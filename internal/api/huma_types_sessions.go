@@ -10,8 +10,9 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// SessionListInput is the Huma input for GET /v0/sessions.
+// SessionListInput is the Huma input for GET /v0/city/{cityName}/sessions.
 type SessionListInput struct {
+	CityScope
 	PaginationParam
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
@@ -31,8 +32,9 @@ func (s *SessionListInput) Resolve(ctx huma.Context) []error {
 	return nil
 }
 
-// SessionGetInput is the Huma input for GET /v0/session/{id}.
+// SessionGetInput is the Huma input for GET /v0/city/{cityName}/session/{id}.
 type SessionGetInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Peek string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
 }
@@ -50,8 +52,9 @@ type sessionCreateBody struct {
 	Title             string            `json:"title,omitempty" doc:"Session title."`
 }
 
-// SessionCreateInput is the Huma input for POST /v0/sessions.
+// SessionCreateInput is the Huma input for POST /v0/city/{cityName}/sessions.
 type SessionCreateInput struct {
+	CityScope
 	Body sessionCreateBody
 }
 
@@ -63,13 +66,15 @@ type SessionCreateOutput struct {
 	Body   sessionResponse
 }
 
-// SessionIDInput is a generic Huma input for session endpoints that only need {id}.
+// SessionIDInput is a generic Huma input for session endpoints that only need {cityName}+{id}.
 type SessionIDInput struct {
+	CityScope
 	ID string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 }
 
-// SessionTranscriptInput is the Huma input for GET /v0/session/{id}/transcript.
+// SessionTranscriptInput is the Huma input for GET /v0/city/{cityName}/session/{id}/transcript.
 type SessionTranscriptInput struct {
+	CityScope
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
 	Tail   string `query:"tail" required:"false" doc:"Number of recent entries to return."`
@@ -99,20 +104,23 @@ type SessionPatchBody struct {
 	Alias *string  `json:"alias,omitempty" doc:"Session alias. Empty string clears the alias."`
 }
 
-// SessionPatchInput is the Huma input for PATCH /v0/session/{id}.
+// SessionPatchInput is the Huma input for PATCH /v0/city/{cityName}/session/{id}.
 type SessionPatchInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body SessionPatchBody
 }
 
-// SessionCloseInput is the Huma input for POST /v0/session/{id}/close.
+// SessionCloseInput is the Huma input for POST /v0/city/{cityName}/session/{id}/close.
 type SessionCloseInput struct {
+	CityScope
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Delete string `query:"delete" required:"false" doc:"Permanently delete bead after closing (true/false)."`
 }
 
-// SessionSubmitInput is the Huma input for POST /v0/session/{id}/submit.
+// SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.
 type SessionSubmitInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
@@ -130,10 +138,11 @@ type SessionSubmitOutput struct {
 	}
 }
 
-// SessionMessageInput is the Huma input for POST /v0/session/{id}/messages.
+// SessionMessageInput is the Huma input for POST /v0/city/{cityName}/session/{id}/messages.
 // Pattern \S requires at least one non-whitespace character so that
 // whitespace-only messages are rejected at the validation layer.
 type SessionMessageInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
@@ -148,8 +157,9 @@ type SessionMessageOutput struct {
 	}
 }
 
-// SessionRespondInput is the Huma input for POST /v0/session/{id}/respond.
+// SessionRespondInput is the Huma input for POST /v0/city/{cityName}/session/{id}/respond.
 type SessionRespondInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
 		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID (optional)."`
@@ -167,16 +177,18 @@ type SessionRespondOutput struct {
 	}
 }
 
-// SessionRenameInput is the Huma input for POST /v0/session/{id}/rename.
+// SessionRenameInput is the Huma input for POST /v0/city/{cityName}/session/{id}/rename.
 type SessionRenameInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
 		Title string `json:"title" minLength:"1" doc:"New session title."`
 	}
 }
 
-// SessionAgentGetInput is the Huma input for GET /v0/session/{id}/agents/{agentId}.
+// SessionAgentGetInput is the Huma input for GET /v0/city/{cityName}/session/{id}/agents/{agentId}.
 type SessionAgentGetInput struct {
+	CityScope
 	ID      string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	AgentID string `path:"agentId" doc:"Subagent ID within the session."`
 }

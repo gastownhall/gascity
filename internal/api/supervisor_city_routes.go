@@ -261,4 +261,60 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		bindCity(sm, (*Server).humaHandleServiceGet))
 	huma.Post(sm.humaAPI, "/v0/city/{cityName}/service/{name}/restart",
 		bindCity(sm, (*Server).humaHandleServiceRestart))
+
+	// Sessions (non-stream) — SSE stream stays on per-city until SSE migration.
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "create-session",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/sessions",
+		Summary:       "Create a session",
+		DefaultStatus: http.StatusAccepted,
+	}, bindCity(sm, (*Server).humaHandleSessionCreate))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/sessions",
+		bindCity(sm, (*Server).humaHandleSessionList))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}",
+		bindCity(sm, (*Server).humaHandleSessionGet))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/transcript",
+		bindCity(sm, (*Server).humaHandleSessionTranscript))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/pending",
+		bindCity(sm, (*Server).humaHandleSessionPending))
+	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/session/{id}",
+		bindCity(sm, (*Server).humaHandleSessionPatch))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "submit-session",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/session/{id}/submit",
+		Summary:       "Submit a message to a session",
+		DefaultStatus: http.StatusAccepted,
+	}, bindCity(sm, (*Server).humaHandleSessionSubmit))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "send-session-message",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/session/{id}/messages",
+		Summary:       "Send a message to a session",
+		DefaultStatus: http.StatusAccepted,
+	}, bindCity(sm, (*Server).humaHandleSessionMessage))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/stop",
+		bindCity(sm, (*Server).humaHandleSessionStop))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/kill",
+		bindCity(sm, (*Server).humaHandleSessionKill))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "respond-session",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/session/{id}/respond",
+		Summary:       "Respond to a pending interaction",
+		DefaultStatus: http.StatusAccepted,
+	}, bindCity(sm, (*Server).humaHandleSessionRespond))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/suspend",
+		bindCity(sm, (*Server).humaHandleSessionSuspend))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/close",
+		bindCity(sm, (*Server).humaHandleSessionClose))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/wake",
+		bindCity(sm, (*Server).humaHandleSessionWake))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/rename",
+		bindCity(sm, (*Server).humaHandleSessionRename))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/agents",
+		bindCity(sm, (*Server).humaHandleSessionAgentList))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/agents/{agentId}",
+		bindCity(sm, (*Server).humaHandleSessionAgentGet))
 }

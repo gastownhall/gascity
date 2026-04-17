@@ -284,7 +284,7 @@ func (c *Client) KillSession(id string) error {
 	if c.cw == nil {
 		return errClientUninitialized
 	}
-	resp, err := c.cw.PostV0SessionByIdKillWithResponse(context.Background(), id)
+	resp, err := c.cw.PostV0CityByCityNameSessionByIdKillWithResponse(context.Background(), c.cityName, id)
 	return checkMutation(resp, bodyOf(resp), err)
 }
 
@@ -299,7 +299,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		i := genclient.SessionSubmitInputBodyIntent(intent)
 		body.Intent = &i
 	}
-	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), id, body)
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, body)
 	if err != nil {
 		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

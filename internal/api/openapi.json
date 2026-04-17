@@ -11606,6 +11606,1117 @@
         "summary": "Get v0 city by city name services"
       }
     },
+    "/v0/city/{cityName}/session/{id}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-session-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include last output preview (true/false).",
+            "explode": false,
+            "in": "query",
+            "name": "peek",
+            "schema": {
+              "description": "Include last output preview (true/false).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name session by ID"
+      },
+      "patch": {
+        "operationId": "patch-v0-city-by-city-name-session-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionPatchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Patch v0 city by city name session by ID"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/agents": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-session-by-id-agents",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAgentListResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name session by ID agents"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/agents/{agentId}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-session-by-id-agents-by-agent-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Subagent ID within the session.",
+            "in": "path",
+            "name": "agentId",
+            "required": true,
+            "schema": {
+              "description": "Subagent ID within the session.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAgentGetResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name session by ID agents by agent ID"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/close": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-session-by-id-close",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Permanently delete bead after closing (true/false).",
+            "explode": false,
+            "in": "query",
+            "name": "delete",
+            "schema": {
+              "description": "Permanently delete bead after closing (true/false).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name session by ID close"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/kill": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-session-by-id-kill",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKWithIDResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name session by ID kill"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/messages": {
+      "post": {
+        "operationId": "send-session-message",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionMessageInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMessageOutputBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Send a message to a session"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/pending": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-session-by-id-pending",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPendingResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name session by ID pending"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/rename": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-session-by-id-rename",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRenameInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name session by ID rename"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/respond": {
+      "post": {
+        "operationId": "respond-session",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRespondInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRespondOutputBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Respond to a pending interaction"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/stop": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-session-by-id-stop",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKWithIDResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name session by ID stop"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/submit": {
+      "post": {
+        "operationId": "submit-session",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionSubmitInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSubmitOutputBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Submit a message to a session"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/suspend": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-session-by-id-suspend",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name session by ID suspend"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/transcript": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-session-by-id-transcript",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Transcript format: conversation (default) or raw.",
+            "explode": false,
+            "in": "query",
+            "name": "format",
+            "schema": {
+              "description": "Transcript format: conversation (default) or raw.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of recent entries to return.",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "description": "Number of recent entries to return.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor: return entries before this UUID.",
+            "explode": false,
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "description": "Pagination cursor: return entries before this UUID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTranscriptGetResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name session by ID transcript"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/wake": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-session-by-id-wake",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKWithIDResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name session by ID wake"
+      }
+    },
+    "/v0/city/{cityName}/sessions": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-sessions",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of results to return.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by session state (e.g. active, closed).",
+            "explode": false,
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "description": "Filter by session state (e.g. active, closed).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by session template (agent qualified name).",
+            "explode": false,
+            "in": "query",
+            "name": "template",
+            "schema": {
+              "description": "Filter by session template (agent qualified name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include last output preview (true/false).",
+            "explode": false,
+            "in": "query",
+            "name": "peek",
+            "schema": {
+              "description": "Include last output preview (true/false).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodySessionResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name sessions"
+      },
+      "post": {
+        "operationId": "create-session",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Create a session"
+      }
+    },
     "/v0/city/{cityName}/sling": {
       "post": {
         "operationId": "post-v0-city-by-city-name-sling",
@@ -12800,574 +13911,6 @@
         "summary": "Get v0 readiness"
       }
     },
-    "/v0/session/{id}": {
-      "get": {
-        "operationId": "get-v0-session-by-id",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Include last output preview (true/false).",
-            "explode": false,
-            "in": "query",
-            "name": "peek",
-            "schema": {
-              "description": "Include last output preview (true/false).",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 session by ID"
-      },
-      "patch": {
-        "operationId": "patch-v0-session-by-id",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionPatchBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Patch v0 session by ID"
-      }
-    },
-    "/v0/session/{id}/agents": {
-      "get": {
-        "operationId": "get-v0-session-by-id-agents",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionAgentListResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 session by ID agents"
-      }
-    },
-    "/v0/session/{id}/agents/{agentId}": {
-      "get": {
-        "operationId": "get-v0-session-by-id-agents-by-agent-id",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Subagent ID within the session.",
-            "in": "path",
-            "name": "agentId",
-            "required": true,
-            "schema": {
-              "description": "Subagent ID within the session.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionAgentGetResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 session by ID agents by agent ID"
-      }
-    },
-    "/v0/session/{id}/close": {
-      "post": {
-        "operationId": "post-v0-session-by-id-close",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Permanently delete bead after closing (true/false).",
-            "explode": false,
-            "in": "query",
-            "name": "delete",
-            "schema": {
-              "description": "Permanently delete bead after closing (true/false).",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 session by ID close"
-      }
-    },
-    "/v0/session/{id}/kill": {
-      "post": {
-        "operationId": "post-v0-session-by-id-kill",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKWithIDResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 session by ID kill"
-      }
-    },
-    "/v0/session/{id}/messages": {
-      "post": {
-        "operationId": "send-session-message",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionMessageInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionMessageOutputBody"
-                }
-              }
-            },
-            "description": "Accepted"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Send a message to a session"
-      }
-    },
-    "/v0/session/{id}/pending": {
-      "get": {
-        "operationId": "get-v0-session-by-id-pending",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionPendingResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 session by ID pending"
-      }
-    },
-    "/v0/session/{id}/rename": {
-      "post": {
-        "operationId": "post-v0-session-by-id-rename",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionRenameInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 session by ID rename"
-      }
-    },
-    "/v0/session/{id}/respond": {
-      "post": {
-        "operationId": "respond-session",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionRespondInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionRespondOutputBody"
-                }
-              }
-            },
-            "description": "Accepted"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Respond to a pending interaction"
-      }
-    },
-    "/v0/session/{id}/stop": {
-      "post": {
-        "operationId": "post-v0-session-by-id-stop",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKWithIDResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 session by ID stop"
-      }
-    },
     "/v0/session/{id}/stream": {
       "get": {
         "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format) or raw messages (JSONL format) based on the format query parameter. Emits activity and pending events for tool approval prompts.",
@@ -13552,343 +14095,6 @@
           }
         },
         "summary": "Stream session output in real time"
-      }
-    },
-    "/v0/session/{id}/submit": {
-      "post": {
-        "operationId": "submit-session",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionSubmitInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionSubmitOutputBody"
-                }
-              }
-            },
-            "description": "Accepted"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Submit a message to a session"
-      }
-    },
-    "/v0/session/{id}/suspend": {
-      "post": {
-        "operationId": "post-v0-session-by-id-suspend",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 session by ID suspend"
-      }
-    },
-    "/v0/session/{id}/transcript": {
-      "get": {
-        "operationId": "get-v0-session-by-id-transcript",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Transcript format: conversation (default) or raw.",
-            "explode": false,
-            "in": "query",
-            "name": "format",
-            "schema": {
-              "description": "Transcript format: conversation (default) or raw.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Number of recent entries to return.",
-            "explode": false,
-            "in": "query",
-            "name": "tail",
-            "schema": {
-              "description": "Number of recent entries to return.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Pagination cursor: return entries before this UUID.",
-            "explode": false,
-            "in": "query",
-            "name": "before",
-            "schema": {
-              "description": "Pagination cursor: return entries before this UUID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionTranscriptGetResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 session by ID transcript"
-      }
-    },
-    "/v0/session/{id}/wake": {
-      "post": {
-        "operationId": "post-v0-session-by-id-wake",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKWithIDResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 session by ID wake"
-      }
-    },
-    "/v0/sessions": {
-      "get": {
-        "operationId": "get-v0-sessions",
-        "parameters": [
-          {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
-            "explode": false,
-            "in": "query",
-            "name": "cursor",
-            "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of results to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of results to return.",
-              "format": "int64",
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Filter by session state (e.g. active, closed).",
-            "explode": false,
-            "in": "query",
-            "name": "state",
-            "schema": {
-              "description": "Filter by session state (e.g. active, closed).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by session template (agent qualified name).",
-            "explode": false,
-            "in": "query",
-            "name": "template",
-            "schema": {
-              "description": "Filter by session template (agent qualified name).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Include last output preview (true/false).",
-            "explode": false,
-            "in": "query",
-            "name": "peek",
-            "schema": {
-              "description": "Include last output preview (true/false).",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodySessionResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 sessions"
-      },
-      "post": {
-        "operationId": "create-session",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SessionCreateBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionResponse"
-                }
-              }
-            },
-            "description": "Accepted"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Create a session"
       }
     }
   }

@@ -402,12 +402,12 @@ func TestClientKillSession(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.KillSession("sess-123"); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
-	if gotPath != "/v0/session/sess-123/kill" {
-		t.Errorf("path = %q, want /v0/session/sess-123/kill", gotPath)
+	if gotPath != "/v0/city/alpha/session/sess-123/kill" {
+		t.Errorf("path = %q, want /v0/city/alpha/session/sess-123/kill", gotPath)
 	}
 }
 

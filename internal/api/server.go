@@ -328,50 +328,9 @@ func (s *Server) registerRoutes() {
 	// stays on per-city until SSE migration.
 	s.registerEventStreamRoute()
 
-	// Sessions — Huma handlers
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "create-session",
-		Method:        http.MethodPost,
-		Path:          "/v0/sessions",
-		Summary:       "Create a session",
-		DefaultStatus: http.StatusAccepted,
-	}, s.humaHandleSessionCreate)
-	huma.Get(s.humaAPI, "/v0/sessions", s.humaHandleSessionList)
-	huma.Get(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionGet)
-	huma.Get(s.humaAPI, "/v0/session/{id}/transcript", s.humaHandleSessionTranscript)
-	huma.Get(s.humaAPI, "/v0/session/{id}/pending", s.humaHandleSessionPending)
-	// Session stream — SSE streaming via Huma StreamResponse
+	// Sessions (non-stream) moved to SupervisorMux.registerCityRoutes.
+	// Session SSE stream stays on per-city until SSE migration.
 	s.registerSessionStreamRoute()
-	huma.Patch(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionPatch)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "submit-session",
-		Method:        http.MethodPost,
-		Path:          "/v0/session/{id}/submit",
-		Summary:       "Submit a message to a session",
-		DefaultStatus: http.StatusAccepted,
-	}, s.humaHandleSessionSubmit)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "send-session-message",
-		Method:        http.MethodPost,
-		Path:          "/v0/session/{id}/messages",
-		Summary:       "Send a message to a session",
-		DefaultStatus: http.StatusAccepted,
-	}, s.humaHandleSessionMessage)
-	huma.Post(s.humaAPI, "/v0/session/{id}/stop", s.humaHandleSessionStop)
-	huma.Post(s.humaAPI, "/v0/session/{id}/kill", s.humaHandleSessionKill)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "respond-session",
-		Method:        http.MethodPost,
-		Path:          "/v0/session/{id}/respond",
-		Summary:       "Respond to a pending interaction",
-		DefaultStatus: http.StatusAccepted,
-	}, s.humaHandleSessionRespond)
-	huma.Post(s.humaAPI, "/v0/session/{id}/suspend", s.humaHandleSessionSuspend)
-	huma.Post(s.humaAPI, "/v0/session/{id}/close", s.humaHandleSessionClose)
-	huma.Post(s.humaAPI, "/v0/session/{id}/wake", s.humaHandleSessionWake)
-	huma.Post(s.humaAPI, "/v0/session/{id}/rename", s.humaHandleSessionRename)
-	huma.Get(s.humaAPI, "/v0/session/{id}/agents", s.humaHandleSessionAgentList)
-	huma.Get(s.humaAPI, "/v0/session/{id}/agents/{agentId}", s.humaHandleSessionAgentGet)
 
 	// Packs / Sling / Services migrated to scoped paths.
 	// Service proxy /svc/* stays on the per-city mux (pass-through).
