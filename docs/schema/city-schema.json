@@ -211,6 +211,20 @@
           "type": "array",
           "description": "InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.\nWhen set, replaces (not adds to) the workspace default."
         },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills lists shared skills attached to this agent by name."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP lists shared MCP definitions attached to this agent by name."
+        },
         "hooks_installed": {
           "type": "boolean",
           "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in beacon and no delayed nudge. Interacts with\ninstall_agent_hooks — set this instead when hooks are pre-installed."
@@ -287,7 +301,7 @@
       "properties": {
         "model": {
           "type": "string",
-          "description": "Model is the default model name for agents (e.g., \"claude-sonnet-4-6\").\nAgents with their own model override take precedence."
+          "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
         },
         "wake_mode": {
           "type": "string",
@@ -295,7 +309,7 @@
             "resume",
             "fresh"
           ],
-          "description": "WakeMode is the default wake mode (\"resume\" or \"fresh\")."
+          "description": "WakeMode is the parsed/composed default wake mode (\"resume\" or\n\"fresh\"), but it is not yet auto-applied at runtime."
         },
         "default_sling_formula": {
           "type": "string",
@@ -306,19 +320,40 @@
             "type": "string"
           },
           "type": "array",
-          "description": "AllowOverlay lists template fields that sessions may override at\ncreation time (e.g., [\"model\", \"prompt\", \"title\"])."
+          "description": "AllowOverlay is parsed and composed as a city-level allowlist for\nsession overlays, but it is not yet inherited onto agents\nautomatically at runtime."
         },
         "allow_env_override": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AllowEnvOverride lists environment variable names that sessions may\noverride at creation time. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+          "description": "AllowEnvOverride is parsed and composed as a city-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor city-wide defaults."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills lists shared skills attached by name to agents through\n[agent_defaults].skills."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP lists shared MCP definitions attached by name to agents through\n[agent_defaults].mcp."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "AgentDefaults provides default values applied to all agents that don't explicitly override them."
+      "description": "AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml."
     },
     "AgentOverride": {
       "properties": {
@@ -402,6 +437,20 @@
           "type": "array",
           "description": "InstallAgentHooks overrides the agent's install_agent_hooks list."
         },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills overrides the agent's attached shared skills list."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP overrides the agent's attached shared MCP list."
+        },
         "hooks_installed": {
           "type": "boolean",
           "description": "HooksInstalled overrides automatic hook detection."
@@ -466,6 +515,20 @@
           },
           "type": "array",
           "description": "InstallAgentHooksAppend appends to the agent's install_agent_hooks list."
+        },
+        "skills_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsAppend appends to the agent's attached shared skills list."
+        },
+        "mcp_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCPAppend appends to the agent's attached shared MCP list."
         },
         "attach": {
           "type": "boolean",
@@ -605,6 +668,34 @@
           },
           "type": "array",
           "description": "InstallAgentHooks overrides the agent's install_agent_hooks list."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills overrides the agent's attached shared skills list."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP overrides the agent's attached shared MCP list."
+        },
+        "skills_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsAppend appends to the agent's attached shared skills list."
+        },
+        "mcp_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCPAppend appends to the agent's attached shared MCP list."
         },
         "hooks_installed": {
           "type": "boolean",
@@ -777,7 +868,14 @@
             "$ref": "#/$defs/PackSource"
           },
           "type": "object",
-          "description": "Packs defines named remote pack sources fetched via git."
+          "description": "Packs defines named remote pack sources fetched via git (V1 mechanism)."
+        },
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object",
+          "description": "Imports defines named pack imports (V2 mechanism). Each key is a\nbinding name; the value specifies the source and optional version,\nexport, and transitive controls. Processed during ExpandCityPacks."
         },
         "agent": {
           "items": {
@@ -861,7 +959,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides default values applied to all agents that\ndon't override them. Useful for setting city-wide model, wake_mode,\nand overlay allowlists."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula plus shared skill/MCP\nattachment baselines; other fields are parsed/composed but not yet\ninherited automatically."
         }
       },
       "additionalProperties": false,
@@ -988,6 +1086,40 @@
       "additionalProperties": false,
       "type": "object",
       "description": "FormulasConfig holds formula directory settings."
+    },
+    "Import": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Source is the pack location: a local relative path (e.g.,\n\"./assets/imports/gastown\") or a remote URL (e.g.,\n\"github.com/gastownhall/gastown\"). Local paths have no version."
+        },
+        "version": {
+          "type": "string",
+          "description": "Version is a semver constraint for remote imports (e.g., \"^1.2\").\nEmpty for local paths. \"sha:\u003chex\u003e\" for commit pinning."
+        },
+        "export": {
+          "type": "boolean",
+          "description": "Export re-exports this import's contents into the parent pack's\nnamespace. Consumers of the parent get this import's agents\nflattened under the parent's binding name."
+        },
+        "transitive": {
+          "type": "boolean",
+          "description": "Transitive controls whether this import's own imports are visible\nto the consumer. Defaults to true (transitive). Set to false to\nsuppress transitive resolution for this specific import."
+        },
+        "shadow": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "silent"
+          ],
+          "description": "Shadow controls shadow warnings when the importer defines an agent\nwith the same name as one from this import. \"warn\" (default) emits\na warning; \"silent\" suppresses it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "description": "Import defines a named import of another pack."
     },
     "K8sConfig": {
       "properties": {
@@ -1425,10 +1557,6 @@
           "type": "boolean",
           "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events."
         },
-        "needs_nudge_poller": {
-          "type": "boolean",
-          "description": "NeedsNudgePoller indicates the provider cannot drain queued nudges via\nturn-boundary hooks (like Claude's UserPromptSubmit) and requires a\nbackground poller that delivers on idle quiescence. Codex is the\ncanonical case. See engdocs/architecture/nudge-delivery.md."
-        },
         "instructions_file": {
           "type": "string",
           "description": "InstructionsFile is the filename the provider reads for project instructions\n(e.g., \"CLAUDE.md\", \"AGENTS.md\"). Empty defaults to \"AGENTS.md\"."
@@ -1513,7 +1641,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Includes lists pack directories or URLs for this rig.\nReplaces the older pack/packs fields. Each entry is a\nlocal path, a git source//sub#ref URL, or a GitHub tree URL."
+          "description": "Includes lists pack directories or URLs for this rig (V1 mechanism).\nEach entry is a local path, a git source//sub#ref URL, or a GitHub tree URL."
+        },
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object",
+          "description": "Imports defines named pack imports for this rig (V2 mechanism).\nEach key is a binding name; agents from these imports get qualified\nnames like \"rigName/bindingName.agentName\"."
         },
         "max_active_sessions": {
           "type": "integer",
@@ -1524,7 +1659,14 @@
             "$ref": "#/$defs/AgentOverride"
           },
           "type": "array",
-          "description": "Overrides are per-agent patches applied after pack expansion."
+          "description": "Overrides are per-agent patches applied after pack expansion.\nV2 renames this to \"patches\" for consistency with [[patches.agent]].\nBoth TOML keys are accepted during migration."
+        },
+        "patches": {
+          "items": {
+            "$ref": "#/$defs/AgentOverride"
+          },
+          "type": "array",
+          "description": "Patches is the V2 name for rig-level agent overrides. Takes\nprecedence over Overrides if both are set."
         },
         "default_sling_target": {
           "type": "string",

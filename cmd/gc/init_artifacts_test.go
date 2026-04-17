@@ -17,7 +17,7 @@ func TestWriteInitFormulasSeedsScopedWorkBuiltin(t *testing.T) {
 		t.Fatalf("writeInitFormulas: %v", err)
 	}
 
-	path := filepath.Join(dir, citylayout.FormulasRoot, "mol-scoped-work.formula.toml")
+	path := filepath.Join(dir, citylayout.FormulasRoot, "mol-scoped-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read seeded formula: %v", err)

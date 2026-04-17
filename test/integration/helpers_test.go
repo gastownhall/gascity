@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,56 @@ func setupRunningCity(t *testing.T, guard *tmuxtest.Guard) string {
 	})
 }
 
+func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cityDir string) {
+	t.Helper()
+
+	var (
+		out          string
+		err          error
+		sawTransient bool
+	)
+	for attempt := 1; attempt <= 2; attempt++ {
+		out, err = runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+		if err == nil {
+			return
+		}
+
+		transient := isTransientManagedDoltInitFailure(out)
+		alreadyInitialized := isAlreadyInitializedGCInitFailure(out)
+		if !transient && !(sawTransient && alreadyInitialized) {
+			t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+		}
+		sawTransient = sawTransient || transient
+
+		if attempt < 2 {
+			t.Logf("retrying gc init after transient managed Dolt startup failure (attempt %d/2)", attempt+1)
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+	}
+
+	startOut, startErr := runGCDoltWithEnv(env, "", "start", cityDir)
+	if startErr == nil || isGCStartAlreadyRunning(startOut) {
+		t.Log("recovered partially initialized city with gc start after transient managed Dolt startup failure")
+		return
+	}
+	t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s", err, out, startErr, startOut)
+}
+
+func isTransientManagedDoltInitFailure(out string) bool {
+	msg := strings.ToLower(out)
+	return strings.Contains(msg, "dolt server exited during startup") ||
+		strings.Contains(msg, "did not become query-ready after 30s")
+}
+
+func isAlreadyInitializedGCInitFailure(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already initialized")
+}
+
+func isGCStartAlreadyRunning(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already running")
+}
+
 func agentNames(agents []agentConfig) []string {
 	names := make([]string, 0, len(agents))
 	for _, agent := range agents {
@@ -184,7 +235,7 @@ func writeCityToml(t *testing.T, cityDir, cityName, startCommand string) {
 
 // quote returns a TOML-safe quoted string.
 func quote(s string) string {
-	return "\"" + s + "\""
+	return strconv.Quote(s)
 }
 
 func repoRoot(t *testing.T) string {

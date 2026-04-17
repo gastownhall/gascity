@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,8 @@ import (
 type reviewCheckCase struct {
 	name         string
 	script       string
+	formula      string
+	applyStepID  string
 	verdictKey   string
 	ralphStepID  string
 	approvedText string
@@ -24,6 +27,8 @@ func reviewCheckCases() []reviewCheckCase {
 		{
 			name:         "design review",
 			script:       "design-review-approved.sh",
+			formula:      "mol-personal-work-v2",
+			applyStepID:  "apply-design-changes",
 			verdictKey:   "design_review.verdict",
 			ralphStepID:  "design-review-loop",
 			approvedText: "Design review approved",
@@ -31,6 +36,8 @@ func reviewCheckCases() []reviewCheckCase {
 		{
 			name:         "code review",
 			script:       "code-review-approved.sh",
+			formula:      "mol-personal-work-v2",
+			applyStepID:  "apply-code-fixes",
 			verdictKey:   "code_review.verdict",
 			ralphStepID:  "code-review-loop",
 			approvedText: "Code review approved",
@@ -38,11 +45,21 @@ func reviewCheckCases() []reviewCheckCase {
 		{
 			name:         "adopt pr review",
 			script:       "adopt-pr-review-approved.sh",
+			formula:      "mol-adopt-pr-v2",
+			applyStepID:  "apply-fixes",
 			verdictKey:   "review.verdict",
 			ralphStepID:  "review-loop",
 			approvedText: "Review approved",
 		},
 	}
+}
+
+func (c reviewCheckCase) attemptStepRef(attempt int) string {
+	return fmt.Sprintf("%s.%s.run.%d.%s", c.formula, c.ralphStepID, attempt, c.applyStepID)
+}
+
+func (c reviewCheckCase) checkStepRef(attempt int) string {
+	return fmt.Sprintf("%s.%s.check.%d", c.formula, c.ralphStepID, attempt)
 }
 
 func TestReviewCheckScriptsDetectVerdictAcrossRalphStep(t *testing.T) {
@@ -56,12 +73,16 @@ func TestReviewCheckScriptsDetectVerdictAcrossRalphStep(t *testing.T) {
 
 			updateBeadMetadata(t, cityDir, verdictID,
 				"gc.root_bead_id="+rootID,
+				"gc.attempt=1",
 				"gc.ralph_step_id="+tc.ralphStepID,
+				"gc.step_ref="+tc.attemptStepRef(1),
 				tc.verdictKey+"=done",
 			)
 			updateBeadMetadata(t, cityDir, checkID,
 				"gc.root_bead_id="+rootID,
+				"gc.attempt=1",
 				"gc.ralph_step_id="+tc.ralphStepID,
+				"gc.step_ref="+tc.checkStepRef(1),
 			)
 
 			scriptPath := filepath.Join(cityDir, ".gc", "scripts", "checks", tc.script)
@@ -85,7 +106,9 @@ func TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep(t *testing.T) {
 			oldVerdictID := createJSONBead(t, cityDir, "apply-old")
 			updateBeadMetadata(t, cityDir, oldVerdictID,
 				"gc.root_bead_id="+rootID,
+				"gc.attempt=1",
 				"gc.ralph_step_id="+tc.ralphStepID,
+				"gc.step_ref="+tc.attemptStepRef(1),
 				tc.verdictKey+"=iterate",
 			)
 
@@ -94,14 +117,18 @@ func TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep(t *testing.T) {
 			newVerdictID := createJSONBead(t, cityDir, "apply-new")
 			updateBeadMetadata(t, cityDir, newVerdictID,
 				"gc.root_bead_id="+rootID,
+				"gc.attempt=1",
 				"gc.ralph_step_id="+tc.ralphStepID,
+				"gc.step_ref="+tc.attemptStepRef(1),
 				tc.verdictKey+"=done",
 			)
 
 			checkID := createJSONBead(t, cityDir, "check")
 			updateBeadMetadata(t, cityDir, checkID,
 				"gc.root_bead_id="+rootID,
+				"gc.attempt=1",
 				"gc.ralph_step_id="+tc.ralphStepID,
+				"gc.step_ref="+tc.checkStepRef(1),
 			)
 
 			scriptPath := filepath.Join(cityDir, ".gc", "scripts", "checks", tc.script)
@@ -147,10 +174,7 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 			t.Fatalf("writing %s: %v", dst, err)
 		}
 	}
-	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
-	}
+	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)

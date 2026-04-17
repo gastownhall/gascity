@@ -6,7 +6,7 @@ env GC_DOLT=skip
 
 # gc start --controller runs the persistent loop and can be stopped.
 exec gc start --controller $WORK/ctrl-city &ctrl&
-exec sleep 1
+exec sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do [ -S "$WORK/ctrl-city/.gc/controller.sock" ] && exit 0; sleep 0.1; done; exit 1'
 
 # gc stop connects to the controller socket and asks it to shut down.
 exec gc stop $WORK/ctrl-city
@@ -19,7 +19,7 @@ stdout 'Controller stopped.'
 
 # Double-start: start one controller, try to start another.
 exec gc start --controller $WORK/ctrl-city &ctrl2&
-exec sleep 1
+exec sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do [ -S "$WORK/ctrl-city/.gc/controller.sock" ] && exit 0; sleep 0.1; done; exit 1'
 
 ! exec gc start --controller $WORK/ctrl-city
 stderr 'controller already running'

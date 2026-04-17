@@ -50,6 +50,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"gate", true},
 		{"molecule", true},
 		{"message", true},
+		{"session", true},
 		{"agent", true},
 		{"role", true},
 		{"rig", true},

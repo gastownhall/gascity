@@ -96,7 +96,7 @@ These decisions are final. Do not revisit them.
 - **City-as-directory model.** A city is a directory on disk containing
   `city.toml`, `.gc/` runtime state, and `rigs/` infrastructure.
 - **Fresh binary, not a Gas Town fork.** We build `gc` from scratch.
-- **TOML for config.** `city.toml` is the single config file.
+- **TOML for config.** `pack.toml` (definition) and `city.toml` (deployment) are the config files.
 - **Tutorials win over spec.** When the spec disagrees, we update the spec.
 - **No premature abstraction.** Don't build interfaces until two
   implementations exist.

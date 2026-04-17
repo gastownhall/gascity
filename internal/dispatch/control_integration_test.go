@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -343,20 +344,28 @@ func TestBuildAttemptRecipeEnrichesNestedRetryChildren(t *testing.T) {
 
 	recipe := buildAttemptRecipe(step, control, 2)
 
-	// Should have 4 steps: scope root + 2 children + 1 spec bead.
-	if len(recipe.Steps) != 4 {
-		t.Fatalf("steps = %d, want 4", len(recipe.Steps))
+	// Should have 6 steps: scope root + 2 children + 1 spec bead + 2 scope-checks.
+	if len(recipe.Steps) != 6 {
+		t.Fatalf("steps = %d, want 6", len(recipe.Steps))
 	}
 
 	// Find the review-code child step.
 	var reviewStep *formula.RecipeStep
 	var specStep *formula.RecipeStep
+	var reviewScopeCheck *formula.RecipeStep
+	var applyScopeCheck *formula.RecipeStep
 	for i := range recipe.Steps {
 		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code" {
 			reviewStep = &recipe.Steps[i]
 		}
 		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code.spec" {
 			specStep = &recipe.Steps[i]
+		}
+		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code-scope-check" {
+			reviewScopeCheck = &recipe.Steps[i]
+		}
+		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.apply-fixes-scope-check" {
+			applyScopeCheck = &recipe.Steps[i]
 		}
 	}
 	if reviewStep == nil {
@@ -381,8 +390,20 @@ func TestBuildAttemptRecipeEnrichesNestedRetryChildren(t *testing.T) {
 	if specStep == nil {
 		t.Fatal("review-code.spec bead not found in recipe")
 	}
+	if reviewScopeCheck == nil {
+		t.Fatal("review-code scope-check bead not found in recipe")
+	}
+	if applyScopeCheck == nil {
+		t.Fatal("apply-fixes scope-check bead not found in recipe")
+	}
 	if specStep.Metadata["gc.kind"] != "spec" {
 		t.Errorf("spec gc.kind = %q, want spec", specStep.Metadata["gc.kind"])
+	}
+	if reviewScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("review-code scope-check gc.kind = %q, want scope-check", reviewScopeCheck.Metadata["gc.kind"])
+	}
+	if applyScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("apply-fixes scope-check gc.kind = %q, want scope-check", applyScopeCheck.Metadata["gc.kind"])
 	}
 	var frozenSpec formula.Step
 	if err := json.Unmarshal([]byte(specStep.Description), &frozenSpec); err != nil {
@@ -641,22 +662,25 @@ max = -1
 	if claude.ID == "" {
 		t.Fatal("review-claude child not created")
 	}
-	if claude.Metadata["gc.routed_to"] != "gascity/claude" {
-		t.Fatalf("review-claude gc.routed_to = %q, want gascity/claude", claude.Metadata["gc.routed_to"])
+	if claude.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+		t.Fatalf("review-claude gc.routed_to = %q, want %q", claude.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	}
+	if claude.Metadata["gc.execution_routed_to"] != "gascity/claude" {
+		t.Fatalf("review-claude gc.execution_routed_to = %q, want gascity/claude", claude.Metadata["gc.execution_routed_to"])
 	}
 	if containsString(claude.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-claude labels = %v, should not contain legacy pool label", claude.Labels)
 	}
 	if claude.Assignee != "" {
-		t.Fatalf("review-claude assignee = %q, want empty for pool route", claude.Assignee)
+		t.Fatalf("review-claude assignee = %q, want empty metadata-only control route", claude.Assignee)
 	}
 
 	codex := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review-codex")
 	if codex.ID == "" {
 		t.Fatal("review-codex child not created")
 	}
-	if codex.Metadata["gc.routed_to"] != "gascity/codex" {
-		t.Fatalf("review-codex gc.routed_to = %q, want gascity/codex", codex.Metadata["gc.routed_to"])
+	if codex.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+		t.Fatalf("review-codex gc.routed_to = %q, want %q", codex.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
 	}
 	if codex.Metadata["gc.execution_routed_to"] != "gascity/codex" {
 		t.Fatalf("review-codex gc.execution_routed_to = %q, want gascity/codex", codex.Metadata["gc.execution_routed_to"])
@@ -668,7 +692,7 @@ max = -1
 		t.Fatalf("review-codex labels = %v, should not contain pool:gascity/claude", codex.Labels)
 	}
 	if codex.Assignee != "" {
-		t.Fatalf("review-codex assignee = %q, want empty for pool route", codex.Assignee)
+		t.Fatalf("review-codex assignee = %q, want empty metadata-only control route", codex.Assignee)
 	}
 
 	synthesize := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.synthesize")
@@ -682,11 +706,27 @@ max = -1
 		t.Fatalf("synthesize labels = %v, should not contain legacy pool label", synthesize.Labels)
 	}
 
-	assertSpawnedSpecUnrouted(t, store, root.ID, "review-claude")
-	assertSpawnedSpecUnrouted(t, store, root.ID, "review-codex")
+	assertSpawnedSpecClosedAndUnrouted(t, store, root.ID, "review-claude")
+	assertSpawnedSpecClosedAndUnrouted(t, store, root.ID, "review-codex")
+
+	claudeSpec, err := findSpecBead(store, claude)
+	if err != nil {
+		t.Fatalf("findSpecBead(review-claude): %v", err)
+	}
+	if claudeSpec.Status != "closed" {
+		t.Fatalf("review-claude spec status = %q, want closed", claudeSpec.Status)
+	}
+
+	codexSpec, err := findSpecBead(store, codex)
+	if err != nil {
+		t.Fatalf("findSpecBead(review-codex): %v", err)
+	}
+	if codexSpec.Status != "closed" {
+		t.Fatalf("review-codex spec status = %q, want closed", codexSpec.Status)
+	}
 }
 
-func assertSpawnedSpecUnrouted(t *testing.T, store beads.Store, rootID, specFor string) {
+func assertSpawnedSpecClosedAndUnrouted(t *testing.T, store beads.Store, rootID, specFor string) {
 	t.Helper()
 	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": rootID}, 0, beads.IncludeClosed)
 	if err != nil {
@@ -695,6 +735,9 @@ func assertSpawnedSpecUnrouted(t *testing.T, store beads.Store, rootID, specFor 
 	for _, bead := range all {
 		if bead.Metadata["gc.kind"] != "spec" || bead.Metadata["gc.spec_for"] != specFor {
 			continue
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("spec %s status = %q, want closed", bead.ID, bead.Status)
 		}
 		if bead.Assignee != "" {
 			t.Fatalf("spec %s assignee = %q, want empty", bead.ID, bead.Assignee)

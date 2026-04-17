@@ -39,8 +39,9 @@ configured via packs and formulas_dir settings.`,
 				return nil
 			}
 
-			// Scan search paths for .formula.toml files, deduplicating by name
-			// (last path wins, matching formula layer resolution order).
+			// Scan search paths for canonical and legacy formula TOML files,
+			// deduplicating by name (last path wins, matching formula layer
+			// resolution order).
 			winners := make(map[string]bool)
 			for _, dir := range paths {
 				entries, err := os.ReadDir(dir)
@@ -48,10 +49,13 @@ configured via packs and formulas_dir settings.`,
 					continue
 				}
 				for _, e := range entries {
-					if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
+					if e.IsDir() {
 						continue
 					}
-					name := strings.TrimSuffix(e.Name(), ".formula.toml")
+					name, ok := formula.TrimTOMLFilename(e.Name())
+					if !ok {
+						continue
+					}
 					winners[name] = true
 				}
 			}

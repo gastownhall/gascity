@@ -32,6 +32,7 @@ func TestIsRemoteInclude(t *testing.T) {
 
 		// File protocol (local git repos).
 		{"file:///tmp/repo.git", true},
+		{"github.com/org/repo", true},
 	}
 
 	for _, tt := range tests {
@@ -41,6 +42,12 @@ func TestIsRemoteInclude(t *testing.T) {
 				t.Errorf("isRemoteInclude(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeRemoteSourceGitHubShortcut(t *testing.T) {
+	if got, want := NormalizeRemoteSource("github.com/org/repo"), "https://github.com/org/repo"; got != want {
+		t.Fatalf("NormalizeRemoteSource = %q, want %q", got, want)
 	}
 }
 

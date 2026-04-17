@@ -1017,7 +1017,7 @@ func reconcileCities(
 		// Wire API state.
 		var cs *controllerState
 		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cfg, sp, eventProv, cityName, path)
+			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
 			return nil
 		}); err != nil {
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))

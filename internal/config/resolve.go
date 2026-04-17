@@ -160,8 +160,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 //
 // Note: booleans are one-directional (can enable, not disable) due to TOML
 // zero-value ambiguity — city providers cannot override a built-in's true
-// to false for EmitsPermissionWarning, SupportsACP, SupportsHooks, or
-// NeedsNudgePoller.
+// to false for EmitsPermissionWarning, SupportsACP, or SupportsHooks.
 func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	result := base
 
@@ -195,9 +194,6 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 	if city.SupportsHooks {
 		result.SupportsHooks = true
-	}
-	if city.NeedsNudgePoller {
-		result.NeedsNudgePoller = true
 	}
 	if city.InstructionsFile != "" {
 		result.InstructionsFile = city.InstructionsFile
@@ -321,7 +317,6 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		EmitsPermissionWarning: spec.EmitsPermissionWarning,
 		SupportsACP:            spec.SupportsACP,
 		SupportsHooks:          spec.SupportsHooks,
-		NeedsNudgePoller:       spec.NeedsNudgePoller,
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,

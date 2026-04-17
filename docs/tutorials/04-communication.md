@@ -144,10 +144,11 @@ install_agent_hooks = ["claude"]
 You can also set them per agent:
 
 ```toml
-[[agent]]
-name = "mayor"
+# agents/mayor/agent.toml
 install_agent_hooks = ["claude"]
 ```
+
+Agent-local overrides like this live in `agents/<name>/agent.toml`.
 
 When a session starts, Gas City installs hook configuration files that the
 provider reads. For Claude, this means a `hooks/claude.json` file that fires Gas

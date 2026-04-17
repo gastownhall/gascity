@@ -220,6 +220,8 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		PoolName:             src.QualifiedName(),
 		Implicit:             src.Implicit,
 		ScaleCheck:           src.ScaleCheck,
+		BindingName:          src.BindingName,
+		PackName:             src.PackName,
 	}
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))
@@ -259,6 +261,24 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
 	}
+	if len(src.Skills) > 0 {
+		dst.Skills = make([]string, len(src.Skills))
+		copy(dst.Skills, src.Skills)
+	}
+	if len(src.MCP) > 0 {
+		dst.MCP = make([]string, len(src.MCP))
+		copy(dst.MCP, src.MCP)
+	}
+	if len(src.SharedSkills) > 0 {
+		dst.SharedSkills = make([]string, len(src.SharedSkills))
+		copy(dst.SharedSkills, src.SharedSkills)
+	}
+	if len(src.SharedMCP) > 0 {
+		dst.SharedMCP = make([]string, len(src.SharedMCP))
+		copy(dst.SharedMCP, src.SharedMCP)
+	}
+	dst.SkillsDir = src.SkillsDir
+	dst.MCPDir = src.MCPDir
 	if src.MaxActiveSessions != nil {
 		v := *src.MaxActiveSessions
 		dst.MaxActiveSessions = &v
@@ -379,8 +399,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 			if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
 				qnSanitized = qnSanitized[len(templatePrefix):]
 			}
-			// Unsanitize: "--" → "/"
-			qn := strings.ReplaceAll(qnSanitized, "--", "/")
+			qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 			names = append(names, qn)
 		}
 	}

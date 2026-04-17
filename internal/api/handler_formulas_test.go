@@ -636,7 +636,7 @@ title = "Prep"
 
 func writeTestFormula(t *testing.T, dir, name, body string) {
 	t.Helper()
-	path := filepath.Join(dir, name+".formula.toml")
+	path := filepath.Join(dir, name+".toml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}

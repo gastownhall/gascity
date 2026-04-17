@@ -15,112 +15,48 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
-const graphExecutionRouteMetaKey = "gc.execution_routed_to"
+// graphExecutionRouteMetaKey is an alias for sling.GraphExecutionRouteMetaKey.
+const graphExecutionRouteMetaKey = sling.GraphExecutionRouteMetaKey
 
+// isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
 func isControlDispatcherKind(kind string) bool {
-	switch kind {
-	case "check", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph":
-		return true
-	default:
-		return false
-	}
+	return sling.IsControlDispatcherKind(kind)
 }
 
-func workflowExecutionRouteFromMeta(meta map[string]string) string {
-	if meta == nil {
-		return ""
-	}
-	if routedTo := strings.TrimSpace(meta[graphExecutionRouteMetaKey]); routedTo != "" {
-		return routedTo
-	}
-	return strings.TrimSpace(meta["gc.routed_to"])
-}
-
+// workflowExecutionRoute delegates to sling.WorkflowExecutionRoute.
 func workflowExecutionRoute(bead beads.Bead) string {
-	return workflowExecutionRouteFromMeta(bead.Metadata)
+	return sling.WorkflowExecutionRoute(bead)
 }
 
-func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (graphRouteBinding, error) {
-	if cfg == nil {
-		return graphRouteBinding{}, fmt.Errorf("control-dispatcher route requires config")
+// controlDispatcherBinding delegates to sling.ControlDispatcherBinding.
+func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string) (sling.GraphRouteBinding, error) {
+	deps := sling.SlingDeps{
+		CityName: cityName,
+		Store:    store,
+		Cfg:      cfg,
+		Resolver: cliAgentResolver{},
 	}
-	agentCfg, ok := resolveAgentIdentity(cfg, config.ControlDispatcherAgentName, rigContext)
-	if !ok {
-		return graphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
-	}
-	binding := graphRouteBinding{qualifiedName: agentCfg.QualifiedName()}
-	if isMultiSessionCfgAgent(&agentCfg) {
-		return binding, nil
-	}
-	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
-	if sn == "" {
-		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
-	}
-	binding.sessionName = sn
-	return binding, nil
+	return sling.ControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
 }
 
-func applyGraphRouteBinding(step *formula.RecipeStep, binding graphRouteBinding) {
-	step.Metadata["gc.routed_to"] = binding.qualifiedName
-	if binding.metadataOnly {
-		step.Assignee = ""
-		return
-	}
-	step.Assignee = binding.sessionName
+// assignGraphStepRoute delegates to sling.AssignGraphStepRoute.
+func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.GraphRouteBinding, controlBinding *sling.GraphRouteBinding) {
+	sling.AssignGraphStepRoute(step, executionBinding, controlBinding)
 }
 
-func assignGraphStepRoute(step *formula.RecipeStep, executionBinding graphRouteBinding, controlBinding *graphRouteBinding) {
-	if controlBinding != nil {
-		if executionBinding.qualifiedName != "" {
-			step.Metadata[graphExecutionRouteMetaKey] = executionBinding.qualifiedName
-		} else {
-			delete(step.Metadata, graphExecutionRouteMetaKey)
-		}
-		applyGraphRouteBinding(step, *controlBinding)
-		return
-	}
-	delete(step.Metadata, graphExecutionRouteMetaKey)
-	applyGraphRouteBinding(step, executionBinding)
-}
-
-// applyGraphRouting decorates a compiled recipe with routing metadata if it
-// is a graph.v2 workflow. Sets gc.routed_to on all step beads so agents can
-// discover routed work. No-op for non-graph recipes.
-//
-// Used by both the gc sling CLI path and the order dispatch path.
-// For the sling path, pass the pre-resolved agent. For the order path,
-// pass nil and the agent will be resolved from routedTo + config.
+// applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
 func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City) error {
-	if !isCompiledGraphWorkflow(recipe) || cfg == nil {
-		return nil
+	deps := sling.SlingDeps{
+		CityName: cityName,
+		Store:    store,
+		StoreRef: storeRef,
+		Cfg:      cfg,
+		Resolver: cliAgentResolver{},
 	}
-
-	// Resolve agent if not provided (order dispatch path).
-	if a == nil {
-		rigContext := graphRouteRigContext(routedTo)
-		baseName := routedTo
-		if i := strings.LastIndex(routedTo, "/"); i >= 0 {
-			baseName = routedTo[i+1:]
-		}
-		resolved, ok := resolveAgentIdentity(cfg, baseName, rigContext)
-		if !ok {
-			// Can't resolve agent — skip decoration rather than fail.
-			return nil
-		}
-		a = &resolved
-	}
-
-	var sessionName string
-	if !isMultiSessionCfgAgent(a) {
-		sessionName = lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		if sessionName == "" {
-			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
-		}
-	}
-	routeVars := graphWorkflowRouteVars(recipe, vars)
-	return decorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, routedTo, sessionName, store, cityName, cfg)
+	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }
 
 var (

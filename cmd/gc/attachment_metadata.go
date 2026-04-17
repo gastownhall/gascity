@@ -6,19 +6,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-func beadFromGetters(id string, getters ...BeadQuerier) (beads.Bead, bool) {
-	for _, getter := range getters {
-		if getter == nil {
-			continue
-		}
-		b, err := getter.Get(id)
-		if err == nil {
-			return b, true
-		}
-	}
-	return beads.Bead{}, false
-}
-
 func collectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier BeadChildQuerier) ([]beads.Bead, error) {
 	var (
 		attachments []beads.Bead

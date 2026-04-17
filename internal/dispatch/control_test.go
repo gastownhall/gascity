@@ -246,6 +246,167 @@ func TestProcessRetryControlSoftFailOnExhaustion(t *testing.T) {
 	}
 }
 
+func TestProcessRetryControlClosesEnclosingScopeOnFailure(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	scopeBody := mustCreate(t, store, beads.Bead{
+		Title: "review iteration",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.2",
+			"gc.scope_role":   "body",
+		},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "apply fixes",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review-loop.iteration.2.apply-fixes",
+			"gc.step_id":          "apply-fixes",
+			"gc.scope_ref":        "mol-test.review-loop.iteration.2",
+			"gc.scope_role":       "member",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"apply-fixes","title":"Apply fixes","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	sibling := mustCreate(t, store, beads.Bead{
+		Title: "cleanup note",
+		Metadata: map[string]string{
+			"gc.kind":         "task",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.2.cleanup-note",
+			"gc.scope_ref":    "mol-test.review-loop.iteration.2",
+			"gc.scope_role":   "member",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "apply fixes attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.review-loop.iteration.2.apply-fixes.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "hard",
+			"gc.failure_reason": "missing_review_artifact",
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
+	mustDep(t, store, scopeBody.ID, sibling.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want processed hard-fail", result)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("result.Skipped = %d, want 1", result.Skipped)
+	}
+
+	controlAfter := mustGet(t, store, control.ID)
+	if controlAfter.Status != "closed" || controlAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("control = status %q outcome %q, want closed/fail", controlAfter.Status, controlAfter.Metadata["gc.outcome"])
+	}
+
+	scopeAfter := mustGet(t, store, scopeBody.ID)
+	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/fail", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+
+	siblingAfter := mustGet(t, store, sibling.ID)
+	if siblingAfter.Status != "closed" || siblingAfter.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("sibling = status %q outcome %q, want closed/skipped", siblingAfter.Status, siblingAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessRetryControlClosesEnclosingScopeOnPassAndPropagatesMetadata(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	scopeBody := mustCreate(t, store, beads.Bead{
+		Title: "review iteration",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.2",
+			"gc.scope_role":   "body",
+		},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "apply fixes",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review-loop.iteration.2.apply-fixes",
+			"gc.step_id":          "apply-fixes",
+			"gc.scope_ref":        "mol-test.review-loop.iteration.2",
+			"gc.scope_role":       "member",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"apply-fixes","title":"Apply fixes","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "apply fixes attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.2.apply-fixes.attempt.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"verdict":"done"}`,
+			"review.verdict":  "done",
+			"review.summary":  "artifact restored",
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+
+	controlAfter := mustGet(t, store, control.ID)
+	if controlAfter.Status != "closed" || controlAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = status %q outcome %q, want closed/pass", controlAfter.Status, controlAfter.Metadata["gc.outcome"])
+	}
+
+	scopeAfter := mustGet(t, store, scopeBody.ID)
+	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/pass", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+	if scopeAfter.Metadata["gc.output_json"] != `{"verdict":"done"}` {
+		t.Fatalf("scope body gc.output_json = %q, want propagated output", scopeAfter.Metadata["gc.output_json"])
+	}
+	if scopeAfter.Metadata["review.verdict"] != "done" {
+		t.Fatalf("scope body review.verdict = %q, want done", scopeAfter.Metadata["review.verdict"])
+	}
+	if scopeAfter.Metadata["review.summary"] != "artifact restored" {
+		t.Fatalf("scope body review.summary = %q, want artifact restored", scopeAfter.Metadata["review.summary"])
+	}
+}
+
 func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -482,6 +643,57 @@ func TestFindLatestAttemptNestedRetryInsideRalph(t *testing.T) {
 	}
 }
 
+func TestFindLatestAttemptFallsBackToDirectDependencyWhenRootIsScoped(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	workflow := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	scope := mustCreate(t, store, beads.Bead{
+		Title: "review-loop iteration 2",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "mol-adopt-pr-v2.review-loop.iteration.2",
+			"gc.attempt":      "2",
+		},
+	})
+
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-codex retry",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": scope.ID,
+			"gc.step_ref":     "mol-adopt-pr-v2.review-loop.iteration.2.review-pipeline.review-codex",
+			"gc.step_id":      "review-pipeline.review-codex",
+		},
+	})
+
+	// Live integration failure shape: the retry wrapper is rooted to the
+	// scoped iteration bead, but the actual attempt bead still carries the
+	// workflow root and is only discoverable through the direct block edge.
+	attempt := mustCreate(t, store, beads.Bead{
+		Title: "review-codex attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "mol-adopt-pr-v2.review-loop.iteration.2.review-pipeline.review-codex.attempt.1",
+			"gc.attempt":      "2",
+		},
+	})
+	mustClose(t, store, attempt.ID)
+	mustDep(t, store, control.ID, attempt.ID, "blocks")
+
+	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	if err != nil {
+		t.Fatalf("findLatestAttempt: %v", err)
+	}
+	if found.ID != attempt.ID {
+		t.Fatalf("findLatestAttempt returned %q, want %q (direct dependency fallback)", found.ID, attempt.ID)
+	}
+}
+
 func TestFindLatestAttemptRalphIteration(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -572,6 +784,122 @@ func TestFindLatestAttemptScopeCheckNotMatched(t *testing.T) {
 	}
 }
 
+func TestProcessRalphControlClosesEnclosingScopeOnIterationFailure(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	scopeBody := mustCreate(t, store, beads.Bead{
+		Title: "outer scope",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.outer-scope",
+			"gc.scope_role":   "body",
+		},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.scope_ref":    "mol-test.outer-scope",
+			"gc.scope_role":   "member",
+			"gc.max_attempts": "1",
+		},
+	})
+	iteration := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.scope_role":   "body",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, store, iteration.ID)
+	mustDep(t, store, control.ID, iteration.ID, "blocks")
+	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
+
+	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRalphControl: %v", err)
+	}
+	if !result.Processed || result.Action != "fail" {
+		t.Fatalf("result = %+v, want processed fail", result)
+	}
+
+	controlAfter := mustGet(t, store, control.ID)
+	if controlAfter.Status != "closed" || controlAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("control = status %q outcome %q, want closed/fail", controlAfter.Status, controlAfter.Metadata["gc.outcome"])
+	}
+
+	scopeAfter := mustGet(t, store, scopeBody.ID)
+	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/fail", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+}
+
+// TestReconcileClosedScopeMemberRalphPass covers the pass-side symmetry of
+// TestProcessRalphControlClosesEnclosingScopeOnIterationFailure: when a scoped
+// ralph control closes with gc.outcome=pass, reconcileClosedScopeMember must
+// auto-close the enclosing scope body with outcome=pass. Exercises the wiring
+// on control.go:176-183 without running the full check pipeline (which would
+// require an executable check script).
+func TestReconcileClosedScopeMemberRalphPass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	scopeBody := mustCreate(t, store, beads.Bead{
+		Title: "outer scope",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.outer-scope",
+			"gc.scope_role":   "body",
+		},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.scope_ref":    "mol-test.outer-scope",
+			"gc.scope_role":   "member",
+			"gc.max_attempts": "3",
+		},
+	})
+	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
+
+	// Simulate the terminal-pass close that processRalphControl performs
+	// at control.go:176 after a check returns GatePass.
+	if err := setOutcomeAndClose(store, control.ID, "pass"); err != nil {
+		t.Fatalf("setOutcomeAndClose: %v", err)
+	}
+
+	if _, err := reconcileClosedScopeMember(store, control.ID); err != nil {
+		t.Fatalf("reconcileClosedScopeMember: %v", err)
+	}
+
+	scopeAfter := mustGet(t, store, scopeBody.ID)
+	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/pass", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildAttemptRecipe tests
 // ---------------------------------------------------------------------------
@@ -652,8 +980,8 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	if recipe.Name != "mol-test.converge.iteration.3" {
 		t.Errorf("recipe name = %q, want mol-test.converge.iteration.3", recipe.Name)
 	}
-	if len(recipe.Steps) != 3 {
-		t.Fatalf("steps = %d, want 3 (root + 2 children)", len(recipe.Steps))
+	if len(recipe.Steps) != 5 {
+		t.Fatalf("steps = %d, want 5 (root + 2 children + 2 scope-checks)", len(recipe.Steps))
 	}
 
 	// Root scope step.
@@ -667,32 +995,65 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("root gc.step_ref = %q, want mol-test.converge.iteration.3", recipe.Steps[0].Metadata["gc.step_ref"])
 	}
 
-	// Children with fully namespaced IDs.
-	if recipe.Steps[1].ID != "mol-test.converge.iteration.3.apply" {
-		t.Errorf("child 1 ID = %q, want mol-test.converge.iteration.3.apply", recipe.Steps[1].ID)
+	applyStep := recipe.StepByID("mol-test.converge.iteration.3.apply")
+	if applyStep == nil {
+		t.Fatal("missing apply step")
 	}
-	if recipe.Steps[1].Metadata["gc.step_ref"] != "mol-test.converge.iteration.3.apply" {
-		t.Errorf("child 1 gc.step_ref = %q, want mol-test.converge.iteration.3.apply", recipe.Steps[1].Metadata["gc.step_ref"])
+	if applyStep.Metadata["gc.step_ref"] != "mol-test.converge.iteration.3.apply" {
+		t.Errorf("apply gc.step_ref = %q, want mol-test.converge.iteration.3.apply", applyStep.Metadata["gc.step_ref"])
 	}
-	if recipe.Steps[1].Metadata["gc.attempt"] != "3" {
-		t.Errorf("child 1 gc.attempt = %q, want 3", recipe.Steps[1].Metadata["gc.attempt"])
+	if applyStep.Metadata["gc.attempt"] != "3" {
+		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
 
-	if recipe.Steps[2].ID != "mol-test.converge.iteration.3.verify" {
-		t.Errorf("child 2 ID = %q, want mol-test.converge.iteration.3.verify", recipe.Steps[2].ID)
+	verifyStep := recipe.StepByID("mol-test.converge.iteration.3.verify")
+	if verifyStep == nil {
+		t.Fatal("missing verify step")
+	}
+	applyScopeCheck := recipe.StepByID("mol-test.converge.iteration.3.apply-scope-check")
+	if applyScopeCheck == nil {
+		t.Fatal("missing apply scope-check")
+	}
+	if applyScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("apply scope-check gc.kind = %q, want scope-check", applyScopeCheck.Metadata["gc.kind"])
+	}
+	if applyScopeCheck.Metadata["gc.control_for"] != "mol-test.converge.iteration.3.apply" {
+		t.Errorf("apply scope-check gc.control_for = %q, want mol-test.converge.iteration.3.apply", applyScopeCheck.Metadata["gc.control_for"])
+	}
+	verifyScopeCheck := recipe.StepByID("mol-test.converge.iteration.3.verify-scope-check")
+	if verifyScopeCheck == nil {
+		t.Fatal("missing verify scope-check")
 	}
 
 	// Verify should block on apply (namespaced).
 	foundBlocksDep := false
+	foundScopeControlDep := false
+	foundScopeBodyDep := false
 	for _, dep := range recipe.Deps {
 		if dep.StepID == "mol-test.converge.iteration.3.verify" &&
-			dep.DependsOnID == "mol-test.converge.iteration.3.apply" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.apply-scope-check" &&
 			dep.Type == "blocks" {
 			foundBlocksDep = true
 		}
+		if dep.StepID == "mol-test.converge.iteration.3.apply-scope-check" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.apply" &&
+			dep.Type == "blocks" {
+			foundScopeControlDep = true
+		}
+		if dep.StepID == "mol-test.converge.iteration.3" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" &&
+			dep.Type == "blocks" {
+			foundScopeBodyDep = true
+		}
 	}
 	if !foundBlocksDep {
-		t.Errorf("missing dep: verify blocks on apply; deps = %+v", recipe.Deps)
+		t.Errorf("missing dep: verify blocks on apply scope-check; deps = %+v", recipe.Deps)
+	}
+	if !foundScopeControlDep {
+		t.Errorf("missing dep: apply scope-check blocks on apply; deps = %+v", recipe.Deps)
+	}
+	if !foundScopeBodyDep {
+		t.Errorf("missing dep: scope body blocks on verify scope-check; deps = %+v", recipe.Deps)
 	}
 
 	// Children should NOT have parent-child deps to the scope root —
@@ -877,10 +1238,10 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 
 	// Scope must block on each child.
 	expectedBlockers := []string{
-		scopeID + ".review-claude",
-		scopeID + ".review-codex",
-		scopeID + ".synthesize",
-		scopeID + ".apply-fixes",
+		scopeID + ".review-claude-scope-check",
+		scopeID + ".review-codex-scope-check",
+		scopeID + ".synthesize-scope-check",
+		scopeID + ".apply-fixes-scope-check",
 	}
 
 	scopeDeps := map[string]bool{}
@@ -981,7 +1342,7 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 
-	// Scope blocks on all 4 children.
+	// Scope blocks on all 4 child scope-check controls.
 	scopeBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
 		if dep.StepID == scopeID && dep.Type == "blocks" {
@@ -989,17 +1350,17 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 	for _, childID := range []string{
-		scopeID + ".review-pipeline.review-claude",
-		scopeID + ".review-pipeline.review-codex",
-		scopeID + ".review-pipeline.synthesize",
-		scopeID + ".apply-fixes",
+		scopeID + ".review-pipeline.review-claude-scope-check",
+		scopeID + ".review-pipeline.review-codex-scope-check",
+		scopeID + ".review-pipeline.synthesize-scope-check",
+		scopeID + ".apply-fixes-scope-check",
 	} {
 		if !scopeBlockers[childID] {
 			t.Errorf("scope missing blocks dep on %q", childID)
 		}
 	}
 
-	// Synthesize blocks on both reviewers.
+	// Synthesize blocks on both reviewer scope-check controls.
 	synthID := scopeID + ".review-pipeline.synthesize"
 	synthBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
@@ -1007,23 +1368,23 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 			synthBlockers[dep.DependsOnID] = true
 		}
 	}
-	if !synthBlockers[scopeID+".review-pipeline.review-claude"] {
-		t.Errorf("synthesize missing dep on review-claude")
+	if !synthBlockers[scopeID+".review-pipeline.review-claude-scope-check"] {
+		t.Errorf("synthesize missing dep on review-claude scope-check")
 	}
-	if !synthBlockers[scopeID+".review-pipeline.review-codex"] {
-		t.Errorf("synthesize missing dep on review-codex")
+	if !synthBlockers[scopeID+".review-pipeline.review-codex-scope-check"] {
+		t.Errorf("synthesize missing dep on review-codex scope-check")
 	}
 
-	// Apply-fixes blocks on synthesize.
+	// Apply-fixes blocks on synthesize scope-check.
 	applyID := scopeID + ".apply-fixes"
 	foundApplyDep := false
 	for _, dep := range recipe.Deps {
-		if dep.StepID == applyID && dep.DependsOnID == synthID && dep.Type == "blocks" {
+		if dep.StepID == applyID && dep.DependsOnID == synthID+"-scope-check" && dep.Type == "blocks" {
 			foundApplyDep = true
 		}
 	}
 	if !foundApplyDep {
-		t.Errorf("apply-fixes missing blocks dep on synthesize")
+		t.Errorf("apply-fixes missing blocks dep on synthesize scope-check")
 	}
 
 	// Children with retry should have gc.kind=retry in metadata.

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -897,7 +898,6 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PathCheck:              "custom-bin",
 		SupportsACP:            true,
 		SupportsHooks:          true,
-		NeedsNudgePoller:       true,
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
@@ -1207,5 +1207,109 @@ permission_mode = "unrestricted"
 	// Schema default "plan" overridden by agent override "unrestricted".
 	if got := rp.EffectiveDefaults["permission_mode"]; got != "unrestricted" {
 		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q", got, "unrestricted")
+	}
+}
+
+func TestResolveProviderImportedPackProvidersMergeAndCityOverrideWins(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	helperDir := filepath.Join(cityDir, "assets", "helper")
+
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test-city"
+schema = 2
+
+[imports.helper]
+source = "./assets/helper"
+
+[providers.claude]
+command = "claude"
+args = ["--city"]
+prompt_mode = "flag"
+prompt_flag = "--city-prompt"
+`)
+
+	writeTestFile(t, helperDir, "pack.toml", `
+[pack]
+name = "helper"
+schema = 2
+
+[providers.claude]
+command = "claude"
+args = ["--helper"]
+prompt_mode = "none"
+
+[providers.codex]
+command = "codex"
+args = ["--from-helper"]
+prompt_mode = "flag"
+prompt_flag = "--message"
+`)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+
+[[agent]]
+name = "worker"
+provider = "codex"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if _, ok := cfg.Providers["codex"]; !ok {
+		t.Fatal("codex provider should be merged from imported pack")
+	}
+	if got := cfg.Providers["claude"].Args; !reflect.DeepEqual(got, []string{"--city"}) {
+		t.Fatalf("claude provider args = %v, want city override", got)
+	}
+
+	var mayor, worker *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].Name {
+		case "mayor":
+			mayor = &cfg.Agents[i]
+		case "worker":
+			worker = &cfg.Agents[i]
+		}
+	}
+	if mayor == nil || worker == nil {
+		t.Fatalf("expected mayor and worker agents, got mayor=%v worker=%v", mayor != nil, worker != nil)
+	}
+
+	mayorProvider, err := ResolveProvider(mayor, &cfg.Workspace, cfg.Providers, lookPathOnly("claude", "codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(mayor): %v", err)
+	}
+	if !reflect.DeepEqual(mayorProvider.Args, []string{"--city"}) {
+		t.Errorf("mayor provider args = %v, want city override", mayorProvider.Args)
+	}
+	if mayorProvider.PromptMode != "flag" {
+		t.Errorf("mayor prompt mode = %q, want %q", mayorProvider.PromptMode, "flag")
+	}
+	if mayorProvider.PromptFlag != "--city-prompt" {
+		t.Errorf("mayor prompt flag = %q, want %q", mayorProvider.PromptFlag, "--city-prompt")
+	}
+
+	workerProvider, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathOnly("claude", "codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(worker): %v", err)
+	}
+	if !reflect.DeepEqual(workerProvider.Args, []string{"--from-helper"}) {
+		t.Errorf("worker provider args = %v, want imported provider args", workerProvider.Args)
+	}
+	if workerProvider.PromptMode != "flag" {
+		t.Errorf("worker prompt mode = %q, want %q", workerProvider.PromptMode, "flag")
+	}
+	if workerProvider.PromptFlag != "--message" {
+		t.Errorf("worker prompt flag = %q, want %q", workerProvider.PromptFlag, "--message")
 	}
 }

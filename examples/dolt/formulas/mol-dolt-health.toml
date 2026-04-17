@@ -1,0 +1,28 @@
+description = """
+Check dolt server health and restart on failure.
+
+This is an **order formula** — dispatched by the order system on a cooldown
+gate (default: 30s, matching gastown). Configured in
+`orders/dolt-health.toml`.
+
+Detects dolt crashes via status check and restarts the server if needed."""
+formula = "mol-dolt-health"
+version = 1
+
+[[steps]]
+id = "check"
+title = "Check dolt health and restart if needed"
+description = """
+Check dolt server status and restart if it has crashed:
+
+```bash
+gc dolt status
+```
+
+If the server is not running:
+
+```bash
+gc dolt start
+```
+
+Close this step after the health check completes (even if no restart was needed)."""

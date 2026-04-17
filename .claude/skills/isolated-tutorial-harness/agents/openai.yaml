@@ -1,4 +1,0 @@
-interface:
-  display_name: "Isolated Tutorial Harness"
-  short_description: "Run isolated tutorial harness"
-  default_prompt: "Use $isolated-tutorial-harness to run or debug the Gas City tutorial acceptance harness in full isolation."

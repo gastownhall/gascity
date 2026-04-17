@@ -49,13 +49,13 @@ func TestGastownPackMaterialization(t *testing.T) {
 	t.Run("Completeness", func(t *testing.T) {
 		expected := []string{
 			"packs/gastown/pack.toml",
-			"packs/gastown/prompts",
+			"packs/gastown/agents",
+			"packs/gastown/template-fragments",
 			"packs/gastown/formulas",
 			"packs/gastown/scripts",
-			"packs/gastown/overlays",
 			"packs/gastown/commands",
 			"packs/maintenance/pack.toml",
-			"packs/maintenance/prompts",
+			"packs/maintenance/agents",
 			"packs/maintenance/formulas",
 		}
 		for _, e := range expected {

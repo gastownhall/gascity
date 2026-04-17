@@ -28,6 +28,22 @@ func writeTestSession(t *testing.T, searchBase, workDir string, lines ...string)
 	}
 }
 
+func writeNamedTestSession(t *testing.T, searchBase, workDir, fileName string, lines ...string) string {
+	t.Helper()
+	slug := strings.ReplaceAll(workDir, "/", "-")
+	slug = strings.ReplaceAll(slug, ".", "-")
+	dir := filepath.Join(searchBase, slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fileName)
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestDoSessionLogsBasic(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -181,6 +197,117 @@ func TestDoSessionLogsToolResultError(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "tool_result: error") {
 		t.Errorf("output should contain tool_result error, got: %s", out)
+	}
+}
+
+func TestResolveSessionLogPathPrefersKeyedTranscriptWhenPresent(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	want := writeNamedTestSession(t, searchBase, workDir, "known-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	got := resolveSessionLogPath([]string{searchBase}, sessionLogContext{
+		workDir:    workDir,
+		sessionKey: "known-session",
+		provider:   "claude",
+	})
+	if got != want {
+		t.Fatalf("resolveSessionLogPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveSessionLogPathFallsBackWhenSessionKeyFileMissing(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	want := writeNamedTestSession(t, searchBase, workDir, "latest-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	got := resolveSessionLogPath([]string{searchBase}, sessionLogContext{
+		workDir:    workDir,
+		sessionKey: "stale-session-key",
+		provider:   "claude",
+	})
+	if got != want {
+		t.Fatalf("resolveSessionLogPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir := t.TempDir()
+	searchBase := t.TempDir()
+	want := writeNamedTestSession(t, searchBase, workDir, "actual-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"provider":     "claude",
+			"session_key":  "stale-session-key",
+			"session_name": "mayor",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+
+	got, provider, ok := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if provider != "claude" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
+	}
+	if got != want {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir := t.TempDir()
+	searchBase := t.TempDir()
+	writeNamedTestSession(t, searchBase, workDir, "actual-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"provider":     "claude",
+			"session_key":  "stale-session-key",
+			"session_name": "mayor",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "helper",
+			"provider":     "claude",
+			"session_name": "helper",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+
+	got, provider, ok := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if provider != "claude" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
+	}
+	if got != "" {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty for ambiguous same-workdir transcript", got)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,14 +40,17 @@ patrol_interval = "100ms"
 `, quote(cityName), agentBlocks, reconcilerNamedSessions(agentBlocks))
 }
 
-var reconcilerAgentNamePattern = regexp.MustCompile(`(?m)^name = "([^"]+)"$`)
+var (
+	reconcilerAgentNamePattern         = regexp.MustCompile(`(?m)^name = "([^"]+)"$`)
+	reconcilerMaxActiveSessionsPattern = regexp.MustCompile(`(?m)^max_active_sessions = (-?\d+)$`)
+)
 
 func reconcilerNamedSessions(agentBlocks string) string {
 	parts := strings.Split(agentBlocks, "[[agent]]")
 	var named strings.Builder
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part == "" || strings.Contains(part, "[agent.pool]") {
+		if part == "" || reconcilerPoolAgentBlock(part) {
 			continue
 		}
 		match := reconcilerAgentNamePattern.FindStringSubmatch(part)
@@ -56,6 +60,24 @@ func reconcilerNamedSessions(agentBlocks string) string {
 		fmt.Fprintf(&named, "\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n", quote(match[1]))
 	}
 	return named.String()
+}
+
+func reconcilerPoolAgentBlock(part string) bool {
+	if strings.Contains(part, "[agent.pool]") {
+		return true
+	}
+	if strings.Contains(part, "scale_check =") {
+		return true
+	}
+	match := reconcilerMaxActiveSessionsPattern.FindStringSubmatch(part)
+	if len(match) != 2 {
+		return false
+	}
+	max, err := strconv.Atoi(match[1])
+	if err != nil {
+		return false
+	}
+	return max == -1 || max > 1
 }
 
 func writeReconcilerToml(t *testing.T, cityDir, cityName string, agentBlocks string) {
@@ -246,11 +268,9 @@ func TestGastown_Reconciler_PoolScaling(t *testing.T) {
 	agentBlocks := fmt.Sprintf(`[[agent]]
 name = "scaler"
 start_command = %s
-
-[agent.pool]
-min = 1
-max = 3
-check = "echo 2"
+min_active_sessions = 1
+max_active_sessions = 3
+scale_check = "echo 2"
 `, quote("bash $GC_CITY/.gc/scripts/stuck-agent.sh"))
 
 	cityDir := setupReconcilerCity(t, agentBlocks)

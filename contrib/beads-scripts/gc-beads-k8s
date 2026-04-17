@@ -229,20 +229,15 @@ case "$op" in
     fi
 
     # 5. Initialize beads if not already done.
-    #
-    # The runner's local issue_prefix is not used for routing — this script
-    # is a pure transport: controller code runs bd commands from per-rig
-    # /city/<rig>/.beads/ dirs on the controller pod, which have their own
-    # prefixes (set by init_controller_beads in gc-controller-k8s). We still
-    # need `bd init` here so bd doesn't error on a missing local config in
-    # the runner pod's cwd. Custom types ARE used (they affect how bd
-    # validates `--type` values) so we still reconcile those.
     if ! "${KUBECTL[@]}" exec "$POD_NAME" -- test -f /workspace/.beads/metadata.json 2>/dev/null; then
       run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
         -p gc --skip-hooks >/dev/null 2>&1
+      run_bd config set issue_prefix gc >/dev/null 2>&1
       if [ -n "$CUSTOM_TYPES" ]; then
         run_bd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1
       fi
+      custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
+      run_bd config set types.custom "$custom_types" >/dev/null 2>&1
     fi
     ;;
 

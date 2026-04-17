@@ -2,19 +2,13 @@ package main
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"text/template"
 
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -44,35 +38,11 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 		return
 	}
 
-	allPackDirs := collectPackDirs(cfg)
-	entries := config.LoadPackCommandEntries(fsys.OSFS{}, allPackDirs)
-	if len(entries) == 0 {
+	if len(cfg.PackCommands) == 0 {
 		return
 	}
 
-	addPackCommandsToRoot(root, entries, cityPath, cfg.Workspace.Name, stdout, stderr)
-}
-
-// addPackCommandsToRoot groups command entries by pack name and registers
-// them on the root command. Packs whose name shadows a core command are
-// skipped with a warning to stderr.
-func addPackCommandsToRoot(root *cobra.Command, entries []config.PackCommandInfo, cityPath, cityName string, stdout, stderr io.Writer) {
-	core := coreCommandNames(root)
-
-	// Group by pack name.
-	grouped := make(map[string][]config.PackCommandInfo)
-	for _, e := range entries {
-		grouped[e.PackName] = append(grouped[e.PackName], e)
-	}
-
-	for packName, cmds := range grouped {
-		if core[packName] {
-			fmt.Fprintf(stderr, "gc: pack %q: name shadows core command, skipping\n", packName) //nolint:errcheck // best-effort stderr
-			continue
-		}
-		nsCmd := newPackNamespaceCmd(packName, cmds, cityPath, cityName, stdout, stderr)
-		root.AddCommand(nsCmd)
-	}
+	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, cfg.Workspace.Name, stdout, stderr, false)
 }
 
 // coreCommandNames returns the set of built-in command names that packs
@@ -91,93 +61,8 @@ func coreCommandNames(root *cobra.Command) map[string]bool {
 	return names
 }
 
-// newPackNamespaceCmd creates a cobra command group for a pack's commands.
-// gc <pack> --help lists the pack's subcommands.
-func newPackNamespaceCmd(packName string, cmds []config.PackCommandInfo, cityPath, cityName string, stdout, stderr io.Writer) *cobra.Command {
-	ns := &cobra.Command{
-		Use:   packName,
-		Short: fmt.Sprintf("Commands from the %s pack", packName),
-		// Don't run anything if no subcommand given — show help.
-		RunE: func(c *cobra.Command, _ []string) error {
-			return c.Help()
-		},
-	}
-
-	for _, info := range cmds {
-		leaf := newPackLeafCmd(info, cityPath, cityName, stdout, stderr)
-		ns.AddCommand(leaf)
-	}
-
-	return ns
-}
-
-// newPackLeafCmd creates a single pack command leaf. DisableFlagParsing
-// is true so all args after the command name pass through to the script.
-func newPackLeafCmd(info config.PackCommandInfo, cityPath, cityName string, stdout, stderr io.Writer) *cobra.Command {
-	long := readLongDescription(info)
-	cmd := &cobra.Command{
-		Use:                info.Entry.Name,
-		Short:              info.Entry.Description,
-		Long:               long,
-		DisableFlagParsing: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			code := runPackCommand(info, cityPath, cityName, args, stdin(), stdout, stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-			return nil
-		},
-	}
-	return cmd
-}
-
-// readLongDescription reads the long description file from the pack dir.
-// Returns empty string on any error.
-func readLongDescription(info config.PackCommandInfo) string {
-	if info.Entry.LongDescription == "" {
-		return ""
-	}
-	path := filepath.Join(info.PackDir, info.Entry.LongDescription)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
 // stdin returns os.Stdin. Extracted for testability (tests can override).
 var stdin = func() io.Reader { return os.Stdin }
-
-// runPackCommand executes a pack command script with env vars, template
-// expansion, and passthrough I/O. Returns the process exit code.
-func runPackCommand(info config.PackCommandInfo, cityPath, cityName string, args []string, stdinR io.Reader, stdout, stderr io.Writer) int {
-	scriptRel := expandScriptTemplate(info.Entry.Script, cityPath, cityName, info.PackDir)
-	scriptPath := scriptRel
-	if !filepath.IsAbs(scriptRel) {
-		scriptPath = filepath.Join(info.PackDir, scriptRel)
-	}
-
-	cmd := exec.Command(scriptPath, args...)
-	cmd.Stdin = stdinR
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(), citylayout.PackRuntimeEnv(cityPath, info.PackName)...)
-	cmd.Env = append(cmd.Env,
-		"GC_PACK_DIR="+info.PackDir,
-		"GC_PACK_NAME="+info.PackName,
-		"GC_CITY_NAME="+cityName,
-	)
-
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
-		}
-		fmt.Fprintf(stderr, "gc %s %s: %v\n", info.PackName, info.Entry.Name, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
-}
 
 // expandScriptTemplate expands Go text/template variables in the script
 // path. On any error, returns the raw script string (graceful fallback).
@@ -218,39 +103,5 @@ func tryPackCommandFallback(args []string, stdout, stderr io.Writer) bool {
 		return false
 	}
 
-	allPackDirs := collectPackDirs(cfg)
-	entries := config.LoadPackCommandEntries(fsys.OSFS{}, allPackDirs)
-
-	packName := args[0]
-	var matching []config.PackCommandInfo
-	for _, e := range entries {
-		if e.PackName == packName {
-			matching = append(matching, e)
-		}
-	}
-	if len(matching) == 0 {
-		return false
-	}
-
-	// If just the pack name with no subcommand, list available commands.
-	if len(args) < 2 {
-		fmt.Fprintf(stdout, "Available commands for %s:\n", packName) //nolint:errcheck // best-effort stdout
-		for _, m := range matching {
-			fmt.Fprintf(stdout, "  %-20s %s\n", m.Entry.Name, m.Entry.Description) //nolint:errcheck // best-effort stdout
-		}
-		return true
-	}
-
-	cmdName := args[1]
-	for _, m := range matching {
-		if m.Entry.Name == cmdName {
-			code := runPackCommand(m, cityPath, cfg.Workspace.Name, args[2:], stdin(), stdout, stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-			return true
-		}
-	}
-
-	return false
+	return tryDiscoveredCommandFallback(args, cfg, cityPath, stdout, stderr)
 }

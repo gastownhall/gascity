@@ -1,0 +1,88 @@
+# Pack/city v2 imports — root pack composition plus rig-scoped imports.
+#
+# Tests:
+# - root pack and city.toml compose as one city surface
+# - [imports.<binding>] from pack.toml contributes imported agents, commands, and doctor checks
+# - [rigs.imports.<binding>] contributes rig-scoped agents and doctor checks
+# - root agents/<name>/ discovery works from the city pack
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+cd $WORK/city
+
+chmod 755 $WORK/city/assets/ops/commands/status/run.sh
+chmod 755 $WORK/city/assets/ops/doctor/tooling/run.sh
+chmod 755 $WORK/city/assets/sidecar/doctor/rig-check/run.sh
+
+# Config validates under the reconciled v2 layout.
+exec gc config show --validate
+stdout 'Config valid.'
+
+# Root pack agent discovery.
+exec gc config explain --agent mayor
+stdout 'Agent: mayor'
+
+# Imported city-scoped agent discovery from pack.toml [imports].
+exec gc config explain --agent assist
+stdout 'Agent: ops.assist'
+
+# Rig-scoped import surfaces under the rig-qualified name.
+exec gc config explain --rig frontend --agent watcher
+stdout 'Agent: frontend/sidecar.watcher'
+
+# Imported commands are exposed under their binding namespace.
+exec gc ops status alpha beta
+stdout 'ops status alpha beta'
+
+# Imported doctor checks flow into gc doctor, including rig imports.
+exec gc doctor --fix
+stdout 'ops:tooling'
+stdout 'sidecar:rig-check'
+stdout 'passed'
+
+-- city/.gc/.keep --
+-- city/frontend/.keep --
+-- city/pack.toml --
+[pack]
+name = "testcity"
+schema = 2
+
+[imports.ops]
+source = "./assets/ops"
+-- city/city.toml --
+[workspace]
+name = "testcity"
+
+[[rigs]]
+name = "frontend"
+path = "./frontend"
+
+[rigs.imports.sidecar]
+source = "./assets/sidecar"
+-- city/agents/mayor/prompt.template.md --
+Hello {{ .AgentName }}
+-- city/assets/ops/pack.toml --
+[pack]
+name = "ops"
+schema = 2
+-- city/assets/ops/agents/assist/prompt.md --
+You are the ops assistant.
+-- city/assets/ops/commands/status/run.sh --
+#!/bin/sh
+echo "ops status $*"
+-- city/assets/ops/doctor/tooling/run.sh --
+#!/bin/sh
+exit 0
+-- city/assets/sidecar/pack.toml --
+[pack]
+name = "sidecar"
+schema = 2
+-- city/assets/sidecar/agents/watcher/agent.toml --
+scope = "rig"
+-- city/assets/sidecar/agents/watcher/prompt.md --
+You watch the frontend rig.
+-- city/assets/sidecar/doctor/rig-check/run.sh --
+#!/bin/sh
+exit 0

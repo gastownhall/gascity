@@ -246,50 +246,42 @@ func displayProviderName(name string) string {
 	return name
 }
 
+// normalizeBeadsProvider maps the internal managed exec wrapper back to the
+// logical "bd" provider for command-time store selection. Managed sessions set
+// GC_BEADS=exec:.../gc-beads-bd so lifecycle operations stay pinned to the
+// city's Dolt server, but general gc commands still need a CRUD-capable store.
+func normalizeBeadsProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if !strings.HasPrefix(provider, "exec:") {
+		return provider
+	}
+	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
+	if filepath.Base(script) == "gc-beads-bd" {
+		return "bd"
+	}
+	return provider
+}
+
 // rawBeadsProvider returns the raw bead store provider name from config.
 // Priority: GC_BEADS env var → city.toml [beads].provider → "bd" default.
-// This is the unmodified config value; use beadsProvider() for lifecycle
-// routing which remaps "bd" → exec:.
-//
-// If the ambient GC_BEADS points at the city-managed gc-beads-bd lifecycle
-// wrapper, we normalize it back to "bd". The wrapper exits 2 for data ops
-// (see #647), so inheriting it from a contaminated parent would reintroduce
-// the crash in nested agent sessions. Genuine user exec: overrides are
-// preserved — only the well-known lifecycle wrapper path is stripped.
+// Managed session env may export the internal gc-beads-bd exec wrapper; that
+// value is normalized back to "bd" so command-time CRUD paths don't try to use
+// the lifecycle-only exec protocol as a general beads store.
 func rawBeadsProvider(cityPath string) string {
 	if v := os.Getenv("GC_BEADS"); v != "" {
-		if isLifecycleWrapperPath(v) {
-			return "bd"
-		}
-		return v
+		return normalizeBeadsProvider(v)
 	}
 	// Try to read provider from city.toml.
 	cfg, err := loadCityConfig(cityPath)
 	if err == nil && cfg.Beads.Provider != "" {
-		return cfg.Beads.Provider
+		return normalizeBeadsProvider(cfg.Beads.Provider)
 	}
 	return "bd"
-}
-
-// isLifecycleWrapperPath reports whether v is the city-managed gc-beads-bd
-// lifecycle wrapper (i.e., `exec:<anything>/.gc/system/bin/gc-beads-bd`).
-func isLifecycleWrapperPath(v string) bool {
-	if !strings.HasPrefix(v, "exec:") {
-		return false
-	}
-	return strings.HasSuffix(v, string(filepath.Separator)+citylayout.SystemBinRoot+string(filepath.Separator)+"gc-beads-bd")
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.
 // Maps "bd" → "exec:<cityPath>/.gc/system/bin/gc-beads-bd" so all lifecycle operations
 // route through the exec: protocol. Other providers pass through unchanged.
-//
-// This is for lifecycle operations ONLY (start/stop/health/ensure-ready/init).
-// gc-beads-bd exits 2 for data operations (get/list/create/update/close); it
-// is not a full exec-beads protocol implementation. Data-path callers — in
-// particular agent-session environments (see template_resolve.go) — must use
-// rawBeadsProvider() so they route through BdStore directly. See #647 for the
-// crash that surfaced when this invariant was violated.
 //
 // Related env vars:
 //   - GC_DOLT=skip — the gc-beads-bd script checks this and exits 2 for all

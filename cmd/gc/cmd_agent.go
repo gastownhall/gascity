@@ -14,6 +14,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
+
+Describe what this agent should do here.
+`
+
 // loadCityConfig loads the city configuration with full pack expansion.
 // Most CLI commands need this instead of config.Load so that agents defined
 // via packs are visible. The only exceptions are quick pre-fetch checks
@@ -150,11 +155,10 @@ func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
 }
 
 // findAgentByQualified looks up an agent by its exact qualified identity
-// (dir+name) from config.
+// (dir+name or dir/binding.name) from config.
 func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool) {
-	dir, name := config.ParseQualifiedName(identity)
 	for _, a := range cfg.Agents {
-		if a.Dir == dir && a.Name == name {
+		if config.AgentMatchesIdentity(&a, identity) {
 			return a, true
 		}
 	}
@@ -208,15 +212,20 @@ func newAgentAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var suspended bool
 	cmd := &cobra.Command{
 		Use:   "add --name <name>",
-		Short: "Add an agent to the workspace",
-		Long: `Add a new agent to the workspace configuration.
+		Short: "Add an agent scaffold",
+		Long: `Add a new agent scaffold under agents/<name>/.
 
-Appends an [[agent]] block to city.toml. The agent will be started
-on the next "gc start" or controller reconcile tick. Use --dir to
-scope the agent to a rig's working directory.`,
+Creates agents/<name>/prompt.template.md and, when needed,
+agents/<name>/agent.toml. These files live in the city directory and do
+not append [[agent]] blocks to city.toml.
+
+Use --prompt-template to copy prompt content from an existing file into
+the canonical prompt.template.md location. Use --dir to record a rig or
+working-directory prefix in agent.toml. Use --suspended to scaffold the
+agent in a suspended state.`,
 		Example: `  gc agent add --name mayor
   gc agent add --name polecat --dir my-project
-  gc agent add --name worker --prompt-template prompts/worker.md --suspended`,
+  gc agent add --name worker --prompt-template ./worker.md --suspended`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdAgentAdd(name, promptTemplate, dir, suspended, stdout, stderr) != 0 {
@@ -248,47 +257,78 @@ func cmdAgentAdd(name, promptTemplate, dir string, suspended bool, stdout, stder
 }
 
 // doAgentAdd is the pure logic for "gc agent add". It loads city.toml,
-// checks for duplicates, appends the new agent, and writes back.
+// checks for duplicates, and writes a v2 agent scaffold under agents/<name>/.
 // Accepts an injected FS for testability.
 func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspended bool, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
+	packPath := filepath.Join(cityPath, "pack.toml")
+	if _, err := fs.Stat(packPath); err != nil {
+		fmt.Fprintln(stderr, "gc agent add: this command requires a city directory with pack.toml; run \"gc doctor\" or \"gc doctor --fix\" to migrate this city first") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	cfg, err := loadCityConfigFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	inputDir, inputName := config.ParseQualifiedName(name)
-	for _, a := range cfg.Agents {
-		if a.Dir == inputDir && a.Name == inputName {
-			fmt.Fprintf(stderr, "gc agent add: agent %q already exists\n", name) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
 	// If input contained a dir component, use it (overrides --dir flag).
 	if inputDir != "" {
 		dir = inputDir
 		name = inputName
 	}
+	for _, a := range cfg.Agents {
+		if a.Name == name {
+			fmt.Fprintf(stderr, "gc agent add: agent %q already exists\n", name) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
-	newAgent := config.Agent{
-		Name:           name,
-		Dir:            dir,
-		PromptTemplate: promptTemplate,
-		Suspended:      suspended,
-	}
-	cfg.Agents = append(cfg.Agents, newAgent)
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+	agentDir := filepath.Join(cityPath, "agents", name)
+	if err := fs.MkdirAll(agentDir, 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Added agent '%s'\n", name) //nolint:errcheck // best-effort stdout
+	var promptData []byte
+	if promptTemplate != "" {
+		src := promptTemplate
+		if !filepath.IsAbs(src) {
+			src = filepath.Join(cityPath, src)
+		}
+		var err error
+		promptData, err = fs.ReadFile(src)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc agent add: reading prompt template %q: %v\n", promptTemplate, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else {
+		promptData = []byte(agentAddPromptScaffold)
+	}
+
+	promptPath := filepath.Join(agentDir, "prompt.template.md")
+	if err := fs.WriteFile(promptPath, promptData, 0o644); err != nil {
+		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	if dir != "" || suspended {
+		var b strings.Builder
+		if dir != "" {
+			fmt.Fprintf(&b, "dir = %q\n", dir) //nolint:errcheck // best-effort strings.Builder
+		}
+		if suspended {
+			b.WriteString("suspended = true\n")
+		}
+		if err := fs.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
+			fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	fmt.Fprintf(stdout, "Scaffolded agent '%s'\n", name) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -357,8 +397,9 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg))
 	if ok {
 		// Found in raw config — toggle and write back.
+		resolvedQN := resolved.QualifiedName()
 		for i := range cfg.Agents {
-			if cfg.Agents[i].Dir == resolved.Dir && cfg.Agents[i].Name == resolved.Name {
+			if cfg.Agents[i].QualifiedName() == resolvedQN {
 				cfg.Agents[i].Suspended = true
 				break
 			}
@@ -457,8 +498,9 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 	resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg))
 	if ok {
 		// Found in raw config — toggle and write back.
+		resolvedQN := resolved.QualifiedName()
 		for i := range cfg.Agents {
-			if cfg.Agents[i].Dir == resolved.Dir && cfg.Agents[i].Name == resolved.Name {
+			if cfg.Agents[i].QualifiedName() == resolvedQN {
 				cfg.Agents[i].Suspended = false
 				break
 			}

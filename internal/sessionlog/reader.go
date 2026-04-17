@@ -356,6 +356,21 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 	}
 }
 
+// FindProviderFallbackSessionFile resolves the narrower provider-specific
+// fallback path to use when a keyed transcript lookup misses. This avoids
+// silently jumping to an unrelated transcript that merely shares the same
+// workdir while still allowing canonical provider fallback files.
+func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir string) string {
+	switch providerFamily(provider) {
+	case "codex":
+		return FindCodexSessionFile(searchPaths, workDir)
+	case "gemini":
+		return FindGeminiSessionFile(searchPaths, workDir)
+	default:
+		return findClaudeLatestSessionFile(searchPaths, workDir)
+	}
+}
+
 // FindSessionFileByID resolves a Claude-style session log path using the
 // known session ID. This is the safest lookup when multiple sessions share
 // the same working directory.
@@ -366,6 +381,21 @@ func FindSessionFileByID(searchPaths []string, workDir, sessionID string) string
 	slug := ProjectSlug(workDir)
 	for _, base := range searchPaths {
 		path := filepath.Join(base, slug, sessionID+".jsonl")
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return ""
+}
+
+func findClaudeLatestSessionFile(searchPaths []string, workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	slug := ProjectSlug(workDir)
+	for _, base := range searchPaths {
+		path := filepath.Join(base, slug, "latest-session.jsonl")
 		info, err := os.Stat(path)
 		if err == nil && !info.IsDir() {
 			return path

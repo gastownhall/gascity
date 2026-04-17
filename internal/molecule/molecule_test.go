@@ -507,6 +507,29 @@ func TestInstantiateWithParentID(t *testing.T) {
 	}
 }
 
+func TestInstantiatePreserveRootTypeKeepsTaskRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root.Type = %q, want task", root.Type)
+	}
+}
+
 func TestInstantiateGraphWorkflowIgnoresParentIDOnRoot(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -1008,7 +1031,7 @@ id = "verify"
 title = "Verify {{title}}"
 depends_on = ["implement"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "e2e-test.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "e2e-test.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1089,7 +1112,7 @@ mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "2m"
 `
-	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1236,7 +1259,7 @@ title = "Cleanup"
 needs = ["body"]
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.kind" = "cleanup" }
 `
-	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1454,4 +1477,27 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	plan, _, rootKey, err := buildRecipeApplyPlan(recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if rootKey != "attempt" {
+		t.Fatalf("rootKey = %q, want attempt", rootKey)
+	}
+	if len(plan.Nodes) != 1 {
+		t.Fatalf("len(plan.Nodes) = %d, want 1", len(plan.Nodes))
+	}
+	if plan.Nodes[0].Type != "task" {
+		t.Fatalf("plan root type = %q, want task", plan.Nodes[0].Type)
+	}
 }

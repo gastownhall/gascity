@@ -1,0 +1,2 @@
+description = "Verify required binaries (jq, gh) are available"
+run = "../check-binaries.sh"

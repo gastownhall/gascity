@@ -1,0 +1,2 @@
+description = "List or restore from migration backups"
+run = "../rollback.sh"

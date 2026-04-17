@@ -1,0 +1,6 @@
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/deacon"
+nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
+idle_timeout = "1h"
+max_active_sessions = 1

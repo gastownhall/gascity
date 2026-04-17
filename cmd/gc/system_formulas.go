@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // MaterializeSystemFormulas writes embedded system formula and order files
@@ -34,7 +36,7 @@ func MaterializeSystemFormulas(embedded fs.FS, subdir, cityPath string) (string,
 		// Route orders/ to the city orders/ root, formulas to formulas/.
 		var dst string
 		if isOrderFile(relPath) {
-			// relPath is "orders/<name>/order.toml"; strip the leading "orders/"
+			// relPath is "orders/<name>.toml"; strip the leading "orders/"
 			// since ordersDir already points to cityPath/orders/.
 			dst = filepath.Join(ordersDir, strings.TrimPrefix(relPath, "orders/"))
 		} else {
@@ -59,7 +61,7 @@ func ListEmbeddedSystemFormulas(embedded fs.FS, subdir string) []string {
 }
 
 // collectFormulaFiles walks the embedded FS under subdir and returns
-// relative paths of *.formula.toml files and orders/*/order.toml files.
+// relative paths of formula TOML files and orders/*.toml files.
 func collectFormulaFiles(embedded fs.FS, subdir string) []string {
 	var files []string
 	_ = fs.WalkDir(embedded, subdir, func(path string, d fs.DirEntry, err error) error {
@@ -81,10 +83,20 @@ func collectFormulaFiles(embedded fs.FS, subdir string) []string {
 
 // isFormulaFile returns true if the relative path is a formula or order file.
 func isFormulaFile(rel string) bool {
-	return strings.HasSuffix(rel, ".formula.toml") || isOrderFile(rel)
+	if isOrderFile(rel) {
+		return true
+	}
+	return !strings.Contains(rel, "/") && formula.IsTOMLFilename(rel)
 }
 
-// isOrderFile returns true if the relative path is an order file (orders/<name>/order.toml).
+// isOrderFile returns true if the relative path is an order file (orders/<name>.toml).
 func isOrderFile(rel string) bool {
-	return strings.HasPrefix(rel, "orders/") && filepath.Base(rel) == "order.toml"
+	if !strings.HasPrefix(rel, "orders/") {
+		return false
+	}
+	name := strings.TrimPrefix(rel, "orders/")
+	if strings.Contains(name, "/") {
+		return false
+	}
+	return orders.IsFlatOrderFilename(name)
 }

@@ -274,20 +274,12 @@ case "$op" in
       sleep 1
     done
 
-    # Stage city directory into a temp location inside the pod.
-    # CMD will gc init --from here into /city/ (which must be clean for init).
-    # kubectl cp runs tar xmf inside the pod and will not create the parent
-    # directory, so create /tmp/city-src explicitly before copying.
-    # A .copy-done sentinel is written after the copy completes so the CMD
-    # waits for the full directory, not just city.toml (which tar may
-    # extract before other files).
+    # Copy city directory into the controller pod.
     echo "Copying city directory..."
-    "${KUBECTL[@]}" exec "$POD_NAME" -- mkdir -p /tmp/city-src
-    "${KUBECTL[@]}" cp "$city_path/." "$POD_NAME:/tmp/city-src/" || {
+    "${KUBECTL[@]}" cp "$city_path/." "$POD_NAME:/city/" || {
       echo "deploy: failed to copy city directory" >&2
       exit 1
     }
-    "${KUBECTL[@]}" exec "$POD_NAME" -- touch /tmp/city-src/.copy-done
 
     # Wait for gc init to complete (sentinel written by Dockerfile CMD).
     echo "Waiting for gc init..."
@@ -307,13 +299,6 @@ case "$op" in
     # tmux/docker deploys don't need it (bd uses local .beads/ dirs).
     echo "Initializing beads on controller..."
     init_controller_beads "$city_path/city.toml"
-
-    # Recreate beads runner pod to pick up latest image.
-    echo "Starting beads runner..."
-    GC_K8S_NAMESPACE="$NS" GC_K8S_IMAGE="$AGENT_IMAGE" \
-      "$(dirname "$0")/../beads-scripts/gc-beads-k8s" shutdown 2>/dev/null || true
-    GC_K8S_NAMESPACE="$NS" GC_K8S_IMAGE="$AGENT_IMAGE" \
-      "$(dirname "$0")/../beads-scripts/gc-beads-k8s" ensure-ready
 
     # Signal gc start to begin.
     "${KUBECTL[@]}" exec "$POD_NAME" -- touch /city/.gc-start

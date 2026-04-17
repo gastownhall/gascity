@@ -24,7 +24,7 @@ func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage orders (scheduled and event-driven dispatch)",
 		Long: `Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in orders/NAME/order.toml files. Each order pairs a gate
+Orders live in flat orders/<name>.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.`,
@@ -54,7 +54,7 @@ func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "List available orders",
 		Long: `List all available orders with their gate type, schedule, and target.
 
-Scans orders/ directories for order.toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining gate conditions,
 scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -239,11 +239,11 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
 	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
 	appendRoot := func(root orders.ScanRoot) {
-		dir := filepath.Clean(root.Dir)
-		if seen[dir] {
+		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
+		if seen[key] {
 			return
 		}
-		seen[dir] = true
+		seen[key] = true
 		roots = append(roots, root)
 	}
 
@@ -251,12 +251,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	// and user packs (via workspace.includes). City-local formulas are highest
 	// priority and override pack formulas when order names collide.
 	for _, layer := range formulaLayers {
-		formulaRoot := filepath.Join(layer, "orders")
 		if layer == localFormulas {
-			appendRoot(orders.ScanRoot{
-				Dir:          formulaRoot,
-				FormulaLayer: localFormulas,
-			})
 			for _, root := range []string{citylayout.OrdersPath(cityPath)} {
 				appendRoot(orders.ScanRoot{
 					Dir:          root,
@@ -266,7 +261,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 			continue
 		}
 		appendRoot(orders.ScanRoot{
-			Dir:          formulaRoot,
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 			FormulaLayer: layer,
 		})
 	}
@@ -278,7 +273,7 @@ func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.Sc
 	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
 	for _, layer := range formulaLayers {
 		roots = append(roots, orders.ScanRoot{
-			Dir:          filepath.Join(layer, "orders"),
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 			FormulaLayer: layer,
 		})
 	}

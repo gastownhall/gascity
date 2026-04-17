@@ -738,9 +738,13 @@ func (s *BdStore) Ready() ([]Bead, error) {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
 	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
+	result := make([]Bead, 0, len(issues))
 	for i := range issues {
-		result[i] = issues[i].toBead()
+		bead := issues[i].toBead()
+		if IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		result = append(result, bead)
 	}
 	return result, nil
 }

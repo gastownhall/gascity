@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -71,6 +72,13 @@ func effectiveCityName(cityPath string) (string, error) {
 		name = cfg.Workspace.Name
 	}
 	return name, nil
+}
+
+func registeredCityName(cityPath, nameOverride string) (string, error) {
+	if alias := strings.TrimSpace(nameOverride); alias != "" {
+		return alias, nil
+	}
+	return effectiveCityName(cityPath)
 }
 
 func normalizeRegisteredCityPath(cityPath string) (string, error) {
@@ -138,6 +146,10 @@ func ensureNoStandaloneController(cityPath string) (int, error) {
 }
 
 func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
+	return registerCityWithSupervisorNamed(cityPath, "", stdout, stderr, commandName, showProgress)
+}
+
+func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
 	if pid, err := ensureNoStandaloneController(cityPath); err != nil {
 		if errors.Is(err, errControllerAlreadyRunning) {
@@ -164,7 +176,7 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	name, err := effectiveCityName(cityPath)
+	name, err := registeredCityName(cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1

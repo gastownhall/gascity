@@ -398,7 +398,7 @@ func TestPrepareCityForSupervisorEnsuresInitArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	initFormula := filepath.Join(cityPath, citylayout.FormulasRoot, "mol-do-work.formula.toml")
+	initFormula := filepath.Join(cityPath, citylayout.FormulasRoot, "mol-do-work.toml")
 	if _, err := os.Stat(initFormula); !os.IsNotExist(err) {
 		t.Fatalf("init formula should not exist before supervisor prep, err=%v", err)
 	}

@@ -158,13 +158,29 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		cmd.Dir = dir
 	}
 	if env != nil {
-		cmd.Env = env
+		cmd.Env = workQueryEnvForDir(env, dir)
 	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
 	return string(out), nil
+}
+
+// workQueryEnvForDir ensures the subprocess environment does not carry a
+// stale inherited PWD when exec.Cmd.Dir points somewhere else. Some shells
+// (notably macOS /bin/sh) preserve the inherited PWD instead of recomputing
+// it from the real working directory, which breaks hook work_query commands
+// that inspect $PWD.
+func workQueryEnvForDir(env []string, dir string) []string {
+	if env == nil {
+		return nil
+	}
+	if dir == "" {
+		return env
+	}
+	out := removeEnvKey(append([]string(nil), env...), "PWD")
+	return append(out, "PWD="+dir)
 }
 
 // doHook is the pure logic for gc hook. Runs the work query and outputs

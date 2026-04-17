@@ -5,5 +5,5 @@ import "embed"
 
 // PackFS contains the gastown pack files.
 //
-//go:embed pack.toml commands doctor formulas namepools all:overlay all:overlays prompts scripts
+//go:embed pack.toml commands doctor formulas orders all:agents assets scripts template-fragments
 var PackFS embed.FS

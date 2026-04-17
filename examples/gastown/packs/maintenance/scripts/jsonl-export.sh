@@ -5,9 +5,6 @@
 # dolt sql exports, wc -l comparisons against spike threshold, git
 # add/commit/push. No LLM judgment needed.
 #
-# NOTE on `bd batch` (beads#6): this script has no `bd` mutation calls.
-# All data operations use `dolt sql` and `git` directly.
-#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 

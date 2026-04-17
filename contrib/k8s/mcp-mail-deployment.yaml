@@ -32,12 +32,6 @@ spec:
       - name: mcp-mail
         image: gc-mcp-mail:latest
         imagePullPolicy: IfNotPresent
-        env:
-        # Disable RBAC for internal cluster traffic — agents connect via
-        # ClusterIP (not localhost) so the default "reader" role blocks
-        # write tools like send_message and register_agent.
-        - name: HTTP_RBAC_ENABLED
-          value: "false"
         ports:
         - containerPort: 8765
           name: http

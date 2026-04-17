@@ -19,7 +19,6 @@ type StatusJSON struct {
 	CityPath   string            `json:"city_path"`
 	Controller ControllerJSON    `json:"controller"`
 	Suspended  bool              `json:"suspended"`
-	Halted     bool              `json:"halted"`
 	Agents     []StatusAgentJSON `json:"agents"`
 	Rigs       []StatusRigJSON   `json:"rigs"`
 	Summary    StatusSummaryJSON `json:"summary"`
@@ -133,13 +132,6 @@ func doCityStatus(
 		fmt.Fprintf(stdout, "  Suspended:  yes\n") //nolint:errcheck // best-effort stdout
 	} else {
 		fmt.Fprintf(stdout, "  Suspended:  no\n") //nolint:errcheck // best-effort stdout
-	}
-
-	// Halt status (supervisor tick soft circuit breaker).
-	if isCityHalted(cityPath) {
-		fmt.Fprintf(stdout, "  Halted:     yes (%s)\n", haltFilePath(cityPath)) //nolint:errcheck // best-effort stdout
-	} else {
-		fmt.Fprintf(stdout, "  Halted:     no\n") //nolint:errcheck // best-effort stdout
 	}
 
 	// Build set of suspended rig names.
@@ -336,7 +328,6 @@ func doCityStatusJSON(
 		CityPath:   cityPath,
 		Controller: ctrl,
 		Suspended:  citySuspended(cfg),
-		Halted:     isCityHalted(cityPath),
 		Agents:     agents,
 		Rigs:       rigs,
 		Summary:    summary,

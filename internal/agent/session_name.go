@@ -8,12 +8,34 @@ import (
 	"text/template"
 )
 
+var sessionNameQualifiedReplacer = strings.NewReplacer(
+	"/", "--",
+	".", "__",
+)
+
+var sessionNameQualifiedReverseReplacer = strings.NewReplacer(
+	"--", "/",
+	"__", ".",
+)
+
 // sessionData holds template variables for custom session naming.
 type sessionData struct {
 	City  string // workspace name
-	Agent string // tmux-safe qualified name (/ → --)
+	Agent string // tmux-safe qualified name (/ -> --, . -> __)
 	Dir   string // rig/dir component (empty for singletons)
 	Name  string // bare agent name
+}
+
+// SanitizeQualifiedNameForSession converts a qualified identity into the
+// deterministic tmux-safe form used by runtime session_name values.
+func SanitizeQualifiedNameForSession(agentName string) string {
+	return sessionNameQualifiedReplacer.Replace(agentName)
+}
+
+// UnsanitizeQualifiedNameFromSession best-effort decodes a tmux-safe runtime
+// session name fragment back to the corresponding qualified identity.
+func UnsanitizeQualifiedNameFromSession(name string) string {
+	return sessionNameQualifiedReverseReplacer.Replace(name)
 }
 
 // SessionNameFor returns the session name for a city agent.
@@ -22,14 +44,14 @@ type sessionData struct {
 // default pattern "{agent}" (the sanitized agent name). With per-city
 // tmux socket isolation as the default, the city prefix is unnecessary.
 //
-// For rig-scoped agents (name contains "/"), the dir and name
-// components are joined with "--" to avoid tmux naming issues:
+// For qualified identities, structural separators are encoded to avoid tmux
+// naming issues while preserving slash-vs-dot distinction:
 //
 //	"mayor"               → "mayor"
 //	"hello-world/polecat" → "hello-world--polecat"
+//	"gastown.mayor"       → "gastown__mayor"
 func SessionNameFor(cityName, agentName, sessionTemplate string) string {
-	// Pre-sanitize: replace "/" with "--" for tmux safety.
-	sanitized := strings.ReplaceAll(agentName, "/", "--")
+	sanitized := SanitizeQualifiedNameForSession(agentName)
 
 	if sessionTemplate == "" {
 		// Default: just the sanitized agent name. Per-city tmux socket

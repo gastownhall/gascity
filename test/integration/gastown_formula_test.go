@@ -35,7 +35,7 @@ id = "act"
 title = "Take action"
 needs = ["check"]
 `
-	if err := os.WriteFile(filepath.Join(formulaDir, "test-patrol.formula.toml"), []byte(formula), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulaDir, "test-patrol.toml"), []byte(formula), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -83,7 +83,7 @@ id = "cook"
 title = "Cook"
 needs = ["combine"]
 `
-	if err := os.WriteFile(filepath.Join(formulaDir, "pancakes.formula.toml"), []byte(formula), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulaDir, "pancakes.toml"), []byte(formula), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 

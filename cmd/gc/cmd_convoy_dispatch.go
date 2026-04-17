@@ -115,6 +115,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath}
+	opts.Tracef = workflowTracef
 	loadCfg := false
 	switch bead.Metadata["gc.kind"] {
 	case "check", "fanout", "retry-eval", "retry", "ralph":
@@ -174,10 +175,13 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, error) {
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
-	if err == nil {
-		if b, err := cityStore.Get(beadID); err == nil {
-			return cityStore, b, nil
-		}
+	if err != nil {
+		return nil, beads.Bead{}, fmt.Errorf("opening city store: %w", err)
+	}
+	if b, err := cityStore.Get(beadID); err == nil {
+		return cityStore, b, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, beads.Bead{}, fmt.Errorf("getting bead %q from city store: %w", beadID, err)
 	}
 
 	// Try rig stores.
@@ -188,10 +192,12 @@ func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, err
 	for _, rig := range cfg.Rigs {
 		rigStore, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
-			continue
+			return nil, beads.Bead{}, fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
 		if b, err := rigStore.Get(beadID); err == nil {
 			return rigStore, b, nil
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			return nil, beads.Bead{}, fmt.Errorf("getting bead %q from rig store %q: %w", beadID, rig.Name, err)
 		}
 	}
 
@@ -221,7 +227,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	if err != nil {
 		return err
 	}
-	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
+	routingRigContext := graphRouteRigContext(defaultRoute.QualifiedName)
 	controlRoute, err := controlDispatcherBinding(store, cityName, cfg, routingRigContext)
 	if err != nil {
 		return err
@@ -278,7 +284,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
 	routedTo := workflowExecutionRoute(source)
 	if routedTo == "" {
-		return graphRouteBinding{sessionName: source.Assignee}, nil
+		return graphRouteBinding{SessionName: source.Assignee}, nil
 	}
 	if cfg == nil {
 		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", source.ID)
@@ -289,20 +295,20 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName 
 		return graphRouteBinding{}, fmt.Errorf("unknown graph.v2 fallback target %q on %s", routedTo, source.ID)
 	}
 
-	binding := graphRouteBinding{qualifiedName: agentCfg.QualifiedName()}
+	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
 	if isMultiSessionCfgAgent(&agentCfg) {
-		binding.metadataOnly = true
+		binding.MetadataOnly = true
 		return binding, nil
 	}
 	if source.Assignee != "" {
-		binding.sessionName = source.Assignee
+		binding.SessionName = source.Assignee
 		return binding, nil
 	}
 	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
 	if sn == "" {
 		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
 	}
-	binding.sessionName = sn
+	binding.SessionName = sn
 	return binding, nil
 }
 

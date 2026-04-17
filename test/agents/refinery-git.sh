@@ -28,14 +28,21 @@ while true; do
             # Fetch latest from origin (polecat pushed to a different clone)
             git fetch origin 2>/dev/null || true
 
+            default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+            if [ -z "$default_branch" ]; then
+                default_branch="main"
+            fi
+
             # Find the remote branch matching this work_id
             branch=$(git branch -r 2>/dev/null | grep "$work_id" | head -1 | tr -d ' ' || true)
 
             if [ -n "$branch" ]; then
-                # Merge to main and push
-                git checkout main 2>/dev/null || true
-                git merge "$branch" --no-edit 2>/dev/null || true
-                git push origin main 2>/dev/null || true
+                # Merge to the remote default branch and push. Let merge/push
+                # failures abort the loop so tests do not silently close work
+                # without landing the fix.
+                git checkout "$default_branch" >/dev/null 2>&1
+                git merge "$branch" --no-edit >/dev/null 2>&1
+                git push origin "$default_branch" >/dev/null 2>&1
             fi
 
             cd "$GC_CITY"

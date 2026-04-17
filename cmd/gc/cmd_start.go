@@ -734,9 +734,6 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 
 	// workDir-based hooks: gemini, codex, opencode, copilot, pi, omp.
 	// Use path.Join for RelDst (container-target, always forward slashes).
-	// These paths live inside the agent worktree and are populated by
-	// pre_start staging (e.g. worktree-setup.sh --sync), so hashing their
-	// contents would drift across reconciler cycles. See issue #682.
 	for _, rel := range []string{
 		path.Join(".gemini", "settings.json"),
 		path.Join(".codex", "hooks.json"),
@@ -750,7 +747,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		if _, err := os.Stat(abs); err == nil {
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: abs, RelDst: path.Join(relWorkDir, rel),
-				Probed: true, SkipFingerprint: true,
+				Probed: true, ContentHash: runtime.HashPathContent(abs),
 			})
 		}
 	}
@@ -759,7 +756,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
-			Probed: true, SkipFingerprint: true,
+			Probed: true, ContentHash: runtime.HashPathContent(skillsDir),
 		})
 	}
 	// cityDir-based hooks: claude (.gc/settings.json).

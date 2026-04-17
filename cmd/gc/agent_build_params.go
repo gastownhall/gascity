@@ -29,6 +29,7 @@ type agentBuildParams struct {
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
+	appendFragments []string // V2: from [agents].append_fragments / [agent_defaults].append_fragments
 	apiURL          string
 	stderr          io.Writer
 
@@ -64,6 +65,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
 		apiURL:          cfg.API.URLOrDefault(),
 		beadStore:       store,
 		beadNames:       make(map[string]string),

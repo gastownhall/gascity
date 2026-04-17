@@ -64,6 +64,23 @@ func TestSessionProviderContextForCityUsesTargetCityAndEnvOverride(t *testing.T)
 	}
 }
 
+func TestRawBeadsProviderNormalizesManagedExecEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+
+	if got := rawBeadsProvider(cityPath); got != "bd" {
+		t.Fatalf("rawBeadsProvider() = %q, want bd", got)
+	}
+}
+
+func TestRawBeadsProviderPreservesCustomExecOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "exec:/tmp/custom-beads")
+
+	if got := rawBeadsProvider(t.TempDir()); got != "exec:/tmp/custom-beads" {
+		t.Fatalf("rawBeadsProvider() = %q, want custom exec override", got)
+	}
+}
+
 func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{
 		Type:   sessionBeadType,

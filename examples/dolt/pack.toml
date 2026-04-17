@@ -3,77 +3,11 @@
 # Provides lifecycle commands (status, start, logs, sql, list, recover, sync,
 # rollback, cleanup, health) for the Dolt SQL server backing bead storage.
 #
-# Also provides a fallback "dog" agent so the pack works standalone.
-# When composed with a pack that provides its own non-fallback dog
-# (e.g. maintenance), the consumer's fully-configured dog wins silently.
+# Dog-backed formulas and orders rely on the city's maintenance pack.
 
 [pack]
 name = "dolt"
-schema = 1
-
-[[doctor]]
-name = "check-dolt"
-script = "doctor/check-dolt.sh"
-description = "Verify Dolt binary is available"
+schema = 2
 
 [formulas]
 dir = "formulas"
-
-[[commands]]
-name = "status"
-description = "Check if the Dolt server is running"
-script = "commands/status.sh"
-
-[[commands]]
-name = "start"
-description = "Start the Dolt server if not already running"
-script = "commands/start.sh"
-
-[[commands]]
-name = "logs"
-description = "Tail the Dolt server log file"
-script = "commands/logs.sh"
-
-[[commands]]
-name = "sql"
-description = "Open an interactive Dolt SQL shell"
-script = "commands/sql.sh"
-
-[[commands]]
-name = "list"
-description = "List Dolt databases"
-script = "commands/list.sh"
-
-[[commands]]
-name = "recover"
-description = "Recover Dolt from read-only state"
-script = "commands/recover.sh"
-
-[[commands]]
-name = "sync"
-description = "Push databases to configured remotes"
-script = "commands/sync.sh"
-
-[[commands]]
-name = "rollback"
-description = "List or restore from migration backups"
-script = "commands/rollback.sh"
-
-[[commands]]
-name = "cleanup"
-description = "Find and remove orphaned Dolt databases"
-script = "commands/cleanup.sh"
-
-[[commands]]
-name = "health"
-description = "Check Dolt data-plane health"
-script = "commands/health.sh"
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "Check your hook for work assignments."
-idle_timeout = "2h"
-min_active_sessions = 0
-max_active_sessions = 3

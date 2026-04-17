@@ -388,7 +388,7 @@ session_live = ["echo global-from-mypk"]
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(formulasDir, "demo.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulasDir, "demo.toml"), []byte(`
 formula = "demo"
 `), 0o644); err != nil {
 		t.Fatal(err)

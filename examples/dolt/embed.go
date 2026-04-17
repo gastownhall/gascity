@@ -3,7 +3,7 @@ package dolt
 
 import "embed"
 
-// PackFS contains the dolt pack files: pack.toml, doctor/, commands/, scripts/, and formulas/.
+// PackFS contains the dolt pack files: pack.toml, doctor/, commands/, scripts/, formulas/, and orders/.
 //
-//go:embed pack.toml doctor commands scripts formulas
+//go:embed pack.toml doctor commands scripts formulas orders
 var PackFS embed.FS

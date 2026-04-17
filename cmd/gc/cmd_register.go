@@ -5,33 +5,47 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
+	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
 
 func newRegisterCmd(stdout, stderr io.Writer) *cobra.Command {
+	var nameFlag string
 	cmd := &cobra.Command{
 		Use:   "register [path]",
 		Short: "Register a city with the machine-wide supervisor",
 		Long: `Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
+Use --name to set the registration name; this also persists workspace.name
+in city.toml so later registrations stay aligned. When --name is omitted,
+workspace.name is used if present, otherwise [pack].name is used and
+backfilled into workspace.name.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doRegister(args, stdout, stderr) != 0 {
+			if doRegisterWithOptions(args, nameFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&nameFlag, "name", "", "machine-local alias for this city registration")
 	return cmd
 }
 
 func doRegister(args []string, stdout, stderr io.Writer) int {
+	return doRegisterWithOptions(args, "", stdout, stderr)
+}
+
+func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io.Writer) int {
 	var cityPath string
 	var err error
 	if len(args) > 0 {
@@ -49,7 +63,57 @@ func doRegister(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc register: %s is not a city directory (no city.toml found)\n", cityPath) //nolint:errcheck
 		return 1
 	}
-	return registerCityWithSupervisor(cityPath, stdout, stderr, "gc register", true)
+	registerName, persistName, err := resolveRegistrationName(cityPath, nameOverride)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc register: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if persistName {
+		if code := overrideCityName(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), registerName, stderr); code != 0 {
+			return code
+		}
+	}
+	return registerCityWithSupervisorNamed(cityPath, registerName, stdout, stderr, "gc register", true)
+}
+
+func resolveRegistrationName(cityPath, nameOverride string) (string, bool, error) {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return "", false, err
+	}
+
+	current := strings.TrimSpace(cfg.Workspace.Name)
+	if alias := strings.TrimSpace(nameOverride); alias != "" {
+		return alias, current != alias, nil
+	}
+	if current != "" {
+		return current, false, nil
+	}
+
+	packName, err := readPackName(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		return "", false, err
+	}
+	return packName, true, nil
+}
+
+func readPackName(packTomlPath string) (string, error) {
+	data, err := os.ReadFile(packTomlPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %q: %w", packTomlPath, err)
+	}
+	var meta struct {
+		Pack struct {
+			Name string `toml:"name"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &meta); err != nil {
+		return "", fmt.Errorf("parsing %q: %w", packTomlPath, err)
+	}
+	if strings.TrimSpace(meta.Pack.Name) == "" {
+		return "", fmt.Errorf("%s: missing [pack].name for registration fallback", packTomlPath)
+	}
+	return meta.Pack.Name, nil
 }
 
 func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {

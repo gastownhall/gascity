@@ -23,6 +23,9 @@ func TestDoRegister(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"my-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GC_HOME", dir)
 
 	var stdout, stderr bytes.Buffer
@@ -44,6 +47,172 @@ func TestDoRegister(t *testing.T) {
 	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Errorf("expected 1 entry at %s, got %v", resolvedCityPath, entries)
+	}
+}
+
+func TestDoRegisterWithNameOverrideRewritesWorkspaceName(t *testing.T) {
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = nil
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"workspace-name\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packToml := "[pack]\nname = \"pack-name\"\nschema = 2\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegisterWithOptions([]string{cityPath}, "machine-alias", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "machine-alias") {
+		t.Fatalf("stdout = %q, want machine-local alias", stdout.String())
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %v", entries)
+	}
+	if entries[0].Name != "machine-alias" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "machine-alias")
+	}
+
+	gotCityToml, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gotCityToml), `name = "machine-alias"`) {
+		t.Fatalf("city.toml should persist the registered name, got:\n%s", string(gotCityToml))
+	}
+	gotPackToml, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotPackToml) != packToml {
+		t.Fatalf("pack.toml changed during register --name:\n%s", string(gotPackToml))
+	}
+}
+
+func TestDoRegisterWithoutNameStillUsesWorkspaceName(t *testing.T) {
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = nil
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"workspace-name\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"pack-name\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegister([]string{cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", code, stderr.String())
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %v", entries)
+	}
+	if entries[0].Name != "workspace-name" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "workspace-name")
+	}
+}
+
+func TestDoRegisterWithoutNameFallsBackToPackNameAndPersistsWorkspaceName(t *testing.T) {
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = nil
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"pack-name\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegister([]string{cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", code, stderr.String())
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %v", entries)
+	}
+	if entries[0].Name != "pack-name" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "pack-name")
+	}
+
+	gotCityToml, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gotCityToml), `name = "pack-name"`) {
+		t.Fatalf("city.toml should persist pack.name fallback, got:\n%s", string(gotCityToml))
+	}
+}
+
+func TestDoRegisterWithoutNameErrorsWhenWorkspaceAndPackNameMissing(t *testing.T) {
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = nil
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegister([]string{cityPath}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "missing [pack].name") {
+		t.Fatalf("stderr = %q, want missing [pack].name", stderr.String())
 	}
 }
 

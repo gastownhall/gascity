@@ -5,13 +5,6 @@
 # SQL queries with age thresholds, bd close/update commands, count
 # comparisons against alert thresholds.
 #
-# NOTE on `bd batch` (beads#6): the only looped `bd` call is `bd close`
-# for stale issues (step 4), which IS in the batch grammar. However,
-# the script primarily operates via direct Dolt SQL with per-database
-# DOLT_COMMIT, and the `bd close` loop is a small fraction of the work.
-# Batching the closes is feasible but low-impact — candidate for a
-# follow-up if the stale-issue volume grows.
-#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 

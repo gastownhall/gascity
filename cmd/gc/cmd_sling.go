@@ -16,9 +16,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -26,16 +26,11 @@ import (
 // slingStdin returns the reader for --stdin input. Extracted for testability.
 var slingStdin = func() io.Reader { return os.Stdin }
 
-// BeadQuerier can retrieve a single bead by ID.
-type BeadQuerier interface {
-	Get(id string) (beads.Bead, error)
-}
+// BeadQuerier is an alias for sling.BeadQuerier.
+type BeadQuerier = sling.BeadQuerier
 
-// BeadChildQuerier extends BeadQuerier with the ability to query child beads.
-type BeadChildQuerier interface {
-	BeadQuerier
-	List(query beads.ListQuery) ([]beads.Bead, error)
-}
+// BeadChildQuerier is an alias for sling.BeadChildQuerier.
+type BeadChildQuerier = sling.BeadChildQuerier
 
 func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var formula bool
@@ -130,61 +125,19 @@ Examples:
 	return cmd
 }
 
-// slingOpts captures the user's intent from CLI flags.
-type slingOpts struct {
-	Target        config.Agent
-	BeadOrFormula string
-	IsFormula     bool
-	OnFormula     string
-	NoFormula     bool
-	SkipPoke      bool
-	Title         string
-	Vars          []string
-	Merge         string // "", "direct", "mr", "local"
-	NoConvoy      bool
-	Owned         bool
-	Nudge         bool
-	Force         bool
-	DryRun        bool
-	ScopeKind     string
-	ScopeRef      string
-}
+// slingOpts is an alias for sling.SlingOpts.
+type slingOpts = sling.SlingOpts
 
 var (
 	slingPokeController        = pokeController
 	slingPokeControlDispatcher = pokeControlDispatch
 )
 
-// slingDeps bundles infrastructure dependencies injected for testability.
-type slingDeps struct {
-	CityName string
-	CityPath string // city directory path; used to poke controller for wake
-	Cfg      *config.City
-	SP       runtime.Provider
-	Runner   SlingRunner
-	Store    beads.Store
-	StoreRef string
-	Stdout   io.Writer
-	Stderr   io.Writer
-}
+// slingDeps is an alias for sling.SlingDeps.
+type slingDeps = sling.SlingDeps
 
-// SlingRunner executes a shell command in the given directory with optional
-// extra env vars and returns combined output. If dir is empty, the command
-// inherits the caller's cwd. The env map entries are added to the process env.
-type SlingRunner func(dir, command string, env map[string]string) (string, error)
-
-func slingTracef(format string, args ...any) {
-	path := strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
-	if path == "" {
-		return
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()                                                                                    //nolint:errcheck // best-effort trace log
-	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
-}
+// SlingRunner is an alias for sling.SlingRunner.
+type SlingRunner = sling.SlingRunner
 
 // shellSlingRunner runs a command via sh -c and returns stdout.
 // Times out after 30 seconds. If dir is non-empty, the command runs in
@@ -262,7 +215,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			fmt.Fprintf(stderr, "gc sling: inline text requires explicit target\n  usage: gc sling <target> %q\n", beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		bp := beadPrefix(beadOrFormula)
+		bp := sling.BeadPrefix(beadOrFormula)
 		if bp == "" {
 			fmt.Fprintf(stderr, "gc sling: cannot derive rig from bead %q (no prefix)\n", beadOrFormula) //nolint:errcheck // best-effort stderr
 			return 1
@@ -302,7 +255,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	// 2. Target agent's rig directory (mol operations create in the agent's store)
 	// 3. City path (fallback for city-scoped agents)
 	storeDir := cityPath
-	if bp := beadPrefix(beadOrFormula); bp != "" {
+	if bp := sling.BeadPrefix(beadOrFormula); bp != "" {
 		if rig, found := findRigByPrefix(cfg, bp); found {
 			rigPath := rig.Path
 			if !filepath.IsAbs(rigPath) {
@@ -374,457 +327,279 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		Runner:   runner,
 		Store:    store,
 		StoreRef: storeRef,
-		Stdout:   stdout,
-		Stderr:   stderr,
 	}
 
-	return doSlingBatch(opts, deps, store)
+	return doSlingBatch(opts, deps, store, stdout, stderr)
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).
 func findRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
-	lp := strings.ToLower(prefix)
-	for _, r := range cfg.Rigs {
-		if strings.ToLower(r.EffectivePrefix()) == lp {
-			return r, true
-		}
-	}
-	return config.Rig{}, false
+	return sling.FindRigByPrefix(cfg, prefix)
 }
 
-// rigDirForBead resolves the rig directory for a bead ID by extracting
-// the bead prefix and looking up the rig path. Returns "" if the bead
-// has no prefix or no matching rig is found.
 func rigDirForBead(cfg *config.City, beadID string) string {
-	bp := beadPrefix(beadID)
-	if bp == "" {
-		return ""
-	}
-	if rig, ok := findRigByPrefix(cfg, bp); ok {
-		return rig.Path
-	}
-	return ""
+	return sling.RigDirForBead(cfg, beadID)
 }
 
-// rigDirForAgent returns the rig directory for an agent by matching its Dir
-// field to a rig Name. Returns "" if the agent has no Dir (city-scoped) or
-// no matching rig is found.
 func rigDirForAgent(cfg *config.City, a config.Agent) string {
-	if a.Dir == "" {
-		return ""
-	}
-	for _, r := range cfg.Rigs {
-		if r.Name == a.Dir {
-			return r.Path
-		}
-	}
-	return ""
+	return sling.RigDirForAgent(cfg, a)
 }
 
 func slingDirForBead(cfg *config.City, cityPath, beadID string) string {
-	if dir := rigDirForBead(cfg, beadID); dir != "" {
-		return dir
-	}
-	return cityPath
+	return sling.SlingDirForBead(cfg, cityPath, beadID)
 }
 
-// doSling is the pure logic for gc sling. Accepts injected deps, querier,
-// and opts struct for testability.
-func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
-	a := opts.Target
-	// Warn about suspended agents / empty pools (unless --force).
-	if a.Suspended && !opts.Force {
-		fmt.Fprintf(deps.Stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", a.QualifiedName()) //nolint:errcheck // best-effort
-	}
-	if sp := scaleParamsFor(&a); isMultiSessionCfgAgent(&a) && sp.Max == 0 && !opts.Force {
-		fmt.Fprintf(deps.Stderr, "warning: pool %q has max=0 — bead routed but no instances to claim it\n", a.QualifiedName()) //nolint:errcheck // best-effort
-	}
+// populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
+func populateSlingDepsCallbacks(deps *slingDeps) {
+	deps.Resolver = cliAgentResolver{}
+	deps.Branches = cliBranchResolver{}
+	deps.Notify = &cliNotifier{}
+}
 
-	// Cross-rig guard — block when a rig-scoped agent receives a bead from
-	// a different rig. Only for plain bead routing (formula creates fresh wisps).
-	// Dry-run shows an informational section instead of blocking.
-	if !opts.IsFormula && !opts.Force && !opts.DryRun {
-		if msg := checkCrossRig(opts.BeadOrFormula, a, deps.Cfg); msg != "" {
-			fmt.Fprintln(deps.Stderr, msg) //nolint:errcheck // best-effort
-			return 1
-		}
+// cliAgentResolver implements sling.AgentResolver using the CLI's
+// 3-step resolution with ambient rig context.
+type cliAgentResolver struct{}
+
+func (cliAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
+	return resolveAgentIdentity(cfg, name, rigContext)
+}
+
+// cliBranchResolver implements sling.BranchResolver using git.
+type cliBranchResolver struct{}
+
+func (cliBranchResolver) DefaultBranch(dir string) string {
+	return defaultBranchFor(dir)
+}
+
+// cliNotifier implements sling.Notifier using IPC.
+type cliNotifier struct{}
+
+func (cliNotifier) PokeController(cityPath string) {
+	_ = slingPokeController(cityPath)
+}
+
+func (cliNotifier) PokeControlDispatch(cityPath string) {
+	_ = slingPokeControlDispatcher(cityPath)
+}
+
+// printSlingWarnings prints only warnings from a SlingResult to stderr.
+// Called before error handling so warnings are visible even on failure.
+func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
+	if result.AgentSuspended {
+		fmt.Fprintf(stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", result.Target) //nolint:errcheck
 	}
-
-	// Pre-flight idempotency check — before formula/wisp processing so an
-	// idempotent bead skips ALL mutations. Only for plain bead routing
-	// (formula mode creates fresh wisps, never idempotent).
-	if !opts.IsFormula && !opts.Force {
-		result := checkBeadState(querier, opts.BeadOrFormula, a)
-		if result.Idempotent {
-			if opts.DryRun {
-				return dryRunSingle(opts, deps, querier)
-			}
-			fmt.Fprintf(deps.Stdout, "Bead %s already routed to %s — skipping (idempotent)\n", opts.BeadOrFormula, a.QualifiedName()) //nolint:errcheck // best-effort
-			return 0
-		}
-		for _, w := range result.Warnings {
-			fmt.Fprintln(deps.Stderr, w) //nolint:errcheck // best-effort
-		}
+	if result.PoolEmpty {
+		fmt.Fprintf(stderr, "warning: pool %q has max=0 — bead routed but no instances to claim it\n", result.Target) //nolint:errcheck
 	}
-
-	// Dry-run: resolve and print preview without executing.
-	if opts.DryRun {
-		return dryRunSingle(opts, deps, querier)
+	for _, w := range result.BeadWarnings {
+		fmt.Fprintln(stderr, w) //nolint:errcheck
 	}
-
-	beadID := opts.BeadOrFormula
-	method := "bead"
-
-	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" && (opts.NoFormula || a.EffectiveDefaultSlingFormula() == "") {
-		fmt.Fprintln(deps.Stderr, "gc sling: --scope-kind/--scope-ref require a formula-backed workflow launch") //nolint:errcheck // best-effort
-		return 1
+	for _, id := range result.AutoBurned {
+		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
 	}
+	for _, e := range result.MetadataErrors {
+		fmt.Fprintf(stderr, "gc sling: %s\n", e) //nolint:errcheck
+	}
+}
 
-	// If --formula, instantiate wisp and use the root bead ID.
-	if opts.IsFormula {
-		method = "formula"
-		formulaVars := buildSlingFormulaVars(opts.BeadOrFormula, "", opts.Vars, a, deps)
-		result, err := instantiateSlingFormula(context.Background(), opts.BeadOrFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title: opts.Title,
-			Vars:  formulaVars,
-		}, "", opts.ScopeKind, opts.ScopeRef, a, deps)
-		if err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q: %v\n", opts.BeadOrFormula, err) //nolint:errcheck // best-effort
-			return 1
-		}
-		if result.GraphWorkflow || isGraphWorkflowAttachment(deps.Store, result.RootID) {
-			if code := startGraphWorkflow(result, "", a, method, deps); code != 0 {
-				return code
-			}
-			fmt.Fprintf(deps.Stdout, "Started workflow %s (formula %q) → %s\n", result.RootID, opts.BeadOrFormula, a.QualifiedName()) //nolint:errcheck // best-effort
-			return 0
-		}
-		beadID = result.RootID
+// printSlingResult formats a SlingResult for CLI display.
+// Warnings go to stderr, messages go to stdout -- matching original behavior.
+func printSlingResult(result sling.SlingResult, stdout, _ io.Writer) {
+	// Skip display messages for idempotent/dry-run (handled separately).
+	if result.Idempotent {
+		fmt.Fprintf(stdout, "Bead %s already routed to %s — skipping (idempotent)\n", result.BeadID, result.Target) //nolint:errcheck
+		return
+	}
+	if result.DryRun {
+		return // dry-run display handled by dryRunSingle/dryRunBatch
 	}
 
-	// If --on, attach a wisp to the bead and route the original bead.
-	if opts.OnFormula != "" {
-		method = "on-formula"
-		if err := checkNoMoleculeChildren(querier, beadID, deps.Store, deps.Stderr); err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
-			return 1
-		}
-		formulaVars := buildSlingFormulaVars(opts.OnFormula, beadID, opts.Vars, a, deps)
-		result, err := instantiateSlingFormula(context.Background(), opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:            opts.Title,
-			Vars:             formulaVars,
-			PriorityOverride: beadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
-		if err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q on %s: %v\n", opts.OnFormula, beadID, err) //nolint:errcheck // best-effort
-			return 1
-		}
-		wispRootID := result.RootID
-		if result.GraphWorkflow || isGraphWorkflowAttachment(deps.Store, wispRootID) {
-			if code := startGraphWorkflow(result, beadID, a, method, deps); code != 0 {
-				return code
-			}
-			fmt.Fprintf(deps.Stdout, "Attached workflow %s (formula %q) to %s\n", wispRootID, opts.OnFormula, beadID) //nolint:errcheck // best-effort
-			return 0
-		}
-		// Record molecule_id on the work bead so agents can discover it
-		// without traversing dependencies.
-		if err := deps.Store.SetMetadata(beadID, "molecule_id", wispRootID); err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: setting molecule_id on %s: %v\n", beadID, err) //nolint:errcheck // best-effort
-			// Non-fatal — wisp was already attached.
-		}
-		fmt.Fprintf(deps.Stdout, "Attached wisp %s (formula %q) to %s\n", wispRootID, opts.OnFormula, beadID) //nolint:errcheck // best-effort
-		// beadID unchanged — route original bead.
+	// Messages (stdout).
+	if result.ConvoyID != "" {
+		fmt.Fprintf(stdout, "Auto-convoy %s\n", result.ConvoyID) //nolint:errcheck
 	}
-
-	// Apply default formula if target has one and no explicit formula/--no-formula.
-	if opts.OnFormula == "" && !opts.IsFormula && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-		method = "default-on-formula"
-		if err := checkNoMoleculeChildren(querier, beadID, deps.Store, deps.Stderr); err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
-			return 1
-		}
-		defaultVars := buildSlingFormulaVars(a.EffectiveDefaultSlingFormula(), beadID, opts.Vars, a, deps)
-		result, err := instantiateSlingFormula(context.Background(), a.EffectiveDefaultSlingFormula(), slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:            opts.Title,
-			Vars:             defaultVars,
-			PriorityOverride: beadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
-		if err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: instantiating default formula %q on %s: %v\n", //nolint:errcheck // best-effort
-				a.EffectiveDefaultSlingFormula(), beadID, err)
-			return 1
-		}
-		wispRootID := result.RootID
-		if result.GraphWorkflow || isGraphWorkflowAttachment(deps.Store, wispRootID) {
-			if code := startGraphWorkflow(result, beadID, a, method, deps); code != 0 {
-				return code
-			}
-			fmt.Fprintf(deps.Stdout, "Attached workflow %s (default formula %q) to %s\n", wispRootID, a.EffectiveDefaultSlingFormula(), beadID) //nolint:errcheck // best-effort
-			return 0
-		}
-		// Record molecule_id on the work bead so agents can discover it
-		// without traversing dependencies.
-		if err := deps.Store.SetMetadata(beadID, "molecule_id", wispRootID); err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: setting molecule_id on %s: %v\n", beadID, err) //nolint:errcheck // best-effort
-			// Non-fatal — wisp was already attached.
-		}
-		fmt.Fprintf(deps.Stdout, "Attached wisp %s (default formula %q) to %s\n", //nolint:errcheck // best-effort
-			wispRootID, a.EffectiveDefaultSlingFormula(), beadID)
-	}
-
-	// Build and execute sling command.
-	// For fixed agents, resolve the target's session name and inject it
-	// as GC_SLING_TARGET so the sling query can assign work per-session.
-	slingEnv := resolveSlingEnv(a, deps)
-	slingCmd := buildSlingCommand(a.EffectiveSlingQuery(), beadID)
-	rigDir := slingDirForBead(deps.Cfg, deps.CityPath, beadID)
-	if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
-		fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
-		telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), method, err)
-		return 1
-	}
-
-	telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), method, nil)
-
-	// Merge strategy metadata.
-	if opts.Merge != "" && deps.Store != nil {
-		if err := deps.Store.SetMetadata(beadID, "merge_strategy", opts.Merge); err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: setting merge strategy: %v\n", err) //nolint:errcheck // best-effort
-			// Non-fatal — bead was already routed.
-		}
-	}
-
-	// Auto-convoy: wrap single bead in a tracking convoy (unless suppressed).
-	if !opts.NoConvoy && !opts.IsFormula && deps.Store != nil {
-		var convoyLabels []string
-		if opts.Owned {
-			convoyLabels = []string{"owned"}
-		}
-		convoy, err := deps.Store.Create(beads.Bead{
-			Title:  fmt.Sprintf("sling-%s", beadID),
-			Type:   "convoy",
-			Labels: convoyLabels,
-		})
-		if err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: creating auto-convoy: %v\n", err) //nolint:errcheck // best-effort
-			// Non-fatal — bead was already routed successfully.
+	if result.WispRootID != "" && result.WorkflowID == "" {
+		if result.FormulaName != "" {
+			fmt.Fprintf(stdout, "Attached wisp %s (formula %q) to %s\n", result.WispRootID, result.FormulaName, result.BeadID) //nolint:errcheck
 		} else {
-			parentID := convoy.ID
-			if err := deps.Store.Update(beadID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-				fmt.Fprintf(deps.Stderr, "gc sling: linking bead to convoy: %v\n", err) //nolint:errcheck // best-effort
+			fmt.Fprintf(stdout, "Attached wisp %s to %s\n", result.WispRootID, result.BeadID) //nolint:errcheck
+		}
+	}
+	if result.WorkflowID != "" {
+		switch result.Method {
+		case "on-formula", "default-on-formula":
+			fmt.Fprintf(stdout, "Attached workflow %s (formula %q) to %s\n", result.WorkflowID, result.FormulaName, result.BeadID) //nolint:errcheck
+		default:
+			fmt.Fprintf(stdout, "Started workflow %s (formula %q) → %s\n", result.WorkflowID, result.FormulaName, result.Target) //nolint:errcheck
+		}
+		return
+	}
+
+	// Standard sling confirmation.
+	switch result.Method {
+	case "formula":
+		fmt.Fprintf(stdout, "Slung formula %q (wisp root %s) → %s\n", result.FormulaName, result.BeadID, result.Target) //nolint:errcheck
+	case "on-formula":
+		fmt.Fprintf(stdout, "Slung %s (with formula %q) → %s\n", result.BeadID, result.FormulaName, result.Target) //nolint:errcheck
+	case "default-on-formula":
+		fmt.Fprintf(stdout, "Slung %s (with default formula %q) → %s\n", result.BeadID, result.FormulaName, result.Target) //nolint:errcheck
+	default:
+		fmt.Fprintf(stdout, "Slung %s → %s\n", result.BeadID, result.Target) //nolint:errcheck
+	}
+}
+
+// printBatchSlingResult formats a batch SlingResult for CLI display.
+func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
+	// Warnings.
+	for _, w := range result.BeadWarnings {
+		fmt.Fprintln(stderr, w) //nolint:errcheck
+	}
+	for _, id := range result.AutoBurned {
+		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
+	}
+	for _, e := range result.MetadataErrors {
+		fmt.Fprintf(stderr, "gc sling: %s\n", e) //nolint:errcheck
+	}
+
+	if result.DryRun {
+		return
+	}
+
+	// Container expansion header.
+	ctype := result.ContainerType
+	if ctype == "" {
+		ctype = "container"
+	}
+	fmt.Fprintf(stdout, "Expanding %s %s (%d children, %d open)\n", ctype, result.BeadID, result.Total, result.Total-result.Skipped) //nolint:errcheck
+
+	// Per-child results.
+	for _, child := range result.Children {
+		switch {
+		case child.Skipped:
+			if child.Status != "" {
+				fmt.Fprintf(stdout, "  Skipped %s (status: %s)\n", child.BeadID, child.Status) //nolint:errcheck
 			} else {
-				label := ""
-				if opts.Owned {
-					label = " (owned)"
-				}
-				fmt.Fprintf(deps.Stdout, "Auto-convoy %s%s\n", convoy.ID, label) //nolint:errcheck // best-effort
+				fmt.Fprintf(stdout, "  Skipped %s — already routed to %s\n", child.BeadID, result.Target) //nolint:errcheck
 			}
+		case child.Failed:
+			fmt.Fprintf(stderr, "  Failed %s: %s\n", child.BeadID, child.FailReason) //nolint:errcheck
+		case child.Routed:
+			if child.WispRootID != "" {
+				label := "formula"
+				if result.Method == "batch-default-on" {
+					label = "default formula"
+				}
+				fmt.Fprintf(stdout, "  Attached wisp %s (%s %q) → %s\n", child.WispRootID, label, child.FormulaName, child.BeadID) //nolint:errcheck
+			}
+			fmt.Fprintf(stdout, "  Slung %s → %s\n", child.BeadID, result.Target) //nolint:errcheck
 		}
 	}
 
-	switch {
-	case opts.IsFormula:
-		fmt.Fprintf(deps.Stdout, "Slung formula %q (wisp root %s) → %s\n", opts.BeadOrFormula, beadID, a.QualifiedName()) //nolint:errcheck // best-effort
-	case opts.OnFormula != "":
-		fmt.Fprintf(deps.Stdout, "Slung %s (with formula %q) → %s\n", beadID, opts.OnFormula, a.QualifiedName()) //nolint:errcheck // best-effort
-	default:
-		fmt.Fprintf(deps.Stdout, "Slung %s → %s\n", beadID, a.QualifiedName()) //nolint:errcheck // best-effort
+	// Summary.
+	summary := fmt.Sprintf("Slung %d/%d children of %s → %s", result.Routed, result.Total, result.BeadID, result.Target)
+	if result.IdempotentCt > 0 {
+		summary += fmt.Sprintf(" (%d already routed)", result.IdempotentCt)
+	}
+	fmt.Fprintln(stdout, summary) //nolint:errcheck
+}
+
+// doSling creates a Sling instance and dispatches to the right intent method.
+func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr io.Writer) int {
+	populateSlingDepsCallbacks(&deps)
+	sl, newErr := sling.New(deps)
+	if newErr != nil {
+		fmt.Fprintln(stderr, newErr) //nolint:errcheck
+		return 1
+	}
+	_ = context.Background() // ctx available for future intent API use
+
+	// Validate scope requires a formula.
+	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" &&
+		(opts.NoFormula || opts.Target.EffectiveDefaultSlingFormula() == "") {
+		fmt.Fprintln(stderr, "--scope-kind/--scope-ref require a formula-backed workflow launch") //nolint:errcheck
+		return 1
 	}
 
-	// Poke controller/supervisor to trigger immediate reconciliation
-	// so pool agents wake without waiting for the next patrol tick.
-	if !opts.SkipPoke {
-		_ = slingPokeController(deps.CityPath)
+	// Use the legacy DoSling when a custom querier is provided (tests).
+	// The intent API uses deps.Store as the querier; tests may inject
+	// a different querier with pre-seeded beads.
+	_ = sl // Sling instance available for future direct use
+	result, err := sling.DoSling(opts, deps, querier)
+	// Always print warnings (suspended, pool-empty, bead warnings)
+	// even when the operation fails -- they provide context for the error.
+	printSlingWarnings(result, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, err) //nolint:errcheck
+		return 1
 	}
-
-	// Nudge target if requested.
-	if opts.Nudge {
-		doSlingNudge(&a, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, deps.Stdout, deps.Stderr)
+	printSlingResult(result, stdout, stderr)
+	// Dry-run: display the CLI preview using the domain result.
+	if result.DryRun {
+		return dryRunSingle(opts, deps, querier, stdout, stderr)
 	}
-
+	if result.NudgeAgent != nil {
+		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
+	}
 	return 0
 }
 
-// doSlingBatch handles convoy expansion before delegating to doSling.
-// If the argument is a convoy, it expands open children and routes each
-// individually. Otherwise it falls through to doSling.
-func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int {
-	a := opts.Target
-	// Formula mode, nil querier → delegate directly.
-	if opts.IsFormula || querier == nil {
-		return doSling(opts, deps, querier)
+// doSlingBatch creates a Sling instance and dispatches batch or single.
+func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdout, stderr io.Writer) int {
+	populateSlingDepsCallbacks(&deps)
+	sl, newErr := sling.New(deps)
+	if newErr != nil {
+		fmt.Fprintln(stderr, newErr) //nolint:errcheck
+		return 1
 	}
+	_ = context.Background() // ctx available for future intent API use
 
-	// Try to look up the bead to check if it's a container.
-	b, err := querier.Get(opts.BeadOrFormula)
+	// For formula/on-formula batch, delegate to the old DoSlingBatch
+	// which handles per-child formula attachment internally.
+	// ExpandConvoy is for plain bead routing of convoy children.
+	var result sling.SlingResult
+	var err error
+	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
+		// Formula paths need per-child wisp attachment -- use legacy API.
+		result, err = sling.DoSlingBatch(opts, deps, querier)
+	} else {
+		result, err = sl.ExpandConvoy(context.Background(), opts.BeadOrFormula, opts.Target, sling.RouteOpts{
+			Merge: opts.Merge, NoConvoy: opts.NoConvoy, Owned: opts.Owned,
+			Nudge: opts.Nudge, Force: opts.Force, SkipPoke: opts.SkipPoke, DryRun: opts.DryRun,
+		}, querier)
+	}
+	// Print warnings before error check so they're visible on failure.
+	printSlingWarnings(result, stderr)
+	// Always print results when we have children (partial failures
+	// should still show per-child status).
+	if len(result.Children) > 0 {
+		printBatchSlingResult(result, stdout, stderr)
+	} else if err == nil {
+		printSlingResult(result, stdout, stderr)
+	}
 	if err != nil {
-		// Can't query → fall through to doSling (best-effort).
-		singleOpts := opts
-		singleOpts.IsFormula = false
-		return doSling(singleOpts, deps, querier)
-	}
-	if b.Type == "epic" {
-		fmt.Fprintf(deps.Stderr, "gc sling: bead %s is an epic; first-class support is for convoys only\n", b.ID) //nolint:errcheck // best-effort
+		fmt.Fprintln(stderr, err) //nolint:errcheck
 		return 1
 	}
-
-	if !beads.IsContainerType(b.Type) {
-		singleOpts := opts
-		singleOpts.IsFormula = false
-		return doSling(singleOpts, deps, querier)
-	}
-
-	// Container expansion keeps closed children in the preview so the skipped
-	// section and summary counts still reflect the full container state.
-	children, err := querier.List(beads.ListQuery{
-		ParentID:      b.ID,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedAsc,
-	})
-	if err != nil {
-		fmt.Fprintf(deps.Stderr, "gc sling: listing children of %s: %v\n", b.ID, err) //nolint:errcheck // best-effort
-		return 1
-	}
-
-	// Partition children into open vs skipped.
-	var open, skipped []beads.Bead
-	for _, c := range children {
-		if c.Status == "open" {
-			open = append(open, c)
-		} else {
-			skipped = append(skipped, c)
-		}
-	}
-
-	if len(open) == 0 {
-		fmt.Fprintf(deps.Stderr, "gc sling: %s %s has no open children\n", b.Type, b.ID) //nolint:errcheck // best-effort
-		return 1
-	}
-
-	// Cross-rig guard — check once on the container bead. Assumes all children
-	// share the container's rig prefix. If a convoy contains beads from multiple
-	// rigs, the per-child check would need to run inside the loop instead.
-	if !opts.Force && !opts.DryRun {
-		if msg := checkCrossRig(b.ID, a, deps.Cfg); msg != "" {
-			fmt.Fprintln(deps.Stderr, msg) //nolint:errcheck // best-effort
-			return 1
-		}
-	}
-
-	// Pre-check: if --on or default formula, verify NO open child already has an attached molecule.
-	useFormula := opts.OnFormula
-	if useFormula == "" && !opts.IsFormula && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-		useFormula = a.EffectiveDefaultSlingFormula()
-	}
-	if useFormula != "" {
-		if err := checkBatchNoMoleculeChildren(querier, open, deps.Store, deps.Stderr); err != nil {
-			fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
-			return 1
-		}
-	}
-
-	// Dry-run: print container preview without executing.
-	if opts.DryRun {
-		return dryRunBatch(opts, deps, b, children, open, querier)
-	}
-
-	fmt.Fprintf(deps.Stdout, "Expanding %s %s (%d children, %d open)\n", b.Type, b.ID, len(children), len(open)) //nolint:errcheck // best-effort
-
-	// Telemetry method.
-	batchMethod := "batch"
-	if opts.OnFormula != "" {
-		batchMethod = "batch-on"
-	} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-		batchMethod = "batch-default-on"
-	}
-
-	// Route each open child.
-	routed := 0
-	failed := 0
-	idempotent := 0
-	for _, child := range open {
-		// Per-child idempotency / pre-flight check (unless --force).
-		if !opts.Force {
-			result := checkBeadState(querier, child.ID, a)
-			if result.Idempotent {
-				fmt.Fprintf(deps.Stdout, "  Skipped %s — already routed to %s\n", child.ID, a.QualifiedName()) //nolint:errcheck // best-effort
-				idempotent++
-				continue
-			}
-			for _, w := range result.Warnings {
-				fmt.Fprintln(deps.Stderr, w) //nolint:errcheck // best-effort
+	if result.DryRun {
+		// For batch dry-run, look up the container bead for display.
+		if querier != nil {
+			if b, getErr := querier.Get(opts.BeadOrFormula); getErr == nil {
+				children, _ := querier.List(beads.ListQuery{
+					ParentID: b.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc,
+				})
+				var open []beads.Bead
+				for _, c := range children {
+					if c.Status == "open" {
+						open = append(open, c)
+					}
+				}
+				return dryRunBatch(opts, deps, stdout, stderr, b, children, open, querier)
 			}
 		}
-
-		// Attach wisp if --on.
-		if opts.OnFormula != "" {
-			childVars := buildSlingFormulaVars(opts.OnFormula, child.ID, opts.Vars, a, deps)
-			cookResult, err := molecule.Cook(context.Background(), deps.Store, opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-				Title:            opts.Title,
-				Vars:             childVars,
-				PriorityOverride: clonePriorityPtr(child.Priority),
-			})
-			if err != nil {
-				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating formula %q: %v\n", child.ID, opts.OnFormula, err) //nolint:errcheck // best-effort
-				telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, err)
-				failed++
-				continue
-			}
-			_ = deps.Store.SetMetadata(child.ID, "molecule_id", cookResult.RootID)             // best-effort
-			fmt.Fprintf(deps.Stdout, "  Attached wisp %s → %s\n", cookResult.RootID, child.ID) //nolint:errcheck // best-effort
-		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-			// Apply default formula per-child.
-			childVars := buildSlingFormulaVars(a.EffectiveDefaultSlingFormula(), child.ID, opts.Vars, a, deps)
-			cookResult, err := molecule.Cook(context.Background(), deps.Store, a.EffectiveDefaultSlingFormula(), slingFormulaSearchPaths(deps, a), molecule.Options{
-				Title:            opts.Title,
-				Vars:             childVars,
-				PriorityOverride: clonePriorityPtr(child.Priority),
-			})
-			if err != nil {
-				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating default formula %q: %v\n", child.ID, a.EffectiveDefaultSlingFormula(), err) //nolint:errcheck // best-effort
-				telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, err)
-				failed++
-				continue
-			}
-			_ = deps.Store.SetMetadata(child.ID, "molecule_id", cookResult.RootID)                               // best-effort
-			fmt.Fprintf(deps.Stdout, "  Attached wisp %s (default formula) → %s\n", cookResult.RootID, child.ID) //nolint:errcheck // best-effort
-		}
-
-		childEnv := resolveSlingEnv(a, deps)
-		slingCmd := buildSlingCommand(a.EffectiveSlingQuery(), child.ID)
-		rigDir := slingDirForBead(deps.Cfg, deps.CityPath, child.ID)
-		if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
-			fmt.Fprintf(deps.Stderr, "  Failed %s: %v\n", child.ID, err) //nolint:errcheck // best-effort
-			telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, err)
-			failed++
-			continue
-		}
-
-		telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, nil)
-		fmt.Fprintf(deps.Stdout, "  Slung %s → %s\n", child.ID, a.QualifiedName()) //nolint:errcheck // best-effort
-		routed++
+		return dryRunSingle(opts, deps, querier, stdout, stderr)
 	}
-
-	// Report skipped children.
-	for _, child := range skipped {
-		fmt.Fprintf(deps.Stdout, "  Skipped %s (status: %s)\n", child.ID, child.Status) //nolint:errcheck // best-effort
-	}
-
-	// Summary line.
-	summary := fmt.Sprintf("Slung %d/%d children of %s → %s", routed, len(children), b.ID, a.QualifiedName())
-	if idempotent > 0 {
-		summary += fmt.Sprintf(" (%d already routed)", idempotent)
-	}
-	fmt.Fprintln(deps.Stdout, summary) //nolint:errcheck // best-effort
-
-	// Nudge once after all children.
-	if opts.Nudge && routed > 0 {
-		doSlingNudge(&a, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, deps.Stdout, deps.Stderr)
-	}
-
-	if failed > 0 {
-		return 1
+	if result.NudgeAgent != nil {
+		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
 }
@@ -868,13 +643,6 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 // slingFormulaSearchPaths returns the formula search paths for the current
 // sling context. Uses the target agent's rig to select rig-specific layers,
 // falling back to city-level layers via FormulaLayers.SearchPaths.
-func slingFormulaSearchPaths(deps slingDeps, a config.Agent) []string {
-	if deps.Cfg == nil {
-		return nil
-	}
-	return deps.Cfg.FormulaLayers.SearchPaths(a.Dir)
-}
-
 func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
 	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
@@ -909,25 +677,6 @@ func beadMetadataTarget(store beads.Store, beadID string) string {
 	return ""
 }
 
-func beadPriorityOverride(store BeadQuerier, beadID string) *int {
-	if store == nil || beadID == "" {
-		return nil
-	}
-	bead, err := store.Get(beadID)
-	if err != nil {
-		return nil
-	}
-	return clonePriorityPtr(bead.Priority)
-}
-
-func clonePriorityPtr(v *int) *int {
-	if v == nil {
-		return nil
-	}
-	cloned := *v
-	return &cloned
-}
-
 func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
 	if deps.Cfg != nil {
 		if dir := rigDirForBead(deps.Cfg, beadID); dir != "" {
@@ -953,14 +702,6 @@ func slingFormulaUsesTargetBranch(formula string) bool {
 // the bead store and returns it as GC_SLING_TARGET. Default routing uses
 // gc.routed_to metadata for all agents, but custom sling_query templates may
 // still rely on the resolved concrete session target.
-func resolveSlingEnv(a config.Agent, deps slingDeps) map[string]string {
-	if isMultiSessionCfgAgent(&a) {
-		return nil
-	}
-	sn := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
-	return map[string]string{"GC_SLING_TARGET": sn}
-}
-
 // buildSlingCommand replaces {} in the sling query template with the bead ID.
 // The bead ID is shell-quoted to prevent command injection.
 func buildSlingCommand(template, beadID string) string {
@@ -978,119 +719,13 @@ func formatBeadLabel(id, title string) string {
 // printCrossRigSection prints the Cross-rig dry-run section if applicable.
 func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *config.City) {
 	if msg := checkCrossRig(beadID, a, cfg); msg != "" {
-		bp := beadPrefix(beadID)
+		bp := sling.BeadPrefix(beadID)
 		rp := rigPrefixForAgent(a, cfg)
 		w("Cross-rig:")
 		w(fmt.Sprintf("  Bead %s (prefix %q) targets %s (rig prefix %q).", beadID, bp, a.QualifiedName(), rp))
 		w("  Without --force, sling would refuse to route (exit 1).")
 		w("")
 	}
-}
-
-// checkNoMoleculeChildren returns an error if the bead already has an attached
-// molecule or wisp child that is still open. Closed molecules are skipped
-// (defense-in-depth). Open molecules on unassigned beads are auto-burned
-// (closed) to unblock re-dispatch after mid-sling failures.
-func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, w io.Writer) error {
-	parent, ok := beadFromGetters(beadID, q, store)
-	if !ok {
-		return nil
-	}
-	parentUnassigned := strings.TrimSpace(parent.Assignee) == ""
-
-	var childQuerier BeadChildQuerier
-	if cq, ok := q.(BeadChildQuerier); ok {
-		childQuerier = cq
-	} else if cq, ok := any(store).(BeadChildQuerier); ok {
-		childQuerier = cq
-	}
-	attachments, err := collectAttachedBeads(parent, store, childQuerier)
-	if err != nil && len(attachments) == 0 {
-		return nil
-	}
-
-	for _, attached := range attachments {
-		if attached.Status == "closed" {
-			continue
-		}
-		if parentUnassigned && store != nil {
-			if burnErr := store.Close(attached.ID); burnErr == nil {
-				fmt.Fprintf(w, "Auto-burned stale %s %s on unassigned bead %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort
-				continue
-			}
-		}
-		return fmt.Errorf("bead %s already has attached %s %s", beadID, attachmentLabel(attached), attached.ID)
-	}
-	return nil
-}
-
-// checkBatchNoMoleculeChildren checks all open children for existing molecule
-// attachments before any wisps are created. Closed molecules are skipped.
-// Open molecules on unassigned beads are auto-burned to unblock re-dispatch.
-// Returns an error listing all problematic beads if any have live molecules.
-func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, w io.Writer) error {
-	var problems []string
-	for _, child := range open {
-		attachments, err := collectAttachedBeads(child, store, q)
-		if err != nil && len(attachments) == 0 {
-			continue // best-effort per-child
-		}
-		childUnassigned := strings.TrimSpace(child.Assignee) == ""
-		for _, attached := range attachments {
-			if attached.Status == "closed" {
-				continue
-			}
-			if childUnassigned && store != nil {
-				if burnErr := store.Close(attached.ID); burnErr == nil {
-					fmt.Fprintf(w, "Auto-burned stale %s %s on unassigned bead %s\n", attachmentLabel(attached), attached.ID, child.ID) //nolint:errcheck // best-effort
-					continue
-				}
-			}
-			problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, attachmentLabel(attached), attached.ID))
-		}
-	}
-	if len(problems) > 0 {
-		return fmt.Errorf("cannot use --on: beads already have attached molecules: %s",
-			strings.Join(problems, ", "))
-	}
-	return nil
-}
-
-func isGraphWorkflowAttachment(store beads.Store, rootID string) bool {
-	if store == nil || rootID == "" {
-		return false
-	}
-	b, err := store.Get(rootID)
-	if err != nil {
-		return false
-	}
-	return b.Metadata["gc.kind"] == "workflow" && b.Metadata["gc.formula_contract"] == "graph.v2"
-}
-
-func instantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps slingDeps) (*molecule.Result, error) {
-	slingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
-	if opts.PriorityOverride == nil && sourceBeadID != "" {
-		opts.PriorityOverride = beadPriorityOverride(deps.Store, sourceBeadID)
-	}
-	compileStart := time.Now()
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
-	if err != nil {
-		slingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
-		return nil, err
-	}
-	slingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
-	if err := applyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg); err != nil {
-		slingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
-		return nil, err
-	}
-	instantiateStart := time.Now()
-	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)
-	if err != nil {
-		slingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
-		return nil, err
-	}
-	slingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
-	return result, nil
 }
 
 func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) map[string]string {
@@ -1106,25 +741,17 @@ func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) 
 	return routeVars
 }
 
-func isCompiledGraphWorkflow(recipe *formula.Recipe) bool {
-	if recipe == nil || len(recipe.Steps) == 0 {
-		return false
-	}
-	root := recipe.Steps[0]
-	return root.Metadata["gc.kind"] == "workflow" && root.Metadata["gc.formula_contract"] == "graph.v2"
-}
-
 func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("workflow recipe is nil")
 	}
-	defaultRoute := graphRouteBinding{qualifiedName: routedTo}
+	defaultRoute := graphRouteBinding{QualifiedName: routedTo}
 	if sessionName != "" {
-		defaultRoute.sessionName = sessionName
+		defaultRoute.SessionName = sessionName
 	} else {
-		defaultRoute.metadataOnly = true
+		defaultRoute.MetadataOnly = true
 	}
-	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
+	routingRigContext := graphRouteRigContext(defaultRoute.QualifiedName)
 	controlRoute, err := controlDispatcherBinding(store, cityName, cfg, routingRigContext)
 	if err != nil {
 		return err
@@ -1211,11 +838,8 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 	return ""
 }
 
-type graphRouteBinding struct {
-	qualifiedName string
-	sessionName   string
-	metadataOnly  bool
-}
+// graphRouteBinding is an alias for sling.GraphRouteBinding.
+type graphRouteBinding = sling.GraphRouteBinding
 
 func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
 	return resolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, nil, fallback, rigContext, store, cityName, cfg)
@@ -1326,9 +950,9 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if !ok {
 		return graphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target)
 	}
-	binding := graphRouteBinding{qualifiedName: agentCfg.QualifiedName()}
+	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
 	if isMultiSessionCfgAgent(&agentCfg) {
-		binding.metadataOnly = true
+		binding.MetadataOnly = true
 		cache[stepID] = binding
 		return binding, nil
 	}
@@ -1336,7 +960,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if sn == "" {
 		return graphRouteBinding{}, fmt.Errorf("step %s: could not resolve session name for %q", stepID, agentCfg.QualifiedName())
 	}
-	binding.sessionName = sn
+	binding.SessionName = sn
 	cache[stepID] = binding
 	return binding, nil
 }
@@ -1367,59 +991,6 @@ func graphRouteRigContext(route string) string {
 	return route[:idx]
 }
 
-func shouldPromoteWorkflowLaunchStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "open", "ready", "todo", "triage", "backlog":
-		return true
-	default:
-		return false
-	}
-}
-
-func promoteWorkflowLaunchBead(store beads.Store, beadID string) error {
-	beadID = strings.TrimSpace(beadID)
-	if beadID == "" {
-		return nil
-	}
-	bead, err := store.Get(beadID)
-	if err != nil {
-		return err
-	}
-	if !shouldPromoteWorkflowLaunchStatus(bead.Status) {
-		return nil
-	}
-	status := "in_progress"
-	return store.Update(beadID, beads.UpdateOpts{Status: &status})
-}
-
-func startGraphWorkflow(result *molecule.Result, sourceBeadID string, a config.Agent, method string, deps slingDeps) int {
-	rootID := result.RootID
-	slingTracef("workflow-start begin root=%s source=%s agent=%s method=%s", rootID, sourceBeadID, a.QualifiedName(), method)
-	statusStart := time.Now()
-	if err := promoteWorkflowLaunchBead(deps.Store, rootID); err != nil {
-		slingTracef("workflow-start root-status-error root=%s dur=%s err=%v", rootID, time.Since(statusStart), err)
-		fmt.Fprintf(deps.Stderr, "gc sling: setting workflow root %s in_progress: %v\n", rootID, err) //nolint:errcheck // best-effort
-		return 1
-	}
-	slingTracef("workflow-start root-status-done root=%s dur=%s", rootID, time.Since(statusStart))
-	if sourceBeadID != "" {
-		metaStart := time.Now()
-		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {
-			slingTracef("workflow-start metadata-error root=%s source=%s dur=%s err=%v", rootID, sourceBeadID, time.Since(metaStart), err)
-			fmt.Fprintf(deps.Stderr, "gc sling: setting workflow_id on %s: %v\n", sourceBeadID, err) //nolint:errcheck // best-effort
-			return 1
-		}
-		slingTracef("workflow-start metadata-done root=%s source=%s dur=%s", rootID, sourceBeadID, time.Since(metaStart))
-	}
-	pokeStart := time.Now()
-	_ = slingPokeControlDispatcher(deps.CityPath)
-	slingTracef("workflow-start poke-done root=%s dur=%s", rootID, time.Since(pokeStart))
-
-	telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), method, nil)
-	slingTracef("workflow-start done root=%s", rootID)
-	return 0
-}
-
 // targetType returns "pool" or "agent" for telemetry attributes.
 func targetType(a *config.Agent) string {
 	if isMultiSessionCfgAgent(a) {
@@ -1428,106 +999,18 @@ func targetType(a *config.Agent) string {
 	return "agent"
 }
 
-// beadCheckResult captures the outcome of a pre-flight bead state check.
-type beadCheckResult struct {
-	Idempotent bool     // bead already routed to the same target
-	Warnings   []string // warnings about existing routing to different targets
-}
+// beadCheckResult is an alias for sling.BeadCheckResult.
+type beadCheckResult = sling.BeadCheckResult
 
-// checkBeadState checks whether a bead is already routed and returns a
-// structured result. Callers decide how to handle idempotency vs warnings.
-// Best-effort: nil querier or query failure → empty result (proceed silently).
+// checkBeadState delegates to sling.CheckBeadState.
+//
+//nolint:unparam // kept explicit to mirror the production call shape used by tests.
 func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResult {
-	if q == nil {
-		return beadCheckResult{}
-	}
-	b, err := q.Get(beadID)
-	if err != nil {
-		return beadCheckResult{} // best-effort: can't query → skip check
-	}
-
-	// Custom sling_query: can't determine idempotency — fall through to
-	// generic warnings only.
-	if isCustomSlingQuery(a) {
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return beadCheckResult{Warnings: warnings}
-	}
-
-	target := a.QualifiedName()
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == target {
-		// Only idempotent if the bead is unassigned or already assigned
-		// consistently with the target. Otherwise the bead would be
-		// invisible to the target's work_query (which requires --unassigned
-		// for pool work in tier 3).
-		if b.Assignee == "" || b.Assignee == target {
-			return beadCheckResult{Idempotent: true}
-		}
-		return beadCheckResult{
-			Warnings: []string{fmt.Sprintf("warning: bead %s routed to %q but assigned to %q", beadID, target, b.Assignee)},
-		}
-	}
-
-	// Fixed agent: check legacy assignee routing as a compatibility fallback.
-	if !isMultiSessionCfgAgent(&a) {
-		if b.Assignee == target {
-			return beadCheckResult{Idempotent: true}
-		}
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return beadCheckResult{Warnings: warnings}
-	}
-
-	// Multi-session targets: pool labels are a legacy fallback only when
-	// gc.routed_to is absent. If gc.routed_to is set (even to a different
-	// target), it is authoritative — a stale pool label must not short-circuit.
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" {
-		poolLabel := "pool:" + target
-		for _, l := range b.Labels {
-			if l == poolLabel {
-				return beadCheckResult{Idempotent: true}
-			}
-		}
-	}
-	var warnings []string
-	if b.Assignee != "" {
-		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-	}
-	if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
-		warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-	}
-	for _, l := range b.Labels {
-		if strings.HasPrefix(l, "pool:") {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-		}
-	}
-	return beadCheckResult{Warnings: warnings}
+	// Build a minimal SlingDeps for the check (only needs IsMultiSession).
+	deps := sling.SlingDeps{}
+	return sling.CheckBeadState(q, beadID, a, deps)
 }
 
-// doSlingNudge sends a nudge to the target agent after routing.
-// For pools, nudges the first running instance. If the target is not
-// running, pokes the controller to trigger an immediate reconciler tick
-// so WakeWork can wake the session without waiting for the next patrol.
 func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	sp runtime.Provider, store beads.Store, stdout, stderr io.Writer,
 ) {
@@ -1642,9 +1125,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 
 // dryRunSingle prints a step-by-step preview of what gc sling would do for a
 // single bead (or formula) without executing any side effects.
-func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
+func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr io.Writer) int {
 	a := opts.Target
-	w := func(s string) { fmt.Fprintln(deps.Stdout, s) } //nolint:errcheck // best-effort
+	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort
 
 	// Header.
 	header := "Dry run: gc sling " + a.QualifiedName() + " " + opts.BeadOrFormula
@@ -1676,7 +1159,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		w("  This creates a wisp and returns its root bead ID.")
 		w("")
 
-		routeCmd := buildSlingCommand(a.EffectiveSlingQuery(), "<wisp-root>")
+		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), "<wisp-root>")
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
@@ -1685,12 +1168,12 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		// Work section (bead info).
 		printBeadInfo(w, querier, opts.BeadOrFormula)
 
-		// Cross-rig section — show when bead prefix doesn't match agent's rig.
+		// Cross-rig section.
 		printCrossRigSection(w, opts.BeadOrFormula, a, deps.Cfg)
 
-		// Idempotency section — show when bead is already routed to this target.
-		result := checkBeadState(querier, opts.BeadOrFormula, a)
-		if result.Idempotent {
+		// Idempotency section -- use preflight result instead of re-querying.
+		check := sling.CheckBeadState(querier, opts.BeadOrFormula, a, deps)
+		if check.Idempotent {
 			w("Idempotency:")
 			w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
 			w("  Without --force, sling would skip routing (exit 0).")
@@ -1698,12 +1181,13 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		}
 
 		// Attach formula section (--on or default).
+		// Dry-run does NOT auto-burn molecules (no mutations).
 		if opts.OnFormula != "" {
-			if err := checkNoMoleculeChildren(querier, opts.BeadOrFormula, deps.Store, deps.Stderr); err != nil {
-				fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
+			// Read-only check: does the bead already have an attached molecule?
+			if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
+				fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck
 				return 1
 			}
-
 			w("Attach formula:")
 			w("  Formula: " + opts.OnFormula)
 			w("  --on attaches a wisp (structured work instructions) to an existing")
@@ -1718,11 +1202,10 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-			if err := checkNoMoleculeChildren(querier, opts.BeadOrFormula, deps.Store, deps.Stderr); err != nil {
-				fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
+			if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
+				fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck
 				return 1
 			}
-
 			w("Default formula:")
 			w("  Formula: " + a.EffectiveDefaultSlingFormula())
 			w("  Target " + a.QualifiedName() + " has a default_sling_formula configured.")
@@ -1737,10 +1220,10 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			w("")
 		}
 
-		routeCmd := buildSlingCommand(a.EffectiveSlingQuery(), opts.BeadOrFormula)
+		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), opts.BeadOrFormula)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
-		if !isCustomSlingQuery(a) {
+		if !sling.IsCustomSlingQuery(a) {
 			if isMultiSessionCfgAgent(&a) {
 				w("  This labels the bead for pool \"" + a.QualifiedName() + "\".")
 			} else {
@@ -1761,11 +1244,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 
 // dryRunBatch prints a step-by-step preview of what gc sling would do for a
 // convoy without executing any side effects.
-func dryRunBatch(opts slingOpts, deps slingDeps,
+func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	b beads.Bead, children, open []beads.Bead, querier BeadQuerier,
 ) int {
 	a := opts.Target
-	w := func(s string) { fmt.Fprintln(deps.Stdout, s) } //nolint:errcheck // best-effort
+	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort
 
 	// Header.
 	w("Dry run: gc sling " + a.QualifiedName() + " " + b.ID)
@@ -1790,11 +1273,10 @@ func dryRunBatch(opts slingOpts, deps slingDeps,
 	// Children list.
 	w(fmt.Sprintf("  Children (%d total, %d open):", len(children), len(open)))
 	for _, c := range children {
-		clabel := formatBeadLabel(c.ID, c.Title)
+		clabel := sling.FormatBeadLabel(c.ID, c.Title)
 		if c.Status == "open" {
-			// Check idempotency for open children.
-			result := checkBeadState(querier, c.ID, a)
-			if result.Idempotent {
+			check := sling.CheckBeadState(querier, c.ID, a, deps)
+			if check.Idempotent {
 				w("    " + clabel + " (open) → already routed (skip)")
 			} else {
 				suffix := " → would route"
@@ -1830,7 +1312,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps,
 	// Route commands.
 	w("Route commands (not executed):")
 	for _, c := range open {
-		routeCmd := buildSlingCommand(a.EffectiveSlingQuery(), c.ID)
+		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), c.ID)
 		w("  " + routeCmd)
 	}
 	w("")
@@ -1994,17 +1476,6 @@ func looksLikeBeadID(s string) bool {
 	return false
 }
 
-// beadPrefix extracts the rig prefix from a bead ID by taking the lowercase
-// letters before the first dash. "HW-7" → "hw", "FE-123" → "fe".
-// Returns "" if the ID has no dash (can't determine prefix).
-func beadPrefix(beadID string) string {
-	i := strings.Index(beadID, "-")
-	if i <= 0 {
-		return ""
-	}
-	return strings.ToLower(beadID[:i])
-}
-
 // rigPrefixForAgent returns the effective bead prefix for the rig that an
 // agent belongs to. City-wide agents (Dir="") return "" (exempt from cross-rig
 // checks). Returns "" if no matching rig is found (best-effort skip).
@@ -2024,7 +1495,7 @@ func rigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // doesn't match the target agent's rig prefix. Returns "" when the check
 // passes or can't be performed (missing prefix, city-wide agent, no rig).
 func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	bp := beadPrefix(beadID)
+	bp := sling.BeadPrefix(beadID)
 	if bp == "" {
 		return ""
 	}

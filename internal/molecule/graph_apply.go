@@ -113,7 +113,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		}
 		if step.IsRoot {
 			rootIncluded = true
-			if step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
 				node.Type = "molecule"
 			}
 			if opts.Title != "" {
@@ -135,7 +135,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Metadata["gc.step_ref"] == "" {
 				node.Metadata["gc.step_ref"] = step.ID
 			}
-			if graphWorkflow || step.Metadata["gc.kind"] != "" {
+			if (graphWorkflow || step.Metadata["gc.kind"] != "") && node.Metadata["gc.root_bead_id"] == "" {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}

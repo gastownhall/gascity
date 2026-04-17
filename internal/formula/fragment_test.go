@@ -20,7 +20,7 @@ version = 2
 id = "{target}.draft"
 title = "Draft"
 `
-	if err := os.WriteFile(filepath.Join(dir, "leaf-expand.formula.toml"), []byte(leaf), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "leaf-expand.toml"), []byte(leaf), 0o644); err != nil {
 		t.Fatalf("write leaf expansion: %v", err)
 	}
 
@@ -34,7 +34,7 @@ id = "{target}.worker"
 title = "Worker"
 expand = "leaf-expand"
 `
-	if err := os.WriteFile(filepath.Join(dir, "parent-expand.formula.toml"), []byte(parent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "parent-expand.toml"), []byte(parent), 0o644); err != nil {
 		t.Fatalf("write parent expansion: %v", err)
 	}
 
@@ -131,7 +131,7 @@ required = true
 id = "{target}.implement"
 title = "[{target.title}] Implement: {{feature}}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expand-required.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expand-required.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion: %v", err)
 	}
 

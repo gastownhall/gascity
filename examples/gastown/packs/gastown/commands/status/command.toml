@@ -1,0 +1,2 @@
+description = "Show gastown orchestration overview"
+run = "../status.sh"

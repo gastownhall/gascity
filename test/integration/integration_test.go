@@ -554,7 +554,13 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
 
-	root := t.TempDir()
+	root, err := os.MkdirTemp("", "gc-int-env-")
+	if err != nil {
+		t.Fatalf("creating isolated env root: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(root)
+	})
 	gcHome := filepath.Join(root, "gc-home")
 	runtimeDir := filepath.Join(root, "runtime")
 	if err := os.MkdirAll(gcHome, 0o755); err != nil {

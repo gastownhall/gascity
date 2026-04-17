@@ -55,7 +55,7 @@ func ConfiguredRigName(cityPath string, a config.Agent, rigs []config.Rig) strin
 	}
 	abs := ResolveDirPath(cityPath, a.Dir)
 	for _, rig := range rigs {
-		if filepath.Clean(abs) == filepath.Clean(rig.Path) {
+		if samePath(abs, rig.Path) {
 			return rig.Name
 		}
 	}
@@ -142,4 +142,39 @@ func ResolveWorkDirPath(cityPath, cityName, qualifiedName string, a config.Agent
 		return ResolveDirPath(cityPath, ExpandTemplate(a.WorkDir, ctx))
 	}
 	return path
+}
+
+func samePath(a, b string) bool {
+	return normalizePathForCompare(a) == normalizePathForCompare(b)
+}
+
+func normalizePathForCompare(path string) string {
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	path = filepath.Clean(path)
+	path = canonicalizeExistingPathPrefix(path)
+	return filepath.Clean(path)
+}
+
+func canonicalizeExistingPathPrefix(path string) string {
+	current := path
+	var suffix []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }

@@ -242,11 +242,7 @@ func (s *Server) handleConfigValidate(w http.ResponseWriter, _ *http.Request) {
 // accurate results. Otherwise falls back to the patch-presence heuristic.
 func agentOrigin(a config.Agent, raw, expanded *config.City) string {
 	if raw != nil {
-		qn := a.Name
-		if a.Dir != "" {
-			qn = a.Dir + "/" + a.Name
-		}
-		switch configedit.AgentOrigin(raw, expanded, qn) {
+		switch configedit.AgentOrigin(raw, expanded, a.QualifiedName()) {
 		case configedit.OriginInline:
 			return "inline"
 		case configedit.OriginDerived:

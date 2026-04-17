@@ -1,0 +1,2 @@
+description = "Tail the Dolt server log file"
+run = "../logs.sh"

@@ -1,0 +1,2 @@
+description = "Open an interactive Dolt SQL shell"
+run = "../sql.sh"

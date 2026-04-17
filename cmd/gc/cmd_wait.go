@@ -632,7 +632,7 @@ func prepareWaitWakeState(store beads.Store, rigStores map[string]beads.Store, n
 	return readyWaitSet, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time, cityProviders map[string]config.ProviderSpec) error {
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
 	waits, err := loadWaitBeads(store)
 	if err != nil {
 		return err
@@ -674,12 +674,11 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 			return err
 		}
 		_ = store.SetMetadata(wait.ID, "nudge_id", nudgeID)
-		rp := resolvedProviderFromBeadMetadata(
-			sessionBead.Metadata["provider"],
-			sessionBead.Metadata["provider_kind"],
-			cityProviders,
-		)
-		if rp.NeedsNudgePoller {
+		kind := sessionBead.Metadata["provider_kind"]
+		if kind == "" {
+			kind = sessionBead.Metadata["provider"]
+		}
+		if kind != "acp" && sessionBead.Metadata["session_name"] != "" {
 			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
 		}
 	}

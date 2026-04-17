@@ -12,6 +12,15 @@ Formula files are reusable workflow definitions stored as
 layers, stages the active winners into `.beads/formulas/`, and asks the
 configured beads backend to instantiate molecules from them.
 
+Current merge-wave status:
+
+- The in-flight Pack/City v2 merge still uses `*.formula.toml` and
+  `orders/*.order.toml`.
+- We decided to remove the `.formula.` / `.order.` infix after the
+  merge, not during it.
+- That follow-up is tracked in
+  [gastownhall/gascity#586](https://github.com/gastownhall/gascity/issues/586).
+
 The important current-state boundary is this:
 
 - Gas City owns formula discovery and layer resolution.
@@ -20,11 +29,14 @@ The important current-state boundary is this:
 
 ## Key Concepts
 
-- **Formula file**: A `*.formula.toml` file selected through formula layers.
+- **Formula file**: A `*.formula.toml` file selected through formula
+  layers. This is the current on-disk naming; simplification is tracked
+  separately in `#586`.
 - **Formula layers**: Ordered directories computed from packs, city config,
   and rig config. Higher-priority layers shadow lower-priority files by name.
 - **Molecule**: A runtime instance created from a formula.
-- **Wisp**: An ephemeral molecule created for dispatch or order execution.
+- **Wisp**: An ephemeral molecule created for dispatch or order
+  execution.
 - **Attached molecule**: A formula instantiated onto an existing bead via
   `Store.MolCookOn`.
 - **Convergence formula subset**: The subset of formula metadata used by the
@@ -90,7 +102,9 @@ Formulas are consumed in two main places:
 - [`cmd/gc/cmd_sling.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/cmd_sling.go) creates wisps during
   `gc sling --formula` and attached molecules via `--on`.
 - [`cmd/gc/order_dispatch.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/order_dispatch.go) creates wisps
-  when formula-backed orders fire.
+  when formula-backed orders fire. In the current merge wave, orders are
+  discovered from `orders/*.order.toml`; removal of the `.order.`
+  infix is deferred to `#586`.
 
 ### Garbage Collection
 

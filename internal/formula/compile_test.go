@@ -30,7 +30,7 @@ id = "cook"
 title = "Cook pancakes"
 needs = ["dry", "wet"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "pancakes.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "pancakes.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,7 +95,7 @@ id = "slow-only"
 title = "Only in slow mode"
 condition = "{{mode}} == slow"
 `
-	if err := os.WriteFile(filepath.Join(dir, "conditional.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "conditional.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +145,7 @@ id = "dev-only"
 title = "Only in dev"
 condition = "{{env}} == dev"
 `
-	if err := os.WriteFile(filepath.Join(dir, "nil-vars.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "nil-vars.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +200,7 @@ id = "child-b"
 title = "Child B"
 needs = ["child-a"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "nested.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "nested.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -248,7 +248,7 @@ phase = "vapor"
 id = "scan"
 title = "Scan"
 `
-	if err := os.WriteFile(filepath.Join(dir, "patrol.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "patrol.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,7 +291,7 @@ mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "30s"
 `
-	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -353,7 +353,7 @@ id = "work"
 title = "Work"
 needs = ["setup"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "graph-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "graph-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -533,7 +533,7 @@ id = "b"
 title = "B"
 needs = ["a"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "graph-cycle.formula.toml"), []byte(formulaText), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "graph-cycle.toml"), []byte(formulaText), 0o644); err != nil {
 		t.Fatalf("write graph-cycle formula: %v", err)
 	}
 
@@ -571,7 +571,7 @@ needs = ["implement"]
 tags = ["review", "{{epic}}"]
 description = "Review the {{feature}} implementation."
 `
-	if err := os.WriteFile(filepath.Join(dir, "repro-unresolved.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "repro-unresolved.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -30,28 +30,18 @@ func TestTutorial05Formulas(t *testing.T) {
 			t.Fatalf("seed rig add %q: %v\n%s", cmd, err, out)
 		}
 	}
-	ws.noteWarning("tutorial 05 continuity workaround: the page assumes helper/worker agents and both rigs already exist, so the page driver seeds my-project, my-api, and a helper agent explicitly before exercising the formula commands")
+	ws.noteWarning("tutorial 05 continuity workaround: the page assumes helper/reviewer agents and both rigs already exist, so the page driver seeds my-project, my-api, and those supporting agents before exercising the visible worker + formula commands")
+	if out, err := ws.runShell("gc agent add --name helper", ""); err != nil {
+		t.Fatalf("seed helper scaffold: %v\n%s", err, out)
+	}
+	writeFile(t, filepath.Join(myCity, "agents", "helper", "prompt.template.md"), "# Helper Agent\nHandle supporting work.\n", 0o644)
+	if out, err := ws.runShell("gc agent add --name reviewer --dir my-project", ""); err != nil {
+		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
+	}
+	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
+	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer Agent\nReview code.\n", 0o644)
 
-	appendFile(t, filepath.Join(myCity, "city.toml"), `
-
-[[agent]]
-name = "helper"
-provider = "claude"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
-name = "worker"
-provider = "claude"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
-name = "reviewer"
-dir = "my-project"
-provider = "`+tutorialReviewerProvider()+`"
-prompt_template = "prompts/worker.md"
-`)
-
-	writeFile(t, filepath.Join(myCity, "formulas", "greeting.formula.toml"), `formula = "greeting"
+	writeFile(t, filepath.Join(myCity, "formulas", "greeting.toml"), `formula = "greeting"
 
 [vars]
 name = "world"
@@ -61,7 +51,7 @@ id = "say-hello"
 title = "Say hello to {{name}}"
 `, 0o644)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "feature-work.formula.toml"), `formula = "feature-work"
+	writeFile(t, filepath.Join(myCity, "formulas", "feature-work.toml"), `formula = "feature-work"
 
 [vars.title]
 description = "What this feature is about"
@@ -82,7 +72,7 @@ title = "Implement {{title}}"
 description = "Work on {{title}} against {{branch}} (priority: {{priority}})"
 `, 0o644)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "deploy-flow.formula.toml"), `formula = "deploy-flow"
+	writeFile(t, filepath.Join(myCity, "formulas", "deploy-flow.toml"), `formula = "deploy-flow"
 
 [vars]
 env = "dev"
@@ -97,7 +87,7 @@ title = "Deploy to staging"
 condition = "{{env}} == staging"
 `, 0o644)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "retry-deploy.formula.toml"), `formula = "retry-deploy"
+	writeFile(t, filepath.Join(myCity, "formulas", "retry-deploy.toml"), `formula = "retry-deploy"
 
 [[steps]]
 id = "retries"
@@ -112,6 +102,26 @@ title = "Try to deploy"
 `, 0o644)
 
 	var pancakesRootID string
+
+	t.Run("gc agent add --name worker", func(t *testing.T) {
+		out, err := ws.runShell("gc agent add --name worker", "")
+		if err != nil {
+			t.Fatalf("gc agent add --name worker: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "Scaffolded agent 'worker'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
+	})
+
+	t.Run("cat > agents/worker/prompt.template.md << 'EOF'", func(t *testing.T) {
+		cmd := `cat > agents/worker/prompt.template.md << 'EOF'
+# Worker Agent
+You are a general-purpose Gas City worker. Execute assigned work carefully and report the result.
+EOF`
+		if out, err := ws.runShell(cmd, ""); err != nil {
+			t.Fatalf("writing worker prompt: %v\n%s", err, out)
+		}
+	})
 
 	t.Run("gc formula list", func(t *testing.T) {
 		out, err := ws.runShell("gc formula list", "")

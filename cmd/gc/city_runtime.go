@@ -71,10 +71,6 @@ type CityRuntime struct {
 	shutdownOnce   sync.Once
 	logPrefix      string // "gc start" or "gc supervisor"
 	stdout, stderr io.Writer
-
-	// halt gates tick work without killing the process. State is
-	// owned by the reconciliation goroutine and never shared.
-	halt haltGate
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -124,17 +120,6 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if p.Cfg.Daemon.WispGCEnabled() {
 		wg = newWispGC(p.Cfg.Daemon.WispGCIntervalDuration(),
 			p.Cfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(p.CityPath))
-	}
-
-	// Clear stale halt file from a previous session so a service restart
-	// always begins in the running state. An operator who wants the halt
-	// to survive a restart can re-issue "gc halt" after startup.
-	if isCityHalted(p.CityPath) {
-		if err := removeHaltFile(p.CityPath); err != nil {
-			fmt.Fprintf(p.Stderr, "%s: clear stale halt file: %v\n", p.LogPrefix, err) //nolint:errcheck // best-effort stderr
-		} else {
-			fmt.Fprintf(p.Stderr, "%s: cleared stale halt file from previous session\n", p.LogPrefix) //nolint:errcheck // best-effort stderr
-		}
 	}
 
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
@@ -219,6 +204,8 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
+	defer cr.shutdown()
+
 	dirty := &atomic.Bool{}
 	if cr.tomlPath != "" {
 		watchPaths := append([]string{}, cr.watchDirs...)
@@ -379,12 +366,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// are atomic, so each request is processed exactly once.
 			// Note: ordering relative to convergenceTick is non-deterministic
 			// via this path, but handlers are idempotent so interleaving is safe.
-			if cr.halt.check(cr.cityPath, cr.stderr) {
-				req.replyCh <- convergenceReply{Error: "city halted"}
-			} else {
-				reply := cr.safeHandleConvergenceRequest(ctx, req)
-				req.replyCh <- reply
-			}
+			reply := cr.safeHandleConvergenceRequest(ctx, req)
+			req.replyCh <- reply
 		case <-ctx.Done():
 			return
 		}
@@ -402,12 +385,6 @@ func (cr *CityRuntime) tick(
 	prevPoolRunning *map[string]bool,
 	trigger string,
 ) {
-	// Soft circuit breaker: if "gc halt" has placed a flag file in
-	// the city's runtime dir, skip all tick work. The log line fires
-	// only on the running → halted transition, not every tick.
-	if cr.halt.check(cr.cityPath, cr.stderr) {
-		return
-	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	trace := cr.beginTraceCycle(trigger, "controller_tick", sessionBeads)
 	// Detect pool instance deaths since last tick.
@@ -723,12 +700,28 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if sessionBeads == nil {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
+	assignedWorkBeads := result.AssignedWorkBeads
+	if released := releaseOrphanedPoolAssignments(store, cr.cfg, sessionBeads.Open(), assignedWorkBeads); len(released) > 0 {
+		releasedSet := make(map[string]struct{}, len(released))
+		for _, id := range released {
+			releasedSet[id] = struct{}{}
+			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", id) //nolint:errcheck
+		}
+		filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+		for _, wb := range assignedWorkBeads {
+			if _, ok := releasedSet[wb.ID]; ok {
+				continue
+			}
+			filtered = append(filtered, wb)
+		}
+		assignedWorkBeads = filtered
+	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
 	// work beads + new tier from scale_check + min fill.
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-		cr.cfg, result.AssignedWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+		cr.cfg, assignedWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
 	// Merge named-session assignee demand so on-demand named sessions with
 	// direct work (Assignee match, no gc.routed_to) stay config-eligible.
 	if poolDesired == nil {
@@ -749,7 +742,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		store,
 		sessionBeads,
 		desiredState,
-		result.AssignedWorkBeads,
+		assignedWorkBeads,
 		cr.cfg,
 		cr.sp,
 		result.StoreQueryPartial,
@@ -853,7 +846,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	reconcileSessionBeadsTraced(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
-		result.AssignedWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
+		assignedWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
 		result.StoreQueryPartial,
 		workSet, cityName,
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
@@ -873,7 +866,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			})
 		}
 	}
-	if err := dispatchReadyWaitNudges(cr.cityPath, store, cr.sp, time.Now(), cr.cfg.Providers); err != nil {
+	if err := dispatchReadyWaitNudges(cr.cityPath, store, cr.sp, time.Now()); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 
@@ -930,11 +923,6 @@ func sweepUndesiredPoolSessionBeads(
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
-	// Respect the halt gate: if the city is halted, skip controller
-	// dispatch too — halting means no reconciliation work of any kind.
-	if cr.halt.check(cr.cityPath, cr.stderr) {
-		return
-	}
 	store := cr.cityBeadStore()
 	if store == nil || cr.sessionDrains == nil {
 		return

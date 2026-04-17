@@ -376,10 +376,7 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 	var result []expandedAgent
 	for i := 1; i <= poolMax; i++ {
 		memberName := poolInstanceNameForAPI(a.Name, i, a)
-		qn := memberName
-		if a.Dir != "" {
-			qn = a.Dir + "/" + memberName
-		}
+		qn := a.QualifiedInstanceName(memberName)
 		result = append(result, expandedAgent{
 			qualifiedName: qn,
 			rig:           a.Dir,
@@ -402,10 +399,7 @@ type sessionLister interface {
 // names back to qualified agent names.
 func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
 	// Build session name prefix: e.g. "city--myrig--polecat-"
-	qnPrefix := a.Name + "-"
-	if a.Dir != "" {
-		qnPrefix = a.Dir + "/" + a.Name + "-"
-	}
+	qnPrefix := a.QualifiedName() + "-"
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, sessTmpl)
 
 	running, err := sp.ListRunning(snPrefix)
@@ -421,7 +415,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 		if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
 			qnSanitized = qnSanitized[len(templatePrefix):]
 		}
-		qn := strings.ReplaceAll(qnSanitized, "--", "/")
+		qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 		result = append(result, expandedAgent{
 			qualifiedName: qn,
 			rig:           a.Dir,
@@ -445,7 +439,7 @@ func agentSessionName(cityName, qualifiedName, sessionTemplate string) string {
 func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	dir, baseName := config.ParseQualifiedName(name)
 	for _, a := range cfg.Agents {
-		if a.Dir == dir && a.Name == baseName {
+		if config.AgentMatchesIdentity(&a, name) {
 			return a, true
 		}
 		// Check multi-session instance members.
@@ -454,13 +448,24 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 		if isMultiSession && a.Dir == dir {
 			isUnlimited := maxSess == nil || *maxSess < 0
 			if isUnlimited {
-				// Unlimited: match "{name}-{N}" where N >= 1.
-				prefix := a.Name + "-"
-				if strings.HasPrefix(baseName, prefix) {
-					suffix := baseName[len(prefix):]
-					if n, err := strconv.Atoi(suffix); err == nil && n >= 1 {
-						return a, true
+				// Unlimited: match "{name}-{N}" or "{binding.name}-{N}" where N >= 1.
+				// For V2 agents, try binding-qualified prefix first.
+				prefixes := []string{a.Name + "-"}
+				if a.BindingName != "" {
+					prefixes = append([]string{a.BindingName + "." + a.Name + "-"}, prefixes...)
+				}
+				matched := false
+				for _, prefix := range prefixes {
+					if strings.HasPrefix(baseName, prefix) {
+						suffix := baseName[len(prefix):]
+						if n, err := strconv.Atoi(suffix); err == nil && n >= 1 {
+							matched = true
+							break
+						}
 					}
+				}
+				if matched {
+					return a, true
 				}
 				continue
 			}
@@ -685,10 +690,7 @@ func multiSessionSharesWorkDir(cityPath, cityName, target string, a config.Agent
 
 func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 	name := poolInstanceNameForAPI(a.Name, slot, a)
-	if a.Dir == "" {
-		return name
-	}
-	return a.Dir + "/" + name
+	return a.QualifiedInstanceName(name)
 }
 
 // isMultiSessionAgent reports whether the agent can have more than one

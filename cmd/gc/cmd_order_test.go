@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -87,6 +89,34 @@ func TestCityOrderRootsUseLocalFormulaLayerForVisibleRoot(t *testing.T) {
 	t.Fatalf("cityOrderRoots() missing %q", visibleRoot)
 }
 
+func TestCityOrderRootsUseTopLevelPackOrders(t *testing.T) {
+	cityDir := t.TempDir()
+	packDir := filepath.Join(cityDir, "packs", "alpha")
+	formulasDir := filepath.Join(packDir, "formulas")
+	ordersDir := filepath.Join(packDir, "orders")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{formulasDir}
+
+	roots := cityOrderRoots(cityDir, cfg)
+	for _, root := range roots {
+		if root.Dir != ordersDir {
+			continue
+		}
+		if root.FormulaLayer != formulasDir {
+			t.Fatalf("FormulaLayer = %q, want %q", root.FormulaLayer, formulasDir)
+		}
+		return
+	}
+	t.Fatalf("cityOrderRoots() missing %q", ordersDir)
+}
+
 func TestCityOrderRootsDedupesLegacyLocalRoot(t *testing.T) {
 	cityDir := t.TempDir()
 	legacyRoot := filepath.Join(cityDir, ".gc", "formulas", "orders")
@@ -100,12 +130,12 @@ func TestCityOrderRootsDedupesLegacyLocalRoot(t *testing.T) {
 
 	var count int
 	for _, root := range roots {
-		if root.Dir == legacyRoot {
+		if root.Dir == citylayout.OrdersPath(cityDir) {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Fatalf("legacy order root appeared %d times, want 1", count)
+		t.Fatalf("visible order root appeared %d times, want 1", count)
 	}
 }
 
@@ -130,7 +160,7 @@ func TestCityOrderRootsPackDirsDedupe(t *testing.T) {
 
 	roots := cityOrderRoots(cityDir, cfg)
 
-	ordersDir := filepath.Join(formulasDir, "orders")
+	ordersDir := filepath.Join(packDir, "orders")
 	var count int
 	for _, root := range roots {
 		if root.Dir == ordersDir {
@@ -139,6 +169,161 @@ func TestCityOrderRootsPackDirsDedupe(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("pack order root appeared %d times, want 1 (dedup)", count)
+	}
+}
+
+func TestScanAllOrdersCityFlatFile(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "formulas"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "health-check.order.toml"), []byte(`
+[order]
+formula = "health-check"
+gate = "cron"
+schedule = "*/5 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{filepath.Join(cityDir, "formulas")}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].Name != "health-check" {
+		t.Fatalf("Name = %q, want %q", aa[0].Name, "health-check")
+	}
+	if aa[0].Source != filepath.Join(cityDir, "orders", "health-check.order.toml") {
+		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "orders", "health-check.order.toml"))
+	}
+}
+
+func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cityDir := t.TempDir()
+	source := "https://github.com/example/orders-pack.git"
+	commit := "abc123def456"
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cacheDir, "formulas"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cacheDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cacheDir, "pack.toml"), []byte(`
+[pack]
+name = "ops"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "orders", "health-check.order.toml"), []byte(`
+[order]
+formula = "health-check"
+gate = "cron"
+schedule = "*/5 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`
+[pack]
+name = "test"
+schema = 1
+
+[imports.ops]
+source = "https://github.com/example/orders-pack.git"
+version = "^1.2"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte(`
+schema = 1
+
+[packs."https://github.com/example/orders-pack.git"]
+version = "1.2.3"
+commit = "abc123def456"
+fetched = "2026-04-10T00:00:00Z"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].Name != "health-check" {
+		t.Fatalf("Name = %q, want %q", aa[0].Name, "health-check")
+	}
+	if aa[0].Source != filepath.Join(cacheDir, "orders", "health-check.order.toml") {
+		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cacheDir, "orders", "health-check.order.toml"))
+	}
+}
+
+func TestScanAllOrdersCityLegacyFormulaOrdersWarns(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "formulas", "orders", "health-check"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"), []byte(`
+[order]
+formula = "health-check"
+gate = "cron"
+schedule = "*/5 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{filepath.Join(cityDir, "formulas")}
+
+	var stderr bytes.Buffer
+	logs := captureCmdOrderLogs(t, func() {
+		aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+		if err != nil {
+			t.Fatalf("scanAllOrders: %v", err)
+		}
+		if len(aa) != 1 {
+			t.Fatalf("got %d orders, want 1", len(aa))
+		}
+		if aa[0].Source != filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml") {
+			t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"))
+		}
+	})
+
+	if !strings.Contains(logs, "move to orders/health-check.toml") {
+		t.Fatalf("logs = %q, want move warning", logs)
 	}
 }
 
@@ -168,6 +353,26 @@ func TestOrderShow(t *testing.T) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
+}
+
+func captureCmdOrderLogs(t *testing.T, fn func()) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	origPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	defer func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+		log.SetPrefix(origPrefix)
+	}()
+
+	fn()
+	return buf.String()
 }
 
 func TestOrderShowExec(t *testing.T) {

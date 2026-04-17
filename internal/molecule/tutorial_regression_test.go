@@ -26,7 +26,7 @@ id = "deploy"
 title = "Deploy to staging"
 condition = "{{env}} == staging"
 `
-	if err := os.WriteFile(filepath.Join(dir, "deploy-flow.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "deploy-flow.toml"), []byte(formulaBody), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 

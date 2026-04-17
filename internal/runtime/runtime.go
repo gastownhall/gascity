@@ -231,16 +231,6 @@ type CopyEntry struct {
 	// (transient I/O error), the fingerprint uses a stable sentinel rather
 	// than falling back to path-based hashing.
 	ContentHash string
-	// SkipFingerprint excludes this entry from CoreFingerprint entirely.
-	// Set for probed entries whose contents are produced by pre_start
-	// staging (e.g. files inside the agent worktree populated by
-	// worktree-setup.sh). Fingerprinting such entries would conflate
-	// "config changed" with "pre_start not done yet" and cause false
-	// config-drift drains. See issue #682. The entry is still staged to
-	// K8s pods and retained in CopyFiles for container providers — the
-	// entry is excluded from identity hashing. Only meaningful when
-	// Probed is true; config-derived entries must still drive drain.
-	SkipFingerprint bool
 }
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.
@@ -346,6 +336,12 @@ type Config struct {
 	// (after session_setup) and re-applied on config change without restart.
 	// Typical use: tmux theming, keybindings, status bars.
 	SessionLive []string
+
+	// ProviderName is the resolved provider name (e.g., "claude", "codex").
+	// Used for per-provider overlay filtering: only files from
+	// overlays/per-provider/<ProviderName>/ are copied. Empty means
+	// provider-specific filtering is skipped (all files copied).
+	ProviderName string
 
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,

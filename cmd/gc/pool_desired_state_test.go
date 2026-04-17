@@ -145,6 +145,27 @@ func TestComputePoolDesiredStates_MinRespectsMax(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_SkipsSingletonAgents(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	work := []beads.Bead{
+		workBead("w1", "worker", "worker", "open", 5),
+	}
+	sessions := []beads.Bead{
+		sessionBead("worker", "open"),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 0 {
+		t.Fatalf("len(result) = %d, want 0 for singleton agent demand", len(result))
+	}
+}
+
 func TestComputePoolDesiredStates_WorkspaceCap(t *testing.T) {
 	wsMax := 3
 	cfg := &config.City{

@@ -1,122 +1,50 @@
 # Gas City agent base image — system dependencies.
 #
-# Minimal runtime: OS packages, Bun, Socket Firewall, tmux, Claude Code CLI,
-# Dolt, and the gcagent user. Developer tools live in Dockerfile.agent.
+# Contains everything an agent needs EXCEPT gc/bd/br binaries: OS packages,
+# Node.js, Claude Code CLI, Dolt. Rebuild only when system dependencies
+# change (~2.5 min). Agent image rebuilds on top take ~5s.
 #
 # Build:
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
-FROM debian:trixie-slim
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Bootstrap: curl and gnupg needed to add third-party apt repos.
+# System packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl gnupg ca-certificates gzip unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# Add GitHub CLI apt repo, then install everything in one pass.
-RUN <<EOF
-set -e
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-    > /etc/apt/sources.list.d/github-cli.list
-apt-get update && apt-get install -y --no-install-recommends \
-    gh \
+    bash \
+    ca-certificates \
+    curl \
     git \
     jq \
-    lsof \
-    ncurses-base \
     procps \
     sudo \
-    tmux
-rm -rf /var/lib/apt/lists/*
-EOF
+    tmux \
+    && rm -rf /var/lib/apt/lists/*
 
-# Bun (installed to /opt/bun, not on PATH directly). Pinned to avoid the
-# unpinned `curl https://bun.sh/install | bash` supply-chain path.
-# renovate: datasource=github-releases depName=oven-sh/bun extractVersion=^bun-v(?<version>.*)$
-ARG BUN_VERSION=1.3.11
-ARG BUN_SHA256_AMD64=8611ba935af886f05a6f38740a15160326c15e5d5d07adef966130b4493607ed
-ARG BUN_SHA256_ARM64=d13944da12a53ecc74bf6a720bd1d04c4555c038dfe422365356a7be47691fdf
-RUN <<EOF
-set -e
-ARCH=$(dpkg --print-architecture)
-case "$ARCH" in
-  amd64) BUN_ARCH=x64; BUN_SHA256="$BUN_SHA256_AMD64" ;;
-  arm64) BUN_ARCH=aarch64; BUN_SHA256="$BUN_SHA256_ARM64" ;;
-  *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
-esac
-curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip
-echo "${BUN_SHA256}  /tmp/bun.zip" | sha256sum -c -
-mkdir -p /opt/bun/bin
-unzip -q -j /tmp/bun.zip "bun-linux-${BUN_ARCH}/bun" -d /opt/bun/bin
-chmod +x /opt/bun/bin/bun
-rm /tmp/bun.zip
-EOF
+# Node.js (for Claude Code CLI).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-# Optional Socket Firewall (disabled by default).
-# When enabled, /opt/socket/bin wraps bun/npm/npx through sfw.
-# Set GC_NO_SFW=true at runtime to bypass even when built with SFW.
-# Build with: --build-arg ENABLE_SFW=true
-ARG ENABLE_SFW=false
-# renovate: datasource=github-releases depName=SocketDev/sfw-free
-ARG SFW_VERSION=1.6.1
-ARG SFW_SHA256_AMD64=4a1e8b65e90fce7d5fd066cf0af6c93d512065fa4222a475c8d959a6bc14b9ff
-ARG SFW_SHA256_ARM64=df2eedb2daf2572eee047adb8bfd81c9069edcb200fc7d3710fca98ec3ca81a1
-RUN <<EOF
-set -e
-if [ "${ENABLE_SFW}" = "true" ]; then
-  mkdir -p /opt/socket/bin
-  ARCH=$(dpkg --print-architecture)
-  case "$ARCH" in
-    amd64) SFW_ARCH=x86_64; SFW_SHA256="$SFW_SHA256_AMD64" ;;
-    arm64) SFW_ARCH=arm64;  SFW_SHA256="$SFW_SHA256_ARM64" ;;
-    *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
-  esac
-  curl -fsSL "https://github.com/SocketDev/sfw-free/releases/download/v${SFW_VERSION}/sfw-free-linux-${SFW_ARCH}" -o /opt/socket/bin/sfw
-  echo "${SFW_SHA256}  /opt/socket/bin/sfw" | sha256sum -c -
-  chmod +x /opt/socket/bin/sfw
+# Claude Code CLI.
+RUN npm install -g @anthropic-ai/claude-code
 
-  for cmd in bun npm npx; do
-    case "$cmd" in
-      npx) real="/opt/bun/bin/bun x" ;;
-      *)   real="/opt/bun/bin/bun" ;;
-    esac
-    cat > "/opt/socket/bin/${cmd}" <<SHIM
-#!/bin/bash
-if [ "\${GC_NO_SFW}" = "true" ]; then
-  exec ${real} "\$@"
-else
-  exec /opt/socket/bin/sfw ${real} "\$@"
-fi
-SHIM
-    chmod +x "/opt/socket/bin/${cmd}"
-  done
-fi
-EOF
+# GitHub CLI (for git credential helper in containers).
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV PATH="/opt/socket/bin:/opt/bun/bin:${PATH}"
-
-# Dolt CLI — pinned version + SHA256 (keep version in sync with deps.env
-# and dolt-statefulset.yaml). Download the binary directly instead of
-# piping the upstream install.sh, to avoid an unpinned curl|bash path.
-# renovate: datasource=github-releases depName=dolthub/dolt
+# Dolt CLI — pinned version (keep in sync with deps.env).
 ARG DOLT_VERSION=1.85.0
-ARG DOLT_SHA256_AMD64=58e1462ddfbd59b2ccd707a12f70aa7597f1590745b546502049a03cb52e1aa2
-ARG DOLT_SHA256_ARM64=f668c8e0d0276f684741ee66cd0dd18f2be8bf628a92982e8c7f20d1aef7b390
-RUN <<EOF
-set -e
-ARCH=$(dpkg --print-architecture)
-DOLT_SHA256=$([ "$ARCH" = "amd64" ] && echo "$DOLT_SHA256_AMD64" || echo "$DOLT_SHA256_ARM64")
-curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${ARCH}.tar.gz" -o /tmp/dolt.tar.gz
-echo "${DOLT_SHA256}  /tmp/dolt.tar.gz" | sha256sum -c -
-tar xzf /tmp/dolt.tar.gz -C /tmp
-mv "/tmp/dolt-linux-${ARCH}/bin/dolt" /usr/local/bin/dolt
-rm -rf /tmp/dolt.tar.gz "/tmp/dolt-linux-${ARCH}"
-EOF
+RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
 
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
 # When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic
@@ -124,16 +52,4 @@ EOF
 RUN useradd -m -s /bin/bash gcagent \
     && echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
     && chmod 0440 /etc/sudoers.d/gcagent
-
-USER gcagent
-
-# Claude Code (native installer).
-RUN curl -fsSL https://claude.ai/install.sh | bash
-
 ENV HOME=/home/gcagent
-ENV SHELL=/bin/bash
-ENV TERM=xterm-256color
-ENV COLORTERM=truecolor
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-ENV PATH="/home/gcagent/.local/bin:/home/gcagent/.bun/bin:${PATH}"

@@ -32,7 +32,7 @@ func TestMaterializeWritesFiles(t *testing.T) {
 	cityPath := t.TempDir()
 
 	fs := fstest.MapFS{
-		"sysformulas/hello.formula.toml": &fstest.MapFile{Data: []byte("[formula]\nname = \"hello\"\n")},
+		"sysformulas/hello.toml": &fstest.MapFile{Data: []byte("[formula]\nname = \"hello\"\n")},
 	}
 
 	dir, err := MaterializeSystemFormulas(fs, "sysformulas", cityPath)
@@ -44,7 +44,7 @@ func TestMaterializeWritesFiles(t *testing.T) {
 		t.Errorf("dir = %q, want %q", dir, expected)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "hello.formula.toml"))
+	data, err := os.ReadFile(filepath.Join(dir, "hello.toml"))
 	if err != nil {
 		t.Fatalf("reading materialized file: %v", err)
 	}
@@ -59,12 +59,12 @@ func TestMaterializeOverwrites(t *testing.T) {
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("old content"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("old content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	fs := fstest.MapFS{
-		"sf/hello.formula.toml": &fstest.MapFile{Data: []byte("new content")},
+		"sf/hello.toml": &fstest.MapFile{Data: []byte("new content")},
 	}
 
 	dir, err := MaterializeSystemFormulas(fs, "sf", cityPath)
@@ -72,7 +72,7 @@ func TestMaterializeOverwrites(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "hello.formula.toml"))
+	data, err := os.ReadFile(filepath.Join(dir, "hello.toml"))
 	if err != nil {
 		t.Fatalf("reading file: %v", err)
 	}
@@ -88,12 +88,12 @@ func TestMaterializeDoesNotRemoveUserFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Pre-existing user formula not in the embedded FS — should be left alone.
-	if err := os.WriteFile(filepath.Join(formulasDir, "user.formula.toml"), []byte("user"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "user.toml"), []byte("user"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	fs := fstest.MapFS{
-		"sf/fresh.formula.toml": &fstest.MapFile{Data: []byte("fresh")},
+		"sf/fresh.toml": &fstest.MapFile{Data: []byte("fresh")},
 	}
 
 	_, err := MaterializeSystemFormulas(fs, "sf", cityPath)
@@ -101,12 +101,12 @@ func TestMaterializeDoesNotRemoveUserFiles(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// user.formula.toml should still exist (not removed).
-	if _, err := os.Stat(filepath.Join(formulasDir, "user.formula.toml")); err != nil {
+	// user.toml should still exist (not removed).
+	if _, err := os.Stat(filepath.Join(formulasDir, "user.toml")); err != nil {
 		t.Error("user formula file was removed")
 	}
-	// fresh.formula.toml should exist.
-	if _, err := os.Stat(filepath.Join(formulasDir, "fresh.formula.toml")); err != nil {
+	// fresh.toml should exist.
+	if _, err := os.Stat(filepath.Join(formulasDir, "fresh.toml")); err != nil {
 		t.Error("fresh formula file missing")
 	}
 }
@@ -115,7 +115,7 @@ func TestMaterializeIdempotent(t *testing.T) {
 	cityPath := t.TempDir()
 
 	fs := fstest.MapFS{
-		"sf/a.formula.toml": &fstest.MapFile{Data: []byte("aaa")},
+		"sf/a.toml": &fstest.MapFile{Data: []byte("aaa")},
 	}
 
 	dir1, err := MaterializeSystemFormulas(fs, "sf", cityPath)
@@ -129,7 +129,7 @@ func TestMaterializeIdempotent(t *testing.T) {
 	if dir1 != dir2 {
 		t.Errorf("dir changed: %q vs %q", dir1, dir2)
 	}
-	data, err := os.ReadFile(filepath.Join(dir2, "a.formula.toml"))
+	data, err := os.ReadFile(filepath.Join(dir2, "a.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,9 +142,9 @@ func TestMaterializeWithOrders(t *testing.T) {
 	cityPath := t.TempDir()
 
 	fs := fstest.MapFS{
-		"sf/basic.formula.toml":    &fstest.MapFile{Data: []byte("basic")},
-		"sf/orders/foo/order.toml": &fstest.MapFile{Data: []byte("foo order")},
-		"sf/orders/bar/order.toml": &fstest.MapFile{Data: []byte("bar order")},
+		"sf/basic.toml":      &fstest.MapFile{Data: []byte("basic")},
+		"sf/orders/foo.toml": &fstest.MapFile{Data: []byte("foo order")},
+		"sf/orders/bar.toml": &fstest.MapFile{Data: []byte("bar order")},
 	}
 
 	dir, err := MaterializeSystemFormulas(fs, "sf", cityPath)
@@ -153,7 +153,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 	}
 
 	// Check basic formula goes to formulas/.
-	data, err := os.ReadFile(filepath.Join(dir, "basic.formula.toml"))
+	data, err := os.ReadFile(filepath.Join(dir, "basic.toml"))
 	if err != nil {
 		t.Fatalf("reading basic: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 
 	// Check order files go to orders/ (peer of formulas/).
 	ordersDir := filepath.Join(cityPath, "orders")
-	data, err = os.ReadFile(filepath.Join(ordersDir, "foo", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "foo.toml"))
 	if err != nil {
 		t.Fatalf("reading foo order: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 		t.Errorf("foo order content = %q", string(data))
 	}
 
-	data, err = os.ReadFile(filepath.Join(ordersDir, "bar", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "bar.toml"))
 	if err != nil {
 		t.Fatalf("reading bar order: %v", err)
 	}
@@ -192,21 +192,44 @@ func TestListEmbeddedEmpty(t *testing.T) {
 
 func TestListEmbeddedWithFiles(t *testing.T) {
 	fs := fstest.MapFS{
-		"sf/a.formula.toml":      &fstest.MapFile{Data: []byte("a")},
-		"sf/b.formula.toml":      &fstest.MapFile{Data: []byte("b")},
-		"sf/orders/p/order.toml": &fstest.MapFile{Data: []byte("p")},
-		"sf/readme.txt":          &fstest.MapFile{Data: []byte("skip")},
+		"sf/a.toml":        &fstest.MapFile{Data: []byte("a")},
+		"sf/b.toml":        &fstest.MapFile{Data: []byte("b")},
+		"sf/orders/p.toml": &fstest.MapFile{Data: []byte("p")},
+		"sf/readme.txt":    &fstest.MapFile{Data: []byte("skip")},
 	}
 
 	got := ListEmbeddedSystemFormulas(fs, "sf")
 	sort.Strings(got)
-	want := []string{"a.formula.toml", "b.formula.toml", "orders/p/order.toml"}
+	want := []string{"a.toml", "b.toml", "orders/p.toml"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestFormulaFilenameTruthHelpers(t *testing.T) {
+	tests := []struct {
+		path        string
+		wantFormula bool
+		wantOrder   bool
+	}{
+		{path: "hello.toml", wantFormula: true, wantOrder: false},
+		{path: "hello.formula.toml", wantFormula: true, wantOrder: false},
+		{path: "orders/cleanup.toml", wantFormula: true, wantOrder: true},
+		{path: "hello.txt", wantFormula: false, wantOrder: false},
+		{path: "orders/cleanup/order.toml", wantFormula: false, wantOrder: false},
+	}
+
+	for _, tt := range tests {
+		if got := isFormulaFile(tt.path); got != tt.wantFormula {
+			t.Errorf("isFormulaFile(%q) = %v, want %v", tt.path, got, tt.wantFormula)
+		}
+		if got := isOrderFile(tt.path); got != tt.wantOrder {
+			t.Errorf("isOrderFile(%q) = %v, want %v", tt.path, got, tt.wantOrder)
 		}
 	}
 }

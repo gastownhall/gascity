@@ -66,7 +66,7 @@ dir = "formulas"
 name = "deacon"
 start_command = "echo hello"
 
--- ordertown/formulas/mol-digest-generate.formula.toml --
+-- ordertown/formulas/mol-digest-generate.toml --
 formula = "mol-digest-generate"
 description = "Generate daily digest"
 
@@ -79,7 +79,7 @@ id = "generate"
 title = "Generate digest"
 needs = ["collect"]
 
--- ordertown/formulas/mol-wisp-compact.formula.toml --
+-- ordertown/formulas/mol-wisp-compact.toml --
 formula = "mol-wisp-compact"
 description = "Compact expired wisps"
 
@@ -87,7 +87,7 @@ description = "Compact expired wisps"
 id = "scan"
 title = "Scan for expired wisps"
 
--- ordertown/formulas/orders/digest-generate/order.toml --
+-- ordertown/orders/digest-generate.toml --
 [order]
 description = "Generate daily code digest"
 formula = "mol-digest-generate"
@@ -95,7 +95,7 @@ gate = "cooldown"
 interval = "24h"
 pool = "dog"
 
--- ordertown/formulas/orders/wisp-compact/order.toml --
+-- ordertown/orders/wisp-compact.toml --
 [order]
 description = "TTL-based wisp cleanup"
 formula = "mol-wisp-compact"

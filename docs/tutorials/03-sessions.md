@@ -10,11 +10,17 @@ you'll see and talk with agents via sessions as well as see how agents talk to
 each other. You'll also learn the difference between "polecats" (agents spun up
 on demand to handle work) and "crew" (persistent agents with named sessions),
 
-To continue with this tutorial, you'll want to start from where the last
-tutorial left off, with a `city.toml` that looks like the following and the
-appropriate agent prompts and rig folders in place to match:
+To continue with this tutorial, start from where the last two tutorials left
+off: the city root has `pack.toml` and `city.toml`, and Tutorial 02 added the
+reviewer under `agents/reviewer/`:
 
 ```shell
+~/my-city
+$ cat pack.toml
+[pack]
+name = "my-city"
+schema = 2
+
 ~/my-city
 $ cat city.toml
 [workspace]
@@ -23,22 +29,25 @@ provider = "claude"
 
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
 mode = "always"
 
-[[agent]]
-name = "reviewer"
-dir = "my-project"
-prompt_template = "prompts/reviewer.md"
-provider = "codex"
-
 [[rigs]]
 name = "my-project"
 path = "/Users/csells/my-project"
+
+~/my-city
+$ cat agents/reviewer/agent.toml
+dir = "my-project"
+provider = "codex"
 ```
+
+The reviewer's prompt lives at `agents/reviewer/prompt.template.md`. This is the
+standard city shape: root config files plus per-agent directories under
+`agents/`.
 
 ## Looking in on Polecats
 
@@ -121,7 +130,7 @@ often used by one-and-done agents know as "polecats". While you could talk to
 one interactively, they're configured to execute beads, go idle and have their
 sessions shutdown ASAP.
 
-If you want an agent to to talk to, you'll want one configured for chatting
+If you want an agent to talk to, you'll want one configured for chatting
 called a "crew" member.
 
 ## Chatting with Crew
@@ -160,7 +169,7 @@ look again at your `city.toml` file, you'll see why:
 ...
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -203,8 +212,9 @@ into the session's terminal:
 ~/my-city
 $ gc session nudge mayor "What's the current city status?"
 2026/04/07 22:07:28 tmux state cache: refreshed 2 sessions in 3.765375ms
-Nudged mayor
 ```
+
+Gas City confirms the nudge with either `Nudged mayor` or `Queued nudge for mayor`.
 
 ![mayor nudge screenshot](mayor-nudge.png)
 
@@ -243,9 +253,19 @@ with `-f`:
 $ gc session logs mayor -f
 ```
 
+In another terminal, nudge the mayor and watch the follow stream show the
+conversation as it happens:
+
+```shell
+~/my-city
+$ gc session nudge mayor "What's the current city status?"
+```
+
+Again, Gas City confirms the nudge with either `Nudged mayor` or `Queued nudge for mayor`.
+
 Useful for watching what a background agent is doing without attaching and
 potentially interrupting it. Peek shows the terminal; logs show the
-conversation.
+conversation as new user and assistant messages arrive.
 
 ## What's next
 

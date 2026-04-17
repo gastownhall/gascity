@@ -1,0 +1,454 @@
+package migrate
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+func TestMigrateCityCommonCase(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown", "../packs/qa-team"]
+default_rig_includes = ["../packs/default rig"]
+
+[[agent]]
+name = "mayor"
+scope = "city"
+provider = "claude"
+prompt_template = "prompts/mayor.md"
+overlay_dir = "overlays/mayor"
+namepool = "namepools/mayor.txt"
+fallback = true
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`)
+	writeFile(t, cityDir, "prompts/mayor.md", "You are {{.Agent}}.\n")
+	writeFile(t, cityDir, "prompts/worker.md", "You are a worker.\n")
+	writeFile(t, cityDir, "overlays/mayor/CLAUDE.md", "city overlay\n")
+	writeFile(t, cityDir, "namepools/mayor.txt", "Ada\nGrace\n")
+
+	report, err := Apply(cityDir, Options{})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if len(report.Warnings) == 0 {
+		t.Fatal("expected fallback warning, got none")
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if !strings.Contains(packToml, "[pack]") {
+		t.Fatalf("pack.toml missing [pack]:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "name = \"legacy-city\"") {
+		t.Fatalf("pack.toml missing derived pack name:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "[imports.gastown]") {
+		t.Fatalf("pack.toml missing gastown import:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "source = \"../packs/gastown\"") {
+		t.Fatalf("pack.toml missing gastown source:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "[defaults.rig.imports.default-rig]") {
+		t.Fatalf("pack.toml missing default rig import:\n%s", packToml)
+	}
+
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	if strings.Contains(cityToml, "[[agent]]") {
+		t.Fatalf("city.toml still contains [[agent]]:\n%s", cityToml)
+	}
+	if strings.Contains(cityToml, "includes =") {
+		t.Fatalf("city.toml still contains workspace.includes:\n%s", cityToml)
+	}
+	if strings.Contains(cityToml, "default_rig_includes") {
+		t.Fatalf("city.toml still contains workspace.default_rig_includes:\n%s", cityToml)
+	}
+
+	mayorAgentToml := readFile(t, filepath.Join(cityDir, "agents", "mayor", "agent.toml"))
+	if !strings.Contains(mayorAgentToml, "scope = \"city\"") {
+		t.Fatalf("mayor agent.toml missing scope:\n%s", mayorAgentToml)
+	}
+	if !strings.Contains(mayorAgentToml, "provider = \"claude\"") {
+		t.Fatalf("mayor agent.toml missing provider:\n%s", mayorAgentToml)
+	}
+	if strings.Contains(mayorAgentToml, "prompt_template") {
+		t.Fatalf("mayor agent.toml still contains prompt_template:\n%s", mayorAgentToml)
+	}
+	if strings.Contains(mayorAgentToml, "overlay_dir") {
+		t.Fatalf("mayor agent.toml still contains overlay_dir:\n%s", mayorAgentToml)
+	}
+	if strings.Contains(mayorAgentToml, "namepool") {
+		t.Fatalf("mayor agent.toml still contains namepool:\n%s", mayorAgentToml)
+	}
+	if strings.Contains(mayorAgentToml, "fallback") {
+		t.Fatalf("mayor agent.toml still contains fallback:\n%s", mayorAgentToml)
+	}
+
+	if got := readFile(t, filepath.Join(cityDir, "agents", "mayor", "prompt.template.md")); !strings.Contains(got, "{{.Agent}}") {
+		t.Fatalf("expected templated mayor prompt to be moved, got:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "agents", "worker", "prompt.md")); !strings.Contains(got, "worker") {
+		t.Fatalf("expected plain worker prompt to be moved, got:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "agents", "mayor", "overlay", "CLAUDE.md")); !strings.Contains(got, "city overlay") {
+		t.Fatalf("expected overlay to move, got:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "agents", "mayor", "namepool.txt")); !strings.Contains(got, "Ada") {
+		t.Fatalf("expected namepool to move, got:\n%s", got)
+	}
+
+	if _, err := os.Stat(filepath.Join(cityDir, "prompts", "mayor.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected mayor prompt source to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, "overlays", "mayor")); !os.IsNotExist(err) {
+		t.Fatalf("expected overlay source to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, "namepools", "mayor.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected namepool source to be removed, err=%v", err)
+	}
+}
+
+func TestMigrateDryRunDoesNotWrite(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`)
+	writeFile(t, cityDir, "prompts/mayor.md", "hello\n")
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	report, err := Apply(cityDir, Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("Apply(dry-run): %v", err)
+	}
+	if len(report.Changes) == 0 {
+		t.Fatal("expected dry-run changes, got none")
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("dry-run rewrote city.toml:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, "pack.toml")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create pack.toml, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, "agents")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not create agents dir, err=%v", err)
+	}
+}
+
+func TestMigrateIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`)
+	writeFile(t, cityDir, "prompts/mayor.md", "hello\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+
+	beforePack := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	report, err := Apply(cityDir, Options{})
+	if err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if len(report.Changes) != 0 {
+		t.Fatalf("expected no changes on second run, got %v", report.Changes)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "pack.toml")); got != beforePack {
+		t.Fatalf("pack.toml changed on second run:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed on second run:\n%s", got)
+	}
+}
+
+func TestMigrateSharedPromptCopiesInsteadOfMoving(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/shared.md"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/shared.md"
+`)
+	writeFile(t, cityDir, "prompts/shared.md", "shared prompt\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(cityDir, "prompts", "shared.md")); err != nil {
+		t.Fatalf("shared prompt should be retained for multi-use sources: %v", err)
+	}
+	for _, name := range []string{"mayor", "worker"} {
+		got := readFile(t, filepath.Join(cityDir, "agents", name, "prompt.md"))
+		if !strings.Contains(got, "shared prompt") {
+			t.Fatalf("%s prompt missing copied content:\n%s", name, got)
+		}
+	}
+}
+
+func TestMigrateResolvesPackRegistryIncludeSources(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["gastown"]
+
+[packs.gastown]
+source = "https://github.com/example/gastown.git"
+ref = "main"
+path = "packs/gastown"
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if !strings.Contains(packToml, "[imports.gastown]") {
+		t.Fatalf("pack.toml missing gastown import:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "source = \"https://github.com/example/gastown.git//packs/gastown#main\"") {
+		t.Fatalf("pack.toml missing converted pack source:\n%s", packToml)
+	}
+}
+
+func TestMigratePackAgentsYieldToCityAgents(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "mayor"
+provider = "codex"
+prompt_template = "prompts/mayor.md"
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 1
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+`)
+	writeFile(t, cityDir, "prompts/mayor.md", "hello\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	agentToml := readFile(t, filepath.Join(cityDir, "agents", "mayor", "agent.toml"))
+	if !strings.Contains(agentToml, "provider = \"codex\"") {
+		t.Fatalf("expected city agent to win over pack agent:\n%s", agentToml)
+	}
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if strings.Contains(packToml, "[[agent]]") {
+		t.Fatalf("pack.toml still contains [[agent]] after migration:\n%s", packToml)
+	}
+}
+
+func TestMigrateValidatesAssetsBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/missing.md"
+`)
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	_, err := Apply(cityDir, Options{})
+	if err == nil {
+		t.Fatal("expected Apply to fail for missing prompt_template")
+	}
+	if !strings.Contains(err.Error(), "prompt_template") {
+		t.Fatalf("expected prompt_template error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(cityDir, "pack.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("pack.toml should not be written on validation failure, err=%v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(cityDir, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("agents dir should not be created on validation failure, err=%v", statErr)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed after validation failure:\n%s", got)
+	}
+}
+
+func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
+	t.Parallel()
+
+	trueVal := true
+	intVal := 42
+	formula := "mol-work"
+	src := config.Agent{
+		Name:                   "worker",
+		Description:            "test agent description",
+		Dir:                    "demo",
+		WorkDir:                ".gc/agents/worker",
+		Scope:                  "city",
+		Suspended:              true,
+		PreStart:               []string{"pre-cmd"},
+		PromptTemplate:         "prompts/worker.md",
+		Nudge:                  "nudge text",
+		Session:                "acp",
+		Provider:               "claude",
+		StartCommand:           "claude --dangerously",
+		Args:                   []string{"--arg1"},
+		PromptMode:             "flag",
+		PromptFlag:             "--prompt",
+		ReadyDelayMs:           &intVal,
+		ReadyPromptPrefix:      "ready>",
+		ProcessNames:           []string{"claude"},
+		EmitsPermissionWarning: &trueVal,
+		Env:                    map[string]string{"K": "V"},
+		OptionDefaults:         map[string]string{"effort": "max"},
+		MaxActiveSessions:      intPtr(5),
+		MinActiveSessions:      intPtr(1),
+		ScaleCheck:             "echo 3",
+		DrainTimeout:           "10m",
+		OnBoot:                 "echo boot",
+		OnDeath:                "echo death",
+		Namepool:               "names.txt",
+		WorkQuery:              "bd ready",
+		SlingQuery:             "bd update {}",
+		IdleTimeout:            "15m",
+		SleepAfterIdle:         "30s",
+		InstallAgentHooks:      []string{"claude"},
+		Skills:                 []string{"code-review"},
+		MCP:                    []string{"beads-health"},
+		HooksInstalled:         &trueVal,
+		SessionSetup:           []string{"setup-cmd"},
+		SessionSetupScript:     "scripts/setup.sh",
+		SessionLive:            []string{"live-cmd"},
+		OverlayDir:             "overlays/test",
+		DefaultSlingFormula:    &formula,
+		InjectFragments:        []string{"frag1"},
+		Attach:                 &trueVal,
+		Fallback:               true,
+		DependsOn:              []string{"other-agent"},
+		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
+		WakeMode:               "fresh",
+	}
+
+	omitted := map[string]bool{
+		"Name":                 true,
+		"PromptTemplate":       true,
+		"Namepool":             true,
+		"NamepoolNames":        true,
+		"OverlayDir":           true,
+		"SourceDir":            true,
+		"Implicit":             true,
+		"Fallback":             true,
+		"SleepAfterIdleSource": true,
+		"PoolName":             true,
+		"BindingName":          true,
+		"PackName":             true,
+		"SharedSkills":         true, // runtime-only (inherited from agent_defaults.skills)
+		"SharedMCP":            true, // runtime-only (inherited from agent_defaults.mcp)
+		"SkillsDir":            true, // runtime-only (discovered from agents/<n>/skills/)
+		"MCPDir":               true, // runtime-only (discovered from agents/<n>/mcp/)
+	}
+
+	cfgFields := make(map[string]bool)
+	cfgType := reflect.TypeOf(agentFile{})
+	for i := 0; i < cfgType.NumField(); i++ {
+		cfgFields[cfgType.Field(i).Name] = true
+	}
+
+	sv := reflect.ValueOf(src)
+	st := sv.Type()
+	for i := 0; i < st.NumField(); i++ {
+		fname := st.Field(i).Name
+		if omitted[fname] {
+			continue
+		}
+		if sv.Field(i).IsZero() {
+			t.Fatalf("Agent field %q is zero in test data — add it to the migration field-sync test", fname)
+		}
+		if !cfgFields[fname] {
+			t.Fatalf("persisted Agent field %q is missing from agentFile — update migration output or explicitly omit it", fname)
+		}
+	}
+
+	cfg := agentConfigFromAgent(src)
+	cv := reflect.ValueOf(cfg)
+	for i := 0; i < cfgType.NumField(); i++ {
+		fname := cfgType.Field(i).Name
+		if cv.Field(i).IsZero() {
+			t.Fatalf("agentConfigFromAgent did not populate field %q", fname)
+		}
+	}
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func writeFile(t *testing.T, root, rel, contents string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(strings.TrimLeft(contents, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	return string(data)
+}

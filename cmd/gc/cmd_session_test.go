@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -283,7 +284,7 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 		WorkDir:  "/tmp/workdir",
 	}
 
-	cmd, hints := buildResumeCommand(cfg, info, "")
+	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
 	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
 		t.Fatalf("resume command = %q, want %q", got, want)
 	}
@@ -295,6 +296,54 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 	}
 	if got, want := hints.Env["GC_HOME"], "/tmp/gc-accept-home"; got != want {
 		t.Fatalf("hints.Env[GC_HOME] = %q, want %q", got, want)
+	}
+}
+
+func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
+	cityDir := t.TempDir()
+	// Write a .gc/settings.json so settingsArgs finds it.
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{"hooks":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor"},
+		},
+	}
+	info := session.Info{
+		Template:   "mayor",
+		Command:    "claude",
+		Provider:   "claude",
+		WorkDir:    "/tmp/workdir",
+		SessionKey: "abc-123",
+		ResumeFlag: "--resume",
+	}
+
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "")
+
+	// Must include --settings pointing to .gc/settings.json.
+	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(gcDir, "settings.json"))
+	if !strings.Contains(cmd, "--settings") {
+		t.Fatalf("resume command missing --settings:\n  got: %s", cmd)
+	}
+	if !strings.Contains(cmd, wantSettings) {
+		t.Fatalf("resume command has wrong --settings path:\n  got:  %s\n  want: ...%s...", cmd, wantSettings)
+	}
+
+	// Must include --resume flag.
+	if !strings.Contains(cmd, "--resume abc-123") {
+		t.Fatalf("resume command missing --resume flag:\n  got: %s", cmd)
+	}
+
+	// Must include default args (--dangerously-skip-permissions for claude).
+	if !strings.Contains(cmd, "--dangerously-skip-permissions") {
+		t.Fatalf("resume command missing default args:\n  got: %s", cmd)
 	}
 }
 

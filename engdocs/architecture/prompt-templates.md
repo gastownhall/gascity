@@ -2,13 +2,15 @@
 title: "Prompt Templates"
 ---
 
-> Last verified against code: 2026-03-01
+> Last revised for merge-wave decisions: 2026-04-10
 
 ## Summary
 
 Prompt Templates is a Layer 0-1 primitive that defines agent behavior
-through Go `text/template` in Markdown. All role-specific behavior is
-user-supplied configuration — the SDK contains zero hardcoded role
+through Go `text/template` in Markdown. Prompt files now opt in to
+template processing explicitly via the `.template.md` suffix; plain
+`prompt.md` files remain plain content. All role-specific behavior is
+user-supplied pack content — the SDK contains zero hardcoded role
 names. Templates are rendered at agent startup with a `PromptContext`
 that provides city, agent, rig, and git metadata, making every agent
 prompt dynamically customized to its deployment context.
@@ -16,9 +18,9 @@ prompt dynamically customized to its deployment context.
 ## Key Concepts
 
 - **Prompt Template**: A Markdown file with Go template directives
-  (`.md.tmpl` extension). Each agent's `prompt_template` config field
-  points to one. Templates define the agent's behavioral specification:
-  what it does, how it finds work, how it communicates.
+  (`.template.md` extension). Each agent's `prompt_template` config
+  field points to one. Templates define the agent's behavioral
+  specification: what it does, how it finds work, how it communicates.
 
 - **PromptContext**: The data available to templates during rendering.
   Includes CityRoot, AgentName (qualified: `rig/agent-1`),
@@ -31,6 +33,13 @@ prompt dynamically customized to its deployment context.
   available via `{{template "name" .}}`. Used for cross-agent
   conventions like command glossaries and architecture context.
 
+- **Appended Fragments**: Named template fragments that are rendered and
+  appended after the main prompt body. These are configured through
+  `append_fragments` in `[agent_defaults]`. Per-agent appended fragments
+  still come from `inject_fragments` on the agent. Explicit
+  `{{template "name" .}}` calls still control in-body placement;
+  appended fragment settings do not.
+
 - **Template Functions**: Three built-in functions: `cmd` (binary
   name), `session` (compute session name for an agent), `basename`
   (extract base name from qualified name).
@@ -40,10 +49,10 @@ prompt dynamically customized to its deployment context.
 ```
   Agent Config                 Template File
   ┌──────────────┐            ┌──────────────────┐
-  │prompt_template│───────────▶│ prompts/agent.md  │
-  │  = "prompts/ │            │  .tmpl            │
-  │   agent.md   │            └────────┬──────────┘
-  │   .tmpl"     │                     │
+  │prompt_template│───────────▶│ prompts/agent     │
+  │  = "prompts/ │            │  .template.md     │
+  │   agent      │            └────────┬──────────┘
+  │   .template.md"│                   │
   └──────────────┘            ┌────────▼──────────┐
                               │ shared/ partials   │
                               │  (auto-loaded)     │
@@ -69,7 +78,9 @@ prompt dynamically customized to its deployment context.
 5. `buildTemplateData()` merges `Env` (lower priority) with SDK
    fields (higher priority) into a single `map[string]string`
 6. Template executes against the merged data map
-7. On parse/execute error, logs warning to stderr and returns raw text
+7. Any configured `append_fragments` are rendered and appended after
+   the main prompt body
+8. On parse/execute error, logs warning to stderr and returns raw text
    (graceful fallback — never blocks agent startup)
 
 ### Key Types
@@ -96,9 +107,13 @@ prompt dynamically customized to its deployment context.
    raw template text, not an empty string. Agents always get a prompt.
 4. **Missing template returns empty.** If `prompt_template` is empty or
    the file doesn't exist, `renderPrompt()` returns `""` without error.
-5. **Shared templates load from sibling directory.** Only `.md.tmpl`
-   files in the `shared/` subdirectory next to the template are loaded.
-   No recursive traversal.
+5. **Shared templates load from sibling directory.** Canonical
+   `.template.md` files and legacy `.md.tmpl` files in the `shared/`
+   subdirectory next to the template are loaded. Canonical files win on
+   definition collisions. No recursive traversal.
+6. **`append_fragments` is append-only.** It does not control in-body
+   placement. If a fragment is explicitly referenced in the template and
+   also listed in `append_fragments`, it appears twice.
 
 ## Interactions
 
@@ -121,7 +136,7 @@ prompt dynamically customized to its deployment context.
   promptFuncMap (141 LOC)
 - `cmd/gc/cmd_prime.go` — `gc prime` command (outputs rendered prompt)
 
-Template files are user-supplied, not SDK code. See example templates
+Template files are user-supplied pack content, not SDK code. See example templates
 in `examples/gastown/packs/gastown/prompts/`.
 
 ## Configuration
@@ -129,9 +144,16 @@ in `examples/gastown/packs/gastown/prompts/`.
 ```toml
 [[agent]]
 name = "worker"
-prompt_template = "prompts/worker.md.tmpl"
+prompt_template = "prompts/worker.template.md"
 [agent.env]
 CUSTOM_VAR = "value"    # available as {{.CUSTOM_VAR}} in template
+```
+
+Preferred defaults naming:
+
+```toml
+[agent_defaults]
+append_fragments = ["safety"]
 ```
 
 ### Template Variables
@@ -156,6 +178,17 @@ CUSTOM_VAR = "value"    # available as {{.CUSTOM_VAR}} in template
 | `cmd` | `{{cmd}}` | Binary name (`gc`) |
 | `session` | `{{session .AgentName}}` | Session name for agent |
 | `basename` | `{{basename .AgentName}}` | Base name from qualified name |
+
+### Fragment Composition
+
+There are two distinct ways fragment content can appear in a rendered
+prompt:
+
+| Mechanism | Where declared | Effect |
+|---|---|---|
+| `{{ template "name" . }}` | inside `prompt.template.md` | Places fragment content exactly where referenced |
+| `append_fragments = ["name"]` | `[agent_defaults]` | Appends fragment content after the rendered prompt body |
+| `inject_fragments = ["name"]` | per-agent settings | Appends fragment content after the rendered prompt body |
 
 ## Testing
 

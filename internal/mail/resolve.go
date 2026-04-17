@@ -7,23 +7,32 @@ import (
 
 // AgentEntry represents a configured agent for recipient resolution.
 type AgentEntry struct {
-	Dir  string // rig directory (empty for city-scoped agents)
-	Name string // bare agent name
+	Dir         string // rig directory (empty for city-scoped agents)
+	Name        string // bare agent name
+	BindingName string // V2 import binding (empty for city-local agents)
 }
 
-// QualifiedName returns "Dir/Name" for rig-scoped agents or just "Name".
+// QualifiedName returns the agent's qualified identity. For V2 agents
+// with a binding, produces "dir/binding.name" or "binding.name".
+// For V1 agents, produces "dir/name" or just "name".
 func (a AgentEntry) QualifiedName() string {
-	if a.Dir == "" {
-		return a.Name
+	name := a.Name
+	if a.BindingName != "" {
+		name = a.BindingName + "." + a.Name
 	}
-	return a.Dir + "/" + a.Name
+	if a.Dir == "" {
+		return name
+	}
+	return a.Dir + "/" + name
 }
 
 // ResolveRecipient resolves a mail recipient to a canonical qualified name.
 //
 // Resolution order:
 //  1. "human" passes through unchanged (reserved recipient).
-//  2. Qualified name ("rig/name") is matched literally.
+//  2. Qualified name — matched literally against QualifiedName(). Handles
+//     V1 ("rig/name"), V2 ("rig/binding.name"), and city-scoped V2
+//     ("binding.name") forms.
 //  3. Bare name ("name") is matched against all agents by Name field.
 //     Succeeds only when exactly one agent matches; rejects ambiguous names.
 //
@@ -37,14 +46,13 @@ func ResolveRecipient(to string, agents []AgentEntry) (string, error) {
 		return "human", nil
 	}
 
-	// Qualified name: literal match.
-	if strings.Contains(to, "/") {
-		for _, a := range agents {
-			if a.QualifiedName() == to {
-				return to, nil
-			}
+	// Qualified name: literal match against QualifiedName().
+	// This handles both "rig/name" (V1), "rig/binding.name" (V2),
+	// and "binding.name" (city-scoped V2).
+	for _, a := range agents {
+		if a.QualifiedName() == to {
+			return a.QualifiedName(), nil
 		}
-		return "", fmt.Errorf("unknown recipient %q", to)
 	}
 
 	// Bare name: find all agents with this Name.

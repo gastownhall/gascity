@@ -1,0 +1,2 @@
+description = "List Dolt databases"
+run = "../list.sh"

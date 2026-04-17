@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -697,7 +696,7 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC(), nil); err != nil {
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
 		t.Fatalf("dispatchReadyWaitNudges: %v", err)
 	}
 	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now().UTC())
@@ -729,113 +728,62 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	}
 }
 
-// TestDispatchReadyWaitNudges_PollerGatedOnCapability proves the wait-dispatch
-// poller gate is driven by NeedsNudgePoller capability, not provider name.
-// It covers builtins, codex-derived aliases (via provider_kind), and custom
-// city-configured providers.
-func TestDispatchReadyWaitNudges_PollerGatedOnCapability(t *testing.T) {
-	cases := []struct {
-		name          string
-		provider      string
-		providerKind  string
-		cityProviders map[string]config.ProviderSpec
-		wantCalled    bool
-	}{
-		{name: "codex builtin starts poller", provider: "codex", wantCalled: true},
-		{name: "claude builtin skips poller", provider: "claude", wantCalled: false},
-		{name: "unknown provider skips poller", provider: "custom-runtime", wantCalled: false},
-		{
-			name:         "codex-derived alias starts poller via provider_kind",
-			provider:     "my-fast-codex",
-			providerKind: "codex",
-			wantCalled:   true,
-		},
-		{
-			name:     "custom city provider with NeedsNudgePoller starts poller",
-			provider: "amp-poll",
-			cityProviders: map[string]config.ProviderSpec{
-				"amp-poll": {NeedsNudgePoller: true},
-			},
-			wantCalled: true,
-		},
-		{
-			name:     "custom city provider without NeedsNudgePoller skips poller",
-			provider: "amp-hook",
-			cityProviders: map[string]config.ProviderSpec{
-				"amp-hook": {NeedsNudgePoller: false},
-			},
-			wantCalled: false,
-		},
-		{
-			name:         "city alias derived from codex inherits NeedsNudgePoller",
-			provider:     "my-fast-codex",
-			providerKind: "codex",
-			cityProviders: map[string]config.ProviderSpec{
-				"my-fast-codex": {Command: "codex"},
-			},
-			wantCalled: true,
-		},
+func TestDispatchReadyWaitNudges_StartsPollerForRunningInteractiveSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_BEADS", "file")
-			dir := t.TempDir()
-			store, err := openCityStoreAt(dir)
-			if err != nil {
-				t.Fatalf("openCityStoreAt: %v", err)
-			}
-			meta := map[string]string{
-				"session_name":       "worker",
-				"agent_name":         "worker",
-				"continuation_epoch": "1",
-				"provider":           tc.provider,
-			}
-			if tc.providerKind != "" {
-				meta["provider_kind"] = tc.providerKind
-			}
-			sessionBead, err := store.Create(beads.Bead{
-				Type:     sessionBeadType,
-				Labels:   []string{sessionBeadLabel},
-				Metadata: meta,
-			})
-			if err != nil {
-				t.Fatalf("create session bead: %v", err)
-			}
-			if _, err := store.Create(beads.Bead{
-				Type:   waitBeadType,
-				Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
-				Metadata: map[string]string{
-					"session_id":       sessionBead.ID,
-					"session_name":     "worker",
-					"kind":             "deps",
-					"state":            waitStateReady,
-					"dep_ids":          "gc-1",
-					"dep_mode":         "all",
-					"registered_epoch": "1",
-					"delivery_attempt": "1",
-				},
-			}); err != nil {
-				t.Fatalf("create wait bead: %v", err)
-			}
-			sp := runtime.NewFake()
-			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			called := false
-			prev := startNudgePoller
-			startNudgePoller = func(_, _, _ string) error {
-				called = true
-				return nil
-			}
-			t.Cleanup(func() { startNudgePoller = prev })
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	called := false
+	prev := startNudgePoller
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		called = true
+		if cityPath != dir || agentName != "worker" || sessionName != "worker" {
+			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
+		}
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
 
-			if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC(), tc.cityProviders); err != nil {
-				t.Fatalf("dispatchReadyWaitNudges: %v", err)
-			}
-			if called != tc.wantCalled {
-				t.Fatalf("startNudgePoller called = %v, want %v", called, tc.wantCalled)
-			}
-		})
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	if !called {
+		t.Fatal("startNudgePoller was not called")
 	}
 }
 

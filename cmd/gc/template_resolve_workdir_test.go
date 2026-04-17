@@ -214,8 +214,6 @@ func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 }
 
 func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
-	// Hermetic: ambient GC_BEADS would poison the "bd" assertion below.
-	t.Setenv("GC_BEADS", "")
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "")
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
@@ -277,7 +275,6 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 		t.Fatalf("GC_BEADS = %q, want %q", got, "bd")
 	}
 }
-
 
 // Regression for #647: agent-session data ops must not route through the
 // lifecycle-only gc-beads-bd wrapper.

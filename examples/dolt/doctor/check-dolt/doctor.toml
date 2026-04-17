@@ -1,0 +1,2 @@
+description = "Verify Dolt binary is available"
+run = "../check-dolt.sh"

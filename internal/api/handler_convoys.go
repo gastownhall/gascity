@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
@@ -146,25 +148,17 @@ func (s *Server) handleConvoyCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	convoy, err := store.Create(beads.Bead{
+	deps := s.convoyDeps()
+	result, err := convoy.ConvoyCreate(deps, store, convoy.ConvoyCreateInput{
 		Title: body.Title,
-		Type:  "convoy",
+		Items: body.Items,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 
-	// Link child items to convoy.
-	for _, itemID := range body.Items {
-		pid := convoy.ID
-		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "failed to link item "+itemID+": "+err.Error())
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusCreated, convoy)
+	writeJSON(w, http.StatusCreated, result.Convoy)
 }
 
 func (s *Server) handleConvoyAdd(w http.ResponseWriter, r *http.Request) {
@@ -269,51 +263,25 @@ func (s *Server) handleConvoyRemove(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConvoyCheck(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
-
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
-		b, err := store.Get(id)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-		if b.Type != "convoy" {
-			writeError(w, http.StatusBadRequest, "invalid", "bead "+id+" is not a convoy")
-			return
-		}
-
-		children, err := store.List(beads.ListQuery{
-			ParentID:      id,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedAsc,
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-
-		total := len(children)
-		closed := 0
-		for _, c := range children {
-			if c.Status == "closed" {
-				closed++
-			}
-		}
-
-		complete := total > 0 && closed == total
-		writeJSON(w, http.StatusOK, map[string]any{
-			"convoy_id": id,
-			"total":     total,
-			"closed":    closed,
-			"complete":  complete,
-		})
+	store, ok := s.findConvoyStore(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
 		return
 	}
-	writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
+
+	deps := s.convoyDeps()
+	progress, err := convoy.ConvoyProgress(deps, store, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"convoy_id": progress.ConvoyID,
+		"total":     progress.Total,
+		"closed":    progress.Closed,
+		"complete":  progress.Complete,
+	})
 }
 
 func (s *Server) handleConvoyDelete(w http.ResponseWriter, r *http.Request) {
@@ -353,8 +321,52 @@ func (s *Server) handleConvoyDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConvoyClose(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
+	store, ok := s.findConvoyStore(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
+		return
+	}
 
+	deps := s.convoyDeps()
+	if err := convoy.ConvoyClose(deps, store, id); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
+}
+
+// convoyDeps builds convoy.ConvoyDeps from the server's state.
+func (s *Server) convoyDeps() convoy.ConvoyDeps {
+	stores := s.state.BeadStores()
+	ep := s.state.EventProvider()
+	var rec events.Recorder
+	if ep != nil {
+		rec = ep // events.Provider embeds events.Recorder
+	}
+	return convoy.ConvoyDeps{
+		Cfg: s.state.Config(),
+		GetStore: func(rig string) (beads.Store, error) {
+			if st := s.state.BeadStore(rig); st != nil {
+				return st, nil
+			}
+			return nil, beads.ErrNotFound
+		},
+		FindStore: func(beadID string) (beads.Store, error) {
+			for _, rigName := range sortedRigNames(stores) {
+				st := stores[rigName]
+				if _, err := st.Get(beadID); err == nil {
+					return st, nil
+				}
+			}
+			return nil, beads.ErrNotFound
+		},
+		Recorder: rec,
+	}
+}
+
+// findConvoyStore locates the store containing a convoy bead.
+func (s *Server) findConvoyStore(id string) (beads.Store, bool) {
+	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)
@@ -362,19 +374,12 @@ func (s *Server) handleConvoyClose(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return nil, false
 		}
 		if b.Type != "convoy" {
-			writeError(w, http.StatusBadRequest, "invalid", "bead "+id+" is not a convoy")
-			return
+			return nil, false
 		}
-		if err := store.Close(id); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
-		return
+		return store, true
 	}
-	writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
+	return nil, false
 }

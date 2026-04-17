@@ -25,6 +25,9 @@ type StartupHints struct {
 	// SessionLive is a list of idempotent commands run after session_setup
 	// and re-applied on config change without restart.
 	SessionLive []string
+	// ProviderName is the resolved provider name (e.g., "claude", "codex").
+	// Used for per-provider overlay filtering in V2.
+	ProviderName string
 	// PackOverlayDirs lists overlay directories from packs. Copied to
 	// the session workdir before the agent's own OverlayDir.
 	PackOverlayDirs []string

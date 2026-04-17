@@ -148,7 +148,7 @@ start_command = "echo hello"
 min_active_sessions = 0
 max_active_sessions = 3
 scale_check = "echo 2"
--- gastown/formulas/mol-deacon-patrol.formula.toml --
+-- gastown/formulas/mol-deacon-patrol.toml --
 formula = "mol-deacon-patrol"
 description = "Deacon patrol loop"
 
@@ -161,7 +161,7 @@ id = "check-gates"
 title = "Evaluate gates"
 needs = ["check-inbox"]
 
--- gastown/formulas/mol-witness-patrol.formula.toml --
+-- gastown/formulas/mol-witness-patrol.toml --
 formula = "mol-witness-patrol"
 description = "Witness patrol loop"
 
@@ -174,7 +174,7 @@ id = "orphan-scan"
 title = "Scan for orphaned beads"
 needs = ["check-inbox"]
 
--- gastown/formulas/mol-refinery-patrol.formula.toml --
+-- gastown/formulas/mol-refinery-patrol.toml --
 formula = "mol-refinery-patrol"
 description = "Refinery merge processing"
 
@@ -187,7 +187,7 @@ id = "find-work"
 title = "Find merge work"
 needs = ["check-inbox"]
 
--- gastown/formulas/mol-polecat-work.formula.toml --
+-- gastown/formulas/mol-polecat-work.toml --
 formula = "mol-polecat-work"
 description = "Polecat implementation"
 
@@ -213,7 +213,7 @@ id = "submit"
 title = "Push and assign refinery"
 needs = ["implement"]
 
--- gastown/formulas/mol-shutdown-dance.formula.toml --
+-- gastown/formulas/mol-shutdown-dance.toml --
 formula = "mol-shutdown-dance"
 description = "Shutdown dance with due process"
 
@@ -236,7 +236,7 @@ id = "verdict"
 title = "Pardon or execute"
 needs = ["check-2"]
 
--- gastown/formulas/mol-digest-generate.formula.toml --
+-- gastown/formulas/mol-digest-generate.toml --
 formula = "mol-digest-generate"
 description = "Generate activity digest"
 
@@ -249,7 +249,7 @@ id = "generate"
 title = "Generate digest"
 needs = ["collect"]
 
--- gastown/formulas/mol-wisp-compact.formula.toml --
+-- gastown/formulas/mol-wisp-compact.toml --
 formula = "mol-wisp-compact"
 description = "Compact closed wisps"
 
@@ -262,7 +262,7 @@ id = "compact"
 title = "Delete expired wisps"
 needs = ["scan"]
 
--- gastown/formulas/mol-prune-branches.formula.toml --
+-- gastown/formulas/mol-prune-branches.toml --
 formula = "mol-prune-branches"
 description = "Prune merged branches"
 

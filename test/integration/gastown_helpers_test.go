@@ -280,7 +280,7 @@ func setupBareGitRepo(t *testing.T) string {
 		dir  string
 		args []string
 	}{
-		{"", []string{"git", "init", "--bare", bare}},
+		{"", []string{"git", "init", "--bare", "--initial-branch=main", bare}},
 	}
 
 	// Create a temp working dir to make the initial commit

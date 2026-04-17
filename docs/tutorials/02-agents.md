@@ -15,22 +15,25 @@ We'll pick up where Tutorial 01 left off. You should have `my-city` running with
 
 ## Defining an agent
 
-Open `city.toml`. You already have a `mayor` agent from the tutorial template.
-Let's add a second agent that uses `codex` instead of `claude`:
+Each custom agent gets its own directory under `agents/<name>/`. Start by
+creating a rig-scoped reviewer:
 
-```toml
-[workspace]
-name = "my-city"
-provider = "claude"
+```shell
+~/my-city
+$ gc agent add --name reviewer --dir my-project
+Scaffolded agent 'reviewer'
 
-... # context elided
-
-[[agent]]
-name = "reviewer"
+~/my-city
+$ cat > agents/reviewer/agent.toml << 'EOF'
 dir = "my-project"
 provider = "codex"
-prompt_template = "prompts/reviewer.md"
+EOF
 ```
+
+This creates `agents/reviewer/prompt.template.md`. Add
+`agents/reviewer/agent.toml` when you want per-agent overrides. Here we use it
+to scope the reviewer to the `my-project` rig and switch it from the city's
+default `claude` provider to `codex`.
 
 You'll want to create a prompt for the new agent. Let's take a look at the
 default GC prompt if you don't provide one:
@@ -69,7 +72,7 @@ reviewer prompt to look like the following:
 
 ```shell
 ~/my-city
-$ cat > prompts/reviewer.md << 'EOF'
+$ cat > agents/reviewer/prompt.template.md << 'EOF'
 # Code Reviewer Agent
 You are an agent in a Gas City workspace. Check for available work and execute it.
 
@@ -100,14 +103,12 @@ your own custom agents are configured as you build out more of them over time.
 If you wanted to get fancy, you could also set the model and permission mode:
 
 ```toml
-...
-[[agent]]
-name = "reviewer"
 dir = "my-project"
-prompt_template = "prompts/reviewer.md"
+provider = "codex"
 option_defaults = { model = "sonnet", permission_mode = "plan" }
-...
 ```
+
+That file would live at `agents/reviewer/agent.toml`.
 
 Now that your agent is available, it's time to sling some work to it:
 
@@ -123,10 +124,10 @@ Slung mp-p956 → my-project/reviewer
 
 Your new reviewer agent is scoped to the `my-project` rig, so from inside that
 directory you can target it explicitly as `my-project/reviewer`. Gas City
-started a Codex session, loaded the prompt from `prompts/reviewer.md`, and
-delivered the task to the rig-scoped reviewer. You can watch progress with `bd
-show` as you already know. And when the work is done, you can check the file
-system for the review you requested:
+started a Codex session, loaded the prompt from
+`agents/reviewer/prompt.template.md`, and delivered the task to the rig-scoped
+reviewer. You can watch progress with `bd show` as you already know. And when
+the work is done, you can check the file system for the review you requested:
 
 ```shell
 ~/my-project
@@ -140,10 +141,6 @@ No findings.
 
 `hello.py` is a single `print("Hello, World!")` statement and does not present a meaningful bug, security, or style issue in its current form.
 ```
-
-The exact review text will vary by provider and model. The important part is
-that the reviewer creates `review.md` in the rig and fills it with review
-feedback.
 
 This is handy for fire-and-forget kind of work. However, if you'd like to see
 the agent in action or even talk to one directly, you're going to need a

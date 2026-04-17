@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -36,6 +37,10 @@ type initProviderTarget struct {
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
 	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
+	if err := bootstrap.EnsureBootstrap(""); err != nil {
+		fmt.Fprintf(stderr, "%s: bootstrapping implicit imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor

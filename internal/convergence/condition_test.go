@@ -111,6 +111,31 @@ func TestConditionEnvEnvironOptionalEmpty(t *testing.T) {
 	}
 }
 
+func TestConditionEnvEnvironPreservesIntegrationRealBD(t *testing.T) {
+	t.Setenv("GC_INTEGRATION_REAL_BD", "/tmp/test-real-bd")
+
+	env := ConditionEnv{
+		BeadID:      "bead-789",
+		Iteration:   1,
+		CityPath:    "/city",
+		WispID:      "wisp-abc",
+		ArtifactDir: "/tmp/art",
+	}
+
+	vars := env.Environ()
+	lookup := make(map[string]string)
+	for _, v := range vars {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) == 2 {
+			lookup[parts[0]] = parts[1]
+		}
+	}
+
+	if got := lookup["GC_INTEGRATION_REAL_BD"]; got != "/tmp/test-real-bd" {
+		t.Fatalf("GC_INTEGRATION_REAL_BD = %q, want %q", got, "/tmp/test-real-bd")
+	}
+}
+
 func TestResolveConditionPath(t *testing.T) {
 	t.Run("absolute path", func(t *testing.T) {
 		dir := t.TempDir()

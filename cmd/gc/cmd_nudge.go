@@ -191,8 +191,8 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	var quiescence time.Duration
 	cmd := &cobra.Command{
 		Use:    "poll [session]",
-		Short:  "Poll and deliver queued nudges for runtimes without turn hooks",
-		Long:   "Poll and deliver queued nudges for runtimes without turn hooks. Used internally for Codex sessions.",
+		Short:  "Poll and deliver queued nudges for sessions that need out-of-band delivery",
+		Long:   "Poll and deliver queued nudges for sessions that need an out-of-band delivery fallback. Used internally.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -566,7 +566,7 @@ func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b bead
 		alias:             alias,
 		aliasHistory:      session.AliasHistory(b.Metadata),
 		transport:         strings.TrimSpace(b.Metadata["transport"]),
-		resolved:          resolvedProviderFromBeadMetadata(b.Metadata["provider"], b.Metadata["provider_kind"], cfg.Providers),
+		resolved:          &config.ResolvedProvider{Name: strings.TrimSpace(b.Metadata["provider"])},
 		sessionID:         b.ID,
 		continuationEpoch: strings.TrimSpace(b.Metadata["continuation_epoch"]),
 		sessionName:       sessionName,
@@ -607,50 +607,6 @@ func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b bead
 		target.identity = sessionName
 	}
 	return target
-}
-
-// resolvedProviderFromBeadMetadata creates a ResolvedProvider from a bead's
-// provider metadata fields, hydrating capability flags so that callers
-// (e.g. maybeStartNudgePoller) see the correct NeedsNudgePoller value even
-// when the provider is no longer in active config. It checks (in order):
-//  1. City-configured providers (handles custom providers with the flag)
-//  2. Builtin providers by provider name
-//  3. Builtin providers by provider_kind (handles codex-derived aliases)
-func resolvedProviderFromBeadMetadata(provider, providerKind string, cityProviders map[string]config.ProviderSpec) *config.ResolvedProvider {
-	name := strings.TrimSpace(provider)
-	kind := strings.TrimSpace(providerKind)
-	rp := &config.ResolvedProvider{Name: name}
-	builtins := config.BuiltinProviders()
-	// Determine the builtin base: prefer canonical kind (handles aliases like
-	// "my-fast-codex" with provider_kind="codex"), fall back to name.
-	var builtinBase *config.ProviderSpec
-	if kind != "" {
-		if spec, ok := builtins[kind]; ok {
-			builtinBase = &spec
-		}
-	}
-	if builtinBase == nil {
-		if spec, ok := builtins[name]; ok {
-			builtinBase = &spec
-		}
-	}
-	// Check city-configured providers first (may include custom providers).
-	if cityProviders != nil {
-		if spec, ok := cityProviders[name]; ok {
-			if builtinBase != nil {
-				merged := config.MergeProviderOverBuiltin(*builtinBase, spec)
-				rp.NeedsNudgePoller = merged.NeedsNudgePoller
-			} else {
-				rp.NeedsNudgePoller = spec.NeedsNudgePoller
-			}
-			return rp
-		}
-	}
-	// Fall back to builtin capabilities.
-	if builtinBase != nil {
-		rp.NeedsNudgePoller = builtinBase.NeedsNudgePoller
-	}
-	return rp
 }
 
 func parseNudgeAgentIdentity(identity string) config.Agent {
@@ -768,15 +724,11 @@ func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence
 	return time.Since(last) >= quiescence
 }
 
-// maybeStartNudgePoller spawns a background poller that drains the queued-nudge
-// store for providers whose runtime cannot deliver on turn boundaries via hooks.
-// Providers opt in by setting NeedsNudgePoller on their ProviderSpec. The poller
-// is a no-op for providers that drain via UserPromptSubmit-equivalent hooks.
 func maybeStartNudgePoller(target nudgeTarget) {
-	if target.resolved == nil || !target.resolved.NeedsNudgePoller {
+	if target.sessionName == "" {
 		return
 	}
-	if target.sessionName == "" {
+	if target.sessionTransport() == "acp" {
 		return
 	}
 	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {

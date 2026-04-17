@@ -1,21 +1,29 @@
 package main
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
+)
 
 func normalizePathForCompare(path string) string {
-	if path == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return filepath.Clean(path)
+	return pathutil.NormalizePathForCompare(path)
 }
 
 func samePath(a, b string) bool {
-	return normalizePathForCompare(a) == normalizePathForCompare(b)
+	return pathutil.SamePath(a, b)
+}
+
+func pathWithinRoot(path, root string) bool {
+	path = normalizePathForCompare(path)
+	root = normalizePathForCompare(root)
+	if path == "" || root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || rel == "" || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }

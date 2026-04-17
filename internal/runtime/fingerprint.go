@@ -14,7 +14,7 @@ import (
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Env, FingerprintExtra (pool config, etc.),
-// Nudge, PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
+// PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
 // SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
@@ -135,10 +135,6 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 		hashSortedMap(h, cfg.FingerprintExtra)
 	}
 
-	// Nudge
-	h.Write([]byte(cfg.Nudge)) //nolint:errcheck // hash.Write never errors
-	h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
-
 	// PreStart
 	for _, ps := range cfg.PreStart {
 		h.Write([]byte(ps)) //nolint:errcheck // hash.Write never errors
@@ -164,13 +160,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	// use Src/RelDst paths. When a probed entry has an empty ContentHash
 	// (transient I/O error), a stable sentinel is used instead of falling
 	// back to path-based hashing, which would flip fingerprint modes.
-	// Probed entries with SkipFingerprint are excluded entirely — see
-	// issue #682. SkipFingerprint is ignored on config-derived entries
-	// so real config changes always drive drain.
 	for _, cf := range cfg.CopyFiles {
-		if cf.Probed && cf.SkipFingerprint {
-			continue
-		}
 		if cf.Probed {
 			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
@@ -254,9 +244,6 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 				hashSortedMap(h, cfg.FingerprintExtra)
 			}
 		}),
-		"Nudge": fieldHash(func(h hash.Hash) {
-			h.Write([]byte(cfg.Nudge))
-		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
 			for _, ps := range cfg.PreStart {
 				h.Write([]byte(ps))
@@ -277,9 +264,6 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
-				if cf.Probed && cf.SkipFingerprint {
-					continue
-				}
 				if cf.Probed {
 					h.Write([]byte(cf.RelDst))
 					h.Write([]byte{0})
@@ -332,8 +316,6 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
 			fmt.Fprintf(w, "    FPExtra: %v\n", current.FingerprintExtra) //nolint:errcheck // best-effort diag
-		case "Nudge":
-			fmt.Fprintf(w, "    Nudge len: %d\n", len(current.Nudge)) //nolint:errcheck // best-effort diag
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":
@@ -344,9 +326,6 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    SessionSetupScript len: %d\n", len(current.SessionSetupScript)) //nolint:errcheck // best-effort diag
 		case "CopyFiles":
 			for i, cf := range current.CopyFiles {
-				if cf.Probed && cf.SkipFingerprint {
-					continue
-				}
 				fmt.Fprintf(w, "    CopyFiles[%d]: RelDst=%q ContentHash=%q\n", i, cf.RelDst, cf.ContentHash) //nolint:errcheck // best-effort diag
 			}
 		}

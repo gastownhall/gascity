@@ -20,6 +20,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
@@ -68,7 +69,7 @@ func TestGastownSmoke(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() || !strings.HasSuffix(path, ".md.tmpl") {
+			if info.IsDir() || !strings.HasSuffix(path, ".template.md") {
 				return nil
 			}
 
@@ -99,7 +100,7 @@ func TestGastownSmoke(t *testing.T) {
 			t.Fatalf("walking packs dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .md.tmpl files found in packs/")
+			t.Fatal("no .template.md files found in packs/")
 		}
 	})
 
@@ -121,11 +122,19 @@ func TestGastownSmoke(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() || !strings.HasSuffix(path, ".formula.toml") {
+			if info.IsDir() || !formula.IsTOMLFilename(path) {
 				return nil
 			}
 
-			if strings.Contains(path, "/orders/") {
+			// Only consider formulas under a packs/<pack>/formulas/ tree.
+			// Other TOML siblings (pack.toml, agents/*/agent.toml,
+			// commands/*/command.toml, doctor/*/doctor.toml, orders/*)
+			// must not be treated as formulas.
+			slashed := filepath.ToSlash(path)
+			if !strings.Contains(slashed, "/formulas/") {
+				return nil
+			}
+			if strings.Contains(slashed, "/orders/") {
 				return nil
 			}
 
@@ -151,7 +160,7 @@ func TestGastownSmoke(t *testing.T) {
 			t.Fatalf("walking packs dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .formula.toml files found in packs/")
+			t.Fatal("no formula .toml files found in packs/")
 		}
 	})
 

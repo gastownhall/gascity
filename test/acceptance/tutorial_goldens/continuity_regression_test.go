@@ -43,6 +43,8 @@ func TestTutorialContinuity_SessionLookupFlowIsExplicit(t *testing.T) {
 	page03Text := collectPageText(page03)
 
 	for _, want := range []string{
+		"cat pack.toml",
+		"cat agents/reviewer/agent.toml",
 		"gc session list --template my-project/reviewer",
 		"gc session peek mc-8sfd",
 	} {
@@ -76,7 +78,15 @@ func TestTutorialContinuity_CommunicationUsesVisibleWakeAndRigScopedReviewer(t *
 func TestTutorialContinuity_FormulasIntroducesWorkerBeforeUse(t *testing.T) {
 	page05Text := readTutorialPageText(t, "05-formulas.md")
 
-	if !strings.Contains(page05Text, `name = "worker"`) {
+	for _, want := range []string{
+		"gc agent add --name worker",
+		"agents/worker/prompt.template.md",
+	} {
+		if !strings.Contains(page05Text, want) {
+			t.Fatalf("tutorial 05 is missing the worker setup step %q", want)
+		}
+	}
+	if !strings.Contains(page05Text, `gc sling worker mp-2wx`) {
 		t.Fatal("tutorial 05 slings work to worker without first establishing that agent in the prose")
 	}
 }

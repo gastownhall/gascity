@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -41,8 +43,12 @@ type TemplateParams struct {
 	WorkDir string
 	// SessionName is the computed tmux session name.
 	SessionName string
-	// Alias is the configured logical agent/session identity for provider metadata.
+	// Alias is the human-readable session identifier used for commands and mail.
 	Alias string
+	// ConfiguredNamedIdentity marks a canonical named session bead reserved in config.
+	ConfiguredNamedIdentity string
+	// ConfiguredNamedMode records the controller mode for canonical named sessions.
+	ConfiguredNamedMode string
 	// FPExtra carries additional fingerprint data (pool config, etc.).
 	FPExtra map[string]string
 	// ResolvedProvider is the resolved provider spec (for ACP routing, etc.).
@@ -57,25 +63,30 @@ type TemplateParams struct {
 	RigName string
 	// RigRoot is the absolute path to the associated rig root (empty if none).
 	RigRoot string
-	// ConfiguredNamedIdentity is the fully-qualified named-session identity, if any.
-	ConfiguredNamedIdentity string
-	// ConfiguredNamedMode is the configured named-session wake mode, if any.
-	ConfiguredNamedMode string
-	// ManualSession marks sessions created manually rather than from desired config.
-	ManualSession bool
-	// DependencyOnly marks sessions that exist only to satisfy dependency wake logic.
-	DependencyOnly bool
-	// PoolSlot is the 1-based slot index for pooled agents.
-	PoolSlot int
-	// IsACP records whether the session should use ACP startup handling.
-	IsACP bool
-	// HookEnabled reports whether the agent hook is installed for this template.
-	HookEnabled bool
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
+	// IsACP is true if session = "acp".
+	IsACP bool
+	// HookEnabled reports whether provider hooks are installed for this agent.
+	// Hook-enabled providers receive startup context via their hook path
+	// (for example gc prime --hook), so PromptMode=none should not also
+	// fall back to a delayed startup nudge.
+	HookEnabled bool
 	// SessionOverride is the per-agent session provider override (e.g., "acp",
 	// "tmux", "exec:..."). Empty means use the city-level default.
 	SessionOverride string
+	// DependencyOnly marks a realized cold slot kept only so dependency wake
+	// has something concrete to wake even when pool check wants zero.
+	DependencyOnly bool
+	// ManualSession marks a discovered root created outside pool scale logic
+	// (for example via `gc session new`). These sessions stay desired without
+	// inflating poolDesired for config-managed slots.
+	ManualSession bool
+	// PoolSlot is the 1-based slot number within the pool. Set during
+	// buildDesiredState for pool instances so syncSessionBeads can stamp
+	// pool_slot metadata without reverse-engineering the slot from the name
+	// (which fails for namepool-themed instances like "fenrir").
+	PoolSlot int
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -119,17 +130,30 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 4: Resolve overlay directory.
 	overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, p.cityPath)
 
-	// Step 5: Build copy_files and command with settings args.
+	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
 	command := resolved.CommandString()
+	// Append schema-derived default args (e.g., --dangerously-skip-permissions
+	// from EffectiveDefaults["permission_mode"] = "unrestricted").
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + shellquote.Join(defaultArgs)
+	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
-		settingsFile := citylayout.ClaudeHookFilePath(p.cityPath)
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: filepath.Join(".gc", "settings.json")})
+		settingsFile, relDst := claudeSettingsSource(p.cityPath)
+		if settingsFile != "" {
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: settingsFile, RelDst: relDst,
+				Probed: true, ContentHash: runtime.HashPathContent(settingsFile),
+			})
+		}
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: scriptsDir, RelDst: filepath.Join(".gc", "scripts")})
+		copyFiles = append(copyFiles, runtime.CopyEntry{
+			Src: scriptsDir, RelDst: path.Join(".gc", "scripts"),
+			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
+		})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
 
@@ -140,6 +164,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	sessName := p.resolveSessionName(qualifiedName, tmplName)
 
 	// Step 7: Resolve session bead ID for traceability.
+	// Look up the session bead by session_name to get the bead ID (e.g., mc-cnf).
+	// This is what MC uses to link beads → session logs.
 	sessionBeadID := ""
 	if p.sessionBeads != nil {
 		for _, b := range p.sessionBeads.Open() {
@@ -150,9 +176,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := p.beadStore.ListByLabel(sessionBeadLabel, 0); err == nil {
+		if all, err := p.beadStore.List(beads.ListQuery{Label: "gc:session"}); err == nil {
 			for _, b := range all {
-				if b.Status == "closed" {
+				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue
 				}
 				if b.Metadata["session_name"] == sessName {
@@ -209,7 +235,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
+	// Merge fragment sources: V1 global_fragments + inject_fragments,
+	// plus V2 append_fragments from agent defaults.
 	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	if len(p.appendFragments) > 0 {
+		fragments = mergeFragmentLists(fragments, p.appendFragments)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:      p.cityPath,
 		AgentName:     qualifiedName,
@@ -276,6 +307,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
+		ProviderName:           resolved.Kind,
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
@@ -296,6 +328,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
+		IsACP:            cfgAgent.Session == "acp",
 		HookEnabled:      hasHooks,
 		SessionOverride:  cfgAgent.Session,
 	}, nil
@@ -305,15 +338,15 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 	env := map[string]string{
 		// Explicit empty values let tmux unset stale Dolt vars inherited from
 		// the server environment when the current city/rig does not use them.
-		"GC_DOLT_HOST":           "",
-		"GC_DOLT_PORT":           "",
-		"GC_DOLT_USER":           "",
-		"GC_DOLT_PASSWORD":       "",
-		"BEADS_DOLT_SERVER_HOST": "",
-		"BEADS_DOLT_SERVER_PORT": "",
-		"BEADS_DOLT_SERVER_USER": "",
-		"BEADS_DOLT_PASSWORD":    "",
-		"BEADS_DOLT_SERVER_MODE": "1",
+		"GC_DOLT_HOST":             "",
+		"GC_DOLT_PORT":             "",
+		"GC_DOLT_USER":             "",
+		"GC_DOLT_PASSWORD":         "",
+		"BEADS_DOLT_SERVER_HOST":   "",
+		"BEADS_DOLT_SERVER_PORT":   "",
+		"BEADS_DOLT_SERVER_USER":   "",
+		"BEADS_DOLT_PASSWORD":      "",
+		"BEADS_DOLT_SERVER_MODE":   "1",
 		"BEADS_DOLT_SHARED_SERVER": "",
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
@@ -376,6 +409,7 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 	}
 	return env
 }
+
 // templateParamsToConfig converts TemplateParams to the runtime.Config
 // needed by Provider.Start. This mirrors managed.SessionConfig() at
 // internal/agent/agent.go:292-315 — for the same inputs, both must
@@ -386,6 +420,8 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	nudge := tp.Hints.Nudge
 	if tp.Prompt != "" {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			// Hook-enabled providers prime themselves on startup, so the
+			// rendered role prompt must not also be replayed as a user nudge.
 			if !tp.HookEnabled || !tp.ResolvedProvider.SupportsHooks {
 				if nudge != "" {
 					nudge = tp.Prompt + "\n\n---\n\n" + nudge
@@ -417,6 +453,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
 		SessionLive:            tp.Hints.SessionLive,
+		ProviderName:           tp.Hints.ProviderName,
 		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
 		OverlayDir:             tp.Hints.OverlayDir,
 		CopyFiles:              tp.Hints.CopyFiles,
@@ -527,8 +564,6 @@ func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessa
 			"cityName":    filepath.Base(tp.Env["GC_CITY_PATH"]),
 			"rigName":     tp.RigName,
 			"rigPath":     tp.RigRoot,
-			// T3 virtual folders group by gc.agent, so use the stable template
-			// identity here and keep per-instance identity in gc.sessionName.
 			"agent":       tp.TemplateName,
 			"template":    tp.TemplateName,
 			"sessionName": tp.SessionName,
@@ -563,18 +598,18 @@ func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessa
 				"GC_AGENT":               tp.Env["GC_AGENT"],
 				"GC_PROVIDER":            tp.Env["GC_PROVIDER"],
 				"GC_TEMPLATE":            tp.Env["GC_TEMPLATE"],
-				"GC_BEAD":               tp.Env["GC_BEAD"],
+				"GC_BEAD":                tp.Env["GC_BEAD"],
 				"GC_BEAD_TITLE":          tp.Env["GC_BEAD_TITLE"],
-				"GC_CONVOY":             tp.Env["GC_CONVOY"],
+				"GC_CONVOY":              tp.Env["GC_CONVOY"],
 				"GC_CONVOY_TITLE":        tp.Env["GC_CONVOY_TITLE"],
 				"GC_CONVOY_STATUS":       tp.Env["GC_CONVOY_STATUS"],
 				"GC_CONVOY_CLOSED_COUNT": tp.Env["GC_CONVOY_CLOSED_COUNT"],
 				"GC_CONVOY_TOTAL_COUNT":  tp.Env["GC_CONVOY_TOTAL_COUNT"],
-				"GC_MOLECULE":           tp.Env["GC_MOLECULE"],
-				"GC_FORMULA":            tp.Env["GC_FORMULA"],
-				"GC_CITY_PATH":          tp.Env["GC_CITY_PATH"],
-				"GC_RIG":                tp.Env["GC_RIG"],
-				"GC_SESSION_NAME":       tp.Env["GC_SESSION_NAME"],
+				"GC_MOLECULE":            tp.Env["GC_MOLECULE"],
+				"GC_FORMULA":             tp.Env["GC_FORMULA"],
+				"GC_CITY_PATH":           tp.Env["GC_CITY_PATH"],
+				"GC_RIG":                 tp.Env["GC_RIG"],
+				"GC_SESSION_NAME":        tp.Env["GC_SESSION_NAME"],
 			},
 		},
 		"resume": map[string]any{
