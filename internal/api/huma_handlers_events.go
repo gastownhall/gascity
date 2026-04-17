@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"net/http"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -93,28 +92,6 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 	resp := &EventEmitOutput{}
 	resp.Body.Status = "recorded"
 	return resp, nil
-}
-
-// registerEventStreamRoute wires up GET /v0/events/stream via registerSSE so
-// the SSE event schema is documented in the OpenAPI spec.
-//
-// The typed event map declares two event types that clients may receive:
-//   - "event": an eventStreamEnvelope with the actual event plus optional
-//     workflow projection
-//   - "heartbeat": a periodic keepalive event used to hold the connection
-//     open through intermediate proxies
-func (s *Server) registerEventStreamRoute() {
-	registerSSE(s.humaAPI, huma.Operation{
-		OperationID: "stream-events",
-		Method:      http.MethodGet,
-		Path:        "/v0/events/stream",
-		Summary:     "Stream city events in real time",
-		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
-			"Supports reconnection via Last-Event-ID header or after_seq query param.",
-	}, map[string]any{
-		"event":     eventStreamEnvelope{},
-		"heartbeat": HeartbeatEvent{},
-	}, s.checkEventStream, s.streamEvents)
 }
 
 // checkEventStream is the precheck for GET /v0/events/stream. It runs before

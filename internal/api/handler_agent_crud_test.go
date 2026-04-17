@@ -10,12 +10,12 @@ import (
 
 func TestHandleAgentCreate(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"coder","provider":"claude"}`
-	req := newPostRequest("/v0/agents", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
@@ -35,12 +35,12 @@ func TestHandleAgentCreate(t *testing.T) {
 
 func TestHandleAgentCreate_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"provider":"claude"}`
-	req := newPostRequest("/v0/agents", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
@@ -49,13 +49,13 @@ func TestHandleAgentCreate_MissingName(t *testing.T) {
 
 func TestHandleAgentUpdate(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"provider":"gemini"}`
-	req := httptest.NewRequest("PATCH", "/v0/agent/myrig/worker", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/agent/myrig/worker"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -75,13 +75,13 @@ func TestHandleAgentUpdate(t *testing.T) {
 
 func TestHandleAgentUpdate_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"provider":"gemini"}`
-	req := httptest.NewRequest("PATCH", "/v0/agent/nonexistent", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/agent/nonexistent"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -90,12 +90,12 @@ func TestHandleAgentUpdate_NotFound(t *testing.T) {
 
 func TestHandleAgentDelete(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/agent/myrig/worker"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -111,12 +111,12 @@ func TestHandleAgentDelete(t *testing.T) {
 
 func TestHandleAgentDelete_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/agent/nonexistent", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/agent/nonexistent"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -125,13 +125,13 @@ func TestHandleAgentDelete_NotFound(t *testing.T) {
 
 func TestHandleCityPatch_Suspend(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"suspended": true}`
-	req := httptest.NewRequest("PATCH", "/v0/city", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, ""), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -144,13 +144,13 @@ func TestHandleCityPatch_Suspend(t *testing.T) {
 func TestHandleCityPatch_Resume(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.cfg.Workspace.Suspended = true
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"suspended": false}`
-	req := httptest.NewRequest("PATCH", "/v0/city", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, ""), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -162,12 +162,12 @@ func TestHandleCityPatch_Resume(t *testing.T) {
 
 func TestCSRF_BlocksDeleteWithoutHeader(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/agent/myrig/worker"), nil)
 	// No X-GC-Request header.
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
@@ -192,13 +192,13 @@ func TestCSRF_BlocksDeleteWithoutHeader(t *testing.T) {
 
 func TestReadOnly_BlocksPatch(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := NewReadOnly(fs)
+	h := newTestCityHandlerReadOnly(t, fs)
 
 	body := `{"suspended": true}`
-	req := httptest.NewRequest("PATCH", "/v0/city", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, ""), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
@@ -207,12 +207,12 @@ func TestReadOnly_BlocksPatch(t *testing.T) {
 
 func TestReadOnly_BlocksDelete(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := NewReadOnly(fs)
+	h := newTestCityHandlerReadOnly(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/agent/myrig/worker"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)

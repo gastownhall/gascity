@@ -12,11 +12,11 @@ import (
 // accessible at /openapi.json and contains expected metadata.
 func TestOpenAPISpecServed(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", "/openapi.json", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /openapi.json status = %d, want %d", rec.Code, http.StatusOK)
@@ -43,8 +43,8 @@ func TestOpenAPISpecServed(t *testing.T) {
 	if !ok {
 		t.Fatal("missing info in OpenAPI spec")
 	}
-	if title, _ := info["title"].(string); title != "Gas City API" {
-		t.Errorf("info.title = %q, want %q", title, "Gas City API")
+	if title, _ := info["title"].(string); title != "Gas City Supervisor API" {
+		t.Errorf("info.title = %q, want %q", title, "Gas City Supervisor API")
 	}
 }
 
@@ -52,11 +52,11 @@ func TestOpenAPISpecServed(t *testing.T) {
 // the same JSON shape as the original handler.
 func TestHumaHealthEndpoint(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/health", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/health"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /health status = %d, want %d", rec.Code, http.StatusOK)

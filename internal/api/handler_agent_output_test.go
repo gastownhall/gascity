@@ -49,9 +49,10 @@ func TestAgentOutputConversation(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=0", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output?tail=0"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -93,9 +94,10 @@ func TestAgentOutputConversationUsesConfiguredWorkDir(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=0", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output?tail=0"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -115,11 +117,11 @@ func TestAgentOutputConversationUsesConfiguredWorkDir(t *testing.T) {
 
 func TestAgentOutputNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent/output", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -136,9 +138,10 @@ func TestAgentOutputCityScoped(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/mayor/output?tail=0", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/mayor/output?tail=0"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
@@ -179,11 +182,12 @@ func TestAgentOutputPagination(t *testing.T) {
 	writeSessionJSONL(t, searchBase, rigDir, lines...)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// tail=1 should return messages from the last compact boundary onward.
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=1", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output?tail=1"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
@@ -221,9 +225,10 @@ func TestAgentOutputCorruptedSessionFile(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	// The corrupt file IS found by FindSessionFile, but ReadFile returns
 	// an empty session (no valid entries). The handler should return a
@@ -253,16 +258,17 @@ func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -283,11 +289,11 @@ func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 
 func TestAgentOutputStreamNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent/output/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent/output/stream"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -297,11 +303,11 @@ func TestAgentOutputStreamNotFound(t *testing.T) {
 func TestAgentOutputStreamNotRunning(t *testing.T) {
 	state := newFakeState(t)
 	// Agent exists in config but no session file and not running → 404.
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -319,16 +325,17 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -381,16 +388,17 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 	<-done

@@ -1112,34 +1112,6 @@ func (s *Server) resolveSessionStream(input *SessionStreamInput) (*sessionStream
 	return &sessionStreamState{info: info, path: path, running: running}, nil
 }
 
-// registerSessionStreamRoute wires up GET /v0/session/{id}/stream via
-// registerSSE so the SSE event schemas appear in the OpenAPI spec.
-//
-// Event types emitted:
-//   - "turn": session transcript turn (conversation format)
-//   - "message": raw session transcript message (JSONL format)
-//   - "activity": session activity state change (idle/in-turn)
-//   - "pending": pending interaction prompt (tool approval)
-//   - "heartbeat": periodic keepalive
-func (s *Server) registerSessionStreamRoute() {
-	registerSSE(s.humaAPI, huma.Operation{
-		OperationID: "stream-session",
-		Method:      http.MethodGet,
-		Path:        "/v0/session/{id}/stream",
-		Summary:     "Stream session output in real time",
-		Description: "Server-Sent Events stream of session transcript updates. " +
-			"Streams turns (conversation format) or raw messages (JSONL format) " +
-			"based on the format query parameter. Emits activity and pending events " +
-			"for tool approval prompts.",
-	}, map[string]any{
-		"turn":      sessionTranscriptResponse{},
-		"message":   sessionRawTranscriptResponse{},
-		"activity":  SessionActivityEvent{},
-		"pending":   runtime.PendingInteraction{},
-		"heartbeat": HeartbeatEvent{},
-	}, s.checkSessionStream, s.streamSession)
-}
-
 // checkSessionStream is the precheck for GET /v0/session/{id}/stream.
 func (s *Server) checkSessionStream(_ context.Context, input *SessionStreamInput) error {
 	_, err := s.resolveSessionStream(input)

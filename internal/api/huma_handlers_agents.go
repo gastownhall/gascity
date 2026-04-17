@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"net/http"
 	"strings"
 	"time"
 
@@ -432,32 +431,6 @@ func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 		running: running,
 		cfg:     cfg,
 	}, nil
-}
-
-// registerAgentOutputStreamRoutes wires up the two agent output stream routes
-// (unqualified and qualified names) via registerSSE. Both emit "turn" events
-// carrying agentOutputResponse, plus periodic heartbeats.
-func (s *Server) registerAgentOutputStreamRoutes() {
-	eventMap := map[string]any{
-		"turn":      agentOutputResponse{},
-		"heartbeat": HeartbeatEvent{},
-	}
-
-	registerSSE(s.humaAPI, huma.Operation{
-		OperationID: "stream-agent-output",
-		Method:      http.MethodGet,
-		Path:        "/v0/agent/{base}/output/stream",
-		Summary:     "Stream agent output in real time",
-		Description: "Server-Sent Events stream of agent output (session log tail or tmux pane polling).",
-	}, eventMap, s.checkAgentOutputStream, s.streamAgentOutput)
-
-	registerSSE(s.humaAPI, huma.Operation{
-		OperationID: "stream-agent-output-qualified",
-		Method:      http.MethodGet,
-		Path:        "/v0/agent/{dir}/{base}/output/stream",
-		Summary:     "Stream agent output in real time (qualified name)",
-		Description: "Server-Sent Events stream of agent output for qualified (rig-prefixed) agent names.",
-	}, eventMap, s.checkAgentOutputStreamQualified, s.streamAgentOutputQualified)
 }
 
 func (s *Server) checkAgentOutputStream(_ context.Context, input *AgentOutputStreamInput) error {
