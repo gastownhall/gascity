@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -555,6 +557,55 @@ func TestWakeReasons_ManualPoolSessionGetsWakeConfigOnImplicitAgent(t *testing.T
 	}
 }
 
+func TestWakeReasons_SessionOriginManualPoolSessionGetsWakeConfigOnImplicitAgent(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	reasons := wakeReasons(makeBead("b1", map[string]string{
+		"template":       "pooled",
+		"session_name":   "manual-pooled",
+		"session_origin": "manual",
+	}), cfg, nil, map[string]int{"pooled": 0}, nil, nil, clk)
+
+	foundWakeConfig := false
+	for _, r := range reasons {
+		if r == WakeConfig {
+			foundWakeConfig = true
+			break
+		}
+	}
+	if !foundWakeConfig {
+		t.Fatalf("manual session_origin pool session should get WakeConfig, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_ManualFixedTemplateSessionGetsWakeConfig(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	reasons := wakeReasons(makeBead("b1", map[string]string{
+		"template":       "worker",
+		"session_name":   "manual-worker",
+		"session_origin": "manual",
+	}), cfg, nil, map[string]int{"worker": 0}, nil, nil, clk)
+
+	if !containsWakeReason(reasons, WakeConfig) {
+		t.Fatalf("manual fixed-template session should get WakeConfig, got %v", reasons)
+	}
+}
+
 func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -589,7 +640,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 		},
 	}
 
-	runner := func(command, _ string) (string, error) {
+	runner := func(command, _ string, _ map[string]string) (string, error) {
 		if strings.Contains(command, "gc.routed_to=worker") {
 			return `[{"id":"BL-42"}]`, nil
 		}
@@ -618,7 +669,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 		},
 	}
 
-	runner := func(_ string, dir string) (string, error) {
+	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		// The dir must be the resolved absolute path, not the relative "myrig".
 		if dir == rigDir {
 			return "MC-1\n", nil
@@ -643,7 +694,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 		},
 	}
 
-	runner := func(_ string, dir string) (string, error) {
+	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		if dir == rigDir {
 			return "MC-1\n", nil
 		}
@@ -653,6 +704,53 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when rig root is configured externally")
+	}
+}
+
+func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "demo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "dm",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "3308",
+		DoltUser:       "rig-user",
+	})
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name: "demo",
+			Path: rigDir,
+		}},
+		Agents: []config.Agent{{
+			Name:      "worker",
+			Dir:       "demo",
+			WorkQuery: `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+		}},
+	}
+
+	work := computeWorkSet(cfg, shellScaleCheck, "test-city", cityDir, nil, nil)
+	if !work["demo/worker"] {
+		t.Fatal("expected explicit rig work query to see rig-scoped password and report work")
 	}
 }
 
@@ -671,7 +769,7 @@ func TestComputeWorkSet_CommandError(t *testing.T) {
 		Agents: []config.Agent{{Name: "worker"}},
 	}
 
-	runner := func(_, _ string) (string, error) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "", fmt.Errorf("connection refused")
 	}
 
@@ -686,7 +784,7 @@ func TestComputeWorkSet_IgnoresNoReadyMessage(t *testing.T) {
 		Agents: []config.Agent{{Name: "worker"}},
 	}
 
-	runner := func(_, _ string) (string, error) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 
@@ -1097,7 +1195,7 @@ func TestIsPoolExcess(t *testing.T) {
 		want     bool
 	}{
 		{"demand exists", "worker", false},
-		{"no demand", "singleton", true},
+		{"no demand", "singleton", false},
 		{"unknown template", "missing", false},
 	}
 
@@ -1196,6 +1294,104 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	healState(&session, false, store, clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
+	}
+}
+
+func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
+	now := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	tests := []struct {
+		name    string
+		alive   bool
+		session beads.Bead
+		want    map[string]string
+	}{
+		{
+			name:  "alive runtime writes awake advisory state",
+			alive: true,
+			session: makeBead("b1", map[string]string{
+				"state": "asleep",
+			}),
+			want: map[string]string{"state": "awake"},
+		},
+		{
+			name:  "drained compatibility state becomes asleep with drained reason",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state": "drained",
+			}),
+			want: map[string]string{
+				"state":        "asleep",
+				"sleep_reason": "drained",
+			},
+		},
+		{
+			name:  "fresh creating stays creating without write",
+			alive: false,
+			session: func() beads.Bead {
+				b := makeBead("b1", map[string]string{"state": "creating"})
+				b.CreatedAt = now.Add(-30 * time.Second)
+				return b
+			}(),
+			want: nil,
+		},
+		{
+			name:  "dead blank legacy state heals to asleep",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state": "",
+			}),
+			want: map[string]string{"state": "asleep"},
+		},
+		{
+			name:  "dead blank legacy state with create claim heals to creating",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state":                "",
+				"pending_create_claim": "true",
+			}),
+			want: map[string]string{"state": "creating"},
+		},
+		{
+			name:  "stale creating heals to asleep and resets stale resume identity",
+			alive: false,
+			session: func() beads.Bead {
+				b := makeBead("b1", map[string]string{
+					"state":               "creating",
+					"session_key":         "old-key",
+					"started_config_hash": "old-hash",
+				})
+				b.CreatedAt = now.Add(-2 * time.Minute)
+				return b
+			}(),
+			want: map[string]string{
+				"state":                      "asleep",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := healStatePatch(tt.session, tt.alive, clk)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("healStatePatch = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
+	session := makeBead("b1", map[string]string{
+		"state": "creating",
+	})
+	session.CreatedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if got := healStatePatch(session, false, nil); got != nil {
+		t.Fatalf("healStatePatch with nil clock = %#v, want nil patch for fresh-compatible creating", got)
 	}
 }
 

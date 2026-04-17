@@ -394,6 +394,26 @@ func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
 	}
 }
 
+func TestCancelSessionDrain_NonCancelableReason(t *testing.T) {
+	sp := runtime.NewFake()
+	dt := newDrainTracker()
+	dt.set("b1", &drainState{
+		reason:     "orphaned",
+		generation: 5,
+	})
+
+	session := makeBead("b1", map[string]string{
+		"generation": "5",
+	})
+
+	if cancelSessionDrain(session, sp, dt) {
+		t.Error("cancel should fail for non-cancelable drain reason")
+	}
+	if ds := dt.get("b1"); ds == nil || ds.reason != "orphaned" {
+		t.Errorf("non-cancelable drain should remain, got %+v", ds)
+	}
+}
+
 func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -425,7 +445,7 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}, cfg, map[string]int{}, nil, nil, clk)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Drain should be cleaned up.
 	if dt.get(b.ID) != nil {
@@ -458,6 +478,7 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 			"session_name": "test-session",
 			"template":     "worker",
 			"generation":   "3",
+			"state":        "active",
 		},
 	})
 
@@ -570,16 +591,8 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 		return &got
 	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
-	// Drain should be canceled — orphaned drains ARE cancelable in the
-	// advanceSessionDrains cancelation check since they're based on
-	// desired-state membership. But wait: orphaned IS in the non-cancelable
-	// list (reason != "config-drift" && reason != "orphaned" && reason != "suspended").
-	// So the drain survives cancelation but should still have sent the
-	// deferred interrupt. Let's verify the interrupt WAS sent for a
-	// non-cancelable drain.
-
-	// For orphaned drains (non-cancelable), GC_DRAIN_ACK should be set
-	// on the advance tick since the drain isn't canceled.
+	// Orphaned drains are non-cancelable because the session is leaving the
+	// desired set. The drain survives and receives its deferred signal.
 	ds := dt.get(b.ID)
 	if ds == nil {
 		t.Fatal("orphaned drain should not be canceled by wake reasons")
@@ -658,7 +671,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 	}
 }
 
-func TestAdvanceSessionDrains_ConfigDriftNotCancelable(t *testing.T) {
+func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	sp := runtime.NewFake()
@@ -680,26 +693,20 @@ func TestAdvanceSessionDrains_ConfigDriftNotCancelable(t *testing.T) {
 	dt.set(b.ID, &drainState{
 		startedAt:  now.Add(-10 * time.Second),
 		deadline:   now.Add(20 * time.Second),
-		reason:     "config-drift", // NOT cancelable
+		reason:     "config-drift",
 		generation: 3,
 	})
 
-	// Config has the worker agent — but config-drift drains are not canceled.
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker"},
-		},
-	}
-
-	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}, cfg, map[string]int{}, nil, nil, clk)
+	}, []beads.Bead{b}, map[string]wakeEvaluation{
+		b.ID: {Reasons: []WakeReason{WakePending}},
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk, nil)
 
-	// Drain should NOT be canceled — config-drift is non-cancelable.
-	// Session is alive and deadline not reached, so drain continues.
-	if dt.get(b.ID) == nil {
-		t.Error("config-drift drain should not be canceled by wake reasons")
+	if dt.get(b.ID) != nil {
+		t.Error("config-drift drain should be canceled by a pending wake")
 	}
 }
 
@@ -843,6 +850,28 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	}
 	if got.Metadata["last_woke_at"] != "" {
 		t.Errorf("last_woke_at should be cleared, got %q", got.Metadata["last_woke_at"])
+	}
+}
+
+func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":         "test-session",
+			"pending_create_claim": "true",
+		},
+	})
+
+	ds := &drainState{reason: "idle"}
+	completeDrain(&b, store, ds, clk)
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared after drain completion", got.Metadata["pending_create_claim"])
 	}
 }
 

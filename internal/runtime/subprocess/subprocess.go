@@ -373,7 +373,16 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 }
 
 func (p *Provider) metaPath(name, key string) string {
-	return filepath.Join(p.dir, name+".meta."+key)
+	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
+}
+
+func metaFilePrefix(name string) string {
+	return "m" + metaFileKey(name)
+}
+
+func metaFileKey(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 // --- Unix socket helpers ---

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -71,6 +72,13 @@ func effectiveCityName(cityPath string) (string, error) {
 		name = cfg.Workspace.Name
 	}
 	return name, nil
+}
+
+func registeredCityName(cityPath, nameOverride string) (string, error) {
+	if alias := strings.TrimSpace(nameOverride); alias != "" {
+		return alias, nil
+	}
+	return effectiveCityName(cityPath)
 }
 
 func normalizeRegisteredCityPath(cityPath string) (string, error) {
@@ -138,6 +146,10 @@ func ensureNoStandaloneController(cityPath string) (int, error) {
 }
 
 func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
+	return registerCityWithSupervisorNamed(cityPath, "", stdout, stderr, commandName, showProgress)
+}
+
+func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
 	if pid, err := ensureNoStandaloneController(cityPath); err != nil {
 		if errors.Is(err, errControllerAlreadyRunning) {
@@ -164,7 +176,7 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	name, err := effectiveCityName(cityPath)
+	name, err := registeredCityName(cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -239,23 +251,22 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 	var lastStatus string
 	for {
 		running, status, known := supervisorCityRunningHook(cityPath)
-		if known {
-			if running == wantRunning {
-				return nil
-			}
-			if !wantRunning {
-				return fmt.Errorf("city is still running under supervisor")
-			}
+		switch {
+		case known && running == wantRunning:
+			return nil
+		case known && !wantRunning:
+			return fmt.Errorf("city is still running under supervisor")
+		case known && wantRunning && status == "init_failed":
 			// If the supervisor reports an init failure, surface the
 			// error immediately instead of polling until timeout.
-			if wantRunning && status == "init_failed" {
-				if errMsg := supervisorCityError(cityPath); errMsg != "" {
-					return fmt.Errorf("city failed to start: %s", errMsg)
-				}
-				return fmt.Errorf("city failed to start under supervisor")
+			if errMsg := supervisorCityError(cityPath); errMsg != "" {
+				return fmt.Errorf("city failed to start: %s", errMsg)
 			}
-		} else if !wantRunning {
+			return fmt.Errorf("city failed to start under supervisor")
+		case !known && !wantRunning:
 			return nil
+		case !known && supervisorAliveHook() == 0:
+			return fmt.Errorf("supervisor stopped before city became ready")
 		}
 		if stdout != nil && status != "" && status != lastStatus {
 			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout

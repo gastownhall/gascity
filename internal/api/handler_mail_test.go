@@ -7,16 +7,17 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestMailLifecycle(t *testing.T) {
-	state := newFakeState(t)
+	state := newSessionFakeState(t)
 	srv := New(state)
 
-	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
-	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
+	body := `{"from":"mayor","to":"myrig/worker","subject":"Review needed","body":"Please check gc-456"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -30,11 +31,11 @@ func TestMailLifecycle(t *testing.T) {
 	if sent.Subject != "Review needed" {
 		t.Errorf("Subject = %q, want %q", sent.Subject, "Review needed")
 	}
-	if sent.To != "myrig/worker" {
-		t.Errorf("To = %q, want %q (bare name should resolve to qualified)", sent.To, "myrig/worker")
+	if sent.To == "" {
+		t.Fatal("To is empty, want concrete materialized session ID")
 	}
 
-	// Check inbox using the resolved qualified name.
+	// Check inbox using the same logical named target the send API accepts.
 	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -43,6 +44,72 @@ func TestMailLifecycle(t *testing.T) {
 		Items []mail.Message `json:"items"`
 		Total int            `json:"total"`
 	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("logical-target inbox Total = %d, want 1", inbox.Total)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].ID != sent.ID {
+		t.Fatalf("logical-target inbox items = %#v, want sent message %s", inbox.Items, sent.ID)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail/count?agent=myrig/worker", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var count map[string]int
+	json.NewDecoder(rec.Body).Decode(&count) //nolint:errcheck
+	if count["total"] != 1 || count["unread"] != 1 {
+		t.Fatalf("logical-target count = %#v, want total=1 unread=1", count)
+	}
+
+	// Named-session mail remains visible through logical queries after the
+	// configured session is restarted onto a new bead.
+	oldSession, err := state.cityBeadStore.Get(sent.To)
+	if err != nil {
+		t.Fatalf("get materialized session %s: %v", sent.To, err)
+	}
+	if sessionName := oldSession.Metadata["session_name"]; sessionName != "" {
+		if err := state.sp.Stop(sessionName); err != nil {
+			t.Fatalf("stop materialized session %s: %v", sessionName, err)
+		}
+	}
+	if err := state.cityBeadStore.Close(sent.To); err != nil {
+		t.Fatalf("close materialized session %s: %v", sent.To, err)
+	}
+	freshID, err := srv.resolveSessionIDMaterializingNamed(state.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("rematerialize named session: %v", err)
+	}
+	if freshID == sent.To {
+		t.Fatalf("rematerialized session ID = %q, want a fresh bead after close", freshID)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker&status=all", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("logical-target inbox after rematerialize Total = %d, want 1", inbox.Total)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].ID != sent.ID {
+		t.Fatalf("logical-target inbox after rematerialize items = %#v, want sent message %s", inbox.Items, sent.ID)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail/count?agent=myrig/worker", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	json.NewDecoder(rec.Body).Decode(&count) //nolint:errcheck
+	if count["total"] != 1 || count["unread"] != 1 {
+		t.Fatalf("logical-target count after rematerialize = %#v, want total=1 unread=1", count)
+	}
+
+	// Check inbox using the concrete materialized session ID.
+	req = httptest.NewRequest("GET", "/v0/mail?agent="+sent.To, nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
 	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
 	if inbox.Total != 1 {
 		t.Fatalf("inbox Total = %d, want 1", inbox.Total)
@@ -58,7 +125,7 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Inbox should be empty now (only unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
+	req = httptest.NewRequest("GET", "/v0/mail?agent="+sent.To, nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -83,6 +150,109 @@ func TestMailLifecycle(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("archive status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestMailSendAllowsHumanRecipient(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+
+	body := `{"from":"myrig/worker","to":"human","subject":"Done","body":"Task complete"}`
+	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var sent mail.Message
+	json.NewDecoder(rec.Body).Decode(&sent) //nolint:errcheck
+	if sent.To != "human" {
+		t.Fatalf("sent To = %q, want human", sent.To)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail?agent=human", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("human inbox Total = %d, want 1", inbox.Total)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].ID != sent.ID {
+		t.Fatalf("human inbox items = %#v, want sent message %s", inbox.Items, sent.ID)
+	}
+}
+
+func TestMailNamedSessionQueryExcludesOrdinaryBackingTemplateSessions(t *testing.T) {
+	state := newSessionFakeState(t)
+	srv := New(state)
+
+	namedID, err := srv.resolveSessionIDMaterializingNamed(state.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("materialize named session: %v", err)
+	}
+	ordinary, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "ordinary worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-ordinary-worker",
+			"template":     "myrig/worker",
+			"agent_name":   "myrig/worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create ordinary backing-template session: %v", err)
+	}
+	namedMsg, err := state.cityMailProv.Send("human", namedID, "named", "named body")
+	if err != nil {
+		t.Fatalf("send named message: %v", err)
+	}
+	legacyMsg, err := state.cityMailProv.Send("human", "myrig/worker", "legacy named", "legacy body")
+	if err != nil {
+		t.Fatalf("send legacy logical named message: %v", err)
+	}
+	ordinaryMsg, err := state.cityMailProv.Send("human", ordinary.ID, "ordinary", "ordinary body")
+	if err != nil {
+		t.Fatalf("send ordinary message: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker&status=all", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 2 {
+		t.Fatalf("logical named inbox Total = %d, want 2; items=%#v", inbox.Total, inbox.Items)
+	}
+	gotIDs := make(map[string]bool, len(inbox.Items))
+	for _, item := range inbox.Items {
+		gotIDs[item.ID] = true
+	}
+	if !gotIDs[namedMsg.ID] || !gotIDs[legacyMsg.ID] || gotIDs[ordinaryMsg.ID] {
+		t.Fatalf("logical named inbox item IDs = %#v, want named %s and legacy %s only", gotIDs, namedMsg.ID, legacyMsg.ID)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail/count?agent=myrig/worker", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var count map[string]int
+	json.NewDecoder(rec.Body).Decode(&count) //nolint:errcheck
+	if count["total"] != 2 || count["unread"] != 2 {
+		t.Fatalf("logical named count = %#v, want total=2 unread=2", count)
 	}
 }
 
@@ -349,10 +519,10 @@ func TestMailThreadIncludesRig(t *testing.T) {
 }
 
 func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
-	state := newFakeState(t)
+	state := newSessionFakeState(t)
 	srv := New(state)
 
-	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
+	body := `{"rig":"test-city","from":"alice","to":"myrig/worker","subject":"Hi","body":"hello"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec := httptest.NewRecorder()

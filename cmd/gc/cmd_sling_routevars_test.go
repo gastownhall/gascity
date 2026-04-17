@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *testing.T) {
@@ -40,10 +41,12 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
 			},
 			{
-				ID:       "demo.design",
-				Title:    "Design",
-				Type:     "task",
-				Assignee: "{{design_target}}",
+				ID:    "demo.design",
+				Title: "Design",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "{{design_target}}",
+				},
 			},
 			{
 				ID:    "demo.review",
@@ -66,7 +69,7 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 		t.Fatalf("expected non-empty sessions for frontend agents, got claude=%q codex=%q", claudeSession, codexSession)
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeSession, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 
@@ -168,10 +171,12 @@ type = "task"
 		Cfg:      cfg,
 		Store:    store,
 		StoreRef: "city:test-city",
+		Resolver: cliAgentResolver{},
+		Notify:   cliNotifier{},
 	}
 
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	result, err := instantiateSlingFormula(
+	result, err := sling.InstantiateSlingFormula(
 		context.Background(),
 		"wf-test",
 		[]string{formulaDir},
@@ -179,7 +184,7 @@ type = "task"
 		"", "", "", a, deps,
 	)
 	if err != nil {
-		t.Fatalf("instantiateSlingFormula: %v", err)
+		t.Fatalf("InstantiateSlingFormula: %v", err)
 	}
 	if result.RootID == "" {
 		t.Fatal("RootID is empty")

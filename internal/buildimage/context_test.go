@@ -175,7 +175,7 @@ dir = "my-formulas"
 name = "mayor"
 prompt_template = "prompts/mayor.md"
 `)
-	writeFile(t, cityDir, "my-formulas/custom.formula.toml", "name = \"custom\"\n")
+	writeFile(t, cityDir, "my-formulas/custom.toml", "name = \"custom\"\n")
 	writeFile(t, cityDir, "prompts/mayor.md", "You are the mayor.")
 
 	err := AssembleContext(Options{
@@ -187,7 +187,7 @@ prompt_template = "prompts/mayor.md"
 	}
 
 	assertFileExists(t, outputDir, "workspace/fragments/ops.toml")
-	assertFileExists(t, outputDir, "workspace/my-formulas/custom.formula.toml")
+	assertFileExists(t, outputDir, "workspace/my-formulas/custom.toml")
 	assertFileExists(t, outputDir, "workspace/prompts/mayor.md")
 }
 
@@ -218,7 +218,7 @@ func TestExcludedPath(t *testing.T) {
 		{".gc/cache/packs/remote/.git/HEAD", true},
 		{".gc/runtime/worktrees/agent/file.txt", true},
 		{".gc/prompts/mayor.md", true},
-		{".gc/formulas/test.formula.toml", true},
+		{".gc/formulas/test.toml", true},
 		{".gc/scripts/setup.sh", true},
 		{".gc/settings.json", true},
 		{".env", true},

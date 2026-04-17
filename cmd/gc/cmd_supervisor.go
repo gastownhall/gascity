@@ -966,6 +966,7 @@ func reconcileCities(
 		watchDirs := config.WatchDirs(prov, cfg, path)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
+		configDirty := &atomic.Bool{}
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
@@ -981,6 +982,7 @@ func reconcileCities(
 				TomlPath:                tomlPath,
 				WatchDirs:               watchDirs,
 				ConfigRev:               configRev,
+				ConfigDirty:             configDirty,
 				Cfg:                     cfg,
 				SP:                      sp,
 				Publication:             publication,
@@ -1017,7 +1019,7 @@ func reconcileCities(
 		// Wire API state.
 		var cs *controllerState
 		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cfg, sp, eventProv, cityName, path)
+			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
 			return nil
 		}); err != nil {
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
@@ -1083,8 +1085,8 @@ func reconcileCities(
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
-		sockPath := controllerSocketPath(path)
-		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh, controlDispatcherCh)
+		sockPath := filepath.Join(path, ".gc", "controller.sock")
+		lis, lisErr := startControllerSocket(path, cityCancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
@@ -1251,7 +1253,6 @@ func reconcileCities(
 			}()
 			defer l.Close() //nolint:errcheck // close listener (after socket removal)
 			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
-			defer cityRuntime.shutdown()
 			cityRuntime.run(cityCtx)
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
@@ -1432,27 +1433,31 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		}
 	}
 
-	// Materialize Claude skill stubs.
-	if cfg.Workspace.Provider == "claude" {
-		dirs := []string{cityPath}
-		for _, r := range cfg.Rigs {
-			if r.Path != "" {
-				dirs = append(dirs, r.Path)
-			}
-		}
-		if err := runStep("materializing_skill_stubs", func() error {
-			return materializeSkillStubs(dirs...)
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': skill stubs: %v\n", cityName, err) //nolint:errcheck
-		}
-	}
-
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {
 		return config.ValidateAgents(cfg.Agents)
 	}); err != nil {
 		return fmt.Errorf("validate agents: %w", err)
 	}
+
+	// Skill collision validation precedes materialization so a
+	// collision cannot produce half-written sinks. Errors abort the
+	// tick without touching materialization state; the operator
+	// sees the collision message on the supervisor's stderr stream.
+	if err := runStep("validating_skill_collisions", func() error {
+		return checkSkillCollisions(cfg, cityPath)
+	}); err != nil {
+		return fmt.Errorf("validate skill collisions: %w", err)
+	}
+
+	// Stage-1 skill materialization. Runs on every tick so
+	// catalog edits land without requiring a supervisor restart.
+	// Idempotent — converged passes create nothing new.
+	// runStage1SkillMaterialization logs all errors inline and
+	// returns nil; this step cannot fail the tick.
+	_ = runStep("materializing_skills", func() error {
+		return runStage1SkillMaterialization(cityPath, cfg, stderr)
+	})
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if err := runStep("validating_hooks", func() error {

@@ -85,9 +85,14 @@ func computePoolDesiredStates(
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, or alias.
 	assigneeToSessionBeadID := make(map[string]string)
+	sessionBeadTemplate := make(map[string]string)
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
+		}
+		template := strings.TrimSpace(sb.Metadata["template"])
+		if template != "" {
+			sessionBeadTemplate[sb.ID] = template
 		}
 		assigneeToSessionBeadID[sb.ID] = sb.ID
 		if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
@@ -106,15 +111,15 @@ func computePoolDesiredStates(
 		if agent.Suspended {
 			continue
 		}
+		if !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
 		template := agent.QualifiedName()
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
 			routedTo := wb.Metadata["gc.routed_to"]
-			if routedTo != template {
-				continue
-			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
@@ -123,6 +128,15 @@ func computePoolDesiredStates(
 				continue
 			}
 			sessionBeadID := assigneeToSessionBeadID[assignee]
+			if routedTo == "" && sessionBeadID != "" {
+				routedTo = sessionBeadTemplate[sessionBeadID]
+				if routedTo == "" && len(cfg.Agents) == 1 {
+					routedTo = cfg.Agents[0].QualifiedName()
+				}
+			}
+			if routedTo != template {
+				continue
+			}
 			if sessionBeadID != "" {
 				allRequests = append(allRequests, SessionRequest{
 					Template:      template,

@@ -125,14 +125,14 @@ version = 2
 [[steps]]
 id = "review"
 title = "Review"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 type = "task"
 
 [steps.retry]
 max_attempts = 3
 on_exhausted = "soft_fail"
 `
-	if err := os.WriteFile(filepath.Join(dir, "retry-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "retry-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

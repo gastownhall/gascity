@@ -3,10 +3,13 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -103,8 +106,13 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	} else if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
+	validationErrors = append(validationErrors, validateLegacyFormulaConfigRoutes(cfg)...)
+	validationWarnings := singletonSessionMigrationWarnings(cfg)
 
 	if validate {
+		for _, w := range validationWarnings {
+			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 		if len(validationErrors) > 0 {
 			for _, e := range validationErrors {
 				fmt.Fprintf(stderr, "gc config show: %s\n", e) //nolint:errcheck // best-effort stderr
@@ -116,6 +124,9 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	}
 
 	// Print validation warnings even in show mode.
+	for _, w := range validationWarnings {
+		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	for _, e := range validationErrors {
 		fmt.Fprintf(stderr, "gc config show: warning: %s\n", e) //nolint:errcheck // best-effort stderr
 	}
@@ -163,6 +174,154 @@ resolution.`,
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
+}
+
+func singletonSessionMigrationWarnings(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	cityName := cfg.EffectiveCityName()
+	namedByTemplate := make(map[string]bool, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		spec, ok := findNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if !ok {
+			continue
+		}
+		namedByTemplate[namedSessionBackingTemplate(spec)] = true
+	}
+	var warnings []string
+	for i := range cfg.Agents {
+		agentCfg := &cfg.Agents[i]
+		if m := agentCfg.EffectiveMaxActiveSessions(); m == nil || *m != 1 {
+			continue
+		}
+		if namedByTemplate[agentCfg.QualifiedName()] {
+			continue
+		}
+		warnings = append(warnings,
+			fmt.Sprintf("agent %q: max_active_sessions=1 now limits ephemeral capacity but does not create a persistent singleton; declare [[named_session]] for a canonical session identity", agentCfg.QualifiedName()))
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+func validateLegacyFormulaConfigRoutes(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	paths := formulaValidationPaths(cfg)
+	if len(paths) == 0 {
+		return nil
+	}
+	parser := formula.NewParser(paths...)
+	formulaNames := discoverFormulaNames(paths)
+	agentTargets, namedTargets := formulaValidationTargets(cfg)
+	var errs []string
+	for _, name := range formulaNames {
+		loaded, err := parser.LoadByName(name)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("formula %q: %v", name, err))
+			continue
+		}
+		resolved, err := parser.Resolve(loaded)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("formula %q: %v", name, err))
+			continue
+		}
+		if resolved.Version < 2 || resolved.Type != formula.TypeWorkflow {
+			continue
+		}
+		collectLegacyGraphAssigneeErrors(name, resolved.Steps, agentTargets, namedTargets, &errs)
+	}
+	sort.Strings(errs)
+	return errs
+}
+
+func formulaValidationPaths(cfg *config.City) []string {
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(candidates []string) {
+		for _, p := range candidates {
+			if strings.TrimSpace(p) == "" {
+				continue
+			}
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			paths = append(paths, p)
+		}
+	}
+	add(cfg.FormulaLayers.City)
+	for _, rigPaths := range cfg.FormulaLayers.Rigs {
+		add(rigPaths)
+	}
+	return paths
+}
+
+func discoverFormulaNames(paths []string) []string {
+	seen := make(map[string]struct{})
+	var names []string
+	for _, dir := range paths {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name, ok := formula.TrimTOMLFilename(entry.Name())
+			if !ok {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func formulaValidationTargets(cfg *config.City) (map[string]struct{}, map[string]struct{}) {
+	agentTargets := make(map[string]struct{}, len(cfg.Agents)*2)
+	for i := range cfg.Agents {
+		agentTargets[cfg.Agents[i].Name] = struct{}{}
+		agentTargets[cfg.Agents[i].QualifiedName()] = struct{}{}
+	}
+	namedTargets := make(map[string]struct{}, len(cfg.NamedSessions)*2)
+	for i := range cfg.NamedSessions {
+		namedTargets[cfg.NamedSessions[i].IdentityName()] = struct{}{}
+		namedTargets[cfg.NamedSessions[i].QualifiedName()] = struct{}{}
+	}
+	return agentTargets, namedTargets
+}
+
+func collectLegacyGraphAssigneeErrors(
+	formulaName string,
+	steps []*formula.Step,
+	agentTargets map[string]struct{},
+	namedTargets map[string]struct{},
+	errs *[]string,
+) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		target := strings.TrimSpace(step.Assignee)
+		if target != "" && !strings.Contains(target, "{") {
+			if _, ok := namedTargets[target]; !ok {
+				if _, ok := agentTargets[target]; ok {
+					*errs = append(*errs,
+						fmt.Sprintf("formula %q step %q: assignee=%q now requires a concrete session target; use metadata.gc.run_target for config routing", formulaName, step.ID, target))
+				}
+			}
+		}
+		collectLegacyGraphAssigneeErrors(formulaName, step.Children, agentTargets, namedTargets, errs)
+	}
 }
 
 // doConfigExplain shows the resolved config for agents with provenance
@@ -274,7 +433,7 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	}
 
 	// Scaling.
-	if isMultiSessionCfgAgent(a) {
+	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {
 		sp := scaleParamsFor(a)
 		explainField(w, "min_active_sessions", fmt.Sprintf("%d", sp.Min), source)
 		explainField(w, "max_active_sessions", fmt.Sprintf("%d", sp.Max), source)

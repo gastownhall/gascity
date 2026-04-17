@@ -298,6 +298,11 @@ func resolveMailIdentity(store beads.Store, identifier string) (string, error) {
 	sessionID, err := resolveSessionID(store, identifier)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
+			if target, matched, targetErr := resolveLiveConfiguredNamedMailTarget(store, identifier); targetErr != nil {
+				return "", targetErr
+			} else if matched {
+				return target.display, nil
+			}
 			if address, ok := configuredMailboxAddress(identifier); ok {
 				return address, nil
 			}
@@ -336,6 +341,11 @@ func resolveMailIdentityWithConfig(cityPath string, cfg *config.City, store bead
 			return "", err
 		}
 	}
+	if target, matched, targetErr := resolveLiveConfiguredNamedMailTarget(store, identifier); targetErr != nil {
+		return "", targetErr
+	} else if matched {
+		return target.display, nil
+	}
 	if address, ok := configuredMailboxAddressWithConfig(cityPath, cfg, identifier); ok {
 		return address, nil
 	}
@@ -362,6 +372,11 @@ func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
+	}
+	if target, matched, targetErr := resolveLiveConfiguredNamedMailTarget(store, identifier); targetErr != nil {
+		return "", targetErr
+	} else if matched {
+		return target.display, nil
 	}
 	return resolveMailIdentityWithConfig(cityPath, cfg, store, identifier)
 }
@@ -391,7 +406,7 @@ func configuredMailboxAddressWithConfig(cityPath string, cfg *config.City, ident
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, nil, identifier)
+	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier)
 	if err != nil || !ok {
 		return "", false
 	}
@@ -425,6 +440,57 @@ type resolvedMailTarget struct {
 	recipients []string
 }
 
+func resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (resolvedMailTarget, bool, error) {
+	identifier = normalizeNamedSessionTarget(identifier)
+	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
+		return resolvedMailTarget{}, false, nil
+	}
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+	})
+	if err != nil {
+		return resolvedMailTarget{}, false, err
+	}
+
+	matches := make(map[string]resolvedMailTarget)
+	order := make([]string, 0, 2)
+	for _, b := range all {
+		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+			continue
+		}
+		identity := strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata])
+		if identity == "" || targetBasename(identity) != identifier {
+			continue
+		}
+		addresses := sessionMailboxAddresses(b)
+		if len(addresses) == 0 {
+			continue
+		}
+		display := sessionMailboxAddress(b)
+		if display == "" {
+			display = addresses[0]
+		}
+		if _, ok := matches[display]; ok {
+			continue
+		}
+		matches[display] = resolvedMailTarget{
+			display:    display,
+			recipients: addresses,
+		}
+		order = append(order, display)
+	}
+
+	switch len(order) {
+	case 0:
+		return resolvedMailTarget{}, false, nil
+	case 1:
+		return matches[order[0]], true, nil
+	default:
+		return resolvedMailTarget{}, true, fmt.Errorf("%w: %q matches %d live configured named sessions: %s",
+			session.ErrAmbiguous, identifier, len(order), strings.Join(order, ", "))
+	}
+}
+
 func resolveMailTargets(store beads.Store, identifier string) (resolvedMailTarget, error) {
 	if identifier == "" || identifier == "human" {
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
@@ -432,6 +498,11 @@ func resolveMailTargets(store beads.Store, identifier string) (resolvedMailTarge
 	sessionID, err := resolveSessionID(store, identifier)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
+			if target, matched, targetErr := resolveLiveConfiguredNamedMailTarget(store, identifier); targetErr != nil {
+				return resolvedMailTarget{}, targetErr
+			} else if matched {
+				return target, nil
+			}
 			if address, ok := configuredMailboxAddress(identifier); ok {
 				return resolvedMailTarget{display: address, recipients: []string{address}}, nil
 			}
@@ -513,7 +584,6 @@ func tryOpenCityStore() (beads.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	readDoltPort(cityPath)
 	return openCityStoreAt(cityPath)
 }
 

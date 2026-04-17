@@ -98,8 +98,8 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
 
-	if store.listByAssigneeCalls != 1 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 1", store.listByAssigneeCalls)
+	if store.listByAssigneeCalls != 2 {
+		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
 	}
 
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
@@ -108,8 +108,8 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("third agents = %d, want 200", rec.Code)
 	}
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 2", store.listByAssigneeCalls)
+	if store.listByAssigneeCalls != 4 {
+		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
 	}
 }
 

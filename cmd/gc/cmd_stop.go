@@ -89,8 +89,8 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
 		qn := a.QualifiedName()
-		if !isMultiSessionCfgAgent(&a) {
-			// Single agent.
+		if !a.SupportsInstanceExpansion() {
+			// Non-expanding template.
 			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
 			sessionNames = append(sessionNames, sn)
 			desired[sn] = true

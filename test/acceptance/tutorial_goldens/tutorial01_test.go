@@ -41,15 +41,15 @@ func TestTutorial01Cities(t *testing.T) {
 		})
 
 		t.Run("gc init ~/my-city", func(t *testing.T) {
-			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --provider claude` path because the wizard requires a real TTY")
-			out, err := ws.runShell("gc init ~/my-city --provider claude", "")
+			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --provider claude --skip-provider-readiness` path because the wizard requires a real TTY and CI does not carry interactive Claude auth")
+			out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 			if err != nil {
 				t.Fatalf("gc init wizard: %v\n%s", err, out)
 			}
 			for _, want := range []string{
 				"Welcome to Gas City!",
 				`Initialized city "my-city" with default provider "claude".`,
-				"Registering city with supervisor",
+				"Skipping provider readiness checks",
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("gc init output missing %q:\n%s", want, out)
@@ -74,7 +74,7 @@ func TestTutorial01Cities(t *testing.T) {
 			wsProvider := newTutorialWorkspace(t)
 			wsProvider.attachDiagnostics(t, "tutorial-01-provider-branch")
 
-			out, err := wsProvider.runShell("gc init ~/my-city --provider claude", "")
+			out, err := wsProvider.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 			if err != nil {
 				t.Fatalf("gc init --provider claude: %v\n%s", err, out)
 			}
@@ -98,7 +98,7 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ls: %v\n%s", err, out)
 			}
-			for _, want := range []string{"city.toml", "formulas", "orders", "prompts"} {
+			for _, want := range []string{"city.toml", "pack.toml", "formulas", "orders", "agents"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("ls output missing %q:\n%s", want, out)
 				}
@@ -114,7 +114,7 @@ func TestTutorial01Cities(t *testing.T) {
 				`name = "my-city"`,
 				`provider = "claude"`,
 				`name = "mayor"`,
-				`prompt_template = "prompts/mayor.md"`,
+				`prompt_template = "agents/mayor/prompt.template.md"`,
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("city.toml missing %q:\n%s", want, out)

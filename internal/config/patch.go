@@ -28,7 +28,7 @@ type AgentPatch struct {
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
-	// Pool overrides pool configuration fields.
+	// Pool overrides legacy [pool] fields that map to session scaling.
 	Pool *PoolOverride `toml:"pool,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
@@ -54,8 +54,33 @@ type AgentPatch struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	Skills []string `toml:"skills,omitempty"`
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	MCP []string `toml:"mcp,omitempty"`
+	// SkillsAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	SkillsAppend []string `toml:"skills_append,omitempty"`
+	// MCPAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
+	// InjectAssignedSkills overrides per-agent appendix injection
+	// (see Agent.InjectAssignedSkills).
+	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
@@ -103,13 +128,13 @@ type AgentPatch struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
-// PoolOverride modifies pool configuration fields. Nil fields are not changed.
+// PoolOverride modifies legacy [pool] fields that map to session scaling. Nil fields are not changed.
 type PoolOverride struct {
-	// Min overrides pool minimum instances.
+	// Min overrides the minimum number of sessions.
 	Min *int `toml:"min,omitempty" jsonschema:"minimum=0"`
-	// Max overrides pool maximum instances. 0 means the pool is disabled.
+	// Max overrides the maximum number of sessions. 0 means no sessions can claim routed work.
 	Max *int `toml:"max,omitempty" jsonschema:"minimum=0"`
-	// Check overrides the pool check command.
+	// Check overrides the session scale check command.
 	Check *string `toml:"check,omitempty"`
 	// DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h").
 	DrainTimeout *string `toml:"drain_timeout,omitempty"`
@@ -189,6 +214,13 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
+		// V2: match by qualified name so patches targeting "gastown.mayor"
+		// find agents with BindingName="gastown" and Name="mayor".
+		if AgentMatchesIdentity(a, target) {
+			applyAgentPatchFields(a, patch)
+			return nil
+		}
+		// V1 fallback: direct Dir+Name match.
 		if a.Dir == patch.Dir && a.Name == patch.Name {
 			applyAgentPatchFields(a, patch)
 			return nil
@@ -243,6 +275,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.HooksInstalled != nil {
 		a.HooksInstalled = p.HooksInstalled
+	}
+	if p.InjectAssignedSkills != nil {
+		a.InjectAssignedSkills = p.InjectAssignedSkills
 	}
 	if len(p.SessionSetup) > 0 {
 		a.SessionSetup = append([]string(nil), p.SessionSetup...)

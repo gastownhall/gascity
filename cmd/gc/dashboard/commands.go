@@ -14,7 +14,7 @@ type CommandMeta struct {
 	Category string // Groups commands in the palette UI
 	Args     string // Placeholder hint for required arguments
 	ArgType  string // What kind of options to show (rigs, agents, convoys, hooks)
-	Binary   string // "gc" or "bd" — which binary to invoke
+	Binary   string // "gc", "bd", or "api" — how the command is executed
 }
 
 // AllowedCommands defines which commands can be executed from the dashboard.
@@ -27,7 +27,7 @@ type CommandMeta struct {
 //   - gt mail X        → gc mail X
 //   - gt rig X         → gc rig X
 //   - gt sling         → gc sling
-//   - bd list/show     → bd (direct, no gc wrapper)
+//   - bd list/show     → dashboard API (no subprocess fallback)
 //   - gt polecat add   → gc agent start
 //   - gt mayor attach  → gc agent attach
 var AllowedCommands = map[string]CommandMeta{
@@ -48,9 +48,9 @@ var AllowedCommands = map[string]CommandMeta{
 	"hooks list":        {Safe: true, Desc: "List hooks", Category: "Hooks", Binary: "gc"},
 	"events --json":     {Safe: true, Desc: "Show events (JSON)", Category: "Status", Binary: "gc"},
 
-	// === Read-only bd commands (direct bead queries) ===
-	"list": {Safe: true, Desc: "List beads", Category: "Beads", Binary: "bd"},
-	"show": {Safe: true, Desc: "Show bead details", Category: "Beads", Args: "<bead-id>", Binary: "bd"},
+	// === Read-only bead commands (API-backed; never subprocess fallback) ===
+	"list": {Safe: true, Desc: "List beads", Category: "Beads", Binary: "api"},
+	"show": {Safe: true, Desc: "Show bead details", Category: "Beads", Args: "<bead-id>", Binary: "api"},
 
 	// === Action commands (require confirmation) ===
 

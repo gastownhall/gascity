@@ -96,10 +96,12 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 
 		expected := []string{
 			"packs/gastown/pack.toml",
-			"packs/gastown/prompts",
+			"packs/gastown/agents",
+			"packs/gastown/template-fragments",
 			"packs/gastown/formulas",
 			"packs/gastown/scripts",
 			"packs/maintenance/pack.toml",
+			"packs/maintenance/agents",
 			"packs/maintenance/formulas",
 		}
 		for _, rel := range expected {
@@ -115,7 +117,7 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 
 		expected := []string{
 			"packs/hyperscale/pack.toml",
-			"packs/hyperscale/prompts",
+			"packs/hyperscale/agents",
 			"packs/hyperscale/scripts",
 		}
 		for _, rel := range expected {

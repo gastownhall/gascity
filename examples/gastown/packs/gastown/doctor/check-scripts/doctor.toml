@@ -1,0 +1,2 @@
+description = "Verify pack scripts are executable"
+run = "../check-scripts.sh"

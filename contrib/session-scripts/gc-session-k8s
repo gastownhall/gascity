@@ -23,8 +23,8 @@
 #   GC_K8S_NAMESPACE   - K8s namespace for agent pods (default: gc)
 #   GC_K8S_IMAGE       - Container image for agents (required for start)
 #   GC_K8S_CONTEXT     - kubectl context (default: current)
-#   GC_K8S_DOLT_HOST   - Dolt service DNS (default: dolt.gc.svc.cluster.local)
-#   GC_K8S_DOLT_PORT   - Dolt service port (default: 3307)
+#   GC_K8S_DOLT_HOST   - Deprecated Dolt service DNS compatibility fallback (default: dolt.gc.svc.cluster.local)
+#   GC_K8S_DOLT_PORT   - Deprecated Dolt service port compatibility fallback (default: 3307)
 #   GC_K8S_MCP_MAIL_HOST - mcp-agent-mail service DNS (default: mcp-mail.gc.svc.cluster.local)
 #   GC_K8S_MCP_MAIL_PORT - mcp-agent-mail service port (default: 8765)
 #   GC_K8S_CPU_REQUEST - Pod CPU request (default: 500m)
@@ -45,8 +45,8 @@ TMUX_SESSION="main"
 
 NS="${GC_K8S_NAMESPACE:-gc}"
 IMAGE="${GC_K8S_IMAGE:-}"
-DOLT_HOST="${GC_K8S_DOLT_HOST:-dolt.gc.svc.cluster.local}"
-DOLT_PORT="${GC_K8S_DOLT_PORT:-3307}"
+DEFAULT_DOLT_HOST="${GC_K8S_DOLT_HOST:-dolt.gc.svc.cluster.local}"
+DEFAULT_DOLT_PORT="${GC_K8S_DOLT_PORT:-3307}"
 MCP_MAIL_HOST="${GC_K8S_MCP_MAIL_HOST:-mcp-mail.gc.svc.cluster.local}"
 MCP_MAIL_PORT="${GC_K8S_MCP_MAIL_PORT:-8765}"
 CPU_REQ="${GC_K8S_CPU_REQUEST:-500m}"
@@ -121,7 +121,29 @@ case "$op" in
     config=$(cat)
     command=$(echo "$config" | jq -r '.command // ""')
     env_json=$(echo "$config" | jq -c '.env // {}')
-
+    payload_dolt_host=$(echo "$env_json" | jq -r ".GC_DOLT_HOST // empty")
+    payload_dolt_port=$(echo "$env_json" | jq -r ".GC_DOLT_PORT // empty")
+    emit_dolt_env=false
+    dolt_host=""
+    dolt_port=""
+    # The session payload is the only authority for pod Dolt targeting.
+    # A port-only payload means "managed-local on the controller" and must be
+    # adapted to the in-cluster managed service alias. Missing payload host/port
+    # means omit pod Dolt env entirely; do not synthesize from ambient process
+    # env or deprecated GC_K8S_DOLT_* compatibility inputs.
+    if [ -n "$payload_dolt_host" ] && [ -z "$payload_dolt_port" ]; then
+      echo "start: session payload requires GC_DOLT_PORT when GC_DOLT_HOST is set" >&2
+      exit 1
+    fi
+    if [ -n "$payload_dolt_host" ] && [ -n "$payload_dolt_port" ]; then
+      emit_dolt_env=true
+      dolt_host="$payload_dolt_host"
+      dolt_port="$payload_dolt_port"
+    elif [ -z "$payload_dolt_host" ] && [ -n "$payload_dolt_port" ]; then
+      emit_dolt_env=true
+      dolt_host="$DEFAULT_DOLT_HOST"
+      dolt_port="$DEFAULT_DOLT_PORT"
+    fi
     if [ -z "$name" ]; then
       echo "start: missing session name" >&2
       exit 1
@@ -223,29 +245,35 @@ case "$op" in
     # Derive mail project from city name so all agents share one namespace.
     mail_project=$(echo "$env_json" | jq -r '.GC_CITY // "/workspace"')
 
-    env_array=$(echo "$env_json" | jq \
-      --arg dolt_host "$DOLT_HOST" \
-      --arg dolt_port "$DOLT_PORT" \
-      --arg mcp_mail_url "http://${MCP_MAIL_HOST}:${MCP_MAIL_PORT}" \
-      --arg mcp_mail_project "$mail_project" \
-      --arg tmux_session "$TMUX_SESSION" \
-      --arg pod_dir "$pod_work_dir" '
-      del(.GC_DOLT_HOST, .GC_DOLT_PORT,
-          .BEADS_DOLT_SERVER_HOST, .BEADS_DOLT_SERVER_PORT,
+    dolt_env_json=$(jq -n       --arg emit_dolt_env "$emit_dolt_env"       --arg dolt_host "$dolt_host"       --arg dolt_port "$dolt_port" '
+      if $emit_dolt_env == "true" then
+        {
+          GC_DOLT_HOST: $dolt_host,
+          GC_DOLT_PORT: $dolt_port,
+          BEADS_DOLT_SERVER_HOST: $dolt_host,
+          BEADS_DOLT_SERVER_PORT: $dolt_port
+        }
+      else
+        {}
+      end
+    ')
+
+    env_array=$(echo "$env_json" | jq       --argjson dolt_env "$dolt_env_json"       --arg mcp_mail_url "http://${MCP_MAIL_HOST}:${MCP_MAIL_PORT}"       --arg mcp_mail_project "$mail_project"       --arg tmux_session "$TMUX_SESSION"       --arg pod_dir "$pod_work_dir" '
+      del(.BEADS_DOLT_SERVER_HOST, .BEADS_DOLT_SERVER_PORT,
           .GC_BEADS, .GC_SESSION, .GC_EVENTS,
+          .GC_DOLT_HOST, .GC_DOLT_PORT,
+          .GC_K8S_DOLT_HOST, .GC_K8S_DOLT_PORT,
           .GC_MAIL, .GC_MCP_MAIL_URL, .GC_MCP_MAIL_PROJECT)
       | .GC_CITY = "/workspace" | .GC_DIR = $pod_dir
+      | . + $dolt_env
       | to_entries
       | map({name: .key, value: (.value | tostring)})
-      + [{name: "GC_DOLT_HOST", value: $dolt_host},
-         {name: "GC_DOLT_PORT", value: $dolt_port},
-         {name: "GC_MCP_MAIL_URL", value: $mcp_mail_url},
+      + [{name: "GC_MCP_MAIL_URL", value: $mcp_mail_url},
          {name: "GC_MCP_MAIL_PROJECT", value: $mcp_mail_project},
          {name: "GC_MAIL", value: "exec:gc-mail-mcp-agent-mail"},
          {name: "GC_TMUX_SESSION", value: $tmux_session},
          {name: "CLAUDE_CONFIG_DIR", value: "/home/gcagent/.claude"}]
     ')
-
     # Determine the working directory for the main container.
     # Use the work_dir from config (host path) so that $GC_CITY and $GC_DIR
     # resolve correctly inside the pod — the emptyDir volume is mounted at
@@ -270,14 +298,15 @@ case "$op" in
     # controller copies files into the shared emptyDir volume via the init
     # container, then touches the sentinel. This guarantees all files are
     # in place before the main container starts — no race, no send-keys.
-    # Build volume mounts for the main container. The emptyDir is mounted
-    # at $work_dir so host-path env vars ($GC_CITY, $GC_DIR) resolve to
-    # valid paths inside the pod. If GC_CITY differs from work_dir (agent
-    # has a custom dir), add a second mount so $GC_CITY is also valid.
-    main_vol_mounts='[{name: "ws", mountPath: $wd}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
-    extra_jq_args=(--arg wd "$work_dir")
+    # Build volume mounts for the main container. The workspace emptyDir is
+    # always mounted at /workspace so projected GC_CITY=/workspace and
+    # GC_DIR=/workspace/... resolve inside the pod. If the controller city path
+    # differs from the host work_dir, keep a compatibility mount at the original
+    # city path for any remaining absolute-path references in staged files.
+    main_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
+    extra_jq_args=()
     if [ -n "$gc_city" ] && [ "$gc_city" != "$work_dir" ]; then
-      main_vol_mounts='[{name: "ws", mountPath: $wd}, {name: "city", mountPath: $city}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
+      main_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "city", mountPath: $city}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
       extra_jq_args+=(--arg city "$gc_city")
     fi
 
@@ -336,7 +365,7 @@ case "$op" in
               name: "agent",
               image: $image,
               imagePullPolicy: "IfNotPresent",
-              workingDir: $wd,
+              workingDir: $work_dir,
               command: ["/bin/sh", "-c"],
               args: [$cmd],
               env: $env,
@@ -396,7 +425,7 @@ case "$op" in
               name: "agent",
               image: $image,
               imagePullPolicy: "IfNotPresent",
-              workingDir: $wd,
+              workingDir: $work_dir,
               command: ["/bin/sh", "-c"],
               args: [$cmd],
               env: $env,

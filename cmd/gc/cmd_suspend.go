@@ -41,8 +41,6 @@ func newResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "resume [path]",
 		Short: "Resume a suspended city",
 		Long: `Resume a suspended city by clearing workspace.suspended in city.toml.
-Also clears the halt flag file (if any) created by "gc halt", so this
-is the single verb that takes a city out of every soft-pause state.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -80,33 +78,16 @@ func cmdSuspend(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdResume is the CLI entry point for resuming the city.
-//
-// In addition to clearing workspace.suspended, this also removes the
-// halt flag file (if any) created by "gc halt". Clearing the halt
-// file is idempotent: absence is a no-op. This keeps "gc resume" the
-// single verb that takes a city out of every soft-pause state.
 func cmdResume(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveSuspendDir(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Clear the halt flag file so the tick loop starts running again.
-	// Attempt this first but don't abort — the suspend-clear must also
-	// run so we don't leave the city half-resumed.
-	var haltErr error
-	if err := removeHaltFile(cityPath); err != nil {
-		haltErr = err
-		fmt.Fprintf(stderr, "gc resume: WARNING: failed to clear halt file: %v\n", err)                                    //nolint:errcheck // best-effort stderr
-		fmt.Fprintf(stderr, "gc resume: the supervisor may still be halted; manually remove %s\n", haltFilePath(cityPath)) //nolint:errcheck // best-effort stderr
-	}
 	if c := apiClient(cityPath); c != nil {
 		err := c.ResumeCity()
 		if err == nil {
 			fmt.Fprintf(stdout, "City resumed (%s)\n", cityPath) //nolint:errcheck // best-effort stdout
-			if haltErr != nil {
-				return 1
-			}
 			return 0
 		}
 		if !api.ShouldFallback(err) {
@@ -115,11 +96,7 @@ func cmdResume(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	rc := doSuspendCity(fsys.OSFS{}, cityPath, false, stdout, stderr)
-	if rc == 0 && haltErr != nil {
-		return 1
-	}
-	return rc
+	return doSuspendCity(fsys.OSFS{}, cityPath, false, stdout, stderr)
 }
 
 // resolveSuspendDir resolves the city directory from args or the current city.

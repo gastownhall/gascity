@@ -49,7 +49,7 @@ func effectiveSessionProviderForCity(cityPath string) string {
 }
 
 func needsPackManagedBinaryDependencies(beadsProvider string) bool {
-	return beadsProvider == "" || beadsProvider == "bd"
+	return providerUsesBdStoreContract(beadsProvider)
 }
 
 func coreBinaryDependencies(sessionProvider, beadsProvider string, opts coreBinaryDependencyOptions) []binaryDependency {

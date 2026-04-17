@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // TailMeta holds metadata extracted from the tail of a session file.
@@ -42,6 +45,41 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 
 	lines := splitLines(data)
 	return extractFromLines(lines), nil
+}
+
+// ExtractTailMetaFromSearchPaths reads tail metadata only after verifying
+// path resolves under one of the configured session-log search roots.
+func ExtractTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
+	safePath, err := validateSearchPathFile(searchPaths, path)
+	if err != nil {
+		return nil, err
+	}
+	return ExtractTailMeta(safePath)
+}
+
+func validateSearchPathFile(searchPaths []string, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("empty session log path")
+	}
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("resolving session log path: %w", err)
+	}
+	for _, root := range searchPaths {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		cleanRoot, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(cleanRoot, cleanPath)
+		if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		return cleanPath, nil
+	}
+	return "", fmt.Errorf("session log path is outside configured search paths")
 }
 
 // readTail reads the last n bytes of r (or the whole thing if smaller).

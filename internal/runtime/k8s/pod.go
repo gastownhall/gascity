@@ -3,6 +3,7 @@ package k8s
 import (
 	"encoding/base64"
 	"fmt"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +12,109 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+const (
+	podManagedDoltHost = "dolt.gc.svc.cluster.local"
+	podManagedDoltPort = "3307"
+)
+
+func controllerCityPath(cfgEnv map[string]string) string {
+	ctrlCity := strings.TrimSpace(cfgEnv["GC_CITY"])
+	if ctrlCity == "" {
+		ctrlCity = strings.TrimSpace(cfgEnv["GC_CITY_PATH"])
+	}
+	if ctrlCity == "" {
+		ctrlCity = strings.TrimSpace(cfgEnv["GC_CITY_ROOT"])
+	}
+	return ctrlCity
+}
+
+func remapControllerPathToPod(val, ctrlCity string) string {
+	val = strings.TrimSpace(val)
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if val == "" || ctrlCity == "" {
+		return val
+	}
+	if val == ctrlCity || strings.HasPrefix(val, ctrlCity+"/") {
+		return "/workspace" + val[len(ctrlCity):]
+	}
+	return val
+}
+
+func projectedPodWorkDir(cfg runtime.Config) string {
+	podWorkDir := "/workspace"
+	ctrlCity := controllerCityPath(cfg.Env)
+	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
+		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
+			podWorkDir = "/workspace/" + rel
+		}
+	}
+	return podWorkDir
+}
+
+func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
+	storeRoot := strings.TrimSpace(cfg.Env["GC_STORE_ROOT"])
+	if storeRoot == "" {
+		storeRoot = strings.TrimSpace(cfg.WorkDir)
+	}
+	if storeRoot == "" {
+		storeRoot = controllerCityPath(cfg.Env)
+	}
+	storeRoot = remapControllerPathToPod(storeRoot, controllerCityPath(cfg.Env))
+	if storeRoot == "" {
+		return podWorkDir
+	}
+	return storeRoot
+}
+
+// projectedPodDoltEnv adapts the controller projection to a pod-visible Dolt
+// target. Managed-local controller projections intentionally omit GC_DOLT_HOST
+// and use a host-local runtime port; pods translate that blank-host managed
+// shape to the provider-configured in-cluster alias at this adapter edge so
+// agents still consume one GC_DOLT_* connection contract. Explicit
+// GC_DOLT_HOST values are preserved as written.
+// BEADS_DOLT_SERVER_HOST/PORT are compatibility mirrors derived from the GC
+// projection, not independent input authorities.
+func controllerLocalDoltHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	switch host {
+	case "", "127.0.0.1", "localhost", "0.0.0.0", "::1", "::":
+		return true
+	default:
+		return false
+	}
+}
+
+func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort string) (map[string]string, error) {
+	host := strings.TrimSpace(cfgEnv["GC_DOLT_HOST"])
+	port := strings.TrimSpace(cfgEnv["GC_DOLT_PORT"])
+	managedHost = strings.TrimSpace(managedHost)
+	managedPort = strings.TrimSpace(managedPort)
+	if managedHost == "" {
+		managedHost = podManagedDoltHost
+	}
+	if managedPort == "" {
+		managedPort = podManagedDoltPort
+	}
+
+	switch {
+	case host == "" && port == "":
+		return map[string]string{}, nil
+	case host != "" && port == "":
+		return nil, fmt.Errorf("requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set")
+	case controllerLocalDoltHost(host):
+		host = managedHost
+		port = managedPort
+	}
+
+	projected := map[string]string{
+		"GC_DOLT_HOST":           host,
+		"GC_DOLT_PORT":           port,
+		"BEADS_DOLT_SERVER_HOST": host,
+		"BEADS_DOLT_SERVER_PORT": port,
+	}
+	return projected, nil
+}
 
 // buildPod creates a pod manifest compatible with gc-session-k8s.
 // Same labels, annotations, container names, volumes, and tmux-inside-pod
@@ -28,20 +132,9 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	agentLabel := SanitizeLabel(agentName)
 
 	// Resolve pod-side working directory.
-	// Controller resolves dirs relative to its cityPath; pods use /workspace.
-	podWorkDir := "/workspace"
-	ctrlCity := cfg.Env["GC_CITY"]
-	if ctrlCity == "" {
-		ctrlCity = cfg.Env["GC_CITY_PATH"]
-	}
-	if ctrlCity == "" {
-		ctrlCity = cfg.Env["GC_CITY_ROOT"]
-	}
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
-	}
+	// Controller resolves dirs relative to its city path; pods use /workspace.
+	podWorkDir := projectedPodWorkDir(cfg)
+	ctrlCity := controllerCityPath(cfg.Env)
 
 	// Build the command the agent runs. Base64-encode to avoid quoting issues.
 	agentCmd := cfg.Command
@@ -109,7 +202,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 
 	// Build environment, remapping K8s-specific vars.
-	env := buildPodEnv(cfg.Env, podWorkDir)
+	env, err := buildPodEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.
@@ -225,34 +321,24 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 }
 
 // buildPodEnv creates the env var list for the agent container.
-// Removes controller-only vars and remaps K8s-specific ones.
-func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
+// Removes controller-only vars, strips deprecated K8s compatibility inputs,
+// and remaps pod-visible ones.
+func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
+	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
 	skip := map[string]bool{
 		"GC_BEADS":               true,
 		"GC_SESSION":             true,
 		"GC_EVENTS":              true,
+		"GC_K8S_DOLT_HOST":       true,
+		"GC_K8S_DOLT_PORT":       true,
 		"GC_DOLT_HOST":           true,
 		"GC_DOLT_PORT":           true,
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
-		// Note: GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_SERVER_USER,
-		// and BEADS_DOLT_PASSWORD are intentionally NOT stripped — agents
-		// need auth credentials to authenticate against the in-cluster
-		// Dolt service. Only host/port are stripped and replaced with
-		// K8s-specific endpoints.
 	}
 
-	// Resolve controller-side city path with the same fallback as buildPod
-	// so GC_RIG_ROOT/BEADS_DIR remap works regardless of which env var the
-	// controller exported.
-	ctrlCity := cfgEnv["GC_CITY"]
-	if ctrlCity == "" {
-		ctrlCity = cfgEnv["GC_CITY_PATH"]
-	}
-	if ctrlCity == "" {
-		ctrlCity = cfgEnv["GC_CITY_ROOT"]
-	}
+	ctrlCity := controllerCityPath(cfgEnv)
 
 	var env []corev1.EnvVar
 	for k, v := range cfgEnv {
@@ -262,18 +348,27 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 		val := v
 		// Remap city/workdir vars to pod-visible paths.
 		switch k {
-		case "GC_CITY":
-			val = "/workspace"
-		case "GC_CITY_PATH", "GC_CITY_ROOT":
+		case "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT":
 			val = "/workspace"
 		case "GC_DIR":
 			val = podWorkDir
-		case "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PACK_STATE_DIR", "GC_PACK_DIR":
-			if ctrlCity != "" && (val == ctrlCity || strings.HasPrefix(val, ctrlCity+"/")) {
-				val = "/workspace" + val[len(ctrlCity):]
-			}
+		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PACK_STATE_DIR", "GC_PACK_DIR":
+			val = remapControllerPathToPod(val, ctrlCity)
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})
+	}
+
+	projectedDolt, err := projectedPodDoltEnv(cfgEnv, managedServiceHost, managedServicePort)
+	if err != nil {
+		return nil, err
+	}
+	projectedKeys := make([]string, 0, len(projectedDolt))
+	for key := range projectedDolt {
+		projectedKeys = append(projectedKeys, key)
+	}
+	sort.Strings(projectedKeys)
+	for _, key := range projectedKeys {
+		env = append(env, corev1.EnvVar{Name: key, Value: projectedDolt[key]})
 	}
 
 	// Add tmux session env so agent's tmux provider uses the same session.
@@ -288,24 +383,6 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 		env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/gcagent/.claude"})
 	}
 
-	// Inject K8s Dolt discovery for agent-side bd init.
-	// GC_DOLT_HOST/PORT are stripped (controller-only), so inject K8s-specific
-	// defaults that point to the in-cluster Dolt service.
-	envMap := make(map[string]bool, len(env))
-	for _, e := range env {
-		envMap[e.Name] = true
-	}
-	if !envMap["GC_K8S_DOLT_HOST"] {
-		env = append(env, corev1.EnvVar{
-			Name: "GC_K8S_DOLT_HOST", Value: "dolt.gc.svc.cluster.local",
-		})
-	}
-	if !envMap["GC_K8S_DOLT_PORT"] {
-		env = append(env, corev1.EnvVar{
-			Name: "GC_K8S_DOLT_PORT", Value: "3307",
-		})
-	}
-
 	// Inject GITHUB_TOKEN from optional K8s secret for git push in pods.
 	env = append(env, corev1.EnvVar{
 		Name: "GITHUB_TOKEN",
@@ -318,7 +395,7 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 		},
 	})
 
-	return env
+	return env, nil
 }
 
 // needsStaging returns true if the session config requires file staging

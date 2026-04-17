@@ -12,12 +12,12 @@ import (
 func TestEnsureGitignoreEntries_CreatesNewFile(t *testing.T) {
 	f := fsys.NewFake()
 
-	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/"}); err != nil {
+	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"}); err != nil {
 		t.Fatalf("ensureGitignoreEntries: %v", err)
 	}
 
 	got := string(f.Files[filepath.Join("/city", ".gitignore")])
-	for _, want := range []string{".gc/", ".beads/"} {
+	for _, want := range []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"} {
 		if !strings.Contains(got, want) {
 			t.Errorf(".gitignore missing %q; got:\n%s", want, got)
 		}
@@ -27,11 +27,31 @@ func TestEnsureGitignoreEntries_CreatesNewFile(t *testing.T) {
 	}
 }
 
+func TestEnsureGitignoreEntries_RigEntriesTrackCanonicalBeadsFilesOnly(t *testing.T) {
+	f := fsys.NewFake()
+
+	if err := ensureGitignoreEntries(f, "/rig", rigGitignoreEntries); err != nil {
+		t.Fatalf("ensureGitignoreEntries: %v", err)
+	}
+
+	got := string(f.Files[filepath.Join("/rig", ".gitignore")])
+	for _, want := range rigGitignoreEntries {
+		if !strings.Contains(got, want) {
+			t.Errorf("rig .gitignore missing %q; got:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{".gc/", "hooks/", ".runtime/"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("rig .gitignore should not contain %q; got:\n%s", forbidden, got)
+		}
+	}
+}
+
 func TestEnsureGitignoreEntries_SkipsExisting(t *testing.T) {
 	f := fsys.NewFake()
-	f.Files[filepath.Join("/city", ".gitignore")] = []byte(".gc/\nnode_modules/\n")
+	f.Files[filepath.Join("/city", ".gitignore")] = []byte(".gc/\n.beads/\n/.beads/\nnode_modules/\n")
 
-	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/"}); err != nil {
+	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"}); err != nil {
 		t.Fatalf("ensureGitignoreEntries: %v", err)
 	}
 
@@ -40,9 +60,16 @@ func TestEnsureGitignoreEntries_SkipsExisting(t *testing.T) {
 	if strings.Count(got, ".gc/") != 1 {
 		t.Errorf(".gc/ appears %d times, want 1; got:\n%s", strings.Count(got, ".gc/"), got)
 	}
-	// .beads/ should be added.
-	if !strings.Contains(got, ".beads/") {
-		t.Errorf(".gitignore missing .beads/; got:\n%s", got)
+	// Canonical .beads rules should be added.
+	for _, want := range []string{".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"} {
+		if !strings.Contains(got, want) {
+			t.Errorf(".gitignore missing %q; got:\n%s", want, got)
+		}
+	}
+	for _, legacy := range []string{"\n.beads/\n", "\n/.beads/\n"} {
+		if strings.Contains("\n"+got, legacy) {
+			t.Errorf("legacy .beads ignore %q should be removed; got:\n%s", strings.TrimSpace(legacy), got)
+		}
 	}
 	// Original content preserved.
 	if !strings.Contains(got, "node_modules/") {
@@ -53,7 +80,7 @@ func TestEnsureGitignoreEntries_SkipsExisting(t *testing.T) {
 func TestEnsureGitignoreEntries_Idempotent(t *testing.T) {
 	f := fsys.NewFake()
 
-	entries := []string{".gc/", ".beads/", "hooks/", ".runtime/"}
+	entries := cityGitignoreEntries
 	for i := 0; i < 3; i++ {
 		if err := ensureGitignoreEntries(f, "/city", entries); err != nil {
 			t.Fatalf("pass %d: ensureGitignoreEntries: %v", i, err)
@@ -71,10 +98,10 @@ func TestEnsureGitignoreEntries_Idempotent(t *testing.T) {
 
 func TestEnsureGitignoreEntries_NoOpWhenAllPresent(t *testing.T) {
 	f := fsys.NewFake()
-	original := ".gc/\n.beads/\nhooks/\n.runtime/\n"
+	original := ".gc/\n.beads/*\n!.beads/config.yaml\n!.beads/metadata.json\nhooks/\n.runtime/\n"
 	f.Files[filepath.Join("/city", ".gitignore")] = []byte(original)
 
-	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/", "hooks/", ".runtime/"}); err != nil {
+	if err := ensureGitignoreEntries(f, "/city", cityGitignoreEntries); err != nil {
 		t.Fatalf("ensureGitignoreEntries: %v", err)
 	}
 
@@ -99,7 +126,7 @@ func TestDoInit_WritesGitignoreEntries(t *testing.T) {
 		t.Fatal(".gitignore not created by doInit")
 	}
 	got := string(data)
-	for _, want := range []string{".gc/", ".beads/", "hooks/", ".runtime/"} {
+	for _, want := range cityGitignoreEntries {
 		if !strings.Contains(got, want) {
 			t.Errorf(".gitignore missing %q; got:\n%s", want, got)
 		}

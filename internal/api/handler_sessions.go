@@ -53,8 +53,8 @@ type sessionResponse struct {
 	// session runtime can honor.
 	SubmissionCapabilities session.SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 
-	// ConfiguredNamedSession marks canonical singleton sessions materialized from
-	// [[named_session]] configuration.
+	// ConfiguredNamedSession marks canonical configured sessions materialized
+	// from [[named_session]] configuration.
 	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
 
 	// Options contains the effective per-session option overrides from
@@ -133,15 +133,8 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 		r.Kind = k
 	}
 	// Surface bead-persisted sleep/hold/quarantine reason.
-	switch {
-	case b.Metadata["sleep_reason"] != "":
-		r.Reason = b.Metadata["sleep_reason"]
-	case b.Metadata["quarantined_until"] != "":
-		r.Reason = "quarantine"
-	case b.Metadata["wait_hold"] != "":
-		r.Reason = "wait-hold"
-	case b.Metadata["held_until"] != "":
-		r.Reason = "user-hold"
+	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC()); reason != "" {
+		r.Reason = reason
 	}
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
@@ -273,7 +266,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	mgr := s.sessionManager(store)
 
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -296,10 +289,6 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
-		return
-	}
-	if b, getErr := store.Get(id); getErr == nil && strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" && strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" {
-		writeError(w, http.StatusConflict, "conflict", "configured always-on named sessions cannot be closed while config-managed")
 		return
 	}
 	nudgeIDs, err := session.WaitNudgeIDs(store, id)
@@ -351,13 +340,12 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.RepairEmptyType(store, &b)
-	if b.Status == "closed" {
-		writeError(w, http.StatusConflict, "conflict", "session "+id+" is closed")
-		return
-	}
-
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
+		if state, conflict := session.WakeConflictState(err); conflict {
+			writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+state)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
@@ -437,8 +425,9 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 
 	resp.Running = sp.IsRunning(info.SessionName)
 
-	// Active bead: search rig stores for in_progress work assigned to this template.
-	resp.ActiveBead = s.findActiveBead(info.Template, "")
+	// Active bead: prefer canonical session ownership, with legacy
+	// session_name/alias/template fallbacks for old in-progress records.
+	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 
 	// Peek preview (opt-in, only when running).
 	if wantPeek && resp.Running {
@@ -469,7 +458,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
 		}
 		if sessionFile != "" {
-			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
+			if meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage

@@ -1,0 +1,88 @@
+# Pack commands and doctor checks discovered from imported packs.
+#
+# Tests:
+# - binding-scoped command exposure: gc <binding> <command...>
+# - nested/default command discovery
+# - command.toml override for public command words
+# - command leaves remain terminal even with asset subdirectories
+# - pack doctor checks flow into gc doctor
+# - transitive = false hides nested imported commands/checks
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+# Initialize a real city scaffold, then swap in the pack-import config.
+exec gc init $WORK/city
+cp $WORK/city.toml.custom $WORK/city/city.toml
+
+cd $WORK/city
+
+chmod 755 $WORK/packs/ops/commands/status/run.sh
+chmod 755 $WORK/packs/ops/commands/repo-sync/run.sh
+chmod 755 $WORK/packs/ops/doctor/tooling/run.sh
+chmod 755 $WORK/packs/child/commands/ping/run.sh
+chmod 755 $WORK/packs/child/doctor/transitive/run.sh
+
+# Imported commands are exposed under the binding name.
+exec gc ops status alpha beta
+stdout 'status pack=ops city=testcity args=alpha beta'
+
+# command.toml can remap a flat storage dir to nested CLI words.
+exec gc ops repo sync now
+stdout 'sync pack=ops city=testcity args=now'
+
+# The binding namespace help shows the discovered command tree.
+exec gc ops --help
+stdout 'status'
+stdout 'repo'
+! stdout 'ping'
+
+# gc doctor includes direct imported pack checks.
+exec gc doctor
+stdout 'ops:tooling'
+! stdout 'child:transitive'
+stdout 'passed'
+
+-- city.toml.custom --
+[workspace]
+name = "testcity"
+
+[imports.ops]
+source = "../packs/ops"
+transitive = false
+
+-- packs/ops/pack.toml --
+[pack]
+name = "ops"
+schema = 1
+
+[imports.child]
+source = "../child"
+
+-- packs/ops/commands/status/run.sh --
+#!/bin/sh
+echo "status pack=$GC_PACK_NAME city=$GC_CITY_NAME args=$*"
+-- packs/ops/commands/status/assets/readme.txt --
+status assets should not affect discovery
+-- packs/ops/commands/repo-sync/command.toml --
+command = ["repo", "sync"]
+description = "Sync repository state"
+-- packs/ops/commands/repo-sync/run.sh --
+#!/bin/sh
+echo "sync pack=$GC_PACK_NAME city=$GC_CITY_NAME args=$*"
+-- packs/ops/doctor/tooling/run.sh --
+#!/bin/sh
+exit 0
+
+-- packs/child/pack.toml --
+[pack]
+name = "child"
+schema = 1
+
+-- packs/child/commands/ping/run.sh --
+#!/bin/sh
+echo "child ping"
+-- packs/child/doctor/transitive/run.sh --
+#!/bin/sh
+exit 0

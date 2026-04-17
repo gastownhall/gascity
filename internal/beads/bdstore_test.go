@@ -428,7 +428,7 @@ func TestBdStoreList(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --include-infra --limit 0`: {
+		`bd list --json --include-infra --include-gates --limit 0`: {
 			out: []byte(`[{"id":"bd-aaa","title":"first","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},{"id":"bd-bbb","title":"second","status":"closed","issue_type":"bug","created_at":"2025-01-15T10:31:00Z"}]`),
 		},
 	})
@@ -453,7 +453,7 @@ func TestBdStoreListEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --include-infra --limit 0`: {out: []byte(`[]`)},
+		`bd list --json --include-infra --include-gates --limit 0`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListOpen()
@@ -515,6 +515,31 @@ func TestBdStoreReady(t *testing.T) {
 	}
 	if got[0].Title != "ready one" {
 		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "ready one")
+	}
+}
+
+func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-session","title":"infra session","status":"open","issue_type":"session","created_at":"2025-01-15T10:31:00Z"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready() returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-task" {
+		t.Fatalf("Ready()[0].ID = %q, want %q", got[0].ID, "bd-task")
 	}
 }
 
@@ -799,6 +824,26 @@ func TestBdStoreCreateWithLabels(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreateWithMultipleLabelsUsesSingleFlag(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","labels":["owned","session:gc-x"]}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Create(beads.Bead{Title: "test", Type: "convoy", Labels: []string{"owned", "session:gc-x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--labels owned,session:gc-x") {
+		t.Errorf("args = %q, want to contain '--labels owned,session:gc-x'", args)
+	}
+	if strings.Count(args, "--labels") != 1 {
+		t.Errorf("args = %q, want a single --labels flag", args)
+	}
+}
+
 func TestBdStoreCreateWithParentID(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -916,7 +961,7 @@ func TestBdStoreListByLabel(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:digest --include-infra --limit 5`: {
+		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 5`: {
 			out: []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`),
 		},
 	})
@@ -941,7 +986,7 @@ func TestBdStoreListByLabelEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:none --include-infra --limit 1`: {out: []byte(`[]`)},
+		`bd list --json --label=order-run:none --include-infra --include-gates --limit 1`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListByLabel("order-run:none", 1)
@@ -984,6 +1029,9 @@ func TestBdStoreListByLabelZeroLimit(t *testing.T) {
 	}
 	if !strings.Contains(args, "--include-infra") {
 		t.Errorf("args = %q, want --include-infra", args)
+	}
+	if !strings.Contains(args, "--include-gates") {
+		t.Errorf("args = %q, want --include-gates", args)
 	}
 	if strings.Contains(args, "--all") {
 		t.Errorf("args = %q, did not want --all by default", args)

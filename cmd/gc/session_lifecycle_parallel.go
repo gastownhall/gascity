@@ -192,20 +192,20 @@ func dependencyTemplateAlive(
 	if cfgAgent == nil {
 		return false
 	}
-	if isMultiSessionCfgAgent(cfgAgent) {
-		for name, tp := range desiredState {
-			if tp.TemplateName != template {
-				continue
-			}
-			if sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames) {
-				return true
-			}
+	for name, tp := range desiredState {
+		if tp.TemplateName != template {
+			continue
 		}
-		return false
+		if sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames) {
+			return true
+		}
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
-	depTP := desiredState[sessionName]
-	return sp.IsRunning(sessionName) && sp.ProcessAlive(sessionName, depTP.Hints.ProcessNames)
+	processNames := cfgAgent.ProcessNames
+	if depTP, ok := desiredState[sessionName]; ok {
+		processNames = depTP.Hints.ProcessNames
+	}
+	return sp.IsRunning(sessionName) && sp.ProcessAlive(sessionName, processNames)
 }
 
 func candidateWaveOrder(
@@ -269,10 +269,19 @@ func prepareStartCandidate(
 	clk clock.Clock,
 ) (*preparedStart, error) {
 	session := candidate.session
-	tp := candidate.tp
 	if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
+	return buildPreparedStart(candidate, cfg, store)
+}
+
+func buildPreparedStart(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+) (*preparedStart, error) {
+	session := candidate.session
+	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
 	// Apply template_overrides from bead metadata. These are per-session
@@ -310,7 +319,7 @@ func prepareStartCandidate(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
-	if wd := resolveTaskWorkDir(store, candidate.logicalTemplate(cfg)); wd != "" {
+	if wd := resolveTaskWorkDir(store, session.ID, candidate.name(), strings.TrimSpace(session.Metadata["alias"]), candidate.logicalTemplate(cfg)); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
@@ -384,10 +393,12 @@ func prepareStartCandidate(
 		}
 		session.Metadata["instance_token"] = instanceToken
 	}
-	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithAlias(
+	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithSessionContext(
 		session.ID,
 		candidate.name(),
 		strings.TrimSpace(session.Metadata["alias"]),
+		strings.TrimSpace(session.Metadata["template"]),
+		strings.TrimSpace(session.Metadata["session_origin"]),
 		generation,
 		continuationEpoch,
 		instanceToken,
@@ -588,25 +599,21 @@ func commitStartResultTraced(
 	if err := clearPendingCreateClaim(session, store); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
 	}
-	metadata := map[string]string{
-		"started_config_hash": result.prepared.coreHash,
-		"live_hash":           result.prepared.liveHash,
-		"started_live_hash":   result.prepared.liveHash,
-	}
+	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
-		metadata["core_hash_breakdown"] = string(bdj)
+		coreBreakdown = string(bdj)
 	}
 	// Transition creating/asleep/drained beads to active once the runtime
 	// spawn has confirmed. Folded into this metadata batch so the state
 	// write is atomic with the hash writes and avoids a second round-trip
 	// per spawn. See confirmPendingStart for the state gate.
-	if confirmPendingStart(session.Metadata["state"]) {
-		metadata["state"] = string(sessionpkg.StateActive)
-		metadata["state_reason"] = "creation_complete"
-	}
-	if session.Metadata["sleep_reason"] != "" {
-		metadata["sleep_reason"] = ""
-	}
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:         result.prepared.coreHash,
+		LiveHash:         result.prepared.liveHash,
+		CoreBreakdown:    coreBreakdown,
+		ConfirmState:     confirmPendingStart(session.Metadata["state"]),
+		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
@@ -649,6 +656,60 @@ func clearPendingCreateClaim(session *beads.Bead, store beads.Store) error {
 	}
 	session.Metadata["pending_create_claim"] = ""
 	return nil
+}
+
+func recoverRunningPendingCreate(
+	session *beads.Bead,
+	tp TemplateParams,
+	cfg *config.City,
+	store beads.Store,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if session == nil || store == nil {
+		return false
+	}
+	prepared, err := buildPreparedStart(startCandidate{session: session, tp: tp}, cfg, store)
+	if err != nil {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_rebuild_failed", "failed", traceRecordPayload{
+				"error": err.Error(),
+			}, nil, "")
+		}
+		return false
+	}
+	if err := clearPendingCreateClaim(session, store); err != nil {
+		return false
+	}
+	coreBreakdown := ""
+	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
+		coreBreakdown = string(bdj)
+	}
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:      prepared.coreHash,
+		LiveHash:      prepared.liveHash,
+		CoreBreakdown: coreBreakdown,
+		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
+			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
+		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+	})
+	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
+				"error": err.Error(),
+			}, nil, "")
+		}
+		return false
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(metadata))
+	}
+	for key, value := range metadata {
+		session.Metadata[key] = value
+	}
+	if trace != nil {
+		trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_healed", "healed", nil, nil, "")
+	}
+	return true
 }
 
 func shouldRollbackPendingCreate(session *beads.Bead) bool {
@@ -794,6 +855,9 @@ func executePlannedStartsTraced(
 						"rollback_pending": result.rollbackPending,
 						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
 					}, "")
+				}
+				if result.err == nil && result.outcome != "session_initializing" {
+					clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++

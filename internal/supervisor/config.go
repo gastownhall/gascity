@@ -151,6 +151,10 @@ func DefaultHome() string {
 	if isTestBinary() {
 		panic("supervisor.DefaultHome: GC_HOME must be set during tests to prevent host supervisor interference")
 	}
+	return builtinDefaultHome()
+}
+
+func builtinDefaultHome() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".gc")
@@ -158,13 +162,26 @@ func DefaultHome() string {
 	return filepath.Join(home, ".gc")
 }
 
+// UsesIsolatedGCHomeOverride reports whether GC_HOME points away from the builtin ~/.gc default.
+func UsesIsolatedGCHomeOverride() bool {
+	gcHome := strings.TrimSpace(os.Getenv("GC_HOME"))
+	if gcHome == "" {
+		return false
+	}
+	return filepath.Clean(gcHome) != filepath.Clean(builtinDefaultHome())
+}
+
 // RuntimeDir returns the directory for ephemeral runtime files (lock,
-// socket). Uses $XDG_RUNTIME_DIR/gc if available, falls back to
-// DefaultHome().
+// socket). Uses $XDG_RUNTIME_DIR/gc for the default machine-wide home, but
+// keeps isolated GC_HOME overrides self-contained under their own home so
+// they do not collide with the host supervisor socket.
 //
 // Guard: in test binaries, XDG_RUNTIME_DIR or GC_HOME must be set to
 // prevent connecting to the host supervisor socket.
 func RuntimeDir() string {
+	if UsesIsolatedGCHomeOverride() {
+		return DefaultHome()
+	}
 	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
 		return filepath.Join(v, "gc")
 	}

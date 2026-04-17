@@ -9,30 +9,18 @@ import (
 
 // EnsureClaudeStateFile creates or updates HOME/.claude.json with the minimum
 // global onboarding state Claude Code needs to avoid first-run onboarding UI.
-// If configDir is non-empty it is used as the Claude config directory;
-// otherwise it defaults to HOME/.claude.
-func EnsureClaudeStateFile(home string, configDir ...string) error {
+func EnsureClaudeStateFile(home string) error {
 	home = strings.TrimSpace(home)
 	if home == "" {
 		return nil
 	}
-	cd := filepath.Join(home, ".claude")
-	if len(configDir) > 0 {
-		if v := strings.TrimSpace(configDir[0]); v != "" {
-			cd = v
-		}
+	statePath := filepath.Join(home, ".claude.json")
+	root, err := loadClaudeState(statePath)
+	if err != nil {
+		return err
 	}
-	for _, statePath := range claudeStatePaths(home, cd) {
-		root, err := loadClaudeState(statePath)
-		if err != nil {
-			return err
-		}
-		root["hasCompletedOnboarding"] = true
-		if err := saveClaudeState(statePath, root); err != nil {
-			return err
-		}
-	}
-	return nil
+	root["hasCompletedOnboarding"] = true
+	return saveClaudeState(statePath, root)
 }
 
 // EnsureClaudeProjectState marks a project path as trusted/onboarded in the
@@ -59,56 +47,30 @@ func EnsureClaudeProjectState(env *Env, projectPath string) error {
 	if err := EnsureClaudeStateFile(home); err != nil {
 		return err
 	}
-	configDir := filepath.Join(home, ".claude")
-	if env != nil {
-		if v := strings.TrimSpace(env.Get("CLAUDE_CONFIG_DIR")); v != "" {
-			configDir = v
-		}
-	}
-	for _, statePath := range claudeStatePaths(home, configDir) {
-		root, err := loadClaudeState(statePath)
-		if err != nil {
-			return err
-		}
-		projects, _ := root["projects"].(map[string]any)
-		if projects == nil {
-			projects = map[string]any{}
-			root["projects"] = projects
-		}
-		entry, _ := projects[projectPath].(map[string]any)
-		if entry == nil {
-			entry = map[string]any{}
-		}
-		entry["hasCompletedProjectOnboarding"] = true
-		entry["hasTrustDialogAccepted"] = true
-		if _, ok := entry["projectOnboardingSeenCount"]; !ok {
-			entry["projectOnboardingSeenCount"] = 1
-		}
-		projects[projectPath] = entry
-		if err := saveClaudeState(statePath, root); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
-func claudeStatePaths(home, configDir string) []string {
-	seen := make(map[string]struct{}, 2)
-	var paths []string
-	add := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		if _, ok := seen[path]; ok {
-			return
-		}
-		seen[path] = struct{}{}
-		paths = append(paths, path)
+	statePath := filepath.Join(home, ".claude.json")
+	root, err := loadClaudeState(statePath)
+	if err != nil {
+		return err
 	}
-	add(filepath.Join(home, ".claude.json"))
-	add(filepath.Join(configDir, ".claude.json"))
-	return paths
+
+	projects, _ := root["projects"].(map[string]any)
+	if projects == nil {
+		projects = map[string]any{}
+		root["projects"] = projects
+	}
+	entry, _ := projects[projectPath].(map[string]any)
+	if entry == nil {
+		entry = map[string]any{}
+	}
+	entry["hasCompletedProjectOnboarding"] = true
+	entry["hasTrustDialogAccepted"] = true
+	if _, ok := entry["projectOnboardingSeenCount"]; !ok {
+		entry["projectOnboardingSeenCount"] = 1
+	}
+	projects[projectPath] = entry
+
+	return saveClaudeState(statePath, root)
 }
 
 func loadClaudeState(path string) (map[string]any, error) {

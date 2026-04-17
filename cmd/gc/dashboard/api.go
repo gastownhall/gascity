@@ -272,14 +272,26 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try API fast-path for recognized commands.
-	if output, ok := h.runViaAPI(req.Command); ok {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(CommandResponse{
-			Command: req.Command,
-			Success: true,
-			Output:  output,
-		})
+	// Try API fast-path for recognized commands. Commands marked as API-only
+	// fail closed here instead of falling back to subprocess execution.
+	if output, handled, err := h.runViaAPI(req.Command); handled {
+		if err != nil {
+			if meta.Binary == "api" {
+				h.sendError(w, "Failed to execute API-backed command: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(CommandResponse{
+				Command: req.Command,
+				Success: true,
+				Output:  output,
+			})
+			return
+		}
+	}
+	if meta.Binary == "api" {
+		h.sendError(w, "API-backed command has no dashboard handler", http.StatusBadGateway)
 		return
 	}
 
@@ -331,47 +343,48 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // runViaAPI attempts to execute a recognized command via the GC API instead of
-// spawning a subprocess. Returns (output, true) if the command was handled, or
-// ("", false) to fall through to subprocess execution.
-func (h *APIHandler) runViaAPI(command string) (string, bool) {
+// spawning a subprocess. It returns handled=false only when the command has no
+// API implementation. Recognized API-backed commands return handled=true and
+// surface transport or upstream failures via err so callers can fail closed.
+func (h *APIHandler) runViaAPI(command string) (string, bool, error) {
 	parts := parseCommandArgs(command)
 	if len(parts) == 0 {
-		return "", false
+		return "", false, nil
 	}
 
 	switch parts[0] {
 	case "status":
 		body, err := h.apiGet("/v0/status")
 		if err != nil {
-			return "", false
+			return "", true, err
 		}
-		return prettyJSON(body), true
+		return prettyJSON(body), true, nil
 
 	case "agent":
 		if len(parts) >= 2 && parts[1] == "list" {
 			body, err := h.apiGet("/v0/sessions")
 			if err != nil {
-				return "", false
+				return "", true, err
 			}
-			return prettyJSON(body), true
+			return prettyJSON(body), true, nil
 		}
 
 	case "list":
-		// bd list
+		// API-backed bead list
 		body, err := h.apiGet("/v0/beads")
 		if err != nil {
-			return "", false
+			return "", true, err
 		}
-		return prettyJSON(body), true
+		return prettyJSON(body), true, nil
 
 	case "show":
-		// bd show <id>
+		// API-backed bead show <id>
 		if len(parts) >= 2 {
 			body, err := h.apiGet("/v0/bead/" + parts[1])
 			if err != nil {
-				return "", false
+				return "", true, err
 			}
-			return prettyJSON(body), true
+			return prettyJSON(body), true, nil
 		}
 
 	case "mail":
@@ -380,9 +393,9 @@ func (h *APIHandler) runViaAPI(command string) (string, bool) {
 			case "inbox", "check":
 				body, err := h.apiGet("/v0/mail")
 				if err != nil {
-					return "", false
+					return "", true, err
 				}
-				return prettyJSON(body), true
+				return prettyJSON(body), true, nil
 			}
 		}
 
@@ -392,16 +405,16 @@ func (h *APIHandler) runViaAPI(command string) (string, bool) {
 			case "list":
 				body, err := h.apiGet("/v0/convoys")
 				if err != nil {
-					return "", false
+					return "", true, err
 				}
-				return prettyJSON(body), true
+				return prettyJSON(body), true, nil
 			case "show", "status":
 				if len(parts) >= 3 {
 					body, err := h.apiGet("/v0/convoy/" + parts[2])
 					if err != nil {
-						return "", false
+						return "", true, err
 					}
-					return prettyJSON(body), true
+					return prettyJSON(body), true, nil
 				}
 			}
 		}
@@ -410,18 +423,18 @@ func (h *APIHandler) runViaAPI(command string) (string, bool) {
 		if len(parts) >= 2 && parts[1] == "list" {
 			body, err := h.apiGet("/v0/rigs")
 			if err != nil {
-				return "", false
+				return "", true, err
 			}
-			return prettyJSON(body), true
+			return prettyJSON(body), true, nil
 		}
 
 	case "hooks":
 		if len(parts) >= 2 && parts[1] == "list" {
 			body, err := h.apiGet("/v0/beads?status=in_progress")
 			if err != nil {
-				return "", false
+				return "", true, err
 			}
-			return prettyJSON(body), true
+			return prettyJSON(body), true, nil
 		}
 
 	case "sling":
@@ -440,16 +453,16 @@ func (h *APIHandler) runViaAPI(command string) (string, bool) {
 			}
 		}
 		if _, ok := payload["target"]; !ok {
-			return "", false // target is required by API
+			return "", false, nil // target is required by API
 		}
 		body, err := h.apiPost("/v0/sling", payload)
 		if err != nil {
-			return "", false
+			return "", true, err
 		}
-		return prettyJSON(body), true
+		return prettyJSON(body), true, nil
 	}
 
-	return "", false
+	return "", false, nil
 }
 
 // handleCommands returns the list of available commands for the palette.
@@ -461,16 +474,10 @@ func (h *APIHandler) handleCommands(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// runValidatedCommand executes a command with the appropriate binary (gc or bd).
-// The binary string comes from CommandMeta.Binary and determines the working directory.
+// runValidatedCommand executes a subprocess-backed dashboard command.
+// API-only commands are handled earlier and never reach this path.
 func (h *APIHandler) runValidatedCommand(ctx context.Context, timeout time.Duration, binary string, args []string) (string, error) {
-	dir := h.cityPath
-	if binary == "bd" {
-		// bd commands need to run from a rig directory where .beads/ lives.
-		// Use the first rig's path as default. The caller can override via args.
-		dir = h.cityPath
-	}
-	return h.runCommandWithSem(ctx, timeout, binary, args, dir)
+	return h.runCommandWithSem(ctx, timeout, binary, args, h.cityPath)
 }
 
 // runCommandWithSem executes a command with semaphore-based concurrency limiting.

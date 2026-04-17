@@ -24,7 +24,7 @@ func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage orders (scheduled and event-driven dispatch)",
 		Long: `Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in orders/NAME/order.toml files. Each order pairs a gate
+Orders live in flat orders/<name>.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.`,
@@ -54,7 +54,7 @@ func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "List available orders",
 		Long: `List all available orders with their gate type, schedule, and target.
 
-Scans orders/ directories for order.toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining gate conditions,
 scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -239,11 +239,11 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
 	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
 	appendRoot := func(root orders.ScanRoot) {
-		dir := filepath.Clean(root.Dir)
-		if seen[dir] {
+		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
+		if seen[key] {
 			return
 		}
-		seen[dir] = true
+		seen[key] = true
 		roots = append(roots, root)
 	}
 
@@ -251,12 +251,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	// and user packs (via workspace.includes). City-local formulas are highest
 	// priority and override pack formulas when order names collide.
 	for _, layer := range formulaLayers {
-		formulaRoot := filepath.Join(layer, "orders")
 		if layer == localFormulas {
-			appendRoot(orders.ScanRoot{
-				Dir:          formulaRoot,
-				FormulaLayer: localFormulas,
-			})
 			for _, root := range []string{citylayout.OrdersPath(cityPath)} {
 				appendRoot(orders.ScanRoot{
 					Dir:          root,
@@ -266,7 +261,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 			continue
 		}
 		appendRoot(orders.ScanRoot{
-			Dir:          formulaRoot,
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 			FormulaLayer: layer,
 		})
 	}
@@ -278,7 +273,7 @@ func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.Sc
 	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
 	for _, layer := range formulaLayers {
 		roots = append(roots, orders.ScanRoot{
-			Dir:          filepath.Join(layer, "orders"),
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 			FormulaLayer: layer,
 		})
 	}
@@ -403,6 +398,21 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 
 // --- gc order run ---
 
+func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	store, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	return store, 0
+}
+
 func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 	aa, code := loadOrders(stderr, "gc order run")
 	if code != 0 {
@@ -413,20 +423,36 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	store := bdStoreForCity(cityPath, cityPath)
+	a, ok := findOrder(aa, name, rig)
+	if !ok {
+		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if a.IsExec() {
+		cfg, cfgErr := loadCityConfig(cityPath)
+		if cfgErr != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	}
+	store, storeCode := openCityOrderStore(stderr, "gc order run")
+	if store == nil {
+		return storeCode
+	}
 
 	ep, epCode := openCityEventsProvider(stderr, "gc order run")
 	if ep == nil {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderRun(aa, name, rig, cityPath, shellSlingRunner, store, ep, stdout, stderr)
+	return doOrderRun(aa, name, rig, cityPath, store, ep, stdout, stderr)
 }
 
 // doOrderRun executes an order manually: instantiates a wisp from the
 // order's formula (or runs exec script directly) and routes it to the
 // configured target.
-func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunner, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
 		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
@@ -435,7 +461,12 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 
 	// Exec orders: run the script directly.
 	if a.IsExec() {
-		return doOrderRunExec(a, cityPath, stdout, stderr)
+		cfg, cfgErr := loadCityConfig(cityPath)
+		if cfgErr != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
 
 	// Capture event head before wisp creation (race-free cursor).
@@ -471,7 +502,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 
 	if a.Pool != "" && cfg != nil {
 		pool := qualifyPool(a.Pool, a.Rig)
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -483,18 +514,23 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 	}
 	rootID := cookResult.RootID
 
-	// Label with order-run:<scopedName> for tracking, plus root routing metadata
-	// when a target is configured. For event gates, also add order:<scopedName>
-	// and seq:<headSeq> for cursor tracking.
-	routeCmd := fmt.Sprintf("bd update %s --add-label=order-run:%s", rootID, scoped)
+	// Track the spawned root in the same store that created it so manual runs
+	// stay provider-aware and do not fall back to ambient bd CLI state.
+	update := beads.UpdateOpts{
+		Labels: []string{"order-run:" + scoped},
+	}
 	if a.Gate == "event" && ep != nil {
-		routeCmd += fmt.Sprintf(" --add-label=order:%s --add-label=seq:%d", scoped, headSeq)
+		update.Labels = append(update.Labels,
+			"order:"+scoped,
+			fmt.Sprintf("seq:%d", headSeq),
+		)
 	}
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
-		routeCmd += fmt.Sprintf(" --set-metadata gc.routed_to=%s", pool)
+		update.Metadata = map[string]string{
+			"gc.routed_to": qualifyPool(a.Pool, a.Rig),
+		}
 	}
-	if _, err := runner("", routeCmd, nil); err != nil {
+	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -508,17 +544,19 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 }
 
 // doOrderRunExec runs an exec order directly via shell.
-func doOrderRunExec(a orders.Order, cityPath string, stdout, stderr io.Writer) int {
+func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) int {
 	timeout := a.TimeoutOrDefault()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	env := orderExecEnv(cityPath, a)
-	if a.Source != "" {
-		env = append(env, "ORDER_DIR="+filepath.Dir(a.Source))
+	target, err := resolveOrderExecTarget(cityPath, cfg, a)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
+	env := orderExecEnv(cityPath, target, a)
 
-	output, err := shellExecRunner(ctx, a.Exec, cityPath, env)
+	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: exec failed: %v\n", err) //nolint:errcheck
 		if len(output) > 0 {
@@ -541,12 +579,10 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 		return code
 	}
 
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	store, storeCode := openCityOrderStore(stderr, "gc order check")
+	if store == nil {
+		return storeCode
 	}
-	store := bdStoreForCity(cityPath, cityPath)
 	lastRunFn := orderLastRunFn(store)
 	cursorFn := bdCursorFunc(store)
 
@@ -625,12 +661,10 @@ func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	store, storeCode := openCityOrderStore(stderr, "gc order history")
+	if store == nil {
+		return storeCode
 	}
-	store := bdStoreForCity(cityPath, cityPath)
 	return doOrderHistory(name, rig, aa, store, stdout)
 }
 

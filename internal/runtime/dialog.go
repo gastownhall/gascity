@@ -231,7 +231,8 @@ func containsRateLimitDialog(content string) bool {
 // and no dialog is present.
 func containsPromptIndicator(content string) bool {
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimRight(line, " \t")
+		trimmed := strings.ReplaceAll(line, "\u00a0", " ")
+		trimmed = strings.TrimRight(trimmed, " \t")
 		if trimmed == "" {
 			continue
 		}

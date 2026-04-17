@@ -115,12 +115,21 @@ For the next few examples, keep using the `mayor` from the earlier tutorials
 and add a generic worker so you have a second execution target besides the
 reviewer:
 
-```toml
-[[agent]]
-name = "worker"
-provider = "claude"
-prompt_template = "prompts/worker.md"
+```shell
+~/my-city
+$ gc agent add --name worker
+Scaffolded agent 'worker'
+
+~/my-city
+$ cat > agents/worker/prompt.template.md << 'EOF'
+# Worker Agent
+You are a general-purpose Gas City worker. Execute assigned work carefully and report the result.
+EOF
 ```
+
+Because the city already defaults to `claude`, this city-scoped worker does not
+need an `agent.toml` yet. Add one later if you want provider, model, or
+directory overrides.
 
 ## Instantiating a formula
 

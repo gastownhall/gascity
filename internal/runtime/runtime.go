@@ -225,22 +225,12 @@ type CopyEntry struct {
 	// ContentHash is a hex-encoded hash of the entry's content at discovery
 	// time. Set for filesystem-probed entries (hook files, skills dirs) so
 	// the config fingerprint is stable when content hasn't changed, even if
-	// the file is recreated (e.g., by materializeSkillStubs on every tick).
+	// the file is recreated on every tick.
 	// Empty for config-derived entries — those use Src/RelDst paths in the
 	// fingerprint instead. When Probed is true but ContentHash is empty
 	// (transient I/O error), the fingerprint uses a stable sentinel rather
 	// than falling back to path-based hashing.
 	ContentHash string
-	// SkipFingerprint excludes this entry from CoreFingerprint entirely.
-	// Set for probed entries whose contents are produced by pre_start
-	// staging (e.g. files inside the agent worktree populated by
-	// worktree-setup.sh). Fingerprinting such entries would conflate
-	// "config changed" with "pre_start not done yet" and cause false
-	// config-drift drains. See issue #682. The entry is still staged to
-	// K8s pods and retained in CopyFiles for container providers — the
-	// entry is excluded from identity hashing. Only meaningful when
-	// Probed is true; config-derived entries must still drive drain.
-	SkipFingerprint bool
 }
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.
@@ -343,6 +333,12 @@ type Config struct {
 	// Typical use: session UI setup such as theming, keybindings, or status bars.
 	SessionLive []string
 
+	// ProviderName is the resolved provider name (e.g., "claude", "codex").
+	// Used for per-provider overlay filtering: only files from
+	// overlays/per-provider/<ProviderName>/ are copied. Empty means
+	// provider-specific filtering is skipped (all files copied).
+	ProviderName string
+
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.
@@ -390,7 +386,7 @@ func SyncWorkDirEnv(cfg Config) Config {
 	if cfg.Env != nil && cfg.Env["GC_DIR"] == cfg.WorkDir {
 		return cfg
 	}
-	env := make(map[string]string, len(cfg.Env)+1)
+	env := make(map[string]string, len(cfg.Env))
 	for k, v := range cfg.Env {
 		env[k] = v
 	}

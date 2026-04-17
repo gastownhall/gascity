@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // builtinPack pairs an embedded FS with the subdirectory name used under .gc/system/packs/.
@@ -20,6 +21,10 @@ type builtinPack struct {
 	fs   fs.FS
 	name string // e.g. "bd", "dolt"
 }
+
+const (
+	legacyOrderConfigFile = "order.toml"
+)
 
 // builtinPacks lists all packs embedded in the gc binary. These are
 // materialized to .gc/system/packs/ on every gc start and gc init.
@@ -40,6 +45,9 @@ func MaterializeBuiltinPacks(cityPath string) error {
 		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.name)
 		if err := materializeFS(bp.fs, ".", dst); err != nil {
 			return fmt.Errorf("materializing %s pack: %w", bp.name, err)
+		}
+		if err := pruneLegacyEmbeddedOrders(bp.fs, dst); err != nil {
+			return fmt.Errorf("pruning legacy %s order paths: %w", bp.name, err)
 		}
 	}
 	return nil
@@ -63,16 +71,23 @@ func builtinPackIncludes(cityPath string) []string {
 		includes = append(includes, maintenancePath)
 	}
 
-	// bd is gated on the beads provider. The bd pack already includes dolt,
-	// so loading both here would expand the dolt pack twice.
-	provider := os.Getenv("GC_BEADS")
-	if provider == "" {
-		// Peek at city.toml for the provider setting without full config load.
-		provider = peekBeadsProvider(filepath.Join(cityPath, "city.toml"))
-	}
-	if provider == "" || provider == "bd" {
+	// bd is gated on the beads provider. The managed exec wrapper path is
+	// normalized back to "bd", so it only needs the bd pack. A direct
+	// exec:gc-beads-bd override outside the managed wrapper still includes
+	// dolt explicitly so config loading keeps the lifecycle helpers aligned.
+	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
+	normalizedProvider := normalizeRawBeadsProvider(cityPath, provider)
+	usesDirectExecLifecycle := strings.HasPrefix(provider, "exec:") &&
+		execProviderBase(provider) == "gc-beads-bd" &&
+		normalizedProvider != "bd"
+	if providerUsesBdStoreContract(normalizedProvider) {
 		if bdPath := filepath.Join(systemRoot, "bd"); packExists(bdPath) {
 			includes = append(includes, bdPath)
+		}
+	}
+	if usesDirectExecLifecycle {
+		if doltPath := filepath.Join(systemRoot, "dolt"); packExists(doltPath) {
+			includes = append(includes, doltPath)
 		}
 	}
 
@@ -140,6 +155,53 @@ func materializeFS(embedded fs.FS, root, dstDir string) error {
 		}
 		return os.WriteFile(dst, data, perm)
 	})
+}
+
+// pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the
+// embedded pack already provides the flat orders/<name>.toml form.
+func pruneLegacyEmbeddedOrders(embedded fs.FS, dstDir string) error {
+	entries, err := fs.ReadDir(embedded, "orders")
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		orderName, ok := orders.TrimFlatOrderFilename(name)
+		if !ok {
+			continue
+		}
+		for _, legacyPath := range []string{
+			filepath.Join(dstDir, "orders", orderName, legacyOrderConfigFile),
+			filepath.Join(dstDir, "formulas", "orders", orderName, legacyOrderConfigFile),
+		} {
+			if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			pruneEmptyDirs(filepath.Dir(legacyPath), dstDir)
+		}
+	}
+	return nil
+}
+
+func pruneEmptyDirs(dir, stop string) {
+	stop = filepath.Clean(stop)
+	for {
+		cleanDir := filepath.Clean(dir)
+		if cleanDir == stop || cleanDir == "." || cleanDir == string(filepath.Separator) {
+			return
+		}
+		entries, err := os.ReadDir(cleanDir)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if err := os.Remove(cleanDir); err != nil {
+			return
+		}
+		dir = filepath.Dir(cleanDir)
+	}
 }
 
 // MaterializeGastownPacks is a compatibility shim for callers that still

@@ -36,8 +36,19 @@ Now we're ready to create our first city.
 
 ## Creating a city
 
-A city is a directory that holds your agent configuration, prompts, and
-workflows. You create a new city with `gc init`:
+A city is a directory that holds your pack definition, deployment config, agent
+prompts, and workflows. You create a new city with `gc init`:
+
+A useful mental model is:
+
+- A **city** is the whole working folder for one Gas City environment. It
+  combines your agents, formulas, rigs, orders, and the local settings that
+  tell Gas City how to run them on this machine.
+- A **pack** is the reusable part of that city. It holds the Gas City
+  definitions that are portable and worth sharing with other cities or other
+  people.
+
+Another way to say it: a city is a pack plus deployment details.
 
 ```shell
 
@@ -92,8 +103,9 @@ same command, just providing the provider explicitly.
 $ gc init ~/my-city --provider claude
 ```
 
-Gas City created the city directory, registered it, and started it. Let's look
-at what's inside:
+Gas City created the city directory, registered it, and started it. A city
+created with `gc init` comes with `pack.toml`, `city.toml`, and the standard
+top-level directories, so let's look at what's inside:
 
 ```shell
 ~
@@ -101,13 +113,18 @@ $ cd ~/my-city
 
 ~/my-city
 $ ls
-city.toml  formulas  hooks  orders  prompts
+agents  assets  city.toml  commands  doctor  formulas  orders  overlays  pack.toml  template-fragments
 ```
 
-The main file is `city.toml` — it defines your city, using the contents of those
-directories as well as containing some definitions and local config. Assuming
-you chose the default `tutorial` config template and default provider,
-`city.toml` looks like this:
+At the top level of the city directory:
+
+- `pack.toml` — the portable pack definition layer
+- `city.toml` — city-local deployment and runtime settings
+
+This city comes with a built-in `mayor` agent. The mayor's prompt lives at
+`agents/mayor/prompt.template.md`, and `city.toml` defines the always-on mayor
+session that uses it. Assuming you chose the default `tutorial` config
+template and default provider, `city.toml` looks like this:
 
 ```shell
 ~/my-city
@@ -118,7 +135,7 @@ provider = "claude"
 
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -127,12 +144,11 @@ mode = "always"
 
 The `[workspace]` section names your city and sets the default provider.
 
-Each `[[agent]]` table you configure lets you create a named set of config
-including things like the provider, the model, the prompt you want to use to
-define its role, etc. An agent is named so that you can assign it work (aka
-"sling"). Here we've created an agent called the `mayor` with a prompt template
-(the instructions for the mayor) and a default session where you instructions
-go.
+The `[[agent]]` entry defines the built-in `mayor`, and `[[named_session]]`
+keeps a `mayor` session running so you can talk to it at any time. When you
+add more agents later, Gas City creates `agents/<name>/`, with
+`prompt.template.md` for the prompt and `agent.toml` for any per-agent
+overrides.
 
 Gas City also gives you an implicit agent for each supported provider — so
 `claude`, `codex`, and `gemini` are available as agent names even though they're
@@ -142,28 +158,17 @@ prompt.
 To check on the status of your city, use `gc status`:
 
 ```shell
-~/my-project
+~/my-city
 $ gc status
 my-city  /Users/csells/my-city
   Controller: standalone (PID 83621)
   Suspended:  no
 
 Agents:
-  dog                     pool (min=0, max=3)
-2026/04/06 21:20:22 tmux state cache: refreshed 2 sessions in 3.582ms
-    dog-1                 stopped
-    dog-2                 stopped
-    dog-3                 stopped
   mayor                   pool (min=0, max=unlimited)
   claude                  pool (min=0, max=unlimited)
-  my-project/claude       pool (min=0, max=unlimited)
 
-1/4 agents running
-
-Rigs:
-  my-project              /Users/csells/my-project
-
-Sessions: 2 active, 0 suspended
+Sessions: 1 active, 0 suspended
 ```
 
 ## Adding a rig

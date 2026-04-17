@@ -58,3 +58,17 @@ linters:
         linters:
           - revive
         text: "var-naming"
+      # These domain packages intentionally use package-qualified exported names
+      # (for example sling.SlingResult) to keep adapter call sites explicit.
+      - path: internal/convoy/
+        linters:
+          - revive
+        text: "stutters"
+      - path: internal/graphroute/
+        linters:
+          - revive
+        text: "stutters"
+      - path: internal/sling/
+        linters:
+          - revive
+        text: "stutters"

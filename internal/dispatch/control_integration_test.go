@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -343,20 +345,28 @@ func TestBuildAttemptRecipeEnrichesNestedRetryChildren(t *testing.T) {
 
 	recipe := buildAttemptRecipe(step, control, 2)
 
-	// Should have 4 steps: scope root + 2 children + 1 spec bead.
-	if len(recipe.Steps) != 4 {
-		t.Fatalf("steps = %d, want 4", len(recipe.Steps))
+	// Should have 6 steps: scope root + 2 children + 1 spec bead + 2 scope-checks.
+	if len(recipe.Steps) != 6 {
+		t.Fatalf("steps = %d, want 6", len(recipe.Steps))
 	}
 
 	// Find the review-code child step.
 	var reviewStep *formula.RecipeStep
 	var specStep *formula.RecipeStep
+	var reviewScopeCheck *formula.RecipeStep
+	var applyScopeCheck *formula.RecipeStep
 	for i := range recipe.Steps {
 		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code" {
 			reviewStep = &recipe.Steps[i]
 		}
 		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code.spec" {
 			specStep = &recipe.Steps[i]
+		}
+		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code-scope-check" {
+			reviewScopeCheck = &recipe.Steps[i]
+		}
+		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.apply-fixes-scope-check" {
+			applyScopeCheck = &recipe.Steps[i]
 		}
 	}
 	if reviewStep == nil {
@@ -381,8 +391,20 @@ func TestBuildAttemptRecipeEnrichesNestedRetryChildren(t *testing.T) {
 	if specStep == nil {
 		t.Fatal("review-code.spec bead not found in recipe")
 	}
+	if reviewScopeCheck == nil {
+		t.Fatal("review-code scope-check bead not found in recipe")
+	}
+	if applyScopeCheck == nil {
+		t.Fatal("apply-fixes scope-check bead not found in recipe")
+	}
 	if specStep.Metadata["gc.kind"] != "spec" {
 		t.Errorf("spec gc.kind = %q, want spec", specStep.Metadata["gc.kind"])
+	}
+	if reviewScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("review-code scope-check gc.kind = %q, want scope-check", reviewScopeCheck.Metadata["gc.kind"])
+	}
+	if applyScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("apply-fixes scope-check gc.kind = %q, want scope-check", applyScopeCheck.Metadata["gc.kind"])
 	}
 	var frozenSpec formula.Step
 	if err := json.Unmarshal([]byte(specStep.Description), &frozenSpec); err != nil {
@@ -579,18 +601,22 @@ max = -1
 		Ralph: &formula.RalphSpec{MaxAttempts: 3},
 		Children: []*formula.Step{
 			{
-				ID:       "review-claude",
-				Title:    "Code review: Claude",
-				Type:     "task",
-				Assignee: "gascity/claude",
-				Retry:    &formula.RetrySpec{MaxAttempts: 3},
+				ID:    "review-claude",
+				Title: "Code review: Claude",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "gascity/claude",
+				},
+				Retry: &formula.RetrySpec{MaxAttempts: 3},
 			},
 			{
-				ID:       "review-codex",
-				Title:    "Code review: Codex",
-				Type:     "task",
-				Assignee: "gascity/codex",
-				Retry:    &formula.RetrySpec{MaxAttempts: 3},
+				ID:    "review-codex",
+				Title: "Code review: Codex",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "gascity/codex",
+				},
+				Retry: &formula.RetrySpec{MaxAttempts: 3},
 			},
 			{
 				ID:    "synthesize",
@@ -641,22 +667,25 @@ max = -1
 	if claude.ID == "" {
 		t.Fatal("review-claude child not created")
 	}
-	if claude.Metadata["gc.routed_to"] != "gascity/claude" {
-		t.Fatalf("review-claude gc.routed_to = %q, want gascity/claude", claude.Metadata["gc.routed_to"])
+	if claude.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+		t.Fatalf("review-claude gc.routed_to = %q, want %q", claude.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	}
+	if claude.Metadata["gc.execution_routed_to"] != "gascity/claude" {
+		t.Fatalf("review-claude gc.execution_routed_to = %q, want gascity/claude", claude.Metadata["gc.execution_routed_to"])
 	}
 	if containsString(claude.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-claude labels = %v, should not contain legacy pool label", claude.Labels)
 	}
 	if claude.Assignee != "" {
-		t.Fatalf("review-claude assignee = %q, want empty for pool route", claude.Assignee)
+		t.Fatalf("review-claude assignee = %q, want empty metadata-only control route", claude.Assignee)
 	}
 
 	codex := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review-codex")
 	if codex.ID == "" {
 		t.Fatal("review-codex child not created")
 	}
-	if codex.Metadata["gc.routed_to"] != "gascity/codex" {
-		t.Fatalf("review-codex gc.routed_to = %q, want gascity/codex", codex.Metadata["gc.routed_to"])
+	if codex.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+		t.Fatalf("review-codex gc.routed_to = %q, want %q", codex.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
 	}
 	if codex.Metadata["gc.execution_routed_to"] != "gascity/codex" {
 		t.Fatalf("review-codex gc.execution_routed_to = %q, want gascity/codex", codex.Metadata["gc.execution_routed_to"])
@@ -668,7 +697,7 @@ max = -1
 		t.Fatalf("review-codex labels = %v, should not contain pool:gascity/claude", codex.Labels)
 	}
 	if codex.Assignee != "" {
-		t.Fatalf("review-codex assignee = %q, want empty for pool route", codex.Assignee)
+		t.Fatalf("review-codex assignee = %q, want empty metadata-only control route", codex.Assignee)
 	}
 
 	synthesize := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.synthesize")
@@ -682,11 +711,27 @@ max = -1
 		t.Fatalf("synthesize labels = %v, should not contain legacy pool label", synthesize.Labels)
 	}
 
-	assertSpawnedSpecUnrouted(t, store, root.ID, "review-claude")
-	assertSpawnedSpecUnrouted(t, store, root.ID, "review-codex")
+	assertSpawnedSpecClosedAndUnrouted(t, store, root.ID, "review-claude")
+	assertSpawnedSpecClosedAndUnrouted(t, store, root.ID, "review-codex")
+
+	claudeSpec, err := findSpecBead(store, claude)
+	if err != nil {
+		t.Fatalf("findSpecBead(review-claude): %v", err)
+	}
+	if claudeSpec.Status != "closed" {
+		t.Fatalf("review-claude spec status = %q, want closed", claudeSpec.Status)
+	}
+
+	codexSpec, err := findSpecBead(store, codex)
+	if err != nil {
+		t.Fatalf("findSpecBead(review-codex): %v", err)
+	}
+	if codexSpec.Status != "closed" {
+		t.Fatalf("review-codex spec status = %q, want closed", codexSpec.Status)
+	}
 }
 
-func assertSpawnedSpecUnrouted(t *testing.T, store beads.Store, rootID, specFor string) {
+func assertSpawnedSpecClosedAndUnrouted(t *testing.T, store beads.Store, rootID, specFor string) {
 	t.Helper()
 	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": rootID}, 0, beads.IncludeClosed)
 	if err != nil {
@@ -695,6 +740,9 @@ func assertSpawnedSpecUnrouted(t *testing.T, store beads.Store, rootID, specFor 
 	for _, bead := range all {
 		if bead.Metadata["gc.kind"] != "spec" || bead.Metadata["gc.spec_for"] != specFor {
 			continue
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("spec %s status = %q, want closed", bead.ID, bead.Status)
 		}
 		if bead.Assignee != "" {
 			t.Fatalf("spec %s assignee = %q, want empty", bead.ID, bead.Assignee)
@@ -707,6 +755,252 @@ func assertSpawnedSpecUnrouted(t *testing.T, store beads.Store, rootID, specFor 
 		return
 	}
 	t.Fatalf("missing spec bead for %q under root %s", specFor, rootID)
+}
+
+func TestSpawnNextAttemptRoutesDirectSessionRetryControlViaDispatcher(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	_ = mustCreate(t, store, beads.Bead{
+		Title:  "sky",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"session_name": "s-gc-sky",
+		},
+	})
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review / fix loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{{
+			ID:       "review-direct",
+			Title:    "Code review",
+			Type:     "task",
+			Assignee: "sky",
+			Retry:    &formula.RetrySpec{MaxAttempts: 3},
+		}},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":             "ralph",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-direct.review-loop",
+			"gc.step_id":          "review-loop",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{}); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	child := findAttemptByRef(t, store, root.ID, "mol-direct.review-loop.iteration.2.review-direct")
+	if child.ID == "" {
+		t.Fatal("review-direct child not created")
+	}
+	if got := child.Assignee; got != "" {
+		t.Fatalf("review-direct assignee = %q, want empty when control-dispatcher is unresolved", got)
+	}
+	if got := child.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Fatalf("review-direct gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	}
+	if got := child.Metadata["gc.execution_routed_to"]; got != "sky" {
+		t.Fatalf("review-direct gc.execution_routed_to = %q, want direct session target preserved", got)
+	}
+}
+
+func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "colliding session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/claude",
+			"session_name": "s-gc-colliding",
+		},
+	}); err != nil {
+		t.Fatalf("create colliding session: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "claude",
+			Dir:  "gascity",
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("gascity/claude", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve config target")
+	}
+	if binding.directSessionID != "" {
+		t.Fatalf("directSessionID = %q, want empty so config route is not hijacked by alias", binding.directSessionID)
+	}
+	if binding.qualifiedName != "gascity/claude" || !binding.metadataOnly {
+		t.Fatalf("binding = %+v, want metadata-only gascity/claude config route", binding)
+	}
+}
+
+func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	named, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "on_demand",
+			"state":                     "asleep",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxActive,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
+	}
+	if binding.directSessionID != named.ID {
+		t.Fatalf("directSessionID = %q, want canonical named bead ID %q", binding.directSessionID, named.ID)
+	}
+	if binding.qualifiedName != "" || binding.sessionName != "" {
+		t.Fatalf("binding = %+v, want direct named session only", binding)
+	}
+}
+
+func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMetadataOnly(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxActive,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
+	}
+	if binding.directSessionID != "" || binding.sessionName != "" {
+		t.Fatalf("binding = %+v, want no direct or legacy session-name target without a canonical bead", binding)
+	}
+	if binding.qualifiedName != "worker" || !binding.metadataOnly {
+		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecutionTarget(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "always",
+			"state":                     "active",
+		},
+	}); err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	dispatcher, err := store.Create(beads.Bead{
+		Title:  "control-dispatcher",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "control-dispatcher",
+			"template":                  config.ControlDispatcherAgentName,
+			"configured_named_session":  "true",
+			"configured_named_identity": config.ControlDispatcherAgentName,
+			"configured_named_mode":     "always",
+			"state":                     "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control-dispatcher session: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxActive,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	step := &formula.RecipeStep{
+		ID:       "review-scope-check",
+		Title:    "Finalize scope for review",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "scope-check"},
+	}
+
+	applyAttemptControlStepRoute(step, "worker", cfg, store)
+
+	if got := step.Metadata["gc.execution_routed_to"]; got != "worker" {
+		t.Fatalf("gc.execution_routed_to = %q, want worker", got)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Fatalf("gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	}
+	if step.Assignee != dispatcher.ID {
+		t.Fatalf("assignee = %q, want canonical control-dispatcher bead %q", step.Assignee, dispatcher.ID)
+	}
 }
 
 func containsString(values []string, want string) bool {

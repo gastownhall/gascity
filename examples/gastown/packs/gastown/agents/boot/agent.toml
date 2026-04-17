@@ -1,0 +1,4 @@
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/boot"
+max_active_sessions = 1

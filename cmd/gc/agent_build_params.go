@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os/exec"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -29,6 +31,7 @@ type agentBuildParams struct {
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
+	appendFragments []string // V2: from [agents].append_fragments / [agent_defaults].append_fragments
 	stderr          io.Writer
 
 	// beadStore is the city-level bead store for session bead lookups.
@@ -43,11 +46,26 @@ type agentBuildParams struct {
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
+
+	// skillCatalog is the shared skill catalog for this city (union of
+	// city pack's skills/ and every bootstrap implicit-import pack's
+	// skills/). Loaded once per build cycle and reused across every
+	// agent. Nil when LoadCityCatalog returned an error — the build
+	// continues without skill materialization participation in
+	// fingerprints or PreStart injection. The load error is logged to
+	// stderr at params-construction time.
+	skillCatalog *materialize.CityCatalog
+
+	// sessionProvider is cfg.Session.Provider (the city-level session
+	// runtime selector: "" / "tmux" / "subprocess" / "acp" / "k8s" /
+	// etc.). Used by the skill materialization integration to decide
+	// stage-2 eligibility.
+	sessionProvider string
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
-	return &agentBuildParams{
+	params := &agentBuildParams{
 		cityName:        cityName,
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
@@ -63,10 +81,26 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
 		beadStore:       store,
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
+		sessionProvider: cfg.Session.Provider,
 	}
+	// Load the shared skill catalog once per build cycle. Errors are
+	// non-fatal — the build continues without skills participating in
+	// fingerprints or PreStart, which matches the spec's "no spurious
+	// drain-restart cycles on remote-runtime agents" principle when
+	// discovery breaks transiently.
+	cat, err := materialize.LoadCityCatalog(cfg.PackSkillsDir)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (skills will not contribute to fingerprints this tick)\n", err) //nolint:errcheck // best-effort stderr
+		}
+	} else {
+		params.skillCatalog = &cat
+	}
+	return params
 }
 
 // effectiveOverlayDirs merges city-level and rig-level pack overlay dirs.

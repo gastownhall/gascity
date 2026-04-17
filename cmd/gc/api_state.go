@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
@@ -34,6 +33,7 @@ type controllerState struct {
 	mu            sync.RWMutex
 	cfg           *config.City
 	sp            runtime.Provider
+	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
 	cityBeadStore beads.Store   // city-level store for session beads
 	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
@@ -53,15 +53,20 @@ type controllerState struct {
 // newControllerState creates a controllerState with per-rig stores.
 // BdStores are wrapped with CachingStore for in-memory reads.
 func newControllerState(
+	ctx context.Context,
 	cfg *config.City,
 	sp runtime.Provider,
 	ep events.Provider,
 	cityName, cityPath string,
 ) *controllerState {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cs := &controllerState{
 		cfg:        cfg,
 		sp:         sp,
+		cacheCtx:   ctx,
 		eventProv:  ep,
 		editor:     configedit.NewEditor(fsys.OSFS{}, tomlPath),
 		cityName:   cityName,
@@ -75,7 +80,7 @@ func newControllerState(
 	if store, err := openCityStoreAt(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
-		cs.cityBeadStore = wrapWithCachingStore(store, ep)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
@@ -85,10 +90,13 @@ func newControllerState(
 
 // wrapWithCachingStore wraps a BdStore with a CachingStore that primes
 // and starts a background reconciler. Non-BdStore stores are returned as-is.
-func wrapWithCachingStore(store beads.Store, ep events.Provider) beads.Store {
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider) beads.Store {
 	bdStore, ok := store.(*beads.BdStore)
 	if !ok {
 		return store
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	var recorder events.Recorder
 	if ep != nil {
@@ -116,11 +124,14 @@ func wrapWithCachingStore(store beads.Store, ep events.Provider) beads.Store {
 	// callers (convergence reconcile, sweep, API handlers).
 	go func() {
 		log.Printf("caching-store: priming ...")
-		if err := cs.Prime(context.Background()); err != nil {
+		if err := cs.Prime(ctx); err != nil {
 			log.Printf("caching-store: prime FAILED: %v (reads will use bd subprocess)", err)
 			return
 		}
-		cs.StartReconciler(context.Background())
+		if ctx.Err() != nil {
+			return
+		}
+		cs.StartReconciler(ctx)
 	}()
 	return cs
 }
@@ -132,28 +143,20 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	provider := beadsProviderFor(cfg)
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
-	// For the "file" provider, all rigs share the same city-level beads.json.
-	var sharedFileStore beads.Store
-	if provider == "file" {
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
+	var sharedLegacyFileStore beads.Store
+	if provider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
+		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
 		if err == nil {
-			sharedFileStore = store
-		} else {
-			// Fall back to bd provider rather than opening duplicate per-rig file stores.
-			fmt.Fprintf(os.Stderr, "api: failed to open shared file store: %v (falling back to bd provider)\n", err)
-			provider = "bd"
+			sharedLegacyFileStore = store
 		}
 	}
 
 	for _, rig := range cfg.Rigs {
-		if sharedFileStore != nil {
-			stores[rig.Name] = sharedFileStore
-		} else {
-			stores[rig.Name] = wrapWithCachingStore(
-				cs.openRigStore(provider, rig.Path, rig.EffectivePrefix(), rig.Name, cfg),
-				cs.eventProv,
-			)
+		store := sharedLegacyFileStore
+		if store == nil {
+			store = cs.openRigStore(provider, rig.Name, rig.Path, rig.EffectivePrefix())
 		}
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}
 	return stores
 }
@@ -171,29 +174,27 @@ func beadsProviderFor(cfg *config.City) string {
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
-// cfg is the config snapshot that triggered this build — callers must pass it
-// explicitly so hot-reload never reads the stale cs.cfg.
-func (cs *controllerState) openRigStore(provider, rigPath, prefix, rigName string, cfg *config.City) beads.Store {
+func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string) beads.Store {
+	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		env := citylayout.CityRuntimeEnvMap(cs.cityPath)
-		env["GC_BEADS_PREFIX"] = prefix
-		rigPath = filepath.Clean(rigPath)
-		env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
-		env["GC_RIG_ROOT"] = rigPath
-		env["GC_RIG"] = rigName
-		s.SetEnv(env)
+		s.SetEnv(gcExecStoreEnv(cs.cityPath, execStoreTarget{
+			ScopeRoot: scopeRoot,
+			ScopeKind: "rig",
+			Prefix:    prefix,
+			RigName:   rigName,
+		}, provider))
 		return s
 	}
 	switch provider {
 	case "file":
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
+		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 		if err != nil {
-			return bdStoreForRig(rigPath, cs.cityPath, cfg)
+			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForRig(rigPath, cs.cityPath, cfg)
+		return bdStoreForRig(scopeRoot, cs.cityPath, cs.cfg)
 	}
 }
 
@@ -270,7 +271,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cityStore, cs.eventProv)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv)
 		cityMailProv = newMailProvider(cityStore)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc

@@ -641,9 +641,9 @@ func TestResolveAgentIdentity(t *testing.T) {
 			if got.Name != tt.wantName {
 				t.Errorf("agent.Name = %q, want %q", got.Name, tt.wantName)
 			}
-			gotIsMulti := isMultiSessionCfgAgent(&got)
+			gotIsMulti := got.SupportsInstanceExpansion()
 			if gotIsMulti != tt.wantPool {
-				t.Errorf("isMultiSession = %v, want %v", gotIsMulti, tt.wantPool)
+				t.Errorf("supportsInstanceExpansion = %v, want %v", gotIsMulti, tt.wantPool)
 			}
 			if got.PoolName != tt.wantLabel {
 				t.Errorf("agent.PoolName = %q, want %q", got.PoolName, tt.wantLabel)

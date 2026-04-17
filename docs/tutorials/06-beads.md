@@ -25,22 +25,23 @@ provider = "claude"
 
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
 mode = "always"
 
-[[agent]]
-name = "reviewer"
-dir = "my-project"
-prompt_template = "prompts/reviewer.md"
-provider = "codex"
-
 [[rigs]]
 name = "my-project"
 path = "/Users/csells/my-project"
+
+~/my-city
+$ cat agents/reviewer/agent.toml
+dir = "my-project"
+provider = "codex"
 ```
+
+The corresponding prompt files live under `agents/<name>/prompt.template.md`.
 
 Beads are fundamental to the system. You're going to be working with crew to
 turn plans into beads that can be executed in parallel by polecats.

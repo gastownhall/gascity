@@ -1,17 +1,27 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"gopkg.in/yaml.v3"
 )
 
 // TestEnsureBeadsProvider_file verifies that file provider is a no-op.
@@ -32,6 +42,128 @@ func TestEnsureBeadsProvider_exec(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_PACK_STATE_DIR", "/tmp/wrong-pack")
+	t.Setenv("GC_DOLT_DATA_DIR", "/tmp/wrong-data")
+	t.Setenv("GC_DOLT_LOG_FILE", "/tmp/wrong-log")
+	t.Setenv("GC_DOLT_STATE_FILE", "/tmp/wrong-state")
+	t.Setenv("GC_DOLT_PID_FILE", "/tmp/wrong-pid")
+	t.Setenv("GC_DOLT_LOCK_FILE", "/tmp/wrong-lock")
+	t.Setenv("GC_DOLT_CONFIG_FILE", "/tmp/wrong-config")
+
+	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	packStateDir := citylayout.PackStateDir(cityPath, "dolt")
+	want := map[string]string{
+		"GC_PACK_STATE_DIR":   packStateDir,
+		"GC_DOLT_DATA_DIR":    filepath.Join(cityPath, ".beads", "dolt"),
+		"GC_DOLT_LOG_FILE":    filepath.Join(packStateDir, "dolt.log"),
+		"GC_DOLT_STATE_FILE":  filepath.Join(packStateDir, "dolt-provider-state.json"),
+		"GC_DOLT_PID_FILE":    filepath.Join(packStateDir, "dolt.pid"),
+		"GC_DOLT_LOCK_FILE":   filepath.Join(packStateDir, "dolt.lock"),
+		"GC_DOLT_CONFIG_FILE": filepath.Join(packStateDir, "dolt-config.yaml"),
+	}
+	for key, expected := range want {
+		if got := env[key]; got != expected {
+			t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want %q", key, got, expected)
+		}
+	}
+}
+
+func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BIN", "/tmp/wrong-gc")
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+
+	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GC_BIN"]; got != "/opt/gc/bin/gc" {
+		t.Fatalf("providerLifecycleProcessEnv()[GC_BIN] = %q, want %q", got, "/opt/gc/bin/gc")
+	}
+}
+
+func TestEnsureBeadsProviderPublishesManagedDoltRuntimeStateFromProviderState(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fr"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+	providerState := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-provider-state.json")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "$1" in
+  start)
+    mkdir -p "$(dirname %q)"
+    cat > %q <<'JSON'
+{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-14T00:00:00Z"}
+JSON
+    ;;
+  stop)
+    ;;
+esac
+exit 0
+`, providerState, providerState, os.Getpid(), port, filepath.Join(cityPath, ".beads", "dolt"))
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	if err := ensureBeadsProvider(cityPath); err != nil {
+		t.Fatalf("ensureBeadsProvider: %v", err)
+	}
+
+	published, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(dolt-state.json): %v", err)
+	}
+	publishedText := string(published)
+	if !strings.Contains(publishedText, fmt.Sprintf("\"port\":%d", port)) {
+		t.Fatalf("published state missing port %d: %s", port, publishedText)
+	}
+	if !strings.Contains(publishedText, filepath.Join(cityPath, ".beads", "dolt")) {
+		t.Fatalf("published state missing data_dir: %s", publishedText)
+	}
+	for _, dir := range []string{cityPath, rigPath} {
+		data, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port"))
+		if err != nil {
+			t.Fatalf("ReadFile(%s/.beads/dolt-server.port): %v", dir, err)
+		}
+		if got := strings.TrimSpace(string(data)); got != strconv.Itoa(port) {
+			t.Fatalf("%s port file = %q, want %d", dir, got, port)
+		}
+	}
+}
+
 // TestEnsureBeadsProvider_bd_skip verifies bd provider is no-op when GC_DOLT=skip.
 func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 	dir := t.TempDir()
@@ -43,6 +175,108 @@ func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	if err := ensureBeadsProvider(dir); err != nil {
 		t.Fatalf("expected nil, got %v", err)
+	}
+}
+
+func TestEnsureBeadsProvider_bdAcceptsHealthyServerAfterStartError(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, ".gc", "system", "bin", "gc-beads-bd")
+	callLog := filepath.Join(dir, "provider.log")
+	marker := filepath.Join(dir, "started")
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(dir), doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   filepath.Join(dir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"case \"${1:-}\" in\n" +
+		"  start)\n" +
+		"    : > \"" + marker + "\"\n" +
+		"    echo 'signal: terminated' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  health)\n" +
+		"    [ -f \"" + marker + "\" ]\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+
+	if err := ensureBeadsProvider(dir); err != nil {
+		t.Fatalf("ensureBeadsProvider = %v, want nil", err)
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	got := strings.Fields(string(data))
+	want := []string{"start", "health"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("provider calls = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureBeadsProvider_execDoesNotMaskStartErrorWithHealth(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "provider.log")
+	marker := filepath.Join(dir, "started")
+	script := filepath.Join(dir, "provider.sh")
+	content := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"case \"${1:-}\" in\n" +
+		"  start)\n" +
+		"    : > \"" + marker + "\"\n" +
+		"    echo 'signal: terminated' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  health)\n" +
+		"    [ -f \"" + marker + "\" ]\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	err := ensureBeadsProvider(dir)
+	if err == nil {
+		t.Fatal("ensureBeadsProvider = nil, want start error")
+	}
+	if !strings.Contains(err.Error(), "signal: terminated") {
+		t.Fatalf("ensureBeadsProvider error = %v, want start error", err)
+	}
+
+	data, readErr := os.ReadFile(callLog)
+	if readErr != nil {
+		t.Fatalf("read call log: %v", readErr)
+	}
+	got := strings.Fields(string(data))
+	want := []string{"start"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("provider calls = %v, want %v", got, want)
 	}
 }
 
@@ -116,6 +350,86 @@ func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
 	}
 }
 
+func TestCurrentDoltPortIgnoresReachablePortFileWithoutManagedState(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte(fmt.Sprintf("%d\n", port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := currentDoltPort(cityDir); got != "" {
+		t.Fatalf("currentDoltPort() = %q, want empty when runtime state is missing", got)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("reachable compatibility port file should be removed, stat err = %v", err)
+	}
+}
+
+func TestCurrentManagedDoltPortIgnoresNonCanonicalPackState(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "extra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	payload := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":%q}`,
+		os.Getpid(), ln.Addr().(*net.TCPAddr).Port, filepath.Join(cityDir, ".beads", "dolt"), time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "extra", "dolt-state.json"), []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := currentManagedDoltPort(cityDir); got != "" {
+		t.Fatalf("currentManagedDoltPort() = %q, want empty when only non-canonical pack state exists", got)
+	}
+}
+
+func TestCurrentManagedDoltPortUsesCanonicalPackStateOnly(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "extra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = stale.Close() })
+	canonical := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = canonical.Close() })
+	stalePayload := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":%q}`,
+		os.Getpid(), stale.Addr().(*net.TCPAddr).Port, filepath.Join(cityDir, ".beads", "dolt"), time.Now().UTC().Add(time.Minute).Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "extra", "dolt-state.json"), []byte(stalePayload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      canonical.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := currentManagedDoltPort(cityDir); got != fmt.Sprintf("%d", canonical.Addr().(*net.TCPAddr).Port) {
+		t.Fatalf("currentManagedDoltPort() = %q, want canonical pack port %d", got, canonical.Addr().(*net.TCPAddr).Port)
+	}
+}
+
+//nolint:unparam // test helper keeps signature aligned with call sites under comparison
+func requireSyncConfiguredDoltPortFiles(t *testing.T, cityPath, provider string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) {
+	t.Helper()
+	if err := syncConfiguredDoltPortFiles(cityPath, provider, cityDolt, cityPrefix, rigs); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "foobar")
@@ -129,7 +443,7 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.port: 1234\ndolt.auto-start: true\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.auto-start: true\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -144,28 +458,918 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	syncConfiguredDoltPortFiles(cityDir, []config.Rig{{Name: "foobar", Path: rigDir}})
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "foobar", Path: rigDir}})
 
-	for _, dir := range []string{cityDir, rigDir} {
-		data, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port"))
+	for _, tc := range []struct {
+		dir    string
+		origin string
+	}{
+		{dir: cityDir, origin: "managed_city"},
+		{dir: rigDir, origin: "inherited_city"},
+	} {
+		data, err := os.ReadFile(filepath.Join(tc.dir, ".beads", "dolt-server.port"))
 		if err != nil {
-			t.Fatalf("read port file for %s: %v", dir, err)
+			t.Fatalf("read port file for %s: %v", tc.dir, err)
 		}
 		if strings.TrimSpace(string(data)) != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
-			t.Fatalf("%s port file = %q, want %d", dir, strings.TrimSpace(string(data)), ln.Addr().(*net.TCPAddr).Port)
+			t.Fatalf("%s port file = %q, want %d", tc.dir, strings.TrimSpace(string(data)), ln.Addr().(*net.TCPAddr).Port)
 		}
+		cfgData, err := os.ReadFile(filepath.Join(tc.dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", tc.dir, err)
+		}
+		cfg := string(cfgData)
+		if strings.Contains(cfg, "dolt.port:") {
+			t.Fatalf("%s config still contains dolt.port:\n%s", tc.dir, cfg)
+		}
+		if !strings.Contains(cfg, "dolt.auto-start: false") {
+			t.Fatalf("%s config missing dolt.auto-start normalization:\n%s", tc.dir, cfg)
+		}
+		if !strings.Contains(cfg, "gc.endpoint_origin: "+tc.origin) {
+			t.Fatalf("%s config missing gc.endpoint_origin=%s:\n%s", tc.dir, tc.origin, cfg)
+		}
+		if !strings.Contains(cfg, "gc.endpoint_status: verified") {
+			t.Fatalf("%s config missing gc.endpoint_status:\n%s", tc.dir, cfg)
+		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesReconcilesMalformedManagedConfigs(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: stale\ndolt.auto-start: true\ndolt_server_port: 3307\n: not yaml\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+
+	assertManagedScope := func(dir, prefix, origin string) {
+		t.Helper()
 		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
 		if err != nil {
 			t.Fatalf("read config for %s: %v", dir, err)
 		}
 		cfg := string(cfgData)
-		if strings.Contains(cfg, "dolt.port:") {
-			t.Fatalf("%s config still contains dolt.port:\n%s", dir, cfg)
+		for _, needle := range []string{
+			"issue_prefix: " + prefix,
+			"issue-prefix: " + prefix,
+			"dolt.auto-start: false",
+			"gc.endpoint_origin: " + origin,
+			"gc.endpoint_status: verified",
+			": not yaml",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q after malformed reconciliation:\n%s", dir, needle, cfg)
+			}
 		}
-		if !strings.Contains(cfg, "dolt.auto-start: false") {
-			t.Fatalf("%s config missing dolt.auto-start normalization:\n%s", dir, cfg)
+		for _, forbidden := range []string{"dolt_server_port", "dolt.port:", "dolt.host:", "dolt.user:"} {
+			if strings.Contains(cfg, forbidden) {
+				t.Fatalf("%s config should scrub %q after malformed reconciliation:\n%s", dir, forbidden, cfg)
+			}
 		}
 	}
+
+	assertManagedScope(cityDir, "gc", "managed_city")
+	assertManagedScope(rigDir, "fe", "inherited_city")
+}
+
+func TestSyncConfiguredDoltPortFilesCreatesMissingManagedConfigs(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+
+	for _, tc := range []struct {
+		dir    string
+		prefix string
+		origin string
+	}{
+		{dir: cityDir, prefix: "gc", origin: "managed_city"},
+		{dir: rigDir, prefix: "fe", origin: "inherited_city"},
+	} {
+		cfgPath := filepath.Join(tc.dir, ".beads", "config.yaml")
+		cfgData, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatalf("read config for %s: %v", tc.dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{
+			"issue_prefix: " + tc.prefix,
+			"issue-prefix: " + tc.prefix,
+			"gc.endpoint_origin: " + tc.origin,
+			"gc.endpoint_status: verified",
+			"dolt.auto-start: false",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:%c%s", tc.dir, needle, 10, cfg)
+			}
+		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesCanonicalizesExternalAndExplicitScopes(t *testing.T) {
+	cityDir := t.TempDir()
+	inheritedRigDir := filepath.Join(t.TempDir(), "fe")
+	explicitRigDir := filepath.Join(t.TempDir(), "ops")
+
+	for _, dir := range []string{cityDir, inheritedRigDir, explicitRigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: stale\ndolt.auto-start: true\ndolt_server_port: 3307\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "dolt-server.port"), []byte("3307\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "db.example.com", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "db.example.com", Port: 3307}, "gc", []config.Rig{
+		{Name: "fe", Path: inheritedRigDir},
+		{Name: "ops", Path: explicitRigDir, DoltHost: "rig-db.example.com", DoltPort: "4406"},
+	})
+
+	assertNoPortFile := func(dir string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(dir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+			t.Fatalf("expected no port file for %s, stat err = %v", dir, err)
+		}
+	}
+
+	assertExternalScope := func(dir, origin, host, port string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{
+			"gc.endpoint_origin: " + origin,
+			"gc.endpoint_status: unverified",
+			"dolt.host: " + host,
+			"dolt.port: " + port,
+			"dolt.auto-start: false",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:\n%s", dir, needle, cfg)
+			}
+		}
+		if strings.Contains(cfg, "dolt_server_port") {
+			t.Fatalf("%s config should scrub deprecated port keys:\n%s", dir, cfg)
+		}
+	}
+
+	assertExternalScope(cityDir, "city_canonical", "db.example.com", "3307")
+	assertExternalScope(inheritedRigDir, "inherited_city", "db.example.com", "3307")
+	assertExternalScope(explicitRigDir, "explicit", "rig-db.example.com", "4406")
+	assertNoPortFile(cityDir)
+	assertNoPortFile(inheritedRigDir)
+	assertNoPortFile(explicitRigDir)
+}
+
+func TestSyncConfiguredDoltPortFilesPreservesLegacyExternalCityConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "fe")
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+dolt.host: legacy-db.example.com
+dolt.port: 4406
+dolt.user: city-user
+dolt.auto-start: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+dolt.auto-start: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "fe", Path: rigDir, Prefix: "fe"}})
+
+	assertScope := func(dir, origin, prefix, status string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{
+			"issue_prefix: " + prefix,
+			"issue-prefix: " + prefix,
+			"gc.endpoint_origin: " + origin,
+			"gc.endpoint_status: " + status,
+			"dolt.host: legacy-db.example.com",
+			"dolt.port: 4406",
+			"dolt.user: city-user",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:\n%s", dir, needle, cfg)
+			}
+		}
+	}
+
+	assertScope(cityDir, "city_canonical", "gc", "unverified")
+	assertScope(rigDir, "inherited_city", "fe", "unverified")
+}
+
+func TestSyncConfiguredDoltPortFilesPreservesLegacyExplicitRigConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "ops")
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+dolt.host: legacy-rig-db.example.com
+dolt.port: 5507
+dolt.user: rig-user
+dolt.auto-start: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "ops", Path: rigDir, Prefix: "ops", DoltHost: "deprecated-rig-db.example.com", DoltPort: "6607"}})
+
+	cfgData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := string(cfgData)
+	for _, needle := range []string{
+		"issue_prefix: ops",
+		"issue-prefix: ops",
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: unverified",
+		"dolt.host: legacy-rig-db.example.com",
+		"dolt.port: 5507",
+		"dolt.user: rig-user",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("rig config missing %q:\n%s", needle, cfg)
+		}
+	}
+	for _, forbidden := range []string{"deprecated-rig-db.example.com", "6607"} {
+		if strings.Contains(cfg, forbidden) {
+			t.Fatalf("rig config should ignore deprecated rig endpoint authority %q:\n%s", forbidden, cfg)
+		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesPrefersCanonicalCityEndpointOverCompatConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	inheritedRigDir := filepath.Join(t.TempDir(), "fe")
+
+	for _, dir := range []string{cityDir, inheritedRigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: canonical-db.example.com
+dolt.port: 4406
+dolt.user: city-user
+dolt.auto-start: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inheritedRigDir, ".beads", "config.yaml"), []byte("issue_prefix: stale\ndolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "deprecated-db.example.com", Port: 3307}, "gc", []config.Rig{{Name: "fe", Path: inheritedRigDir, Prefix: "fe"}})
+
+	assertScope := func(dir, origin, prefix, status string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{
+			"issue_prefix: " + prefix,
+			"issue-prefix: " + prefix,
+			"gc.endpoint_origin: " + origin,
+			"gc.endpoint_status: " + status,
+			"dolt.host: canonical-db.example.com",
+			"dolt.port: 4406",
+			"dolt.user: city-user",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:\n%s", dir, needle, cfg)
+			}
+		}
+		for _, forbidden := range []string{"deprecated-db.example.com", "3307", "dolt_server_port"} {
+			if strings.Contains(cfg, forbidden) {
+				t.Fatalf("%s config should ignore deprecated endpoint authority %q:\n%s", dir, forbidden, cfg)
+			}
+		}
+	}
+
+	assertScope(cityDir, "city_canonical", "gc", "verified")
+	assertScope(inheritedRigDir, "inherited_city", "fe", "verified")
+}
+
+func TestSyncConfiguredDoltPortFilesPrefersCanonicalExplicitRigEndpointOverCompatConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "ops")
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: canonical-rig-db.example.com
+dolt.port: 5507
+dolt.user: rig-user
+dolt.auto-start: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "ops", Path: rigDir, Prefix: "ops", DoltHost: "deprecated-rig-db.example.com", DoltPort: "6607"}})
+
+	cfgData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := string(cfgData)
+	for _, needle := range []string{
+		"issue_prefix: ops",
+		"issue-prefix: ops",
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: verified",
+		"dolt.host: canonical-rig-db.example.com",
+		"dolt.port: 5507",
+		"dolt.user: rig-user",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("rig config missing %q:\n%s", needle, cfg)
+		}
+	}
+	for _, forbidden := range []string{"deprecated-rig-db.example.com", "6607"} {
+		if strings.Contains(cfg, forbidden) {
+			t.Fatalf("rig config should ignore deprecated rig endpoint authority %q:\n%s", forbidden, cfg)
+		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesPreservesCanonicalCityAndExplicitRigOverCompatInputs(t *testing.T) {
+	cityDir := t.TempDir()
+	inheritedRigDir := filepath.Join(t.TempDir(), "fe")
+	explicitRigDir := filepath.Join(t.TempDir(), "ops")
+
+	files := map[string]string{
+		cityDir: `issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+dolt.auto-start: true
+`,
+		inheritedRigDir: `issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+dolt.auto-start: true
+`,
+		explicitRigDir: `issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: canonical-rig-db.example.com
+dolt.port: 4406
+dolt.user: rig-user
+dolt.auto-start: true
+`,
+	}
+	for dir, cfg := range files {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "dolt-server.port"), []byte("3307\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "compat-db.example.com", Port: 5507}, "gc", []config.Rig{
+		{Name: "fe", Path: inheritedRigDir},
+		{Name: "ops", Path: explicitRigDir, DoltHost: "compat-rig-db.example.com", DoltPort: "6608"},
+	})
+
+	assertScope := func(dir string, needles []string, forbids []string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range needles {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:\n%s", dir, needle, cfg)
+			}
+		}
+		for _, forbid := range forbids {
+			if strings.Contains(cfg, forbid) {
+				t.Fatalf("%s config should not contain %q:\n%s", dir, forbid, cfg)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+			t.Fatalf("expected no port file for %s, stat err = %v", dir, err)
+		}
+	}
+
+	assertScope(cityDir,
+		[]string{
+			"issue_prefix: gc",
+			"issue-prefix: gc",
+			"gc.endpoint_origin: city_canonical",
+			"gc.endpoint_status: verified",
+			"dolt.host: canonical-db.example.com",
+			"dolt.port: 3307",
+			"dolt.user: city-user",
+		},
+		[]string{"compat-db.example.com", "5507"},
+	)
+	assertScope(inheritedRigDir,
+		[]string{
+			"issue_prefix: fe",
+			"issue-prefix: fe",
+			"gc.endpoint_origin: inherited_city",
+			"gc.endpoint_status: verified",
+			"dolt.host: canonical-db.example.com",
+			"dolt.port: 3307",
+			"dolt.user: city-user",
+		},
+		[]string{"compat-db.example.com", "5507"},
+	)
+	assertScope(explicitRigDir,
+		[]string{
+			"issue_prefix: ops",
+			"issue-prefix: ops",
+			"gc.endpoint_origin: explicit",
+			"gc.endpoint_status: verified",
+			"dolt.host: canonical-rig-db.example.com",
+			"dolt.port: 4406",
+			"dolt.user: rig-user",
+		},
+		[]string{"compat-rig-db.example.com", "6608"},
+	)
+}
+
+func TestSyncConfiguredDoltPortFilesPreservesCanonicalManagedCityOverCompatExternalInput(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "fe")
+	for dir, cfg := range map[string]string{
+		cityDir: `issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: true
+`,
+		rigDir: `issue_prefix: stale
+issue-prefix: stale
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.host: stale-db.example.com
+dolt.port: 3307
+dolt.auto-start: true
+`,
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "compat-db.example.com", Port: 4406}, "gc", []config.Rig{{Name: "fe", Path: rigDir}})
+
+	assertManagedScope := func(dir, prefix, wantOrigin, wantPort string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{
+			"issue_prefix: " + prefix,
+			"issue-prefix: " + prefix,
+			"gc.endpoint_origin: " + wantOrigin,
+			"gc.endpoint_status: verified",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:\n%s", dir, needle, cfg)
+			}
+		}
+		for _, forbid := range []string{"dolt.host:", "dolt.port:", "compat-db.example.com", "4406", "stale-db.example.com", "3307"} {
+			if strings.Contains(cfg, forbid) {
+				t.Fatalf("%s config should not contain %q:\n%s", dir, forbid, cfg)
+			}
+		}
+		portData, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port"))
+		if err != nil {
+			t.Fatalf("read port file for %s: %v", dir, err)
+		}
+		if got := strings.TrimSpace(string(portData)); got != wantPort {
+			t.Fatalf("%s port file = %q, want %q", dir, got, wantPort)
+		}
+	}
+
+	wantPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	assertManagedScope(cityDir, "gc", "managed_city", wantPort)
+	assertManagedScope(rigDir, "fe", "inherited_city", wantPort)
+}
+
+func TestSyncConfiguredDoltPortFilesRejectsInvalidCanonicalCityState(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: invalid-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := mustReadFile(t, filepath.Join(cityDir, ".beads", "config.yaml"))
+	err := syncConfiguredDoltPortFiles(cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid canonical city endpoint state") {
+		t.Fatalf("syncConfiguredDoltPortFiles() error = %v, want invalid canonical city endpoint state", err)
+	}
+	after := mustReadFile(t, filepath.Join(cityDir, ".beads", "config.yaml"))
+	if string(after) != string(before) {
+		t.Fatalf("city config changed despite invalid canonical state:\n%s", after)
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesRejectsInvalidCanonicalRigState(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      3311,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml"))
+	err := syncConfiguredDoltPortFiles(cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid canonical rig endpoint state") {
+		t.Fatalf("syncConfiguredDoltPortFiles() error = %v, want invalid canonical rig endpoint state", err)
+	}
+	after := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml"))
+	if string(after) != string(before) {
+		t.Fatalf("rig config changed despite invalid canonical state:\n%s", after)
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesSkipsNonBDProviders(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "file", config.DoltConfig{Host: "db.example.com", Port: 3307}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+
+	for _, path := range []string{
+		filepath.Join(cityDir, ".beads", "config.yaml"),
+		filepath.Join(cityDir, ".beads", "dolt-server.port"),
+		filepath.Join(rigDir, ".beads", "config.yaml"),
+		filepath.Join(rigDir, ".beads", "dolt-server.port"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected non-bd sync to leave %s absent, stat err = %v", path, err)
+		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesIgnoresEnvOnlyExternalOverridesForCanonicalFiles(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+dolt.auto-start: true
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+
+	assertManagedScope := func(dir, prefix, origin string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{
+			"issue_prefix: " + prefix,
+			"issue-prefix: " + prefix,
+			"gc.endpoint_origin: " + origin,
+			"gc.endpoint_status: verified",
+		} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:%c%s", dir, needle, 10, cfg)
+			}
+		}
+		for _, forbidden := range []string{"dolt.host:", "dolt.port:"} {
+			if strings.Contains(cfg, forbidden) {
+				t.Fatalf("%s config should ignore env-only external override %q:%c%s", dir, forbidden, 10, cfg)
+			}
+		}
+	}
+
+	assertManagedScope(cityDir, "gc", "managed_city")
+	assertManagedScope(rigDir, "fe", "inherited_city")
+}
+
+func TestSyncConfiguredDoltPortFilesPreservesVerifiedStatusForUnchangedExternalEndpoints(t *testing.T) {
+	cityDir := t.TempDir()
+	inheritedRigDir := filepath.Join(t.TempDir(), "fe")
+	explicitRigDir := filepath.Join(t.TempDir(), "ops")
+
+	files := map[string]string{
+		cityDir: `issue_prefix: stale
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: city-user
+dolt.auto-start: true
+`,
+		inheritedRigDir: `issue_prefix: stale
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: unverified
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: rig-user
+dolt.auto-start: true
+`,
+		explicitRigDir: `issue_prefix: stale
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4406
+dolt.user: ops-user
+dolt.auto-start: true
+`,
+	}
+	for dir, cfg := range files {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "db.example.com", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "db.example.com", Port: 3307}, "gc", []config.Rig{
+		{Name: "fe", Path: inheritedRigDir},
+		{Name: "ops", Path: explicitRigDir, DoltHost: "rig-db.example.com", DoltPort: "4406"},
+	})
+
+	for _, tc := range []struct {
+		dir        string
+		wantUser   string
+		wantStatus string
+	}{
+		{dir: cityDir, wantUser: "city-user", wantStatus: "verified"},
+		{dir: inheritedRigDir, wantUser: "city-user", wantStatus: "verified"},
+		{dir: explicitRigDir, wantUser: "ops-user", wantStatus: "verified"},
+	} {
+		cfgData, err := os.ReadFile(filepath.Join(tc.dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", tc.dir, err)
+		}
+		cfg := string(cfgData)
+		if !strings.Contains(cfg, "gc.endpoint_status: "+tc.wantStatus) {
+			t.Fatalf("%s config should preserve endpoint status %q:%c%s", tc.dir, tc.wantStatus, 10, cfg)
+		}
+		if !strings.Contains(cfg, "dolt.user: "+tc.wantUser) {
+			t.Fatalf("%s config should preserve dolt.user %q:%c%s", tc.dir, tc.wantUser, 10, cfg)
+		}
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesClearsInheritedDoltUserWhenCityClearsIt(t *testing.T) {
+	cityDir := t.TempDir()
+	inheritedRigDir := filepath.Join(t.TempDir(), "fe")
+
+	files := map[string]string{
+		cityDir: `issue_prefix: stale
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.auto-start: true
+`,
+		inheritedRigDir: `issue_prefix: stale
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: stale-user
+dolt.auto-start: true
+`,
+	}
+	for dir, cfg := range files {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "db.example.com", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "db.example.com", Port: 3307}, "gc", []config.Rig{{Name: "fe", Path: inheritedRigDir}})
+
+	cfgData, err := os.ReadFile(filepath.Join(inheritedRigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := string(cfgData)
+	if strings.Contains(cfg, "dolt.user:") {
+		t.Fatalf("inherited rig config should clear stale dolt.user when city user is empty:%c%s", 10, cfg)
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesReconcilesMirroredPrefixesFromCityConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: stale\nissue-prefix: stale\ndolt.auto-start: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
+
+	assertPrefix := func(dir, want string) {
+		t.Helper()
+		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config for %s: %v", dir, err)
+		}
+		cfg := string(cfgData)
+		for _, needle := range []string{"issue_prefix: " + want, "issue-prefix: " + want} {
+			if !strings.Contains(cfg, needle) {
+				t.Fatalf("%s config missing %q:\n%s", dir, needle, cfg)
+			}
+		}
+	}
+
+	assertPrefix(cityDir, "gc")
+	assertPrefix(rigDir, "fe")
 }
 
 func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.T) {
@@ -234,64 +1438,114 @@ func TestCurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped(t *tes
 	}
 }
 
-func TestReadDoltPortOverwritesInheritedValue(t *testing.T) {
-	cityDir := t.TempDir()
-	ln := listenOnRandomPort(t)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	if err := writeDoltState(cityDir, doltRuntimeState{
-		Running:   true,
-		PID:       os.Getpid(),
-		Port:      ln.Addr().(*net.TCPAddr).Port,
-		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT_PORT", "9999")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "old-host")
-	readDoltPort(cityDir)
-	if got := os.Getenv("GC_DOLT_PORT"); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
-		t.Fatalf("GC_DOLT_PORT = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
-	}
-	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
-	}
-	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for local managed Dolt", got)
-	}
-}
-
-// TestInitBeadsForDir_file verifies that file provider is a no-op.
+// TestInitBeadsForDir_file verifies that unmarked file cities stay in legacy shared mode.
 func TestInitBeadsForDir_file(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
-	if err := initBeadsForDir(t.TempDir(), t.TempDir(), "test", "test"); err != nil {
+	cityDir := t.TempDir()
+	if err := initBeadsForDir(cityDir, cityDir, "test", "test"); err != nil {
 		t.Fatalf("expected nil, got %v", err)
+	}
+	if fileStoreUsesScopedRoots(cityDir) {
+		t.Fatal("unmarked file city should remain legacy-shared")
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "beads.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy file city should not create beads.json on init, stat err = %v", err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	list, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected empty legacy store, got %#v", list)
+	}
+}
+
+func TestInitBeadsForDir_fileScopedRigCreatesStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := initBeadsForDir(cityDir, rigDir, "test", "test"); err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc", "beads.json")); err != nil {
+		t.Fatalf("expected scoped rig file store bootstrap, stat err = %v", err)
+	}
+	store, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestInitBeadsForDir_fileLegacyRigPreservesSharedCityStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("openScopeLocalFileStore(city): %v", err)
+	}
+	if err := initBeadsForDir(cityDir, rigDir, "test", "test"); err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc", "beads.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy shared file city should not create rig store, stat err = %v", err)
+	}
+	if fileStoreUsesScopedRoots(cityDir) {
+		t.Fatal("legacy shared file city should not be marked scoped")
+	}
+}
+
+func writeMinimalCityToml(t *testing.T, cityDir string) {
+	t.Helper()
+	content := `[workspace]
+name = "demo"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
 // TestInitBeadsForDir_exec calls script with init <dir> <prefix> <dolt_database>.
 func TestInitBeadsForDir_exec(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	script := writeTestScript(t, "init", 2, "")
 	t.Setenv("GC_BEADS", "exec:"+script)
-	if err := initBeadsForDir(t.TempDir(), "/some/dir", "prefix", "prefix"); err != nil {
+	if err := initBeadsForDir(cityDir, cityDir, "prefix", "prefix"); err != nil {
 		t.Fatalf("expected nil for exit 2, got %v", err)
 	}
 }
 
 func TestInitBeadsForDir_execPassesCanonicalDoltDatabase(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	logFile := filepath.Join(t.TempDir(), "args.log")
 	script := filepath.Join(t.TempDir(), "record-args.sh")
-	content := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + logFile + "\nexit 0\n"
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" > %q\nexit 0\n", logFile)
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("GC_BEADS", "exec:"+script)
-	if err := initBeadsForDir(t.TempDir(), "/some/dir", "gc", "gascity"); err != nil {
+	if err := initBeadsForDir(cityDir, cityDir, "gc", "gascity"); err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 
@@ -299,21 +1553,265 @@ func TestInitBeadsForDir_execPassesCanonicalDoltDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "init /some/dir gc gascity" {
-		t.Fatalf("script args = %q, want %q", got, "init /some/dir gc gascity")
+	want := "init " + cityDir + " gc gascity"
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("script args = %q, want %q", got, want)
+	}
+}
+
+func TestRunProviderOpStripsAmbientGCDoltSkip(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	logFile := filepath.Join(t.TempDir(), "env.log")
+	script := filepath.Join(t.TempDir(), "record-env.sh")
+	content := fmt.Sprintf(`#!/bin/sh
+printf '%%s|%%s|%%s|%%s
+' "${GC_DOLT:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_CITY_PATH:-}" > %q
+exit 0
+`, logFile)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	if err := runProviderOp(script, cityDir, "init", cityDir, "gc", "hq"); err != nil {
+		t.Fatalf("runProviderOp: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read env log: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(data)), "|")
+	if len(parts) != 4 {
+		t.Fatalf("captured env = %q, want 4 fields", strings.TrimSpace(string(data)))
+	}
+	if parts[0] != "" {
+		t.Fatalf("GC_DOLT leaked into provider env: %q", parts[0])
+	}
+	if parts[3] != cityDir {
+		t.Fatalf("GC_CITY_PATH = %q, want %q", parts[3], cityDir)
+	}
+}
+
+func TestInitBeadsForDirExecGcBeadsBdPreservesCityRuntimeEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	logFile := filepath.Join(t.TempDir(), "env.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	content := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "$1" in
+  init)
+    printf '%%s|%%s|%%s|%%s
+' "${GC_CITY_PATH:-}" "${GC_CITY_RUNTIME_DIR:-}" "${GC_PACK_STATE_DIR:-}" "${GC_DOLT_DATA_DIR:-}" > %q
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, logFile)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_CITY_PATH", "/wrong-city")
+	t.Setenv("GC_CITY_RUNTIME_DIR", "/wrong-runtime")
+	t.Setenv("GC_PACK_STATE_DIR", "/wrong-pack")
+	t.Setenv("GC_DOLT_DATA_DIR", "/wrong-data")
+
+	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read env log: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(data)), "|")
+	if len(parts) != 4 {
+		t.Fatalf("captured env = %q, want 4 fields", strings.TrimSpace(string(data)))
+	}
+	if parts[0] != cityDir {
+		t.Fatalf("GC_CITY_PATH = %q, want %q", parts[0], cityDir)
+	}
+	if parts[1] != filepath.Join(cityDir, ".gc", "runtime") {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", parts[1], filepath.Join(cityDir, ".gc", "runtime"))
+	}
+	if parts[2] != citylayout.PackStateDir(cityDir, "dolt") {
+		t.Fatalf("GC_PACK_STATE_DIR = %q, want %q", parts[2], citylayout.PackStateDir(cityDir, "dolt"))
+	}
+	if parts[3] != filepath.Join(cityDir, ".beads", "dolt") {
+		t.Fatalf("GC_DOLT_DATA_DIR = %q, want %q", parts[3], filepath.Join(cityDir, ".beads", "dolt"))
+	}
+}
+
+func TestInitBeadsForDirExecGcBeadsBdNormalizesCanonicalFilesAfterProviderInit(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	content := `#!/bin/sh
+set -eu
+op="$1"
+shift || true
+case "$op" in
+  init)
+    dir="$1"
+    mkdir -p "$dir/.beads"
+    cat > "$dir/.beads/metadata.json" <<'EOF'
+{
+  "database": "sqlite",
+  "backend": "sqlite",
+  "dolt_mode": "local",
+  "dolt_database": "wrong"
+}
+EOF
+    cat > "$dir/.beads/config.yaml" <<'EOF'
+issue_prefix: wrong
+issue-prefix: wrong
+gc.endpoint_origin: explicit
+gc.endpoint_status: unverified
+dolt.host: stale.example
+dolt.port: 3307
+dolt.user: stale
+EOF
+    exit 0
+    ;;
+  list)
+    printf '[]\n'
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	configState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadConfigState: %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadConfigState() = !ok, want canonical config")
+	}
+	if configState.IssuePrefix != "gc" {
+		t.Fatalf("IssuePrefix = %q, want gc", configState.IssuePrefix)
+	}
+	if configState.EndpointOrigin != contract.EndpointOriginManagedCity {
+		t.Fatalf("EndpointOrigin = %q, want %q", configState.EndpointOrigin, contract.EndpointOriginManagedCity)
+	}
+	if configState.EndpointStatus != contract.EndpointStatusVerified {
+		t.Fatalf("EndpointStatus = %q, want %q", configState.EndpointStatus, contract.EndpointStatusVerified)
+	}
+	if configState.DoltHost != "" || configState.DoltPort != "" || configState.DoltUser != "" {
+		t.Fatalf("managed city config should scrub tracked endpoint defaults, got host=%q port=%q user=%q", configState.DoltHost, configState.DoltPort, configState.DoltUser)
+	}
+
+	metaData, err := os.ReadFile(filepath.Join(cityDir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(metadata): %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("Unmarshal(metadata): %v", err)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(meta["database"])); got != "dolt" {
+		t.Fatalf("metadata database = %q, want dolt", got)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(meta["backend"])); got != "dolt" {
+		t.Fatalf("metadata backend = %q, want dolt", got)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "server" {
+		t.Fatalf("metadata dolt_mode = %q, want server", got)
+	}
+	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_database"])); got != "hq" {
+		t.Fatalf("metadata dolt_database = %q, want hq", got)
+	}
+}
+
+func TestInitBeadsForDir_execGcBeadsK8sUsesScopedLifecycleEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[dolt]
+host = "city-db.example.com"
+port = 3307
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "rig-db.example.com"
+dolt_port = "4407"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "env.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-k8s")
+	content := fmt.Sprintf(`#!/bin/sh
+printf '%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s\n' "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" "${GC_PROVIDER:-}" > %q
+exit 0
+`, logFile)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	if err := initBeadsForDir(cityDir, rigDir, "fe", "frontend-db"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read env log: %v", err)
+	}
+	want := strings.Join([]string{
+		rigDir,
+		"rig",
+		"fe",
+		"rig-db.example.com",
+		"4407",
+		"frontend",
+		rigDir,
+		"exec:" + script,
+	}, "|")
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("scoped init env = %q, want %q", got, want)
 	}
 }
 
 func TestInitBeadsForDir_execOmitsCanonicalDoltDatabaseWhenUnknown(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
 	logFile := filepath.Join(t.TempDir(), "args.log")
 	script := filepath.Join(t.TempDir(), "record-args.sh")
-	content := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + logFile + "\nexit 0\n"
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" > %q\nexit 0\n", logFile)
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("GC_BEADS", "exec:"+script)
-	if err := initBeadsForDir(t.TempDir(), "/some/dir", "gc", ""); err != nil {
+	if err := initBeadsForDir(cityDir, cityDir, "gc", ""); err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 
@@ -321,22 +1819,192 @@ func TestInitBeadsForDir_execOmitsCanonicalDoltDatabaseWhenUnknown(t *testing.T)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "init /some/dir gc" {
-		t.Fatalf("script args = %q, want %q", got, "init /some/dir gc")
+	want := "init " + cityDir + " gc"
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("script args = %q, want %q", got, want)
 	}
 }
 
 // TestInitBeadsForDir_bd_skip verifies bd provider is no-op when GC_DOLT=skip.
+func TestInitBeadsForDirExecGcBeadsBdPassesComputedCanonicalDoltDatabase(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	logFile := filepath.Join(t.TempDir(), "args.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	content := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+shift || true
+case "$op" in
+  init)
+    printf '%%s\n' "$*" > %q
+    exit 0
+    ;;
+  list)
+    printf '[]\n'
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, logFile)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	if err := initBeadsForDir(cityDir, cityDir, "gc", ""); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	want := cityDir + " gc hq"
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("script args = %q, want %q", got, want)
+	}
+}
+
 func TestInitBeadsForDir_bd_skip(t *testing.T) {
 	dir := t.TempDir()
+	writeMinimalCityToml(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	MaterializeBeadsBdScript(dir) //nolint:errcheck
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
-	if err := initBeadsForDir(dir, t.TempDir(), "test", "test"); err != nil {
+	if err := initBeadsForDir(dir, dir, "test", "test"); err != nil {
 		t.Fatalf("expected nil, got %v", err)
+	}
+}
+
+func TestInitBeadsForDirBdMaterializedScriptPreservesCityPath(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    mkdir -p "$PWD/.beads"
+    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}\n' > "$PWD/.beads/metadata.json"
+    exit 0
+    ;;
+  config|migrate|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+}
+
+func TestInitBeadsForDirBdMaterializedScriptIgnoresAmbientCityRuntimeEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureFile := filepath.Join(t.TempDir(), "bd-init-env.txt")
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    mkdir -p "$PWD/.beads"
+    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}\n' > "$PWD/.beads/metadata.json"
+    printf '%%s|%%s|%%s|%%s\n' \
+      "${GC_CITY_PATH:-}" \
+      "${GC_CITY_RUNTIME_DIR:-}" \
+      "${GC_PACK_STATE_DIR:-}" \
+      "${BEADS_DIR:-}" > %q
+    exit 0
+    ;;
+  config|migrate|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, captureFile)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_CITY_PATH", "/wrong-city")
+	t.Setenv("GC_CITY_RUNTIME_DIR", "/wrong-runtime")
+	t.Setenv("GC_PACK_STATE_DIR", "/wrong-pack")
+	t.Setenv("BEADS_DIR", "/wrong/.beads")
+
+	if err := initBeadsForDir(cityDir, cityDir, "gc", "hq"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+
+	data, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(data)), "|")
+	if len(parts) != 4 {
+		t.Fatalf("captured env = %q, want 4 fields", strings.TrimSpace(string(data)))
+	}
+	if parts[0] != cityDir {
+		t.Fatalf("GC_CITY_PATH = %q, want %q", parts[0], cityDir)
+	}
+	if parts[1] != filepath.Join(cityDir, ".gc", "runtime") {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", parts[1], filepath.Join(cityDir, ".gc", "runtime"))
+	}
+	if parts[2] != citylayout.PackStateDir(cityDir, "dolt") {
+		t.Fatalf("GC_PACK_STATE_DIR = %q, want %q", parts[2], citylayout.PackStateDir(cityDir, "dolt"))
+	}
+	if parts[3] != filepath.Join(cityDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", parts[3], filepath.Join(cityDir, ".beads"))
 	}
 }
 
@@ -414,46 +2082,40 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 	}
 }
 
-// TestStartBeadsLifecycle_DoesNotInstallWorkspaceAgentHooks verifies that
-// startBeadsLifecycle only handles bead-store setup; agent hook installation
-// belongs to desired-state resolution where per-agent overrides are known.
-func TestStartBeadsLifecycle_DoesNotInstallWorkspaceAgentHooks(t *testing.T) {
+func TestStartBeadsLifecycleDoesNotMutateProcessDoltEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_HOST")
 
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	rigPath := filepath.Join(t.TempDir(), "my-rig")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+	if err := writeDoltState(cityPath, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      4406,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{
-		Workspace: config.Workspace{
-			Name:              "test-city",
-			InstallAgentHooks: []string{"gemini"},
-		},
-		Rigs: []config.Rig{
-			{Name: "my-rig", Path: rigPath},
-		},
-	}
-
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
 		t.Fatalf("startBeadsLifecycle: %v", err)
 	}
-
-	// Workspace agent hooks are installed later, when each agent's resolved
-	// desired state is built. They should not be sprayed into roots here.
-	for _, hookPath := range []string{
-		filepath.Join(cityPath, ".gemini", "settings.json"),
-		filepath.Join(rigPath, ".gemini", "settings.json"),
-	} {
-		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
-			t.Fatalf("unexpected agent hook at %s: %v", hookPath, err)
-		}
+	if got := os.Getenv("GC_DOLT_PORT"); got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty", got)
 	}
 }
 
@@ -512,53 +2174,26 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 
 	runScript("start")
 
-	// `start` spawns the dolt server in the background; the state and port
-	// files it writes may not exist the instant the script exits. Poll with
-	// a bounded timeout instead of reading once. Fixes flake (#542).
-	stateFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
-	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
-	waitForFile(t, stateFile, 3*time.Second)
-	waitForFile(t, portFile, 3*time.Second)
-
+	stateFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-provider-state.json")
 	state, err := os.ReadFile(stateFile)
 	if err != nil {
-		t.Fatalf("read state file: %v", err)
+		t.Fatalf("read provider state file: %v", err)
 	}
 	if !strings.Contains(string(state), filepath.Join(cityPath, ".beads", "dolt")) {
-		t.Fatalf("state file should point at .beads/dolt, got:\n%s", state)
+		t.Fatalf("provider state file should point at .beads/dolt, got:\n%s", state)
 	}
-}
 
-// waitForFile polls until path exists or timeout elapses. Used to avoid
-// racing background-spawned processes like dolt server during startup.
-// Real stat errors (permission denied, malformed path) fail immediately;
-// only not-found is retried. The last not-found error is surfaced in the
-// timeout message for easier debugging.
-func waitForFile(t *testing.T, path string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for {
-		_, err := os.Stat(path)
-		if err == nil {
-			return
-		}
-		if !os.IsNotExist(err) {
-			t.Fatalf("waitForFile: stat %s: %v", path, err)
-		}
-		lastErr = err
-		if time.Now().After(deadline) {
-			t.Fatalf("waitForFile: %s did not appear within %v (last error: %v)", path, timeout, lastErr)
-		}
-		time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("canonical dolt-state.json should not be shell-owned, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("dolt-server.port should not be written by shell start, stat err = %v", err)
 	}
 }
 
 func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeMinimalCityToml(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -566,8 +2201,7 @@ func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
+	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
 		t.Fatalf("MaterializeBeadsBdScript: %v", err)
 	}
 
@@ -612,14 +2246,11 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "mc", "mc")
-	cmd.Env = append(os.Environ(),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	if err := initBeadsForDir(cityPath, cityPath, "mc", "mc"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
 	}
 
 	data, err := os.ReadFile(listCountFile)
@@ -628,6 +2259,727 @@ esac
 	}
 	if strings.TrimSpace(string(data)) != "3" {
 		t.Fatalf("expected bd list to retry until third attempt, got %q", strings.TrimSpace(string(data)))
+	}
+}
+
+func writeGcBeadsBdInitEnvCaptureScript(t *testing.T, captureFile string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	body := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+shift
+case "$op" in
+  init)
+    printf '%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s
+' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_SERVER_USER:-}" "${BEADS_DOLT_PASSWORD:-}" "${GC_PACK_STATE_DIR:-}" > %q
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, captureFile)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func TestInitAndHookDirExecGcBeadsBdProjectsCanonicalExternalCityEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := `[workspace]
+name = "demo"
+
+[dolt]
+host = "city-db.example.com"
+port = 3307
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureFile := filepath.Join(t.TempDir(), "init-env-city")
+	script := writeGcBeadsBdInitEnvCaptureScript(t, captureFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_PACK_STATE_DIR", "/wrong/.gc/runtime/packs/dolt")
+	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
+		t.Fatalf("initAndHookDir(city external): %v", err)
+	}
+	data, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := strings.Join([]string{"city-db.example.com", "3307", "city-user", "city-pass", "city-db.example.com", "3307", "city-user", "city-pass", citylayout.PackStateDir(cityPath, "dolt")}, "|")
+	if got != want {
+		t.Fatalf("captured external city init env = %q, want %q", got, want)
+	}
+}
+
+func TestInitAndHookDirExecGcBeadsBdProjectsCanonicalExplicitRigEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "rig-db.example.com"
+dolt_port = "4407"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigCfg := `issue_prefix: fe
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: rig-db.example.com
+dolt.port: 4407
+dolt.user: rig-user
+`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureFile := filepath.Join(t.TempDir(), "init-env-rig")
+	script := writeGcBeadsBdInitEnvCaptureScript(t, captureFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_PACK_STATE_DIR", "/wrong/.gc/runtime/packs/dolt")
+	if err := initAndHookDir(cityPath, rigPath, "fe"); err != nil {
+		t.Fatalf("initAndHookDir(explicit rig): %v", err)
+	}
+	data, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := strings.Join([]string{"rig-db.example.com", "4407", "rig-user", "rig-pass", "rig-db.example.com", "4407", "rig-user", "rig-pass", citylayout.PackStateDir(cityPath, "dolt")}, "|")
+	if got != want {
+		t.Fatalf("captured explicit rig init env = %q, want %q", got, want)
+	}
+}
+
+func TestInitAndHookDirExecGcBeadsBdProjectsInheritedExternalRigEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "demo"
+
+[dolt]
+host = "city-db.example.com"
+port = 3307
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityCfg := `issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cityCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigCfg := `issue_prefix: fe
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureFile := filepath.Join(t.TempDir(), "init-env-inherited-rig")
+	script := writeGcBeadsBdInitEnvCaptureScript(t, captureFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	if err := initAndHookDir(cityPath, rigPath, "fe"); err != nil {
+		t.Fatalf("initAndHookDir(inherited rig): %v", err)
+	}
+	data, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := strings.Join([]string{"city-db.example.com", "3307", "city-user", "city-pass", "city-db.example.com", "3307", "city-user", "city-pass", citylayout.PackStateDir(cityPath, "dolt")}, "|")
+	if got != want {
+		t.Fatalf("captured inherited rig init env = %q, want %q", got, want)
+	}
+}
+
+func TestHealthBeadsProviderExecGcBeadsBdProjectsCanonicalExternalCityEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureFile := filepath.Join(t.TempDir(), "health-env-city")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+shift
+case "$op" in
+  health)
+    printf '%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s
+' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_SERVER_USER:-}" "${BEADS_DOLT_PASSWORD:-}" "${GC_PACK_STATE_DIR:-}" > %q
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, captureFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_PACK_STATE_DIR", "/wrong/.gc/runtime/packs/dolt")
+	if err := healthBeadsProvider(cityPath); err != nil {
+		t.Fatalf("healthBeadsProvider: %v", err)
+	}
+	data, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := strings.Join([]string{"city-db.example.com", "3307", "city-user", "city-pass", "city-db.example.com", "3307", "city-user", "city-pass", citylayout.PackStateDir(cityPath, "dolt")}, "|")
+	if got != want {
+		t.Fatalf("captured health env = %q, want %q", got, want)
+	}
+}
+
+func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
+
+	opsFile := filepath.Join(t.TempDir(), "provider-ops.log")
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$1" >> %q
+case "$1" in
+  health)
+    echo unhealthy >&2
+    exit 1
+    ;;
+  recover)
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, opsFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bdCalls := filepath.Join(t.TempDir(), "bd-calls.log")
+	countFile := bdCalls + ".count"
+	fakeBD := filepath.Join(binDir, "bd")
+	fakeBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+count=0
+if [ -f %q ]; then
+  count=$(cat %q)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %q
+if [ "$1" = "list" ]; then
+  if [ "$count" -eq 1 ]; then
+    echo '{"error":"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"}' >&2
+    exit 1
+  fi
+  printf '[]\n'
+  exit 0
+fi
+echo "unexpected bd command: $*" >&2
+exit 2
+`, bdCalls, countFile, countFile, countFile)
+	if err := os.WriteFile(fakeBD, []byte(fakeBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", strings.Join([]string{binDir, oldPath}, string(os.PathListSeparator)))
+
+	if err := healthBeadsProvider(cityPath); err != nil {
+		t.Fatalf("healthBeadsProvider() error = %v", err)
+	}
+
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); err != nil {
+		t.Fatalf("published dolt runtime state missing after recovery: %v", err)
+	}
+	calls, err := os.ReadFile(bdCalls)
+	if err != nil {
+		t.Fatalf("read bd calls: %v", err)
+	}
+	if got := strings.Count(string(calls), "list --json --limit 0"); got < 2 {
+		t.Fatalf("bd ping call count = %d, want at least 2; calls:\n%s", got, string(calls))
+	}
+	ops, err := os.ReadFile(opsFile)
+	if err != nil {
+		t.Fatalf("read provider ops: %v", err)
+	}
+	if strings.TrimSpace(string(ops)) != "health\nrecover" {
+		t.Fatalf("provider ops = %q, want health then recover", string(ops))
+	}
+}
+
+func TestHealthBeadsProviderPublishesManagedRuntimeStateWhenHealthyButUnpublished(t *testing.T) {
+	cityPath, _ := setupManagedBdWaitTestCity(t)
+
+	if err := os.Remove(managedDoltStatePath(cityPath)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove published dolt runtime state: %v", err)
+	}
+	if got := currentManagedDoltPort(cityPath); got != "" {
+		t.Fatalf("currentManagedDoltPort() = %q, want empty after removing published state", got)
+	}
+
+	if err := healthBeadsProvider(cityPath); err != nil {
+		t.Fatalf("healthBeadsProvider() error = %v", err)
+	}
+
+	state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read published dolt runtime state: %v", err)
+	}
+	if !state.Running {
+		t.Fatalf("published.Running = false, want true")
+	}
+	if got := currentManagedDoltPort(cityPath); got == "" {
+		t.Fatal("currentManagedDoltPort() = empty, want published managed port")
+	}
+}
+
+func TestEnsureBeadsProviderExecGcBeadsBdProjectsCanonicalPackStateDir(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureFile := filepath.Join(t.TempDir(), "start-env")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+shift
+case "$op" in
+  start)
+    printf '%%s
+' "${GC_PACK_STATE_DIR:-}" > %q
+    exit 2
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, captureFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_PACK_STATE_DIR", "/wrong/.gc/runtime/packs/dolt")
+	if err := ensureBeadsProvider(cityPath); err != nil {
+		t.Fatalf("ensureBeadsProvider: %v", err)
+	}
+	data, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(data)), citylayout.PackStateDir(cityPath, "dolt"); got != want {
+		t.Fatalf("captured start GC_PACK_STATE_DIR = %q, want %q", got, want)
+	}
+}
+
+func TestInitAndHookDirRejectsInvalidCanonicalCityEndpointState(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	invalidCfg := `issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: invalid-db.example.com
+dolt.port: 3307
+`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(invalidCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+writeGcBeadsBdInitEnvCaptureScript(t, filepath.Join(t.TempDir(), "should-not-run")))
+	if err := initAndHookDir(cityPath, cityPath, "gc"); err == nil || !strings.Contains(err.Error(), "invalid canonical city endpoint state") {
+		t.Fatalf("initAndHookDir() error = %v, want invalid canonical city endpoint state", err)
+	}
+}
+
+func TestInitAndHookDirExecGcBeadsBdCanonicalizesScopeFilesInGo(t *testing.T) {
+	cityPath := t.TempDir()
+	writeExecStoreCityConfig(t, cityPath, "demo", "gc", nil)
+
+	captureFile := filepath.Join(t.TempDir(), "canonical-files-owned")
+	scriptDir := t.TempDir()
+	script := filepath.Join(scriptDir, "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+shift
+case "$op" in
+  init)
+    printf '%%s
+' "${GC_CANONICAL_FILES_OWNED:-}" > %q
+    dir="$1"
+    mkdir -p "$dir/.beads"
+    cat > "$dir/.beads/config.yaml" <<'YAML'
+issue-prefix: stale
+dolt.auto-start: true
+YAML
+    cat > "$dir/.beads/metadata.json" <<'JSON'
+{"database":"legacy","backend":"legacy","dolt_mode":"embedded","dolt_database":"wrong-db","dolt_host":"127.0.0.1","dolt_server_port":"3307"}
+JSON
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, captureFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+
+	if data, err := os.ReadFile(captureFile); err != nil {
+		t.Fatalf("read capture file: %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != "" {
+		t.Fatalf("GC_CANONICAL_FILES_OWNED = %q, want empty", got)
+	}
+
+	cfgState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadConfigState: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected canonical config.yaml to exist")
+	}
+	if cfgState.IssuePrefix != "gc" {
+		t.Fatalf("IssuePrefix = %q, want gc", cfgState.IssuePrefix)
+	}
+	if cfgState.EndpointOrigin != contract.EndpointOriginManagedCity {
+		t.Fatalf("EndpointOrigin = %q, want %q", cfgState.EndpointOrigin, contract.EndpointOriginManagedCity)
+	}
+	if cfgState.EndpointStatus != contract.EndpointStatusVerified {
+		t.Fatalf("EndpointStatus = %q, want %q", cfgState.EndpointStatus, contract.EndpointStatusVerified)
+	}
+
+	metaPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if db, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metaPath); err != nil {
+		t.Fatalf("ReadDoltDatabase: %v", err)
+	} else if !ok || db != "hq" {
+		t.Fatalf("dolt_database = %q, ok=%v, want hq/true", db, ok)
+	}
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	metaText := string(metaData)
+	for _, forbidden := range []string{"dolt_host", "dolt_server_port"} {
+		if strings.Contains(metaText, forbidden) {
+			t.Fatalf("metadata should scrub %s: %s", forbidden, metaText)
+		}
+	}
+}
+
+func TestGcBeadsBdInitTightensBeadsDirPermissions(t *testing.T) {
+	tests := []struct {
+		name             string
+		preexistingDir   bool
+		existingMetadata bool
+		wantInitPerm     string
+	}{
+		{name: "fresh_init", preexistingDir: false, existingMetadata: false, wantInitPerm: "700"},
+		{name: "preexisting_dir_without_metadata", preexistingDir: true, existingMetadata: false, wantInitPerm: "700"},
+		{name: "existing_metadata", preexistingDir: true, existingMetadata: true, wantInitPerm: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.preexistingDir {
+				if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o775); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.existingMetadata {
+				if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			script, err := MaterializeBeadsBdScript(cityPath)
+			if err != nil {
+				t.Fatalf("MaterializeBeadsBdScript: %v", err)
+			}
+
+			binDir := filepath.Join(t.TempDir(), "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			initPermFile := filepath.Join(t.TempDir(), "bd-init-perm")
+			fakeBd := filepath.Join(binDir, "bd")
+			fakeBdScript := `#!/bin/sh
+set -eu
+perm_file="` + initPermFile + `"
+case "${1:-}" in
+  init)
+    last=""
+    for arg in "$@"; do
+      last="$arg"
+    done
+    if [ -d "$last/.beads" ]; then
+      stat -c %a "$last/.beads" > "$perm_file"
+    else
+      printf 'missing
+' > "$perm_file"
+    fi
+    mkdir -p "$last/.beads"
+    chmod 775 "$last/.beads"
+    cat > "$last/.beads/metadata.json" <<'JSON'
+{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity"}
+JSON
+    exit 0
+    ;;
+  config|migrate|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+			if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			fakeDolt := filepath.Join(binDir, "dolt")
+			if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
+			cmd.Env = append(os.Environ(),
+				"GC_CITY_PATH="+cityPath,
+				"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+			}
+
+			if tc.wantInitPerm == "" {
+				if _, err := os.Stat(initPermFile); !os.IsNotExist(err) {
+					t.Fatalf("bd init should not run for existing metadata, stat err=%v", err)
+				}
+			} else {
+				data, err := os.ReadFile(initPermFile)
+				if err != nil {
+					t.Fatalf("read init perm: %v", err)
+				}
+				got := strings.TrimSpace(string(data))
+				if len(got) > 3 {
+					got = got[len(got)-3:]
+				}
+				if got != tc.wantInitPerm {
+					t.Fatalf("bd init saw .beads perm %q, want effective bits %q", strings.TrimSpace(string(data)), tc.wantInitPerm)
+				}
+			}
+
+			info, err := os.Stat(filepath.Join(cityPath, ".beads"))
+			if err != nil {
+				t.Fatalf("stat .beads: %v", err)
+			}
+			if got := info.Mode().Perm(); got != beadsDirPerm {
+				t.Fatalf(".beads perm = %o, want %o", got, beadsDirPerm)
+			}
+		})
+	}
+}
+
+func TestGcBeadsBdInitFailsWhenBeadsDirPermissionsCannotBeTightened(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o775); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	realChmod, err := exec.LookPath("chmod")
+	if err != nil {
+		t.Fatalf("LookPath(chmod): %v", err)
+	}
+	fakeChmod := filepath.Join(binDir, "chmod")
+	fakeChmodScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "$#" -ge 2 ] && [ "$1" = "700" ] && [ "$2" = %q ]; then
+  echo "chmod blocked" >&2
+  exit 1
+fi
+exec %q "$@"
+`, filepath.Join(cityPath, ".beads"), realChmod)
+	if err := os.WriteFile(fakeChmod, []byte(fakeChmodScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBd := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("gc-beads-bd init unexpectedly succeeded\n%s", out)
+	}
+	if !strings.Contains(string(out), "failed to set "+filepath.Join(cityPath, ".beads")+" permissions to 700") {
+		t.Fatalf("init error = %q, want chmod failure", string(out))
 	}
 }
 
@@ -640,8 +2992,7 @@ func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
+	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
 		t.Fatalf("MaterializeBeadsBdScript: %v", err)
 	}
 
@@ -701,37 +3052,48 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", rigDir, "re", "re")
-	cmd.Env = append(os.Environ(),
-		"GC_CITY_PATH="+cityPath,
-		"GC_DOLT_HOST=rig-db.example.com",
-		"GC_DOLT_PORT=3307",
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_DOLT_HOST", "rig-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "3307")
+
+	if err := initBeadsForDir(cityPath, rigDir, "re", "re"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
 	}
 
-	want := strings.Join([]string{
+	wantPinned := strings.Join([]string{
 		"rig-db.example.com",
 		"3307",
 		"rig-db.example.com",
 		"3307",
 		filepath.Join(rigDir, ".beads"),
 	}, "|")
-	for _, name := range []string{"config.env", "migrate.env", "list.env"} {
+	for _, name := range []string{"config.env", "migrate.env"} {
 		data, err := os.ReadFile(filepath.Join(captureDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		if got := strings.TrimSpace(string(data)); got != want {
-			t.Fatalf("%s = %q, want %q", name, got, want)
+		if got := strings.TrimSpace(string(data)); got != wantPinned {
+			t.Fatalf("%s = %q, want %q", name, got, wantPinned)
 		}
+	}
+	listData, err := os.ReadFile(filepath.Join(captureDir, "list.env"))
+	if err != nil {
+		t.Fatalf("read list.env: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(listData)), "|")
+	if len(parts) != 5 {
+		t.Fatalf("list.env = %q, want 5 fields", strings.TrimSpace(string(listData)))
+	}
+	if parts[0] != "rig-db.example.com" || parts[1] != "3307" {
+		t.Fatalf("list.env host/port = %q|%q, want rig-db.example.com|3307", parts[0], parts[1])
+	}
+	if parts[4] != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("list.env BEADS_DIR = %q, want %q", parts[4], filepath.Join(rigDir, ".beads"))
 	}
 }
 
-func TestGcBeadsBdInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity(t *testing.T) {
+func TestGcBeadsBdInitBackfillsRepoIDMigrationWhenMetadataExistsWithoutProjectID(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -739,7 +3101,305 @@ func TestGcBeadsBdInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity(t *t
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"wrong-db"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureDir := t.TempDir()
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+capture_dir=%q
+cmd="${1:-}"
+case "$cmd" in
+  init)
+    : > "$capture_dir/init.called"
+    exit 0
+    ;;
+  migrate)
+    : > "$capture_dir/migrate.called"
+    python3 - <<'PY' "$PWD/.beads/metadata.json"
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["project_id"] = "backfilled-project-id"
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, captureDir)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+currentGCBinaryForTests(t),
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); err != nil {
+		t.Fatalf("expected migrate to run on metadata fast path, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "init.called")); !os.IsNotExist(err) {
+		t.Fatalf("bd init should be skipped on metadata fast path, stat err = %v", err)
+	}
+	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(metadata.json): %v", err)
+	}
+	if !strings.Contains(string(metaData), `"project_id": "backfilled-project-id"`) {
+		t.Fatalf("metadata.json missing backfilled project_id:\n%s", metaData)
+	}
+}
+
+func TestGcBeadsBdInitUsesProjectIDHelperWhenRepoIDMigrationFails(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureDir := t.TempDir()
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+capture_dir=%q
+cmd="${1:-}"
+case "$cmd" in
+  init)
+    : > "$capture_dir/init.called"
+    exit 0
+    ;;
+  migrate)
+    : > "$capture_dir/migrate.called"
+    echo 'failed to compute repository ID: not a git repository' >&2
+    exit 1
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, captureDir)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGC := filepath.Join(binDir, "gc-helper")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+capture_dir=%q
+cmd="$1 $2"
+shift 2
+case "$cmd" in
+  'dolt-state ensure-project-id')
+    metadata=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --metadata)
+          metadata="$2"
+          shift 2
+          ;;
+        --host|--port|--user|--database)
+          shift 2
+          ;;
+        *)
+          exit 64
+          ;;
+      esac
+    done
+    : > "$capture_dir/helper.called"
+    python3 - <<'PY' "$metadata"
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data['project_id'] = 'helper-project-id'
+path.write_text(json.dumps(data, indent=2) + '\n')
+PY
+    printf 'project_id\thelper-project-id\nmetadata_updated\ttrue\ndatabase_updated\ttrue\nsource\tgenerated\n'
+    ;;
+  'dolt-config normalize-scope')
+    : > "$capture_dir/normalize.called"
+    exit 0
+    ;;
+  *)
+    echo "unexpected gc helper args: $cmd $*" >&2
+    exit 64
+    ;;
+esac
+`, captureDir)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); err != nil {
+		t.Fatalf("expected migrate attempt before helper fallback, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "helper.called")); err != nil {
+		t.Fatalf("expected project-id helper fallback, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "normalize.called")); err != nil {
+		t.Fatalf("expected normalize helper call, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "init.called")); !os.IsNotExist(err) {
+		t.Fatalf("bd init should be skipped on metadata fast path, stat err = %v", err)
+	}
+	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(metadata.json): %v", err)
+	}
+	if !strings.Contains(string(metaData), `"project_id": "helper-project-id"`) {
+		t.Fatalf("metadata.json missing helper project_id:\n%s", metaData)
+	}
+}
+
+func TestGcBeadsBdInitSkipsRepoIDMigrationWhenProjectIDAlreadyPresent(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureDir := t.TempDir()
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := `#!/bin/sh
+set -eu
+capture_dir="` + captureDir + `"
+cmd="${1:-}"
+case "$cmd" in
+  init)
+    last=""
+    for arg in "$@"; do
+      last="$arg"
+    done
+    mkdir -p "$last/.beads"
+    cat > "$last/.beads/metadata.json" <<'JSON'
+{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity","project_id":"already-present"}
+JSON
+    exit 0
+    ;;
+  migrate)
+    : > "$capture_dir/migrate.called"
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+currentGCBinaryForTests(t),
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); !os.IsNotExist(err) {
+		t.Fatalf("migrate should be skipped when project_id already exists, stat err = %v", err)
+	}
+}
+
+func TestGcBeadsBdInitUsesExplicitDoltDatabaseForRegistration(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"wrong-db","dolt_host":"127.0.0.1","dolt_user":"legacy","dolt_password":"secret","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-user","dolt_port":"4406"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -758,7 +3418,7 @@ func TestGcBeadsBdInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity(t *t
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
-  list|config|migrate)
+  config|migrate|list)
     exit 0
     ;;
   *)
@@ -790,6 +3450,171 @@ exit 0
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
+	sqlData, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	sqlText := string(sqlData)
+	if !strings.Contains(sqlText, "USE `gascity`") {
+		t.Fatalf("expected registration probe for explicit database, got:\n%s", sqlText)
+	}
+	if strings.Contains(sqlText, "USE `wrong-db`") {
+		t.Fatalf("should not register against stale metadata identity:\n%s", sqlText)
+	}
+}
+
+func TestGcBeadsBdInitFastPathNormalizesBeforeBdConfigAndProjectIDBackfill(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"wrong-db","dolt_host":"127.0.0.1","dolt_user":"legacy","dolt_password":"secret","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-user","dolt_port":"4406"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureDir := t.TempDir()
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+capture_dir=%q
+record_db() {
+  python3 -c 'import json, pathlib, sys; meta = json.loads(pathlib.Path(sys.argv[1]).read_text()); log = pathlib.Path(sys.argv[2]); db = meta.get("dolt_database", ""); prefix = log.read_text() if log.exists() else ""; log.write_text(prefix + db + "\n")' "$1" "$2"
+}
+case "${1:-}" in
+  config)
+    record_db "$PWD/.beads/metadata.json" "$capture_dir/config-db.log"
+    exit 0
+    ;;
+  migrate)
+    record_db "$PWD/.beads/metadata.json" "$capture_dir/migrate-db.log"
+    python3 -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); meta = json.loads(path.read_text()); meta["project_id"] = "backfilled-project-id"; path.write_text(json.dumps(meta, indent=2) + "\n")' "$PWD/.beads/metadata.json"
+    exit 0
+    ;;
+  list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, captureDir)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGC := filepath.Join(binDir, "gc-helper")
+	fakeGCScript := `#!/bin/sh
+set -eu
+subcmd="$1 $2"
+shift 2
+case "$subcmd" in
+  "dolt-config normalize-scope")
+    dir=""
+    database=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          shift 2
+          ;;
+        --dir)
+          dir="$2"
+          shift 2
+          ;;
+        --prefix)
+          shift 2
+          ;;
+        --dolt-database)
+          database="$2"
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    python3 -c 'import json, pathlib, sys; meta_path = pathlib.Path(sys.argv[1]); database = sys.argv[2]; meta = json.loads(meta_path.read_text()); meta["database"] = "dolt"; meta["backend"] = "dolt"; meta["dolt_mode"] = "server"; meta["dolt_database"] = database; [meta.pop(key, None) for key in ["dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"]]; meta_path.write_text(json.dumps(meta, indent=2) + "\n")' "$dir/.beads/metadata.json" "$database"
+    exit 0
+    ;;
+  "dolt-state ensure-project-id")
+    exit 0
+    ;;
+  *)
+    echo "unexpected gc helper args: $subcmd $*" >&2
+    exit 64
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+
+	for _, name := range []string{"config-db.log", "migrate-db.log"} {
+		data, err := os.ReadFile(filepath.Join(captureDir, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", name, err)
+		}
+		lines := strings.Fields(string(data))
+		if len(lines) == 0 {
+			t.Fatalf("%s empty", name)
+		}
+		for _, line := range lines {
+			if line != "gascity" {
+				t.Fatalf("%s line = %q, want gascity", name, line)
+			}
+		}
+	}
+	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	metaText := string(metaData)
+	if !strings.Contains(metaText, `"dolt_database": "gascity"`) || !strings.Contains(metaText, `"project_id": "backfilled-project-id"`) {
+		t.Fatalf("metadata = %s", metaText)
+	}
+}
+
+func TestEnforceCanonicalScopeMetadataForInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"wrong-db","dolt_host":"127.0.0.1","dolt_user":"legacy","dolt_password":"secret","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-user","dolt_port":"4406"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, "gascity"); err != nil {
+		t.Fatalf("enforceCanonicalScopeMetadataForInit: %v", err)
+	}
+
 	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
 	if err != nil {
 		t.Fatalf("read metadata: %v", err)
@@ -798,13 +3623,52 @@ exit 0
 	if !strings.Contains(metaText, `"dolt_database": "gascity"`) {
 		t.Fatalf("metadata should be repaired to canonical database:\n%s", metaText)
 	}
-
-	sqlData, err := os.ReadFile(sqlLog)
-	if err != nil {
-		t.Fatalf("read sql log: %v", err)
+	for _, forbidden := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+		if strings.Contains(metaText, forbidden) {
+			t.Fatalf("metadata should scrub deprecated field %s:\n%s", forbidden, metaText)
+		}
 	}
-	if !strings.Contains(string(sqlData), "USE `gascity`") {
-		t.Fatalf("expected registration probe for canonical database, got:\n%s", string(sqlData))
+}
+
+func TestEnforceCanonicalScopeMetadataForInitScrubsDeprecatedMetadataEndpointAuthFields(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"legacy","backend":"legacy","dolt_mode":"embedded","dolt_database":"wrong-db","custom":"keep","dolt_host":"127.0.0.1","dolt_user":"legacy-user","dolt_password":"legacy-pass","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-server-user","dolt_port":"4406"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, "gascity"); err != nil {
+		t.Fatalf("enforceCanonicalScopeMetadataForInit: %v", err)
+	}
+	if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, "gascity"); err != nil {
+		t.Fatalf("second enforceCanonicalScopeMetadataForInit: %v", err)
+	}
+
+	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, forbidden := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+		if _, ok := meta[forbidden]; ok {
+			t.Fatalf("metadata should scrub %s: %s", forbidden, string(metaData))
+		}
+	}
+	for key, want := range map[string]string{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "gascity",
+		"custom":        "keep",
+	} {
+		if got := strings.TrimSpace(fmt.Sprint(meta[key])); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -922,6 +3786,55 @@ func listenOnRandomPort(t *testing.T) net.Listener {
 	return ln
 }
 
+func reserveRandomTCPPort(t *testing.T) int {
+	t.Helper()
+	ln := listenOnRandomPort(t)
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+func startTCPListenerProcess(t *testing.T, port int) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("python3", "-c", `
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+`, strconv.Itoa(port))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start listener process: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return cmd
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("listener process on %d did not become ready", port)
+	return nil
+}
+
 func writeDoltState(cityPath string, state doltRuntimeState) error {
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -1022,15 +3935,15 @@ func TestIsExternalDoltWithConfig(t *testing.T) {
 
 // ── per-city dolt config registration tests ─────────────────────────
 
-func TestDoltHostForCityPrefersEnvOverConfig(t *testing.T) {
+func TestDoltHostForCityPrefersConfiguredTargetOverEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "config-host.example.com", Port: 3307})
 	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
 
 	t.Setenv("GC_DOLT_HOST", "user-override.example.com")
 
-	if got := doltHostForCity(cityPath); got != "user-override.example.com" {
-		t.Errorf("doltHostForCity = %q, want user env override %q", got, "user-override.example.com")
+	if got := doltHostForCity(cityPath); got != "config-host.example.com" {
+		t.Errorf("doltHostForCity = %q, want configured target %q", got, "config-host.example.com")
 	}
 }
 
@@ -1047,15 +3960,15 @@ func TestDoltHostForCityFallsBackToConfig(t *testing.T) {
 	}
 }
 
-func TestDoltPortForCityPrefersEnvOverConfig(t *testing.T) {
+func TestDoltPortForCityPrefersConfiguredTargetOverEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	cityDoltConfigs.Store(cityPath, config.DoltConfig{Port: 3307})
 	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
 
 	t.Setenv("GC_DOLT_PORT", "9999")
 
-	if got := doltPortForCity(cityPath); got != "9999" {
-		t.Errorf("doltPortForCity = %q, want user env override %q", got, "9999")
+	if got := doltPortForCity(cityPath); got != "3307" {
+		t.Errorf("doltPortForCity = %q, want configured target %q", got, "3307")
 	}
 }
 
@@ -1069,6 +3982,2124 @@ func TestDoltPortForCityFallsBackToConfig(t *testing.T) {
 
 	if got := doltPortForCity(cityPath); got != "3307" {
 		t.Errorf("doltPortForCity = %q, want config value %q", got, "3307")
+	}
+}
+
+func TestConfiguredCityDoltTargetPrefersCanonicalConfigOverCompatRegistration(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	host, port, ok := configuredCityDoltTarget(cityPath)
+	if !ok {
+		t.Fatal("configuredCityDoltTarget() = not configured, want canonical target")
+	}
+	if host != "canonical-db.example.com" || port != "3307" {
+		t.Fatalf("configuredCityDoltTarget() = (%q, %q), want canonical target", host, port)
+	}
+	if got := doltHostForCity(cityPath); got != "canonical-db.example.com" {
+		t.Fatalf("doltHostForCity() = %q, want canonical host", got)
+	}
+	if got := doltPortForCity(cityPath); got != "3307" {
+		t.Fatalf("doltPortForCity() = %q, want canonical port", got)
+	}
+}
+
+func TestConfiguredCityDoltTargetDoesNotFallbackToCompatRegistrationWhenCanonicalManaged(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	if host, port, ok := configuredCityDoltTarget(cityPath); ok {
+		t.Fatalf("configuredCityDoltTarget() = (%q, %q, %v), want no external target", host, port, ok)
+	}
+	if got := doltHostForCity(cityPath); got != "" {
+		t.Fatalf("doltHostForCity() = %q, want empty for managed canonical city", got)
+	}
+	if got := doltPortForCity(cityPath); got != "" {
+		t.Fatalf("doltPortForCity() = %q, want empty for managed canonical city", got)
+	}
+	if isExternalDolt(cityPath) {
+		t.Fatal("isExternalDolt() = true, want false for managed canonical city")
+	}
+}
+
+func TestConfiguredCityDoltTargetTreatsLegacyExternalConfigAsAuthoritativeWhenPresent(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+dolt.auto-start: false
+dolt.host: legacy-db.example.com
+dolt.port: 3311
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	host, port, ok := configuredCityDoltTarget(cityPath)
+	if !ok {
+		t.Fatal("configuredCityDoltTarget() = not configured, want legacy canonical target")
+	}
+	if host != "legacy-db.example.com" || port != "3311" {
+		t.Fatalf("configuredCityDoltTarget() = (%q, %q), want legacy file target", host, port)
+	}
+}
+
+func TestConfiguredCityDoltTargetFallsBackToCompatRegistrationWhenLegacyFileHasNoEndpointAuthority(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	host, port, ok := configuredCityDoltTarget(cityPath)
+	if !ok {
+		t.Fatal("configuredCityDoltTarget() = not configured, want compat fallback")
+	}
+	if host != "compat-db.example.com" || port != "4406" {
+		t.Fatalf("configuredCityDoltTarget() = (%q, %q), want compat target", host, port)
+	}
+	if !isExternalDolt(cityPath) {
+		t.Fatal("isExternalDolt() = false, want true for compat fallback before canonicalization")
+	}
+}
+
+func TestValidateCanonicalCompatDoltDriftRejectsCityMismatch(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "bd")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "compat-db.example.com", Port: 4406},
+	}
+
+	err := validateCanonicalCompatDoltDrift(cityPath, cfg)
+	if err == nil || !strings.Contains(err.Error(), "canonical city endpoint") {
+		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want canonical city drift error", err)
+	}
+}
+
+func TestGcBeadsBdStartIgnoresReachableCompatPortFileInput(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chosenPortFile := filepath.Join(t.TempDir(), "chosen-port")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+chosen_file=%q
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    printf '%%s\n' "$port" > "$chosen_file"
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, chosenPortFile)
+	if err := os.WriteFile(fakeDolt, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	compatPort := reserveRandomTCPPort(t)
+	compatListener := startTCPListenerProcess(t, compatPort)
+	providerPort := reserveRandomTCPPort(t)
+	providerListener := startTCPListenerProcess(t, providerPort)
+
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+		Running: true,
+		PID:     providerListener.Process.Pid,
+		Port:    providerPort,
+		DataDir: filepath.Join(cityPath, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte(fmt.Sprintf("%d\n", compatPort)), 0o644); err != nil {
+		t.Fatalf("write compat port file: %v", err)
+	}
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	runStart := func() {
+		t.Helper()
+		cmd := exec.Command(script, "start")
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+		}
+	}
+	runStart()
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+		if compatListener != nil && compatListener.Process != nil {
+			_ = compatListener.Process.Kill()
+		}
+		if compatListener != nil {
+			_ = compatListener.Wait()
+		}
+		if providerListener != nil && providerListener.Process != nil {
+			_ = providerListener.Process.Kill()
+		}
+		if providerListener != nil {
+			_ = providerListener.Wait()
+		}
+	})
+
+	if _, err := os.Stat(chosenPortFile); !os.IsNotExist(err) {
+		t.Fatalf("expected existing provider-state server to skip launching fake dolt, stat err = %v", err)
+	}
+	state, err := readDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read provider state: %v", err)
+	}
+	if state.Port != providerPort || state.PID != providerListener.Process.Pid {
+		t.Fatalf("provider state = %+v, want existing provider listener port=%d pid=%d", state, providerPort, providerListener.Process.Pid)
+	}
+}
+
+func writeFakeManagedConfigWriterGC(t *testing.T, binDir, invocationFile string) string {
+	t.Helper()
+	fakeGC := filepath.Join(binDir, "gc")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+invocation_file=%q
+subcmd="$1 $2"
+shift 2
+case "$subcmd" in
+  "dolt-config write-managed")
+    config_file=""
+    host=""
+    port=""
+    data_dir=""
+    log_level="warning"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --file)
+          config_file="$2"
+          shift 2
+          ;;
+        --host)
+          host="$2"
+          shift 2
+          ;;
+        --port)
+          port="$2"
+          shift 2
+          ;;
+        --data-dir)
+          data_dir="$2"
+          shift 2
+          ;;
+        --log-level)
+          log_level="$2"
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 65
+          ;;
+      esac
+    done
+    printf 'gc dolt-config write-managed\n' >> "$invocation_file"
+    mkdir -p "$(dirname "$config_file")"
+    cat > "$config_file" <<EOF
+# rendered by fake gc
+log_level: $log_level
+listener:
+  port: $port
+  host: $host
+  max_connections: 1000
+  read_timeout_millis: 300000
+  write_timeout_millis: 300000
+
+data_dir: "$data_dir"
+
+behavior:
+  auto_gc_behavior:
+    enable: true
+    archive_level: 1
+EOF
+    ;;
+  "dolt-state allocate-port")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--state-file)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state allocate-port\n' >> "$invocation_file"
+    printf '3311\n'
+    ;;
+  "dolt-state inspect-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--port)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state inspect-managed\n' >> "$invocation_file"
+    printf 'managed_pid\t0\n'
+    printf 'managed_source\t\n'
+    printf 'managed_owned\tfalse\n'
+    printf 'managed_deleted_inodes\tfalse\n'
+    printf 'port_holder_pid\t0\n'
+    printf 'port_holder_owned\tfalse\n'
+    printf 'port_holder_deleted_inodes\tfalse\n'
+    ;;
+  "dolt-state existing-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port|--user|--timeout-ms)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state existing-managed\n' >> "$invocation_file"
+    printf 'managed_pid\t0\n'
+    printf 'managed_owned\tfalse\n'
+    printf 'deleted_inodes\tfalse\n'
+    printf 'state_port\t0\n'
+    printf 'ready\tfalse\n'
+    printf 'reusable\tfalse\n'
+    ;;
+  "dolt-state probe-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state probe-managed\n' >> "$invocation_file"
+    printf 'running\tfalse\n'
+    printf 'port_holder_pid\t0\n'
+    printf 'port_holder_owned\tfalse\n'
+    printf 'port_holder_deleted_inodes\tfalse\n'
+    printf 'tcp_reachable\tfalse\n'
+    ;;
+  "dolt-state wait-ready")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port|--user|--pid|--timeout-ms)
+          shift 2
+          ;;
+        --check-deleted)
+          shift 1
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state wait-ready\n' >> "$invocation_file"
+    printf 'ready\ttrue\n'
+    printf 'pid_alive\ttrue\n'
+    printf 'deleted_inodes\tfalse\n'
+    ;;
+  "dolt-state stop-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--port)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state stop-managed\n' >> "$invocation_file"
+    printf 'had_pid\ttrue\n'
+    printf 'pid\t123\n'
+    printf 'forced\tfalse\n'
+    ;;
+  "dolt-state recover-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port|--user|--log-level|--timeout-ms)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state recover-managed\n' >> "$invocation_file"
+    printf 'diagnosed_read_only\t%%s\n' "${GC_FAKE_RECOVER_DIAGNOSED_READ_ONLY:-false}"
+    printf 'had_pid\ttrue\n'
+    printf 'forced\tfalse\n'
+    printf 'ready\ttrue\n'
+    printf 'pid\t12345\n'
+    printf 'port\t3311\n'
+    printf 'healthy\ttrue\n'
+    ;;
+  "dolt-state query-probe")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host|--port|--user)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state query-probe\n' >> "$invocation_file"
+    ;;
+  "dolt-state read-only-check")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host|--port|--user)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state read-only-check\n' >> "$invocation_file"
+    exit 1
+    ;;
+  "dolt-state preflight-clean")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state preflight-clean\n' >> "$invocation_file"
+    ;;
+  "dolt-state runtime-layout")
+    city=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          city="$2"
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    pack_dir="$city/.gc/runtime/packs/dolt-from-gc"
+    printf 'gc dolt-state runtime-layout\n' >> "$invocation_file"
+    printf 'GC_PACK_STATE_DIR\t%%s\n' "$pack_dir"
+    printf 'GC_DOLT_DATA_DIR\t%%s\n' "$city/.beads/dolt"
+    printf 'GC_DOLT_LOG_FILE\t%%s\n' "$pack_dir/dolt.log"
+    printf 'GC_DOLT_STATE_FILE\t%%s\n' "$pack_dir/dolt-provider-state.json"
+    printf 'GC_DOLT_PID_FILE\t%%s\n' "$pack_dir/dolt.pid"
+    printf 'GC_DOLT_LOCK_FILE\t%%s\n' "$pack_dir/dolt.lock"
+    printf 'GC_DOLT_CONFIG_FILE\t%%s\n' "$pack_dir/dolt-config.yaml"
+    ;;
+  "dolt-state start-managed")
+    city=""
+    host=""
+    port=""
+    log_level="warning"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          city="$2"
+          shift 2
+          ;;
+        --host|--port|--user|--log-level|--timeout-ms)
+          if [ "$1" = "--host" ]; then host="$2"; fi
+          if [ "$1" = "--port" ]; then port="$2"; fi
+          if [ "$1" = "--log-level" ]; then log_level="$2"; fi
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 66
+          ;;
+      esac
+    done
+    pack_dir="$city/.gc/runtime/packs/dolt-from-gc"
+    data_dir="$city/.beads/dolt"
+    config_file="$pack_dir/dolt-config.yaml"
+    state_file="$pack_dir/dolt-provider-state.json"
+    pid_file="$pack_dir/dolt.pid"
+    printf 'gc dolt-state start-managed\n' >> "$invocation_file"
+    mkdir -p "$pack_dir" "$data_dir"
+    cat > "$config_file" <<EOF
+# rendered by fake gc
+log_level: $log_level
+listener:
+  port: $port
+  host: $host
+  max_connections: 1000
+  read_timeout_millis: 300000
+  write_timeout_millis: 300000
+
+data_dir: "$data_dir"
+
+behavior:
+  auto_gc_behavior:
+    enable: true
+    archive_level: 1
+EOF
+    printf '12345\n' > "$pid_file"
+    printf '{"running":true,"pid":12345,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}\n' "$port" "$data_dir" > "$state_file"
+    printf 'ready\ttrue\n'
+    printf 'pid\t12345\n'
+    printf 'port\t%%s\n' "$port"
+    printf 'address_in_use\tfalse\n'
+    printf 'attempts\t1\n'
+    ;;
+  "dolt-state write-provider")
+    state_file=""
+    pid=""
+    running=""
+    port=""
+    data_dir=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --file)
+          state_file="$2"
+          shift 2
+          ;;
+        --pid)
+          pid="$2"
+          shift 2
+          ;;
+        --running)
+          running="$2"
+          shift 2
+          ;;
+        --port)
+          port="$2"
+          shift 2
+          ;;
+        --data-dir)
+          data_dir="$2"
+          shift 2
+          ;;
+        --started-at)
+          shift 2
+          ;;
+        *)
+          echo "unexpected arg: $1" >&2
+          exit 67
+          ;;
+      esac
+    done
+    printf 'gc dolt-state write-provider\n' >> "$invocation_file"
+    mkdir -p "$(dirname "$state_file")"
+    printf '{"running":%%s,"pid":%%s,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}\n' "$running" "$pid" "$port" "$data_dir" > "$state_file"
+    ;;
+  dolt-state\ *cleanup*|dolt-state\ *preflight*|dolt-state\ *quarantine*|dolt-state\ *stale*)
+    printf 'gc %%s\n' "$subcmd" >> "$invocation_file"
+    ;;
+  *)
+    echo "unexpected gc args: $subcmd $*" >&2
+    exit 64
+    ;;
+esac
+`, invocationFile)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return fakeGC
+}
+
+func writeFakeManagedConfigWriterDolt(t *testing.T, binDir string) {
+	t.Helper()
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeDoltScript := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGcBeadsBdStartDoesNotReplaceLiveLockFileInode(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeDoltScript := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    printf 'sql-server\n' >> "$GC_FAKE_DOLT_INVOCATION_FILE"
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.LockFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	readyFile := filepath.Join(t.TempDir(), "holder-ready")
+	releaseFile := filepath.Join(t.TempDir(), "holder-release")
+	holder := exec.Command("sh", "-c", `
+set -eu
+lock_file="$1"
+ready_file="$2"
+release_file="$3"
+: > "$lock_file"
+exec 9>"$lock_file"
+flock 9
+printf 'ready\n' > "$ready_file"
+while [ ! -f "$release_file" ]; do
+  sleep 0.1
+ done
+`, "sh", layout.LockFile, readyFile, releaseFile)
+	holder.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"))
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start lock holder: %v", err)
+	}
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- holder.Wait()
+	}()
+	t.Cleanup(func() {
+		_ = os.WriteFile(releaseFile, []byte("release\n"), 0o644)
+		select {
+		case err := <-holderDone:
+			if err != nil {
+				t.Errorf("lock holder exit: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			_ = holder.Process.Kill()
+			<-holderDone
+			t.Errorf("timed out waiting for lock holder to exit")
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for lock holder to acquire flock")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	inodeFor := func(path string) uint64 {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", path, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("Stat(%s) did not expose syscall.Stat_t", path)
+		}
+		return stat.Ino
+	}
+	beforeInode := inodeFor(layout.LockFile)
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_PORT=3311",
+		"GC_FAKE_DOLT_INVOCATION_FILE="+invocationFile,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("gc-beads-bd start unexpected error: %v", err)
+		}
+	}
+	if exitCode == 0 {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+		t.Fatalf("gc-beads-bd start unexpectedly succeeded while another process held the start lock\n%s", out)
+	}
+	if exitCode != 1 {
+		t.Fatalf("gc-beads-bd start exit %d, want 1\n%s", exitCode, out)
+	}
+	if !strings.Contains(string(out), "could not acquire dolt start lock") {
+		t.Fatalf("gc-beads-bd start output = %q, want lock acquisition failure", out)
+	}
+	afterInode := inodeFor(layout.LockFile)
+	if afterInode != beforeInode {
+		t.Fatalf("lock inode changed from %d to %d while original holder was still live", beforeInode, afterInode)
+	}
+	if invocation, err := os.ReadFile(invocationFile); err == nil && strings.TrimSpace(string(invocation)) != "" {
+		t.Fatalf("dolt should not have been invoked while the start lock was held:\n%s", string(invocation))
+	}
+}
+
+func TestGcBeadsBdStartWaitsForConcurrentStarterSuccess(t *testing.T) {
+	cityPath := t.TempDir()
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.LockFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	startedFile := filepath.Join(t.TempDir(), "starter-ready")
+	fakeGC := filepath.Join(binDir, "gc")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+invocation_file=%q
+started_file=%q
+subcmd="$1 $2"
+shift 2
+case "$subcmd" in
+  "dolt-state runtime-layout")
+    city=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          city="$2"
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state runtime-layout\n' >> "$invocation_file"
+    printf 'GC_PACK_STATE_DIR\t%%s\n' %q
+    printf 'GC_DOLT_DATA_DIR\t%%s\n' %q
+    printf 'GC_DOLT_LOG_FILE\t%%s\n' %q
+    printf 'GC_DOLT_STATE_FILE\t%%s\n' %q
+    printf 'GC_DOLT_PID_FILE\t%%s\n' %q
+    printf 'GC_DOLT_LOCK_FILE\t%%s\n' %q
+    printf 'GC_DOLT_CONFIG_FILE\t%%s\n' %q
+    ;;
+  "dolt-state existing-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port|--user|--timeout-ms)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state existing-managed\n' >> "$invocation_file"
+    if [ -f "$started_file" ]; then
+      printf 'managed_pid\t4242\n'
+      printf 'managed_owned\ttrue\n'
+      printf 'deleted_inodes\tfalse\n'
+      printf 'state_port\t3311\n'
+      printf 'ready\ttrue\n'
+      printf 'reusable\ttrue\n'
+    else
+      printf 'managed_pid\t0\n'
+      printf 'managed_owned\tfalse\n'
+      printf 'deleted_inodes\tfalse\n'
+      printf 'state_port\t0\n'
+      printf 'ready\tfalse\n'
+      printf 'reusable\tfalse\n'
+    fi
+    ;;
+  "dolt-state probe-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state probe-managed
+' >> "$invocation_file"
+    printf 'running	true
+'
+    printf 'port_holder_pid	4242
+'
+    printf 'port_holder_owned	true
+'
+    printf 'port_holder_deleted_inodes	false
+'
+    printf 'tcp_reachable	true
+'
+    ;;
+  "dolt-state query-probe")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host|--port|--user)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state query-probe
+' >> "$invocation_file"
+    if [ -f "$started_file" ]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  "dolt-state write-provider")
+    state_file=""
+    pid=""
+    running=""
+    port=""
+    data_dir=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --file)
+          state_file="$2"
+          shift 2
+          ;;
+        --pid)
+          pid="$2"
+          shift 2
+          ;;
+        --running)
+          running="$2"
+          shift 2
+          ;;
+        --port)
+          port="$2"
+          shift 2
+          ;;
+        --data-dir)
+          data_dir="$2"
+          shift 2
+          ;;
+        --started-at)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state write-provider
+' >> "$invocation_file"
+    mkdir -p "$(dirname "$state_file")"
+    printf '{"running":%%s,"pid":%%s,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}
+' "$running" "$pid" "$port" "$data_dir" > "$state_file"
+    ;;
+  *)
+    echo "unexpected gc args: $subcmd $*" >&2
+    exit 64
+    ;;
+esac
+`, invocationFile, startedFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nset -eu\ncase \"${1:-}\" in\n  config)\n    exit 0\n    ;;\n  *)\n    printf 'dolt %s\\n' \"$*\" >> \"$GC_FAKE_DOLT_INVOCATION_FILE\"\n    exit 1\n    ;;\nesac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invokedDolt := filepath.Join(t.TempDir(), "dolt-invocation")
+
+	readyFile := filepath.Join(t.TempDir(), "holder-ready")
+	holder := exec.Command("sh", "-c", `
+set -eu
+lock_file="$1"
+ready_file="$2"
+started_file="$3"
+: > "$lock_file"
+exec 9>"$lock_file"
+flock 9
+printf 'ready\n' > "$ready_file"
+sleep 4
+printf 'ready\n' > "$started_file"
+sleep 1
+`, "sh", layout.LockFile, readyFile, startedFile)
+	holder.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"))
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start lock holder: %v", err)
+	}
+	defer func() {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for lock holder to acquire flock")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_PORT=3311",
+		"GC_BIN="+fakeGC,
+		"GC_FAKE_DOLT_INVOCATION_FILE="+invokedDolt,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed while concurrent starter was making progress: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, layout.PIDFile))); got != "4242" {
+		t.Fatalf("pid file = %q, want 4242", got)
+	}
+	if _, err := os.Stat(startedFile); err != nil {
+		t.Fatalf("concurrent starter success marker missing after start returned: %v", err)
+	}
+	if invocation, err := os.ReadFile(invokedDolt); err == nil && strings.TrimSpace(string(invocation)) != "" {
+		t.Fatalf("dolt should not have been invoked while concurrent starter won:\n%s", string(invocation))
+	}
+}
+
+func TestGcBeadsBdStartUsesGCBinManagedConfigWriter(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+	writeFakeManagedConfigWriterDolt(t, binDir)
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	invocationText := strings.TrimSpace(string(invocation))
+	for _, want := range []string{"gc dolt-state runtime-layout", "gc dolt-state allocate-port", "gc dolt-state existing-managed", "gc dolt-state probe-managed", "gc dolt-state start-managed"} {
+		if !strings.Contains(invocationText, want) {
+			t.Fatalf("gc invocation missing %q: %s", want, invocationText)
+		}
+	}
+	configData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt-from-gc", "dolt-config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadFile(dolt-config.yaml): %v", err)
+	}
+	if !strings.Contains(string(configData), "# rendered by fake gc") {
+		t.Fatalf("dolt-config.yaml was not rendered by GC_BIN:\n%s", string(configData))
+	}
+	state, err := readDoltRuntimeStateFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt-from-gc", "dolt-provider-state.json"))
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile: %v", err)
+	}
+	if state.Port == 0 {
+		t.Fatalf("provider state port = %d, want non-zero", state.Port)
+	}
+	if !strings.Contains(string(configData), fmt.Sprintf("port: %d", state.Port)) {
+		t.Fatalf("dolt-config.yaml missing helper-selected port %d:\n%s", state.Port, string(configData))
+	}
+}
+
+func TestGcBeadsBdStopUsesGCBinStopManagedHelperWhenAvailable(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.PIDFile, []byte("123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "stop")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd stop failed: %v\n%s", err, out)
+	}
+
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if !strings.Contains(strings.TrimSpace(string(invocation)), "gc dolt-state stop-managed") {
+		t.Fatalf("gc invocation missing stop-managed helper: %s", string(invocation))
+	}
+}
+
+func TestGcBeadsBdRecoverUsesGCBinRecoverManagedHelperWhenAvailable(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "recover")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd recover failed: %v\n%s", err, out)
+	}
+
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	if !strings.Contains(strings.TrimSpace(string(invocation)), "gc dolt-state recover-managed") {
+		t.Fatalf("gc invocation missing recover-managed helper: %s", string(invocation))
+	}
+}
+
+func TestGcBeadsBdRecoverHelperPreservesReadOnlyWarning(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"GC_FAKE_RECOVER_DIAGNOSED_READ_ONLY=true",
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "recover")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd recover failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "detected read-only dolt server") {
+		t.Fatalf("recover output missing read-only warning: %s", string(out))
+	}
+}
+
+func TestManagedDoltConfigGoWriterMatchesShellFallbackSemantics(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goConfigPath := filepath.Join(t.TempDir(), "go", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(goConfigPath, "0.0.0.0", "3311", filepath.Join(cityPath, ".beads", "dolt"), "info"); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeDoltScript := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_PORT=3311",
+		"GC_DOLT_LOGLEVEL=info",
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+	shellConfigPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	goConfig := readManagedDoltConfigForTest(t, goConfigPath)
+	shellConfig := readManagedDoltConfigForTest(t, shellConfigPath)
+	if goConfig != shellConfig {
+		t.Fatalf("managed config mismatch\nGo: %+v\nShell: %+v", goConfig, shellConfig)
+	}
+}
+
+type managedDoltConfigForTest struct {
+	LogLevel string `yaml:"log_level"`
+	Listener struct {
+		Port               int    `yaml:"port"`
+		Host               string `yaml:"host"`
+		MaxConnections     int    `yaml:"max_connections"`
+		ReadTimeoutMillis  int    `yaml:"read_timeout_millis"`
+		WriteTimeoutMillis int    `yaml:"write_timeout_millis"`
+	} `yaml:"listener"`
+	DataDir  string `yaml:"data_dir"`
+	Behavior struct {
+		AutoGCBehavior struct {
+			Enable       bool `yaml:"enable"`
+			ArchiveLevel int  `yaml:"archive_level"`
+		} `yaml:"auto_gc_behavior"`
+	} `yaml:"behavior"`
+}
+
+func readManagedDoltConfigForTest(t *testing.T, path string) managedDoltConfigForTest {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	var cfg managedDoltConfigForTest
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal(%s): %v\n%s", path, err, data)
+	}
+	return cfg
+}
+
+func TestGcBeadsBdStartIsIdempotentWhenAlreadyRunning(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	countFile := filepath.Join(t.TempDir(), "dolt-start-count")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeScript := `#!/bin/sh
+set -eu
+count_file="` + countFile + `"
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+
+	runStart := func() {
+		t.Helper()
+		cmd := exec.Command(script, "start")
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+		}
+	}
+
+	runStart()
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	firstPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
+	if err != nil {
+		t.Fatalf("read first pid file: %v", err)
+	}
+	firstPID := strings.TrimSpace(string(firstPIDData))
+	if firstPID == "" {
+		t.Fatal("first pid file is empty")
+	}
+
+	runStart()
+
+	secondPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
+	if err != nil {
+		t.Fatalf("read second pid file: %v", err)
+	}
+	secondPID := strings.TrimSpace(string(secondPIDData))
+	if secondPID != firstPID {
+		t.Fatalf("repeated start changed pid from %q to %q", firstPID, secondPID)
+	}
+
+	countData, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("read start count: %v", err)
+	}
+	if got := strings.TrimSpace(string(countData)); got != "1" {
+		t.Fatalf("dolt sql-server launch count = %q, want 1", got)
+	}
+
+	state, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-provider-state.json"))
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	if !strings.Contains(string(state), "\"pid\":"+firstPID) {
+		t.Fatalf("provider state file should preserve original pid %s, got: %s", firstPID, state)
+	}
+}
+
+func TestGcBeadsBdStartRestartsServerHoldingDeletedDataInodes(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	countFile := filepath.Join(t.TempDir(), "dolt-start-count")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+count_file=%q
+data_dir=%q
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%%s\n' "$count" > "$count_file"
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    exec python3 - "$port" "$data_dir" "$count" <<'INNERPY'
+import os
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+data_dir = sys.argv[2]
+count = int(sys.argv[3])
+os.makedirs(data_dir, exist_ok=True)
+open_file = None
+if count == 1:
+    stale = os.path.join(data_dir, "stale-open.txt")
+    open_file = open(stale, "w+")
+    open_file.write("stale")
+    open_file.flush()
+    os.unlink(stale)
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, countFile, filepath.Join(cityPath, ".beads", "dolt"))
+	if err := os.WriteFile(fakeDolt, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+
+	runStart := func() {
+		t.Helper()
+		cmd := exec.Command(script, "start")
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+		}
+	}
+
+	runStart()
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	firstPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
+	if err != nil {
+		t.Fatalf("read first pid file: %v", err)
+	}
+	firstPID := strings.TrimSpace(string(firstPIDData))
+	if firstPID == "" {
+		t.Fatal("first pid file is empty")
+	}
+
+	runStart()
+
+	secondPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
+	if err != nil {
+		t.Fatalf("read second pid file: %v", err)
+	}
+	secondPID := strings.TrimSpace(string(secondPIDData))
+	if secondPID == "" {
+		t.Fatal("second pid file is empty")
+	}
+
+	countData, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("read start count: %v", err)
+	}
+	if got := strings.TrimSpace(string(countData)); got != "2" {
+		t.Fatalf("dolt sql-server launch count = %q, want 2", got)
+	}
+}
+
+func TestGcBeadsBdEnsureReadyDoesNotRestartAfterTransientTCPProbeFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	countFile := filepath.Join(t.TempDir(), "dolt-start-count")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+count_file=%q
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%%s\n' "$count" > "$count_file"
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, countFile)
+	if err := os.WriteFile(fakeDolt, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	baseEnv := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN=",
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+
+	runScript := func(env []string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(script, args...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("gc-beads-bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	runScript(baseEnv, "start")
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = baseEnv
+		_ = stop.Run()
+	})
+
+	firstPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
+	if err != nil {
+		t.Fatalf("read first pid file: %v", err)
+	}
+	firstPID := strings.TrimSpace(string(firstPIDData))
+	if firstPID == "" {
+		t.Fatal("first pid file is empty")
+	}
+
+	realNC, err := exec.LookPath("nc")
+	if err != nil {
+		t.Skip("nc not installed")
+	}
+	shimDir := filepath.Join(t.TempDir(), "shim")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	probeFile := filepath.Join(shimDir, "nc-once")
+	shimPath := filepath.Join(shimDir, "nc")
+	shim := fmt.Sprintf(`#!/bin/sh
+set -eu
+probe_file=%q
+real_nc=%q
+if [ ! -f "$probe_file" ]; then
+  : > "$probe_file"
+  exit 1
+fi
+exec "$real_nc" "$@"
+`, probeFile, realNC)
+	if err := os.WriteFile(shimPath, []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envWithShim := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN=",
+		"PATH="+strings.Join([]string{shimDir, binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+
+	runScript(envWithShim, "ensure-ready")
+
+	secondPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
+	if err != nil {
+		t.Fatalf("read second pid file: %v", err)
+	}
+	secondPID := strings.TrimSpace(string(secondPIDData))
+	if secondPID != firstPID {
+		t.Fatalf("ensure-ready changed pid from %q to %q after transient tcp probe failure", firstPID, secondPID)
+	}
+
+	countData, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("read start count: %v", err)
+	}
+	if got := strings.TrimSpace(string(countData)); got != "1" {
+		t.Fatalf("dolt sql-server launch count = %q, want 1", got)
+	}
+}
+
+func TestValidateCanonicalCompatDoltDriftRejectsInheritedRigCompatOverrideWithRelativePath(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRel := "frontend"
+	rigPath := filepath.Join(cityPath, rigRel)
+	t.Setenv("GC_BEADS", "bd")
+	for _, dir := range []string{cityPath, rigPath} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(`issue_prefix: fe
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:     "frontend",
+			Path:     rigRel,
+			Prefix:   "fe",
+			DoltHost: "rig-db.example.com",
+			DoltPort: "4406",
+		}},
+	}
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.Chdir(outsideDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if chdirErr := os.Chdir(origWD); chdirErr != nil {
+			t.Fatalf("restore cwd: %v", chdirErr)
+		}
+	}()
+
+	err = validateCanonicalCompatDoltDrift(cityPath, cfg)
+	if err == nil || !strings.Contains(err.Error(), `rig "frontend"`) {
+		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want inherited rig compat error", err)
+	}
+}
+
+func TestValidateCanonicalCompatDoltDriftRejectsInheritedRigCompatOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	t.Setenv("GC_BEADS", "bd")
+	for _, dir := range []string{cityPath, rigPath} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(`issue_prefix: fe
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:     "frontend",
+			Path:     rigPath,
+			Prefix:   "fe",
+			DoltHost: "rig-db.example.com",
+			DoltPort: "4406",
+		}},
+	}
+
+	err := validateCanonicalCompatDoltDrift(cityPath, cfg)
+	if err == nil || !strings.Contains(err.Error(), `rig "frontend"`) {
+		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want inherited rig compat error", err)
+	}
+}
+
+func TestStartBeadsLifecycleFailsOnCanonicalCompatDoltDrift(t *testing.T) {
+	cityPath := t.TempDir()
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "compat-db.example.com", Port: 4406},
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err == nil || !strings.Contains(err.Error(), "canonical city endpoint") {
+		t.Fatalf("startBeadsLifecycle() error = %v, want canonical city drift error", err)
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("provider should not start before drift validation, stat err = %v", err)
+	}
+}
+
+func TestConfiguredCityDoltTargetDoesNotFallbackToCompatRegistrationWhenCanonicalCityOriginInvalid(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "5510")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: invalid-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	if host, port, ok := configuredCityDoltTarget(cityPath); ok {
+		t.Fatalf("configuredCityDoltTarget() = (%q, %q, %v), want no target for invalid canonical city origin", host, port, ok)
+	}
+	if got := doltHostForCity(cityPath); got != "" {
+		t.Fatalf("doltHostForCity() = %q, want empty for invalid canonical city origin", got)
+	}
+	if got := doltPortForCity(cityPath); got != "" {
+		t.Fatalf("doltPortForCity() = %q, want empty for invalid canonical city origin", got)
+	}
+	if isExternalDolt(cityPath) {
+		t.Fatal("isExternalDolt() = true, want false for invalid canonical city origin")
+	}
+}
+
+func TestDoltHostAndPortForCityDoNotFallbackToEnvWhenCanonicalCityOriginInvalid(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: invalid-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	if got := doltHostForCity(cityPath); got != "" {
+		t.Fatalf("doltHostForCity() = %q, want empty for invalid canonical city origin", got)
+	}
+	if got := doltPortForCity(cityPath); got != "" {
+		t.Fatalf("doltPortForCity() = %q, want empty for invalid canonical city origin", got)
+	}
+	if isExternalDolt(cityPath) {
+		t.Fatal("isExternalDolt() = true, want false for invalid canonical city origin even with env override")
+	}
+}
+
+func TestDoltHostAndPortForCityDoNotFallbackToEnvWhenManagedCanonicalTracksEndpoint(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: stale-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	if got := doltHostForCity(cityPath); got != "" {
+		t.Fatalf("doltHostForCity() = %q, want empty for invalid managed canonical city", got)
+	}
+	if got := doltPortForCity(cityPath); got != "" {
+		t.Fatalf("doltPortForCity() = %q, want empty for invalid managed canonical city", got)
+	}
+	if isExternalDolt(cityPath) {
+		t.Fatal("isExternalDolt() = true, want false for invalid managed canonical city even with env override")
+	}
+}
+
+func TestConfiguredCityDoltTargetDoesNotFallbackToCompatRegistrationWhenManagedCanonicalTracksEndpoint(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "5510")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: stale-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	if host, port, ok := configuredCityDoltTarget(cityPath); ok {
+		t.Fatalf("configuredCityDoltTarget() = (%q, %q, %v), want no target for invalid managed canonical city", host, port, ok)
+	}
+	if got := doltHostForCity(cityPath); got != "" {
+		t.Fatalf("doltHostForCity() = %q, want empty for invalid managed canonical city", got)
+	}
+	if got := doltPortForCity(cityPath); got != "" {
+		t.Fatalf("doltPortForCity() = %q, want empty for invalid managed canonical city", got)
+	}
+	if isExternalDolt(cityPath) {
+		t.Fatal("isExternalDolt() = true, want false for invalid managed canonical city")
+	}
+}
+
+func TestStartBeadsLifecycleRejectsInvalidCanonicalCityState(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err == nil || !strings.Contains(err.Error(), "invalid canonical city endpoint state") {
+		t.Fatalf("startBeadsLifecycle() error = %v, want invalid canonical city endpoint state", err)
+	}
+}
+
+func TestStartBeadsLifecycleRejectsInvalidCanonicalRigState(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(`issue_prefix: fe
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fe"}},
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err == nil || !strings.Contains(err.Error(), "invalid canonical rig endpoint state") {
+		t.Fatalf("startBeadsLifecycle() error = %v, want invalid canonical rig endpoint state", err)
 	}
 }
 
@@ -1097,33 +6128,142 @@ func TestStartBeadsLifecycleRegistersDoltConfig(t *testing.T) {
 	}
 }
 
-// ── readDoltPort with external host ───────────────────────────────────
-
-func TestReadDoltPortPreservesExternalHostPort(t *testing.T) {
-	cityDir := t.TempDir()
-	// Register per-city config (simulates startBeadsLifecycle having run).
-	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307})
-	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
-
-	t.Setenv("GC_DOLT_PORT", "3307")
-
-	// Write a local state file that would normally override — it should NOT.
+func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	providerState := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-provider-state.json")
 	ln := listenOnRandomPort(t)
-	t.Cleanup(func() { _ = ln.Close() })
-	if err := writeDoltState(cityDir, doltRuntimeState{
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+	echo "$@" >> %q
+	if [ "$1" = "start" ]; then
+	  mkdir -p "$(dirname %q)"
+	  cat > %q <<'JSON'
+	{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-14T00:00:00Z"}
+	JSON
+	fi
+	if [ "$1" = "init" ]; then
+	  mkdir -p "$2/.beads"
+	fi
+	exit 0
+	`, callLog, providerState, providerState, os.Getpid(), port, filepath.Join(cityPath, ".beads", "dolt"))
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedDeferredManagedBeads(cityPath, cityPath, "tc", "hq")
+	seedDeferredManagedBeads(cityPath, rigPath, "rg", "rg")
+	if err := writeDoltRuntimeStateFile(providerState, doltRuntimeState{
 		Running:   true,
 		PID:       os.Getpid(),
-		Port:      ln.Addr().(*net.TCPAddr).Port,
-		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		Port:      port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	readDoltPort(cityDir)
+	t.Setenv("GC_BEADS", "bd")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig", Path: rigPath, Prefix: "rg"}},
+	}
 
-	if got := os.Getenv("GC_DOLT_PORT"); got != "3307" {
-		t.Errorf("GC_DOLT_PORT = %q, want %q (external config preserved)", got, "3307")
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("reading call log: %v", err)
+	}
+	ops := string(data)
+	for _, needle := range []string{
+		"start",
+		"init " + cityPath + " tc hq",
+		"init " + rigPath + " rg rg",
+	} {
+		if !strings.Contains(ops, needle) {
+			t.Fatalf("call log missing %q:\n%s", needle, ops)
+		}
+	}
+}
+
+func TestHealthBeadsProviderDoesNotRecoverExternalLoopbackTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptText := "#!/bin/sh\necho \"$1\" >> " + callLog + "\nif [ \"$1\" = \"health\" ]; then\n  echo \"health failed\" >&2\n  exit 1\nfi\nexit 0\n"
+	if err := os.WriteFile(script, []byte(scriptText), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: "4406"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	err := healthBeadsProvider(cityPath)
+	if err == nil || !strings.Contains(err.Error(), "exec beads health: health failed") {
+		t.Fatalf("healthBeadsProvider() error = %v, want direct external health failure", err)
+	}
+
+	data, readErr := os.ReadFile(callLog)
+	if readErr != nil {
+		t.Fatalf("reading call log: %v", readErr)
+	}
+	ops := strings.TrimSpace(string(data))
+	if ops != "health" {
+		t.Fatalf("call log = %q, want only health", ops)
+	}
+}
+
+func TestShutdownBeadsProviderSkipsExternalLoopbackTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: "4406"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		t.Fatalf("shutdownBeadsProvider() error = %v", err)
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("shutdownBeadsProvider() should not invoke stop for external loopback target, stat err = %v", err)
 	}
 }
 
@@ -1142,8 +6282,18 @@ func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 2\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "operator-override.example.com")
+	t.Setenv("GC_DOLT_PORT", "5511")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "operator-override.example.com")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "5511")
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -1165,5 +6315,345 @@ func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
 		if strings.TrimSpace(line) == "start" {
 			t.Errorf("ensureBeadsProvider('start') was called — should be skipped for external host with bd provider")
 		}
+	}
+
+	// Startup should not rewrite process-global Dolt env. Later callers resolve
+	// explicit per-scope env instead of depending on controller ambient state.
+	if got := os.Getenv("GC_DOLT_HOST"); got != "operator-override.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want operator override preserved", got)
+	}
+	if got := os.Getenv("GC_DOLT_PORT"); got != "5511" {
+		t.Fatalf("GC_DOLT_PORT = %q, want operator override preserved", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "operator-override.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want inherited process env preserved", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "5511" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want inherited process env preserved", got)
+	}
+}
+
+func TestNormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","dolt_host":"127.0.0.1","dolt_user":"root"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fr","dolt_server_host":"127.0.0.1","dolt_user":"root"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: dgdb\nissue-prefix: dgdb\ndolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: fr\nissue-prefix: fr\ndolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "dogfood-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fr"}},
+	}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+
+	cityCfg, err := os.ReadFile(filepath.Join(cityPath, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityText := string(cityCfg)
+	for _, want := range []string{"gc.endpoint_origin: managed_city", "gc.endpoint_status: verified", "dolt.auto-start: false"} {
+		if !strings.Contains(cityText, want) {
+			t.Fatalf("city config missing %q:\n%s", want, cityText)
+		}
+	}
+	if strings.Contains(cityText, "dolt.host:") || strings.Contains(cityText, "dolt.port:") {
+		t.Fatalf("city config should not track endpoint defaults for managed city:\n%s", cityText)
+	}
+
+	rigCfg, err := os.ReadFile(filepath.Join(rigPath, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rigText := string(rigCfg)
+	for _, want := range []string{"gc.endpoint_origin: inherited_city", "gc.endpoint_status: verified", "dolt.auto-start: false"} {
+		if !strings.Contains(rigText, want) {
+			t.Fatalf("rig config missing %q:\n%s", want, rigText)
+		}
+	}
+	if strings.Contains(rigText, "dolt.host:") || strings.Contains(rigText, "dolt.port:") {
+		t.Fatalf("inherited managed rig should not track endpoint defaults:\n%s", rigText)
+	}
+
+	for _, metaPath := range []string{
+		filepath.Join(cityPath, ".beads", "metadata.json"),
+		filepath.Join(rigPath, ".beads", "metadata.json"),
+	} {
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metaText := string(data)
+		for _, forbidden := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+			if strings.Contains(metaText, forbidden) {
+				t.Fatalf("metadata %s should scrub %s:\n%s", metaPath, forbidden, metaText)
+			}
+		}
+	}
+}
+
+func TestGcBeadsBdInitNormalizesScopeAndRemovesLocalServerArtifacts(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "gascity"
+prefix = "gc"
+
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	probeLog := filepath.Join(t.TempDir(), "dolt-probe.log")
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    last=""
+    for arg in "$@"; do
+      last="$arg"
+    done
+    mkdir -p "$last/.beads"
+    cat > "$last/.beads/metadata.json" <<'JSON'
+{"database":"legacy","backend":"legacy","dolt_mode":"embedded","dolt_database":"wrong-db","dolt_server_host":"127.0.0.1","dolt_server_port":"3307"}
+JSON
+    cat > "$last/.beads/config.yaml" <<'YAML'
+issue-prefix: stale
+dolt.auto-start: true
+dolt_server_port: 3307
+YAML
+    : > "$last/.beads/dolt-server.pid"
+    : > "$last/.beads/dolt-server.lock"
+    : > "$last/.beads/dolt-server.log"
+    printf '3307\n' > "$last/.beads/dolt-server.port"
+    exit 0
+    ;;
+  list)
+    db=$(python3 -c 'import json, pathlib, sys; meta = json.loads(pathlib.Path(sys.argv[1]).read_text()); print(meta.get("dolt_database", ""), end="")' "$PWD/.beads/metadata.json")
+    printf '%s\t%s\n' "${GC_FAKE_BD_CALLER:-unknown}" "$db" >> "` + probeLog + `"
+    exit 0
+    ;;
+  migrate)
+    python3 -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); data = json.loads(path.read_text()); data["project_id"] = "normalized-project-id"; path.write_text(json.dumps(data, indent=2) + "\n")' "$PWD/.beads/metadata.json"
+    exit 0
+    ;;
+  config|list)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", rigPath, "fe", "fe")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+currentGCBinaryForTests(t),
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+
+	metaData, err := os.ReadFile(filepath.Join(rigPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(rig metadata): %v", err)
+	}
+	metaText := string(metaData)
+	for _, forbidden := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port", "wrong-db"} {
+		if strings.Contains(metaText, forbidden) {
+			t.Fatalf("rig metadata still contains %q:\n%s", forbidden, metaText)
+		}
+	}
+	for _, want := range []string{`"database": "dolt"`, `"backend": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "fe"`} {
+		if !strings.Contains(metaText, want) {
+			t.Fatalf("rig metadata missing %q:\n%s", want, metaText)
+		}
+	}
+
+	rigCfg, err := os.ReadFile(filepath.Join(rigPath, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadFile(rig config): %v", err)
+	}
+	cfgText := string(rigCfg)
+	for _, want := range []string{"issue_prefix: fe", "gc.endpoint_origin: inherited_city", "gc.endpoint_status: verified"} {
+		if !strings.Contains(cfgText, want) {
+			t.Fatalf("rig config missing %q:\n%s", want, cfgText)
+		}
+	}
+	for _, forbidden := range []string{"dolt.host:", "dolt.port:", "dolt_server_port"} {
+		if strings.Contains(cfgText, forbidden) {
+			t.Fatalf("rig config still contains %q:\n%s", forbidden, cfgText)
+		}
+	}
+
+	for _, name := range []string{"dolt-server.pid", "dolt-server.lock", "dolt-server.log", "dolt-server.port"} {
+		if _, err := os.Stat(filepath.Join(rigPath, ".beads", name)); !os.IsNotExist(err) {
+			t.Fatalf("rig %s should be removed after init, stat err = %v", name, err)
+		}
+	}
+
+	t.Setenv("GC_FAKE_BD_CALLER", "raw")
+	_ = runRawBDFromDir(t, fakeBd, rigPath, "list")
+
+	t.Setenv("GC_FAKE_BD_CALLER", "gc")
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "list"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc bd list = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	probeData, err := os.ReadFile(probeLog)
+	if err != nil {
+		t.Fatalf("read probe log: %v", err)
+	}
+	if got := strings.TrimSpace(string(probeData)); got != "raw\tfe\ngc\tfe" {
+		t.Fatalf("probe log = %q, want repaired rig database for both raw bd and gc bd", got)
+	}
+}
+
+func TestNormalizeCanonicalBdScopeFilesMaterializesMissingMetadata(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: ci\nissue-prefix: ci\ndolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: fr\nissue-prefix: fr\ndolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "dogfood-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fr"}},
+	}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+
+	cityMeta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cityMeta), `"dolt_database": "hq"`) {
+		t.Fatalf("city metadata = %s, want hq dolt_database", string(cityMeta))
+	}
+
+	rigMeta, err := os.ReadFile(filepath.Join(rigPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rigMeta), `"dolt_database": "fr"`) {
+		t.Fatalf("rig metadata = %s, want fr dolt_database", string(rigMeta))
+	}
+}
+
+func TestGcBeadsBdStartFallsBackToShellManagedConfigWriterWhenGCBinUnset(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	_ = writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+	writeFakeManagedConfigWriterDolt(t, binDir)
+
+	env := append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	if _, err := os.Stat(invocationFile); !os.IsNotExist(err) {
+		t.Fatalf("PATH gc should not be used for hidden helpers when GC_BIN is unset, stat err = %v", err)
+	}
+	configData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadFile(dolt-config.yaml): %v", err)
+	}
+	if strings.Contains(string(configData), "# rendered by fake gc") {
+		t.Fatalf("dolt-config.yaml should be rendered by shell fallback, not PATH gc:\n%s", string(configData))
+	}
+	state, err := readDoltRuntimeStateFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-provider-state.json"))
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile: %v", err)
+	}
+	if state.Port == 0 {
+		t.Fatalf("provider state port = %d, want non-zero", state.Port)
 	}
 }
