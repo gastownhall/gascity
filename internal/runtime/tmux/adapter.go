@@ -31,9 +31,10 @@ var instanceTokenReader = rand.Reader
 
 // Compile-time check.
 var (
-	_ runtime.Provider                     = (*Provider)(nil)
-	_ runtime.ImmediateNudgeProvider       = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider = (*Provider)(nil)
+	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -258,6 +259,12 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 // WaitForIdle waits for the named session to reach an idle prompt.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	return p.tm.WaitForIdle(ctx, name, timeout)
+}
+
+// WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
+// before the next user turn is injected.
+func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
+	return p.tm.WaitForInterruptBoundary(ctx, name, since, timeout)
 }
 
 // ResetInterruptedTurn discards the just-interrupted Gemini user turn without

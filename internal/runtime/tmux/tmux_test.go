@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -2284,6 +2285,52 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 				t.Errorf("paneContainsBusyIndicator(%v) = %v, want %v", tt.lines, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCodexTranscriptTailContainsTurnAborted(t *testing.T) {
+	tail := strings.Join([]string{
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}`,
+	}, "\n")
+	if !codexTranscriptTailContainsTurnAborted(tail) {
+		t.Fatal("codexTranscriptTailContainsTurnAborted() = false, want true")
+	}
+
+	oldAbort := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}`
+	var stale []string
+	stale = append(stale, oldAbort)
+	for i := 0; i < codexInterruptBoundaryRecentLines+2; i++ {
+		stale = append(stale, fmt.Sprintf(`{"type":"event_msg","payload":{"type":"agent_message","message":"line-%d"}}`, i))
+	}
+	if codexTranscriptTailContainsTurnAborted(strings.Join(stale, "\n")) {
+		t.Fatal("codexTranscriptTailContainsTurnAborted() = true for stale abort marker, want false")
+	}
+}
+
+func TestWaitForCodexInterruptBoundary(t *testing.T) {
+	codexHome := t.TempDir()
+	transcript := filepath.Join(codexHome, "sessions", "2026", "04", "18", "rollout.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"still working"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	since := time.Now()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
+	}()
+
+	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {
+		t.Fatalf("waitForCodexInterruptBoundary: %v", err)
 	}
 }
 

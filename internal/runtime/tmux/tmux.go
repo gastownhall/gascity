@@ -2372,6 +2372,12 @@ const (
 	// Claude's welcome/idle UI can leave several blank rows below the prompt,
 	// so capturing only the last handful of lines misses the ready indicator.
 	promptObservationLines = 120
+	// codexInterruptBoundaryTailBytes is the transcript tail window scanned for
+	// Codex's durable interrupt acknowledgement marker.
+	codexInterruptBoundaryTailBytes = 16 * 1024
+	// codexInterruptBoundaryRecentLines limits detection to the newest transcript
+	// entries so an older interrupt marker does not satisfy a later interrupt.
+	codexInterruptBoundaryRecentLines = 12
 )
 
 func idlePromptPrefix(configured string) string {
@@ -2472,6 +2478,126 @@ func waitForIdlePoll(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// WaitForInterruptBoundary waits for a provider-native interrupt
+// acknowledgement before the next user turn is injected.
+func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
+	provider, err := t.GetEnvironment(session, "GC_PROVIDER")
+	switch strings.TrimSpace(provider) {
+	case "", "codex":
+		// Continue below. Empty provider env can happen in tests or with
+		// older sessions; fall back to process-tree detection.
+	default:
+		return runtime.ErrInteractionUnsupported
+	}
+	if strings.TrimSpace(provider) == "" && !t.targetLooksLikeProvider(session, "codex") {
+		return runtime.ErrInteractionUnsupported
+	}
+	codexHome, err := t.GetEnvironment(session, "CODEX_HOME")
+	if err != nil {
+		return runtime.ErrInteractionUnsupported
+	}
+	codexHome = strings.TrimSpace(codexHome)
+	if codexHome == "" {
+		return runtime.ErrInteractionUnsupported
+	}
+	return waitForCodexInterruptBoundary(ctx, codexHome, since, timeout)
+}
+
+func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since time.Time, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		transcriptPath, modTime, err := latestCodexTranscriptPath(codexHome)
+		if err == nil && !modTime.Before(since) {
+			tail, err := readFileTail(transcriptPath, codexInterruptBoundaryTailBytes)
+			if err == nil && codexTranscriptTailContainsTurnAborted(tail) {
+				return nil
+			}
+		}
+		if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return ErrIdleTimeout
+}
+
+func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
+	root := filepath.Join(codexHome, "sessions")
+	var latestPath string
+	var latestMod time.Time
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if latestPath == "" || info.ModTime().After(latestMod) {
+			latestPath = path
+			latestMod = info.ModTime()
+		}
+		return nil
+	})
+	if latestPath == "" {
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		return "", time.Time{}, os.ErrNotExist
+	}
+	return latestPath, latestMod, nil
+}
+
+func readFileTail(path string, maxBytes int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	offset := info.Size() - maxBytes
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
+
+func codexTranscriptTailContainsTurnAborted(tail string) bool {
+	lines := strings.Split(strings.TrimSpace(tail), "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < codexInterruptBoundaryRecentLines; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		seen++
+		if !strings.Contains(line, "<turn_aborted>") {
+			continue
+		}
+		if strings.Contains(line, `"role":"user"`) || strings.Contains(line, `"role": "user"`) ||
+			strings.Contains(line, `"type":"user_message"`) || strings.Contains(line, `"type": "user_message"`) {
+			return true
+		}
+	}
+	return false
 }
 
 // paneContainsBusyIndicator checks captured pane lines for signs that the

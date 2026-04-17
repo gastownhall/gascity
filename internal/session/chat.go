@@ -454,11 +454,15 @@ func (m *Manager) StopTurn(id string) error {
 		if err != nil {
 			return err
 		}
+		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
 		}
 		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName); err != nil {
 			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
+		}
+		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
+			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
 		return nil
 	})

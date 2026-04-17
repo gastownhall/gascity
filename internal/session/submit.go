@@ -21,6 +21,7 @@ import (
 const (
 	defaultQueuedSubmitTTL    = 24 * time.Hour
 	interruptClearDelay       = 100 * time.Millisecond
+	interruptBoundaryWait     = 10 * time.Second
 	codexDeferredDialogDelay  = 2 * time.Second
 	softInterruptFallbackWait = 2 * time.Second
 	startupDialogVerifiedKey  = "startup_dialog_verified"
@@ -127,6 +128,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
+	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
 		return err
 	}
@@ -135,6 +137,12 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		// restart so the session isn't left in limbo.
 		if stopErr := m.sp.Stop(sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
+		}
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+	}
+	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
+		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
 		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 	}
@@ -230,6 +238,20 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 	return waitForIdle(15 * time.Second)
 }
 
+func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Bead, sessName string, since time.Time) error {
+	if !requiresInterruptBoundaryWait(b) {
+		return nil
+	}
+	waiter, ok := m.sp.(runtime.InterruptBoundaryWaitProvider)
+	if !ok {
+		return nil
+	}
+	if err := waiter.WaitForInterruptBoundary(ctx, sessName, since, interruptBoundaryWait); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return fmt.Errorf("waiting for interrupt boundary: %w", err)
+	}
+	return nil
+}
+
 // providerKind returns the canonical provider kind for a session bead.
 // It checks provider_kind metadata first (set for custom aliases that derive
 // from a builtin), then falls back to the raw provider metadata value.
@@ -317,6 +339,13 @@ func requiresInterruptedTurnReset(b beads.Bead) bool {
 		return false
 	}
 	return providerKind(b) == "gemini"
+}
+
+func requiresInterruptBoundaryWait(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "codex"
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {

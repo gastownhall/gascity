@@ -226,6 +226,17 @@ type InterruptedTurnResetProvider interface {
 	ResetInterruptedTurn(ctx context.Context, name string) error
 }
 
+// InterruptBoundaryWaitProvider is an optional extension for runtimes that can
+// confirm a provider-native interrupt boundary before the next user turn is
+// injected.
+//
+// Codex CLI emits a durable "<turn_aborted>" marker when an in-flight turn has
+// actually been canceled. Waiting for that marker avoids racing a replacement
+// prompt into a session that still intends to finish the interrupted turn.
+type InterruptBoundaryWaitProvider interface {
+	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
+}
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {
