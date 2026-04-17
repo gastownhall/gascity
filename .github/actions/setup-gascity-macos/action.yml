@@ -3,9 +3,9 @@ description: Install the shared macOS dependencies for Gas City CI jobs on the s
 
 inputs:
   go-version:
-    description: Explicit Go version to install. Leave empty to inherit from repo go.mod.
+    description: Go version to install. Default matches setup-gascity-ubuntu; bump both together.
     required: false
-    default: ""
+    default: "1.25.8"
   node-version:
     description: Node.js version to install
     required: false
@@ -43,11 +43,11 @@ runs:
 
     - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
       with:
-        # Default to the repo's go.mod so a Go bump propagates to Mac CI
-        # without a separate composite-action edit. Callers can still pass
-        # an explicit `go-version` to pin a specific version.
+        # Keep this default in lock-step with setup-gascity-ubuntu —
+        # a split between Mac and Linux toolchains would surface as
+        # false "Mac-only" regressions. Track the same pin both
+        # actions use today; bump them together.
         go-version: ${{ inputs.go-version }}
-        go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
         # self-hosted macstadium runners reuse the same GOPATH across jobs;
         # actions/setup-go's cache layer is flaky on reused runners, so skip it.
         cache: false
@@ -65,9 +65,21 @@ runs:
           echo "Homebrew is required on the macOS runner but was not found on PATH" >&2
           exit 1
         fi
-        # flock is needed by the dolt pack doctor check and by the
-        # controller for concurrent-start prevention. macOS does not ship
-        # with util-linux flock; the flock formula provides it.
+        # Bootstrap flock first (relying on Homebrew's internal lock to
+        # serialize any concurrent brew runs). We need flock installed
+        # *before* we take our own lock, otherwise concurrent matrix jobs
+        # on a fresh runner would all race past the missing-flock branch
+        # unguarded — the exact failure Homebrew's "Another active
+        # process" error surfaces as.
+        if ! command -v flock >/dev/null 2>&1; then
+          echo "Bootstrapping flock..."
+          brew install flock
+        fi
+        # Now we can safely lock-guard the remaining installs so parallel
+        # matrix jobs don't interleave brew's output (or worse, corrupt
+        # its caches on an exotic failure).
+        lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
+        mkdir -p "$(dirname "$lock_file")"
         pkgs=(tmux jq flock)
         install_missing() {
           local missing=()
@@ -83,22 +95,10 @@ runs:
             echo "All required formulae already installed: ${pkgs[*]}"
           fi
         }
-        # Serialize brew install across concurrent Mac jobs on the same
-        # runner. When the matrix jobs kick off together (quality + unit
-        # + acceptance + ...) they all race on Homebrew's global lock and
-        # sometimes fail with "Another active Homebrew process...". A
-        # shared flock avoids the race; if flock itself is missing, the
-        # fallback runs unguarded — which is the current behavior.
-        lock_dir="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
-        mkdir -p "$(dirname "$lock_dir")"
-        if command -v flock >/dev/null 2>&1; then
-          (
-            flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
-            install_missing
-          ) 9>"$lock_dir"
-        else
+        (
+          flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
           install_missing
-        fi
+        ) 9>"$lock_file"
         for cmd in tmux jq flock lsof; do
           command -v "$cmd" >/dev/null 2>&1 || {
             echo "Required command '$cmd' missing after install" >&2
