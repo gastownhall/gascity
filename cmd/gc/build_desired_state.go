@@ -903,12 +903,9 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		slot := 0
-		instanceName := cfgAgent.Name
-		qualifiedInstance := cfgAgent.QualifiedName()
-		slot = claimPoolSlot(cfgAgent, sessionBead, usedSlots)
-		instanceName = poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-		qualifiedInstance = cfgAgent.QualifiedInstanceName(instanceName)
+		slot := claimPoolSlot(cfgAgent, sessionBead, usedSlots)
+		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+		qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
 		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
 		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)

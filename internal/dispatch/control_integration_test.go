@@ -1113,6 +1113,76 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 	}
 }
 
+func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecutionTarget(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "always",
+			"state":                     "active",
+		},
+	}); err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	dispatcher, err := store.Create(beads.Bead{
+		Title:  "control-dispatcher",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "control-dispatcher",
+			"template":                  config.ControlDispatcherAgentName,
+			"configured_named_session":  "true",
+			"configured_named_identity": config.ControlDispatcherAgentName,
+			"configured_named_mode":     "always",
+			"state":                     "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control-dispatcher session: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxActive,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	step := &formula.RecipeStep{
+		ID:       "review-scope-check",
+		Title:    "Finalize scope for review",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "scope-check"},
+	}
+
+	applyAttemptControlStepRoute(step, "worker", cfg, store)
+
+	if got := step.Metadata["gc.execution_routed_to"]; got != "worker" {
+		t.Fatalf("gc.execution_routed_to = %q, want worker", got)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Fatalf("gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	}
+	if step.Assignee != dispatcher.ID {
+		t.Fatalf("assignee = %q, want canonical control-dispatcher bead %q", step.Assignee, dispatcher.ID)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
