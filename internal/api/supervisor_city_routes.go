@@ -113,4 +113,152 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		bindCity(sm, (*Server).humaHandleProviderPatchSet))
 	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/patches/provider/{name}",
 		bindCity(sm, (*Server).humaHandleProviderPatchDelete))
+
+	// Beads
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/beads",
+		bindCity(sm, (*Server).humaHandleBeadList))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/beads/graph/{rootID}",
+		bindCity(sm, (*Server).humaHandleBeadGraph))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/beads/ready",
+		bindCity(sm, (*Server).humaHandleBeadReady))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "create-bead",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/beads",
+		Summary:       "Create a bead",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleBeadCreate))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/bead/{id}",
+		bindCity(sm, (*Server).humaHandleBeadGet))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/deps",
+		bindCity(sm, (*Server).humaHandleBeadDeps))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/close",
+		bindCity(sm, (*Server).humaHandleBeadClose))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/reopen",
+		bindCity(sm, (*Server).humaHandleBeadReopen))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/update",
+		bindCity(sm, (*Server).humaHandleBeadUpdate))
+	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/bead/{id}",
+		bindCity(sm, (*Server).humaHandleBeadUpdate))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/assign",
+		bindCity(sm, (*Server).humaHandleBeadAssign))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/bead/{id}",
+		bindCity(sm, (*Server).humaHandleBeadDelete))
+
+	// Mail
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail",
+		bindCity(sm, (*Server).humaHandleMailList))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "send-mail",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/mail",
+		Summary:       "Send a mail message",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleMailSend))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail/count",
+		bindCity(sm, (*Server).humaHandleMailCount))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail/thread/{id}",
+		bindCity(sm, (*Server).humaHandleMailThread))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail/{id}",
+		bindCity(sm, (*Server).humaHandleMailGet))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/mail/{id}/read",
+		bindCity(sm, (*Server).humaHandleMailRead))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/mail/{id}/mark-unread",
+		bindCity(sm, (*Server).humaHandleMailMarkUnread))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/mail/{id}/archive",
+		bindCity(sm, (*Server).humaHandleMailArchive))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "reply-mail",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/mail/{id}/reply",
+		Summary:       "Reply to a mail message",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleMailReply))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/mail/{id}",
+		bindCity(sm, (*Server).humaHandleMailDelete))
+
+	// Convoys
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/convoys",
+		bindCity(sm, (*Server).humaHandleConvoyList))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "create-convoy",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/convoys",
+		Summary:       "Create a convoy",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleConvoyCreate))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}",
+		bindCity(sm, (*Server).humaHandleConvoyGet))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/add",
+		bindCity(sm, (*Server).humaHandleConvoyAdd))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/remove",
+		bindCity(sm, (*Server).humaHandleConvoyRemove))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/check",
+		bindCity(sm, (*Server).humaHandleConvoyCheck))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/close",
+		bindCity(sm, (*Server).humaHandleConvoyClose))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}",
+		bindCity(sm, (*Server).humaHandleConvoyDelete))
+
+	// Events (list/emit — stream stays on per-city for SSE)
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/events",
+		bindCity(sm, (*Server).humaHandleEventList))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "emit-event",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/events",
+		Summary:       "Emit an event",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleEventEmit))
+
+	// Orders
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders",
+		bindCity(sm, (*Server).humaHandleOrderList))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders/check",
+		bindCity(sm, (*Server).humaHandleOrderCheck))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders/history",
+		bindCity(sm, (*Server).humaHandleOrderHistory))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/order/history/{bead_id}",
+		bindCity(sm, (*Server).humaHandleOrderHistoryDetail))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/order/{name}",
+		bindCity(sm, (*Server).humaHandleOrderGet))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/order/{name}/enable",
+		bindCity(sm, (*Server).humaHandleOrderEnable))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/order/{name}/disable",
+		bindCity(sm, (*Server).humaHandleOrderDisable))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders/feed",
+		bindCity(sm, (*Server).humaHandleOrdersFeed))
+
+	// Formulas
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas",
+		bindCity(sm, (*Server).humaHandleFormulaList))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas/{name}/runs",
+		bindCity(sm, (*Server).humaHandleFormulaRuns))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas/{name}",
+		bindCity(sm, (*Server).humaHandleFormulaDetail))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formula/{name}",
+		bindCity(sm, (*Server).humaHandleFormulaDetail))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas/feed",
+		bindCity(sm, (*Server).humaHandleFormulaFeed))
+	// Backwards-compatible workflow aliases.
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/workflow/{workflow_id}",
+		bindCity(sm, (*Server).humaHandleWorkflowGet))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/workflow/{workflow_id}",
+		bindCity(sm, (*Server).humaHandleWorkflowDelete))
+
+	// Packs
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/packs",
+		bindCity(sm, (*Server).humaHandlePackList))
+
+	// Sling
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/sling",
+		bindCity(sm, (*Server).humaHandleSling))
+
+	// Services (workspace services)
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/services",
+		bindCity(sm, (*Server).humaHandleServiceList))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/service/{name}",
+		bindCity(sm, (*Server).humaHandleServiceGet))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/service/{name}/restart",
+		bindCity(sm, (*Server).humaHandleServiceRestart))
 }

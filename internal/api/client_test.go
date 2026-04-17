@@ -288,8 +288,8 @@ func TestClientRestartRig(t *testing.T) {
 
 func TestClientListServices(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/services" {
-			t.Fatalf("path = %q, want /v0/services", r.URL.Path)
+		if r.URL.Path != "/v0/city/alpha/services" {
+			t.Fatalf("path = %q, want /v0/city/alpha/services", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -307,7 +307,7 @@ func TestClientListServices(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	items, err := c.ListServices()
 	if err != nil {
 		t.Fatalf("ListServices: %v", err)
@@ -319,8 +319,8 @@ func TestClientListServices(t *testing.T) {
 
 func TestClientGetService(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/service/healthz" {
-			t.Fatalf("path = %q, want /v0/service/healthz", r.URL.Path)
+		if r.URL.Path != "/v0/city/alpha/service/healthz" {
+			t.Fatalf("path = %q, want /v0/city/alpha/service/healthz", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(workspacesvc.Status{ //nolint:errcheck
@@ -335,7 +335,7 @@ func TestClientGetService(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	status, err := c.GetService("healthz")
 	if err != nil {
 		t.Fatalf("GetService: %v", err)

@@ -322,99 +322,11 @@ func (s *Server) registerRoutes() {
 	huma.Delete(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentDelete)
 	huma.Post(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentAction)
 
-	// Beads — Huma handlers
-	huma.Get(s.humaAPI, "/v0/beads", s.humaHandleBeadList)
-	huma.Get(s.humaAPI, "/v0/beads/graph/{rootID}", s.humaHandleBeadGraph)
-	huma.Get(s.humaAPI, "/v0/beads/ready", s.humaHandleBeadReady)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "create-bead",
-		Method:        http.MethodPost,
-		Path:          "/v0/beads",
-		Summary:       "Create a bead",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleBeadCreate)
-	huma.Get(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadGet)
-	huma.Get(s.humaAPI, "/v0/bead/{id}/deps", s.humaHandleBeadDeps)
-	huma.Post(s.humaAPI, "/v0/bead/{id}/close", s.humaHandleBeadClose)
-	huma.Post(s.humaAPI, "/v0/bead/{id}/reopen", s.humaHandleBeadReopen)
-	huma.Post(s.humaAPI, "/v0/bead/{id}/update", s.humaHandleBeadUpdate)
-	huma.Patch(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadUpdate)
-	huma.Post(s.humaAPI, "/v0/bead/{id}/assign", s.humaHandleBeadAssign)
-	huma.Delete(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadDelete)
-
-	// Mail — Huma handlers
-	huma.Get(s.humaAPI, "/v0/mail", s.humaHandleMailList)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "send-mail",
-		Method:        http.MethodPost,
-		Path:          "/v0/mail",
-		Summary:       "Send a mail message",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleMailSend)
-	huma.Get(s.humaAPI, "/v0/mail/count", s.humaHandleMailCount)
-	huma.Get(s.humaAPI, "/v0/mail/thread/{id}", s.humaHandleMailThread)
-	huma.Get(s.humaAPI, "/v0/mail/{id}", s.humaHandleMailGet)
-	huma.Post(s.humaAPI, "/v0/mail/{id}/read", s.humaHandleMailRead)
-	huma.Post(s.humaAPI, "/v0/mail/{id}/mark-unread", s.humaHandleMailMarkUnread)
-	huma.Post(s.humaAPI, "/v0/mail/{id}/archive", s.humaHandleMailArchive)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "reply-mail",
-		Method:        http.MethodPost,
-		Path:          "/v0/mail/{id}/reply",
-		Summary:       "Reply to a mail message",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleMailReply)
-	huma.Delete(s.humaAPI, "/v0/mail/{id}", s.humaHandleMailDelete)
-
-	// Convoys
-	huma.Get(s.humaAPI, "/v0/convoys", s.humaHandleConvoyList)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "create-convoy",
-		Method:        http.MethodPost,
-		Path:          "/v0/convoys",
-		Summary:       "Create a convoy",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleConvoyCreate)
-	huma.Get(s.humaAPI, "/v0/convoy/{id}", s.humaHandleConvoyGet)
-	huma.Post(s.humaAPI, "/v0/convoy/{id}/add", s.humaHandleConvoyAdd)
-	huma.Post(s.humaAPI, "/v0/convoy/{id}/remove", s.humaHandleConvoyRemove)
-	huma.Get(s.humaAPI, "/v0/convoy/{id}/check", s.humaHandleConvoyCheck)
-	huma.Post(s.humaAPI, "/v0/convoy/{id}/close", s.humaHandleConvoyClose)
-	huma.Delete(s.humaAPI, "/v0/convoy/{id}", s.humaHandleConvoyDelete)
-
-	// Events — Huma handlers
-	huma.Get(s.humaAPI, "/v0/events", s.humaHandleEventList)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "emit-event",
-		Method:        http.MethodPost,
-		Path:          "/v0/events",
-		Summary:       "Emit an event",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleEventEmit)
-	// SSE streaming via sse.Register (event schemas documented in OpenAPI spec)
+	// Beads / Mail / Convoys / Orders / Formulas / Workflow
+	// moved to SupervisorMux.registerCityRoutes at scoped paths.
+	// Events list/emit moved to scoped; the /v0/events/stream SSE stream
+	// stays on per-city until SSE migration.
 	s.registerEventStreamRoute()
-
-	// Orders — Huma handlers
-	huma.Get(s.humaAPI, "/v0/orders", s.humaHandleOrderList)
-	huma.Get(s.humaAPI, "/v0/orders/check", s.humaHandleOrderCheck)
-	huma.Get(s.humaAPI, "/v0/orders/history", s.humaHandleOrderHistory)
-	huma.Get(s.humaAPI, "/v0/order/history/{bead_id}", s.humaHandleOrderHistoryDetail)
-	huma.Get(s.humaAPI, "/v0/order/{name}", s.humaHandleOrderGet)
-	huma.Post(s.humaAPI, "/v0/order/{name}/enable", s.humaHandleOrderEnable)
-	huma.Post(s.humaAPI, "/v0/order/{name}/disable", s.humaHandleOrderDisable)
-	huma.Get(s.humaAPI, "/v0/orders/feed", s.humaHandleOrdersFeed)
-
-	// Formulas — Huma handlers
-	huma.Get(s.humaAPI, "/v0/formulas", s.humaHandleFormulaList)
-	huma.Get(s.humaAPI, "/v0/formulas/{name}/runs", s.humaHandleFormulaRuns)
-	huma.Get(s.humaAPI, "/v0/formulas/{name}", s.humaHandleFormulaDetail)
-	huma.Get(s.humaAPI, "/v0/formula/{name}", s.humaHandleFormulaDetail)
-	huma.Get(s.humaAPI, "/v0/formulas/feed", s.humaHandleFormulaFeed)
-	// Backwards-compatible aliases for the old /v0/workflow routes.
-	// New code uses /v0/convoy/{id} which delegates to the graph handler
-	// for formula-compiled convoys.
-	huma.Get(s.humaAPI, "/v0/workflow/{workflow_id}", s.humaHandleWorkflowGet)
-	huma.Delete(s.humaAPI, "/v0/workflow/{workflow_id}", s.humaHandleWorkflowDelete)
 
 	// Sessions — Huma handlers
 	huma.Register(s.humaAPI, huma.Operation{
@@ -461,17 +373,8 @@ func (s *Server) registerRoutes() {
 	huma.Get(s.humaAPI, "/v0/session/{id}/agents", s.humaHandleSessionAgentList)
 	huma.Get(s.humaAPI, "/v0/session/{id}/agents/{agentId}", s.humaHandleSessionAgentGet)
 
-	// Packs — Huma handler
-	huma.Get(s.humaAPI, "/v0/packs", s.humaHandlePackList)
-
-	// Sling (dispatch) — Huma handler
-	huma.Post(s.humaAPI, "/v0/sling", s.humaHandleSling)
-
-	// Workspace services
-	huma.Get(s.humaAPI, "/v0/services", s.humaHandleServiceList)
-	huma.Get(s.humaAPI, "/v0/service/{name}", s.humaHandleServiceGet)
-	huma.Post(s.humaAPI, "/v0/service/{name}/restart", s.humaHandleServiceRestart)
-	// Service proxy stays on old handler
+	// Packs / Sling / Services migrated to scoped paths.
+	// Service proxy /svc/* stays on the per-city mux (pass-through).
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
 
 	// External messaging (extmsg)

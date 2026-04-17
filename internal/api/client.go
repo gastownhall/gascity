@@ -171,7 +171,7 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	if c.cw == nil {
 		return nil, errClientUninitialized
 	}
-	resp, err := c.cw.GetV0ServicesWithResponse(context.Background())
+	resp, err := c.cw.GetV0CityByCityNameServicesWithResponse(context.Background(), c.cityName)
 	if err != nil {
 		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
@@ -197,7 +197,7 @@ func (c *Client) GetService(name string) (workspacesvc.Status, error) {
 	if c.cw == nil {
 		return workspacesvc.Status{}, errClientUninitialized
 	}
-	resp, err := c.cw.GetV0ServiceByNameWithResponse(context.Background(), name)
+	resp, err := c.cw.GetV0CityByCityNameServiceByNameWithResponse(context.Background(), c.cityName, name)
 	if err != nil {
 		return workspacesvc.Status{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
@@ -220,7 +220,7 @@ func (c *Client) RestartService(name string) error {
 	if c.cw == nil {
 		return errClientUninitialized
 	}
-	resp, err := c.cw.PostV0ServiceByNameRestartWithResponse(context.Background(), name)
+	resp, err := c.cw.PostV0CityByCityNameServiceByNameRestartWithResponse(context.Background(), c.cityName, name)
 	return checkMutation(resp, bodyOf(resp), err)
 }
 

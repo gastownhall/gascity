@@ -423,8 +423,9 @@ type ProviderPatchDeleteInput struct {
 
 // --- Event types ---
 
-// EventListInput is the Huma input for GET /v0/events.
+// EventListInput is the Huma input for GET /v0/city/{cityName}/events.
 type EventListInput struct {
+	CityScope
 	BlockingParam
 	PaginationParam
 	Type  string `query:"type" required:"false" doc:"Filter by event type."`
@@ -432,8 +433,9 @@ type EventListInput struct {
 	Since string `query:"since" required:"false" doc:"Filter events since duration ago (Go duration string, e.g. 5m)."`
 }
 
-// EventEmitInput is the Huma input for POST /v0/events.
+// EventEmitInput is the Huma input for POST /v0/city/{cityName}/events.
 type EventEmitInput struct {
+	CityScope
 	Body struct {
 		Type    string `json:"type" doc:"Event type." minLength:"1"`
 		Actor   string `json:"actor" doc:"Actor that produced the event." minLength:"1"`
@@ -484,63 +486,76 @@ func (e *EventStreamInput) resolveAfterSeq() uint64 {
 
 // --- Order types ---
 
-// OrdersFeedInput is the Huma input for GET /v0/orders/feed.
+// OrdersFeedInput is the Huma input for GET /v0/city/{cityName}/orders/feed.
 type OrdersFeedInput struct {
+	CityScope
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
 	Limit     string `query:"limit" required:"false" doc:"Maximum number of feed items to return."`
 }
 
-// OrderListInput is the Huma input for GET /v0/orders.
-type OrderListInput struct{}
+// OrderListInput is the Huma input for GET /v0/city/{cityName}/orders.
+type OrderListInput struct {
+	CityScope
+}
 
-// OrderGetInput is the Huma input for GET /v0/order/{name}.
+// OrderGetInput is the Huma input for GET /v0/city/{cityName}/order/{name}.
 type OrderGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Order name or scoped name."`
 }
 
-// OrderCheckInput is the Huma input for GET /v0/orders/check.
-type OrderCheckInput struct{}
+// OrderCheckInput is the Huma input for GET /v0/city/{cityName}/orders/check.
+type OrderCheckInput struct {
+	CityScope
+}
 
-// OrderHistoryInput is the Huma input for GET /v0/orders/history.
+// OrderHistoryInput is the Huma input for GET /v0/city/{cityName}/orders/history.
 type OrderHistoryInput struct {
+	CityScope
 	ScopedName string `query:"scoped_name" required:"false" doc:"Scoped order name."`
 	Limit      string `query:"limit" required:"false" doc:"Maximum number of history entries."`
 	Before     string `query:"before" required:"false" doc:"Return entries before this RFC3339 timestamp."`
 }
 
-// OrderHistoryDetailInput is the Huma input for GET /v0/order/history/{bead_id}.
+// OrderHistoryDetailInput is the Huma input for GET /v0/city/{cityName}/order/history/{bead_id}.
 type OrderHistoryDetailInput struct {
+	CityScope
 	BeadID string `path:"bead_id" doc:"Bead ID for the order run."`
 }
 
-// OrderEnableInput is the Huma input for POST /v0/order/{name}/enable.
+// OrderEnableInput is the Huma input for POST /v0/city/{cityName}/order/{name}/enable.
 type OrderEnableInput struct {
+	CityScope
 	Name string `path:"name" doc:"Order name or scoped name."`
 }
 
-// OrderDisableInput is the Huma input for POST /v0/order/{name}/disable.
+// OrderDisableInput is the Huma input for POST /v0/city/{cityName}/order/{name}/disable.
 type OrderDisableInput struct {
+	CityScope
 	Name string `path:"name" doc:"Order name or scoped name."`
 }
 
 // --- Formula types ---
 
-// FormulaFeedInput is the Huma input for GET /v0/formulas/feed.
+// FormulaFeedInput is the Huma input for GET /v0/city/{cityName}/formulas/feed.
 type FormulaFeedInput struct {
+	CityScope
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
 	Limit     string `query:"limit" required:"false" doc:"Maximum number of feed items to return."`
 }
 
-// FormulaListInput is the Huma input for GET /v0/formulas.
+// FormulaListInput is the Huma input for GET /v0/city/{cityName}/formulas.
 type FormulaListInput struct {
+	CityScope
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
 }
 
-// FormulaRunsInput is the Huma input for GET /v0/formulas/{name}/runs.
+// FormulaRunsInput is the Huma input for GET /v0/city/{cityName}/formulas/{name}/runs.
 type FormulaRunsInput struct {
+	CityScope
 	Name      string `path:"name" minLength:"1" pattern:"\\S" doc:"Formula name."`
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
@@ -549,13 +564,16 @@ type FormulaRunsInput struct {
 
 // --- Pack types ---
 
-// PackListInput is the Huma input for GET /v0/packs.
-type PackListInput struct{}
+// PackListInput is the Huma input for GET /v0/city/{cityName}/packs.
+type PackListInput struct {
+	CityScope
+}
 
 // --- Sling types ---
 
-// SlingInput is the Huma input for POST /v0/sling.
+// SlingInput is the Huma input for POST /v0/city/{cityName}/sling.
 type SlingInput struct {
+	CityScope
 	Body struct {
 		Rig            string            `json:"rig,omitempty" doc:"Rig name."`
 		Target         string            `json:"target,omitempty" doc:"Target agent or pool."`
@@ -571,8 +589,9 @@ type SlingInput struct {
 
 // --- Bead types ---
 
-// BeadListInput is the Huma input for GET /v0/beads.
+// BeadListInput is the Huma input for GET /v0/city/{cityName}/beads.
 type BeadListInput struct {
+	CityScope
 	BlockingParam
 	PaginationParam
 	Status   string `query:"status" required:"false" doc:"Filter by bead status."`
@@ -582,28 +601,33 @@ type BeadListInput struct {
 	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
 }
 
-// BeadReadyInput is the Huma input for GET /v0/beads/ready.
+// BeadReadyInput is the Huma input for GET /v0/city/{cityName}/beads/ready.
 type BeadReadyInput struct {
+	CityScope
 	BlockingParam
 }
 
-// BeadGraphInput is the Huma input for GET /v0/beads/graph/{rootID}.
+// BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.
 type BeadGraphInput struct {
+	CityScope
 	RootID string `path:"rootID" doc:"Root bead ID for the graph."`
 }
 
-// BeadGetInput is the Huma input for GET /v0/bead/{id}.
+// BeadGetInput is the Huma input for GET /v0/city/{cityName}/bead/{id}.
 type BeadGetInput struct {
+	CityScope
 	ID string `path:"id" doc:"Bead ID."`
 }
 
-// BeadDepsInput is the Huma input for GET /v0/bead/{id}/deps.
+// BeadDepsInput is the Huma input for GET /v0/city/{cityName}/bead/{id}/deps.
 type BeadDepsInput struct {
+	CityScope
 	ID string `path:"id" doc:"Bead ID."`
 }
 
-// BeadCreateInput is the Huma input for POST /v0/beads.
+// BeadCreateInput is the Huma input for POST /v0/city/{cityName}/beads.
 type BeadCreateInput struct {
+	CityScope
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Rig         string   `json:"rig,omitempty" doc:"Rig name."`
@@ -616,18 +640,21 @@ type BeadCreateInput struct {
 	}
 }
 
-// BeadCloseInput is the Huma input for POST /v0/bead/{id}/close.
+// BeadCloseInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/close.
 type BeadCloseInput struct {
+	CityScope
 	ID string `path:"id" doc:"Bead ID."`
 }
 
-// BeadReopenInput is the Huma input for POST /v0/bead/{id}/reopen.
+// BeadReopenInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/reopen.
 type BeadReopenInput struct {
+	CityScope
 	ID string `path:"id" doc:"Bead ID."`
 }
 
-// BeadUpdateInput is the Huma input for POST /v0/bead/{id}/update and PATCH /v0/bead/{id}.
+// BeadUpdateInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/update and PATCH /v0/city/{cityName}/bead/{id}.
 type BeadUpdateInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Bead ID."`
 	Body beadUpdateBody
 }
@@ -645,23 +672,26 @@ type beadUpdateBody struct {
 	Metadata     map[string]string `json:"metadata,omitempty" doc:"Metadata key-value pairs to set."`
 }
 
-// BeadAssignInput is the Huma input for POST /v0/bead/{id}/assign.
+// BeadAssignInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/assign.
 type BeadAssignInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Bead ID."`
 	Body struct {
 		Assignee string `json:"assignee,omitempty" doc:"Assignee name."`
 	}
 }
 
-// BeadDeleteInput is the Huma input for DELETE /v0/bead/{id}.
+// BeadDeleteInput is the Huma input for DELETE /v0/city/{cityName}/bead/{id}.
 type BeadDeleteInput struct {
+	CityScope
 	ID string `path:"id" doc:"Bead ID."`
 }
 
 // --- Mail types ---
 
-// MailListInput is the Huma input for GET /v0/mail.
+// MailListInput is the Huma input for GET /v0/city/{cityName}/mail.
 type MailListInput struct {
+	CityScope
 	BlockingParam
 	PaginationParam
 	Agent  string `query:"agent" required:"false" doc:"Filter by agent name."`
@@ -669,14 +699,16 @@ type MailListInput struct {
 	Rig    string `query:"rig" required:"false" doc:"Filter by rig name."`
 }
 
-// MailGetInput is the Huma input for GET /v0/mail/{id}.
+// MailGetInput is the Huma input for GET /v0/city/{cityName}/mail/{id}.
 type MailGetInput struct {
+	CityScope
 	ID  string `path:"id" doc:"Message ID."`
 	Rig string `query:"rig" required:"false" doc:"Rig hint for O(1) lookup."`
 }
 
-// MailSendInput is the Huma input for POST /v0/mail.
+// MailSendInput is the Huma input for POST /v0/city/{cityName}/mail.
 type MailSendInput struct {
+	CityScope
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Rig     string `json:"rig,omitempty" doc:"Rig name."`
@@ -687,26 +719,30 @@ type MailSendInput struct {
 	}
 }
 
-// MailReadInput is the Huma input for POST /v0/mail/{id}/read.
+// MailReadInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/read.
 type MailReadInput struct {
+	CityScope
 	ID  string `path:"id" doc:"Message ID."`
 	Rig string `query:"rig" required:"false" doc:"Rig hint."`
 }
 
-// MailMarkUnreadInput is the Huma input for POST /v0/mail/{id}/mark-unread.
+// MailMarkUnreadInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/mark-unread.
 type MailMarkUnreadInput struct {
+	CityScope
 	ID  string `path:"id" doc:"Message ID."`
 	Rig string `query:"rig" required:"false" doc:"Rig hint."`
 }
 
-// MailArchiveInput is the Huma input for POST /v0/mail/{id}/archive.
+// MailArchiveInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/archive.
 type MailArchiveInput struct {
+	CityScope
 	ID  string `path:"id" doc:"Message ID."`
 	Rig string `query:"rig" required:"false" doc:"Rig hint."`
 }
 
-// MailReplyInput is the Huma input for POST /v0/mail/{id}/reply.
+// MailReplyInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/reply.
 type MailReplyInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Message ID."`
 	Rig  string `query:"rig" required:"false" doc:"Rig hint."`
 	Body struct {
@@ -716,20 +752,23 @@ type MailReplyInput struct {
 	}
 }
 
-// MailDeleteInput is the Huma input for DELETE /v0/mail/{id}.
+// MailDeleteInput is the Huma input for DELETE /v0/city/{cityName}/mail/{id}.
 type MailDeleteInput struct {
+	CityScope
 	ID  string `path:"id" doc:"Message ID."`
 	Rig string `query:"rig" required:"false" doc:"Rig hint."`
 }
 
-// MailThreadInput is the Huma input for GET /v0/mail/thread/{id}.
+// MailThreadInput is the Huma input for GET /v0/city/{cityName}/mail/thread/{id}.
 type MailThreadInput struct {
+	CityScope
 	ID  string `path:"id" doc:"Thread ID."`
 	Rig string `query:"rig" required:"false" doc:"Filter by rig."`
 }
 
-// MailCountInput is the Huma input for GET /v0/mail/count.
+// MailCountInput is the Huma input for GET /v0/city/{cityName}/mail/count.
 type MailCountInput struct {
+	CityScope
 	Agent string `query:"agent" required:"false" doc:"Filter by agent name."`
 	Rig   string `query:"rig" required:"false" doc:"Filter by rig name."`
 }
@@ -744,19 +783,22 @@ type MailCountOutput struct {
 
 // --- Convoy types ---
 
-// ConvoyListInput is the Huma input for GET /v0/convoys.
+// ConvoyListInput is the Huma input for GET /v0/city/{cityName}/convoys.
 type ConvoyListInput struct {
+	CityScope
 	BlockingParam
 	PaginationParam
 }
 
-// ConvoyGetInput is the Huma input for GET /v0/convoy/{id}.
+// ConvoyGetInput is the Huma input for GET /v0/city/{cityName}/convoy/{id}.
 type ConvoyGetInput struct {
+	CityScope
 	ID string `path:"id" doc:"Convoy ID."`
 }
 
-// ConvoyCreateInput is the Huma input for POST /v0/convoys.
+// ConvoyCreateInput is the Huma input for POST /v0/city/{cityName}/convoys.
 type ConvoyCreateInput struct {
+	CityScope
 	Body struct {
 		Rig   string   `json:"rig,omitempty" doc:"Rig name."`
 		Title string   `json:"title" doc:"Convoy title." minLength:"1"`
@@ -764,34 +806,39 @@ type ConvoyCreateInput struct {
 	}
 }
 
-// ConvoyAddInput is the Huma input for POST /v0/convoy/{id}/add.
+// ConvoyAddInput is the Huma input for POST /v0/city/{cityName}/convoy/{id}/add.
 type ConvoyAddInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Convoy ID."`
 	Body struct {
 		Items []string `json:"items,omitempty" doc:"Bead IDs to add."`
 	}
 }
 
-// ConvoyRemoveInput is the Huma input for POST /v0/convoy/{id}/remove.
+// ConvoyRemoveInput is the Huma input for POST /v0/city/{cityName}/convoy/{id}/remove.
 type ConvoyRemoveInput struct {
+	CityScope
 	ID   string `path:"id" doc:"Convoy ID."`
 	Body struct {
 		Items []string `json:"items,omitempty" doc:"Bead IDs to remove."`
 	}
 }
 
-// ConvoyCheckInput is the Huma input for GET /v0/convoy/{id}/check.
+// ConvoyCheckInput is the Huma input for GET /v0/city/{cityName}/convoy/{id}/check.
 type ConvoyCheckInput struct {
+	CityScope
 	ID string `path:"id" doc:"Convoy ID."`
 }
 
-// ConvoyCloseInput is the Huma input for POST /v0/convoy/{id}/close.
+// ConvoyCloseInput is the Huma input for POST /v0/city/{cityName}/convoy/{id}/close.
 type ConvoyCloseInput struct {
+	CityScope
 	ID string `path:"id" doc:"Convoy ID."`
 }
 
-// ConvoyDeleteInput is the Huma input for DELETE /v0/convoy/{id}.
+// ConvoyDeleteInput is the Huma input for DELETE /v0/city/{cityName}/convoy/{id}.
 type ConvoyDeleteInput struct {
+	CityScope
 	ID string `path:"id" doc:"Convoy ID."`
 }
 
@@ -908,8 +955,9 @@ func (i *AgentOutputStreamQualifiedInput) QualifiedName() string {
 
 // --- Formula detail types ---
 
-// FormulaDetailInput is the Huma input for GET /v0/formulas/{name} and GET /v0/formula/{name}.
+// FormulaDetailInput is the Huma input for GET /v0/city/{cityName}/formulas/{name} and GET /v0/city/{cityName}/formula/{name}.
 type FormulaDetailInput struct {
+	CityScope
 	Name      string `path:"name" doc:"Formula name."`
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
@@ -939,15 +987,17 @@ func (f *FormulaDetailInput) Resolve(ctx huma.Context) []error {
 
 // --- Workflow backward-compat types ---
 
-// WorkflowGetInput is the Huma input for GET /v0/workflow/{workflow_id}.
+// WorkflowGetInput is the Huma input for GET /v0/city/{cityName}/workflow/{workflow_id}.
 type WorkflowGetInput struct {
+	CityScope
 	WorkflowID string `path:"workflow_id" doc:"Workflow (convoy) ID."`
 	ScopeKind  string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
 }
 
-// WorkflowDeleteInput is the Huma input for DELETE /v0/workflow/{workflow_id}.
+// WorkflowDeleteInput is the Huma input for DELETE /v0/city/{cityName}/workflow/{workflow_id}.
 type WorkflowDeleteInput struct {
+	CityScope
 	WorkflowID string `path:"workflow_id" doc:"Workflow (convoy) ID."`
 	ScopeKind  string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
@@ -996,16 +1046,20 @@ type StatusBody struct {
 
 // --- Service types ---
 
-// ServiceListInput is the Huma input for GET /v0/services.
-type ServiceListInput struct{}
+// ServiceListInput is the Huma input for GET /v0/city/{cityName}/services.
+type ServiceListInput struct {
+	CityScope
+}
 
-// ServiceGetInput is the Huma input for GET /v0/service/{name}.
+// ServiceGetInput is the Huma input for GET /v0/city/{cityName}/service/{name}.
 type ServiceGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Service name."`
 }
 
-// ServiceRestartInput is the Huma input for POST /v0/service/{name}/restart.
+// ServiceRestartInput is the Huma input for POST /v0/city/{cityName}/service/{name}/restart.
 type ServiceRestartInput struct {
+	CityScope
 	Name string `path:"name" doc:"Service name."`
 }
 

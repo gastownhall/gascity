@@ -2527,7 +2527,7 @@
         ],
         "type": "object"
       },
-      "Get-v0-formulasResponse": {
+      "Get-v0-city-by-city-name-formulasResponse": {
         "additionalProperties": false,
         "properties": {
           "items": {
@@ -2549,7 +2549,7 @@
         ],
         "type": "object"
       },
-      "Get-v0-orders-checkResponse": {
+      "Get-v0-city-by-city-name-orders-checkResponse": {
         "additionalProperties": false,
         "properties": {
           "checks": {
@@ -2567,7 +2567,7 @@
         ],
         "type": "object"
       },
-      "Get-v0-ordersResponse": {
+      "Get-v0-city-by-city-name-ordersResponse": {
         "additionalProperties": false,
         "properties": {
           "orders": {
@@ -2585,7 +2585,7 @@
         ],
         "type": "object"
       },
-      "Get-v0-packsResponse": {
+      "Get-v0-city-by-city-name-packsResponse": {
         "additionalProperties": false,
         "properties": {
           "packs": {
@@ -6579,683 +6579,6 @@
         "summary": "Create an agent"
       }
     },
-    "/v0/bead/{id}": {
-      "delete": {
-        "operationId": "delete-v0-bead-by-id",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 bead by ID"
-      },
-      "get": {
-        "operationId": "get-v0-bead-by-id",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Bead"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 bead by ID"
-      },
-      "patch": {
-        "operationId": "patch-v0-bead-by-id",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BeadUpdateBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Patch v0 bead by ID"
-      }
-    },
-    "/v0/bead/{id}/assign": {
-      "post": {
-        "operationId": "post-v0-bead-by-id-assign",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BeadAssignInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 bead by ID assign"
-      }
-    },
-    "/v0/bead/{id}/close": {
-      "post": {
-        "operationId": "post-v0-bead-by-id-close",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 bead by ID close"
-      }
-    },
-    "/v0/bead/{id}/deps": {
-      "get": {
-        "operationId": "get-v0-bead-by-id-deps",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BeadDepsResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 bead by ID deps"
-      }
-    },
-    "/v0/bead/{id}/reopen": {
-      "post": {
-        "operationId": "post-v0-bead-by-id-reopen",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 bead by ID reopen"
-      }
-    },
-    "/v0/bead/{id}/update": {
-      "post": {
-        "operationId": "post-v0-bead-by-id-update",
-        "parameters": [
-          {
-            "description": "Bead ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BeadUpdateBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 bead by ID update"
-      }
-    },
-    "/v0/beads": {
-      "get": {
-        "operationId": "get-v0-beads",
-        "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
-            "explode": false,
-            "in": "query",
-            "name": "cursor",
-            "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of results to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of results to return.",
-              "format": "int64",
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Filter by bead status.",
-            "explode": false,
-            "in": "query",
-            "name": "status",
-            "schema": {
-              "description": "Filter by bead status.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by bead type.",
-            "explode": false,
-            "in": "query",
-            "name": "type",
-            "schema": {
-              "description": "Filter by bead type.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by label.",
-            "explode": false,
-            "in": "query",
-            "name": "label",
-            "schema": {
-              "description": "Filter by label.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by assignee.",
-            "explode": false,
-            "in": "query",
-            "name": "assignee",
-            "schema": {
-              "description": "Filter by assignee.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by rig.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Filter by rig.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyBead"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 beads"
-      },
-      "post": {
-        "operationId": "create-bead",
-        "parameters": [
-          {
-            "description": "Idempotency key for safe retries.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "schema": {
-              "description": "Idempotency key for safe retries.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BeadCreateInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Bead"
-                }
-              }
-            },
-            "description": "Created",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Create a bead"
-      }
-    },
-    "/v0/beads/graph/{rootID}": {
-      "get": {
-        "operationId": "get-v0-beads-graph-by-root-id",
-        "parameters": [
-          {
-            "description": "Root bead ID for the graph.",
-            "in": "path",
-            "name": "rootID",
-            "required": true,
-            "schema": {
-              "description": "Root bead ID for the graph.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BeadGraphResponseJSON"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 beads graph by root ID"
-      }
-    },
-    "/v0/beads/ready": {
-      "get": {
-        "operationId": "get-v0-beads-ready",
-        "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyBead"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 beads ready"
-      }
-    },
     "/v0/cities": {
       "get": {
         "operationId": "get-v0-cities",
@@ -7414,6 +6737,827 @@
         "summary": "Patch v0 city by city name"
       }
     },
+    "/v0/city/{cityName}/bead/{id}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-bead-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name bead by ID"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-bead-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name bead by ID"
+      },
+      "patch": {
+        "operationId": "patch-v0-city-by-city-name-bead-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadUpdateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Patch v0 city by city name bead by ID"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/assign": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-bead-by-id-assign",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadAssignInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name bead by ID assign"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/close": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-bead-by-id-close",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name bead by ID close"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/deps": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-bead-by-id-deps",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeadDepsResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name bead by ID deps"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/reopen": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-bead-by-id-reopen",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name bead by ID reopen"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/update": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-bead-by-id-update",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadUpdateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name bead by ID update"
+      }
+    },
+    "/v0/city/{cityName}/beads": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-beads",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of results to return.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by bead status.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Filter by bead status.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by bead type.",
+            "explode": false,
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "description": "Filter by bead type.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by label.",
+            "explode": false,
+            "in": "query",
+            "name": "label",
+            "schema": {
+              "description": "Filter by label.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by assignee.",
+            "explode": false,
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "description": "Filter by assignee.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rig.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyBead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name beads"
+      },
+      "post": {
+        "operationId": "create-bead",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadCreateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bead"
+                }
+              }
+            },
+            "description": "Created",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Create a bead"
+      }
+    },
+    "/v0/city/{cityName}/beads/graph/{rootID}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-beads-graph-by-root-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Root bead ID for the graph.",
+            "in": "path",
+            "name": "rootID",
+            "required": true,
+            "schema": {
+              "description": "Root bead ID for the graph.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeadGraphResponseJSON"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name beads graph by root ID"
+      }
+    },
+    "/v0/city/{cityName}/beads/ready": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-beads-ready",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyBead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name beads ready"
+      }
+    },
     "/v0/city/{cityName}/config": {
       "get": {
         "operationId": "get-v0-city-by-city-name-config",
@@ -7560,6 +7704,1064 @@
         "summary": "Get v0 city by city name config validate"
       }
     },
+    "/v0/city/{cityName}/convoy/{id}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-convoy-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convoy ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Convoy ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name convoy by ID"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-convoy-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convoy ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Convoy ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConvoyGetResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name convoy by ID"
+      }
+    },
+    "/v0/city/{cityName}/convoy/{id}/add": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-convoy-by-id-add",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convoy ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Convoy ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvoyAddInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name convoy by ID add"
+      }
+    },
+    "/v0/city/{cityName}/convoy/{id}/check": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-convoy-by-id-check",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convoy ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Convoy ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConvoyCheckResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name convoy by ID check"
+      }
+    },
+    "/v0/city/{cityName}/convoy/{id}/close": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-convoy-by-id-close",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convoy ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Convoy ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name convoy by ID close"
+      }
+    },
+    "/v0/city/{cityName}/convoy/{id}/remove": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-convoy-by-id-remove",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convoy ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Convoy ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvoyRemoveInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name convoy by ID remove"
+      }
+    },
+    "/v0/city/{cityName}/convoys": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-convoys",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of results to return.",
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyBead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name convoys"
+      },
+      "post": {
+        "operationId": "create-convoy",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvoyCreateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bead"
+                }
+              }
+            },
+            "description": "Created",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Create a convoy"
+      }
+    },
+    "/v0/city/{cityName}/events": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-events",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of results to return.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by event type.",
+            "explode": false,
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "description": "Filter by event type.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by actor.",
+            "explode": false,
+            "in": "query",
+            "name": "actor",
+            "schema": {
+              "description": "Filter by actor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter events since duration ago (Go duration string, e.g. 5m).",
+            "explode": false,
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "description": "Filter events since duration ago (Go duration string, e.g. 5m).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyEvent"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name events"
+      },
+      "post": {
+        "operationId": "emit-event",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventEmitInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventEmitOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Emit an event"
+      }
+    },
+    "/v0/city/{cityName}/formula/{name}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-formula-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Formula name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Formula name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target agent for preview compilation.",
+            "explode": false,
+            "in": "query",
+            "name": "target",
+            "schema": {
+              "description": "Target agent for preview compilation.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormulaDetailResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name formula by name"
+      }
+    },
+    "/v0/city/{cityName}/formulas": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-formulas",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-formulasResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name formulas"
+      }
+    },
+    "/v0/city/{cityName}/formulas/feed": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-formulas-feed",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of feed items to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of feed items to return.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormulaFeedBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name formulas feed"
+      }
+    },
+    "/v0/city/{cityName}/formulas/{name}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-formulas-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Formula name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Formula name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target agent for preview compilation.",
+            "explode": false,
+            "in": "query",
+            "name": "target",
+            "schema": {
+              "description": "Target agent for preview compilation.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormulaDetailResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name formulas by name"
+      }
+    },
+    "/v0/city/{cityName}/formulas/{name}/runs": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-formulas-by-name-runs",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Formula name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Formula name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of recent runs to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of recent runs to return.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormulaRunsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name formulas by name runs"
+      }
+    },
     "/v0/city/{cityName}/health": {
       "get": {
         "operationId": "get-v0-city-by-city-name-health",
@@ -7600,6 +8802,1216 @@
           }
         },
         "summary": "Get v0 city by city name health"
+      }
+    },
+    "/v0/city/{cityName}/mail": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-mail",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of results to return.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by agent name.",
+            "explode": false,
+            "in": "query",
+            "name": "agent",
+            "schema": {
+              "description": "Filter by agent name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by status (unread, all).",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Filter by status (unread, all).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rig name.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyMessage"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name mail"
+      },
+      "post": {
+        "operationId": "send-mail",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailSendInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            },
+            "description": "Created",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Send a mail message"
+      }
+    },
+    "/v0/city/{cityName}/mail/count": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-mail-count",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by agent name.",
+            "explode": false,
+            "in": "query",
+            "name": "agent",
+            "schema": {
+              "description": "Filter by agent name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rig name.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailCountOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name mail count"
+      }
+    },
+    "/v0/city/{cityName}/mail/thread/{id}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-mail-thread-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Thread ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Thread ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rig.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyMessage"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name mail thread by ID"
+      }
+    },
+    "/v0/city/{cityName}/mail/{id}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-mail-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Message ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rig hint.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Rig hint.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name mail by ID"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-mail-by-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Message ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rig hint for O(1) lookup.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Rig hint for O(1) lookup.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name mail by ID"
+      }
+    },
+    "/v0/city/{cityName}/mail/{id}/archive": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-mail-by-id-archive",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Message ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rig hint.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Rig hint.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name mail by ID archive"
+      }
+    },
+    "/v0/city/{cityName}/mail/{id}/mark-unread": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-mail-by-id-mark-unread",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Message ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rig hint.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Rig hint.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name mail by ID mark unread"
+      }
+    },
+    "/v0/city/{cityName}/mail/{id}/read": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-mail-by-id-read",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Message ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rig hint.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Rig hint.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name mail by ID read"
+      }
+    },
+    "/v0/city/{cityName}/mail/{id}/reply": {
+      "post": {
+        "operationId": "reply-mail",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Message ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rig hint.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Rig hint.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailReplyInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            },
+            "description": "Created",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Reply to a mail message"
+      }
+    },
+    "/v0/city/{cityName}/order/history/{bead_id}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-order-history-by-bead-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID for the order run.",
+            "in": "path",
+            "name": "bead_id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID for the order run.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderHistoryDetailResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name order history by bead ID"
+      }
+    },
+    "/v0/city/{cityName}/order/{name}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-order-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Order name or scoped name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Order name or scoped name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name order by name"
+      }
+    },
+    "/v0/city/{cityName}/order/{name}/disable": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-order-by-name-disable",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Order name or scoped name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Order name or scoped name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name order by name disable"
+      }
+    },
+    "/v0/city/{cityName}/order/{name}/enable": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-order-by-name-enable",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Order name or scoped name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Order name or scoped name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name order by name enable"
+      }
+    },
+    "/v0/city/{cityName}/orders": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-orders",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-ordersResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name orders"
+      }
+    },
+    "/v0/city/{cityName}/orders/check": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-orders-check",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-orders-checkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name orders check"
+      }
+    },
+    "/v0/city/{cityName}/orders/feed": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-orders-feed",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of feed items to return.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of feed items to return.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersFeedBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name orders feed"
+      }
+    },
+    "/v0/city/{cityName}/orders/history": {
+      "get": {
+        "operationId": "list-v0-city-by-city-name-orders-history",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scoped order name.",
+            "explode": false,
+            "in": "query",
+            "name": "scoped_name",
+            "schema": {
+              "description": "Scoped order name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of history entries.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of history entries.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return entries before this RFC3339 timestamp.",
+            "explode": false,
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "description": "Return entries before this RFC3339 timestamp.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OrderHistoryEntry"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List v0 city by city name orders history"
+      }
+    },
+    "/v0/city/{cityName}/packs": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-packs",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-packsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name packs"
       }
     },
     "/v0/city/{cityName}/patches/agent/{name...}": {
@@ -9028,6 +11440,224 @@
         "summary": "Create a rig"
       }
     },
+    "/v0/city/{cityName}/service/{name}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-service-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Service name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Service name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name service by name"
+      }
+    },
+    "/v0/city/{cityName}/service/{name}/restart": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-service-by-name-restart",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Service name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Service name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceRestartOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name service by name restart"
+      }
+    },
+    "/v0/city/{cityName}/services": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-services",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyStatus"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name services"
+      }
+    },
+    "/v0/city/{cityName}/sling": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-sling",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlingInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlingResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name sling"
+      }
+    },
     "/v0/city/{cityName}/status": {
       "get": {
         "operationId": "get-v0-city-by-city-name-status",
@@ -9100,17 +11730,59 @@
         "summary": "Get v0 city by city name status"
       }
     },
-    "/v0/convoy/{id}": {
+    "/v0/city/{cityName}/workflow/{workflow_id}": {
       "delete": {
-        "operationId": "delete-v0-convoy-by-id",
+        "operationId": "delete-v0-city-by-city-name-workflow-by-workflow-id",
         "parameters": [
           {
-            "description": "Convoy ID.",
+            "description": "City name.",
             "in": "path",
-            "name": "id",
+            "name": "cityName",
             "required": true,
             "schema": {
-              "description": "Convoy ID.",
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Workflow (convoy) ID.",
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "description": "Workflow (convoy) ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Permanently delete beads from store (true/false).",
+            "explode": false,
+            "in": "query",
+            "name": "delete",
+            "schema": {
+              "description": "Permanently delete beads from store (true/false).",
               "type": "string"
             }
           }
@@ -9120,7 +11792,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
+                  "$ref": "#/components/schemas/WorkflowDeleteResponse"
                 }
               }
             },
@@ -9137,18 +11809,50 @@
             "description": "Error"
           }
         },
-        "summary": "Delete v0 convoy by ID"
+        "summary": "Delete v0 city by city name workflow by workflow ID"
       },
       "get": {
-        "operationId": "get-v0-convoy-by-id",
+        "operationId": "get-v0-city-by-city-name-workflow-by-workflow-id",
         "parameters": [
           {
-            "description": "Convoy ID.",
+            "description": "City name.",
             "in": "path",
-            "name": "id",
+            "name": "cityName",
             "required": true,
             "schema": {
-              "description": "Convoy ID.",
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Workflow (convoy) ID.",
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "description": "Workflow (convoy) ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope kind (city or rig).",
+            "explode": false,
+            "in": "query",
+            "name": "scope_kind",
+            "schema": {
+              "description": "Scope kind (city or rig).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope reference.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_ref",
+            "schema": {
+              "description": "Scope reference.",
               "type": "string"
             }
           }
@@ -9158,7 +11862,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConvoyGetResponse"
+                  "$ref": "#/components/schemas/WorkflowSnapshotResponse"
                 }
               }
             },
@@ -9185,371 +11889,13 @@
             "description": "Error"
           }
         },
-        "summary": "Get v0 convoy by ID"
-      }
-    },
-    "/v0/convoy/{id}/add": {
-      "post": {
-        "operationId": "post-v0-convoy-by-id-add",
-        "parameters": [
-          {
-            "description": "Convoy ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Convoy ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConvoyAddInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 convoy by ID add"
-      }
-    },
-    "/v0/convoy/{id}/check": {
-      "get": {
-        "operationId": "get-v0-convoy-by-id-check",
-        "parameters": [
-          {
-            "description": "Convoy ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Convoy ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConvoyCheckResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 convoy by ID check"
-      }
-    },
-    "/v0/convoy/{id}/close": {
-      "post": {
-        "operationId": "post-v0-convoy-by-id-close",
-        "parameters": [
-          {
-            "description": "Convoy ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Convoy ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 convoy by ID close"
-      }
-    },
-    "/v0/convoy/{id}/remove": {
-      "post": {
-        "operationId": "post-v0-convoy-by-id-remove",
-        "parameters": [
-          {
-            "description": "Convoy ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Convoy ID.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConvoyRemoveInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 convoy by ID remove"
-      }
-    },
-    "/v0/convoys": {
-      "get": {
-        "operationId": "get-v0-convoys",
-        "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
-            "explode": false,
-            "in": "query",
-            "name": "cursor",
-            "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of results to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of results to return.",
-              "format": "int64",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyBead"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 convoys"
-      },
-      "post": {
-        "operationId": "create-convoy",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConvoyCreateInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Bead"
-                }
-              }
-            },
-            "description": "Created",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Create a convoy"
+        "summary": "Get v0 city by city name workflow by workflow ID"
       }
     },
     "/v0/events": {
       "get": {
         "operationId": "get-v0-events",
         "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
-            "explode": false,
-            "in": "query",
-            "name": "cursor",
-            "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of results to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of results to return.",
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           {
             "description": "Filter by event type.",
             "explode": false,
@@ -9571,12 +11917,12 @@
             }
           },
           {
-            "description": "Filter events since duration ago (Go duration string, e.g. 5m).",
+            "description": "Filter to events within the last Go duration (e.g. \"5m\").",
             "explode": false,
             "in": "query",
             "name": "since",
             "schema": {
-              "description": "Filter events since duration ago (Go duration string, e.g. 5m).",
+              "description": "Filter to events within the last Go duration (e.g. \"5m\").",
               "type": "string"
             }
           }
@@ -9586,21 +11932,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyEvent"
+                  "$ref": "#/components/schemas/SupervisorEventListOutputBody"
                 }
               }
             },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
+            "description": "OK"
           },
           "default": {
             "content": {
@@ -9614,42 +11950,6 @@
           }
         },
         "summary": "Get v0 events"
-      },
-      "post": {
-        "operationId": "emit-event",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EventEmitInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EventEmitOutputBody"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Emit an event"
       }
     },
     "/v0/events/stream": {
@@ -10400,1304 +12700,6 @@
         "summary": "Post v0 extmsg unbind"
       }
     },
-    "/v0/formula/{name}": {
-      "get": {
-        "operationId": "get-v0-formula-by-name",
-        "parameters": [
-          {
-            "description": "Formula name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Formula name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Target agent for preview compilation.",
-            "explode": false,
-            "in": "query",
-            "name": "target",
-            "schema": {
-              "description": "Target agent for preview compilation.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FormulaDetailResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 formula by name"
-      }
-    },
-    "/v0/formulas": {
-      "get": {
-        "operationId": "get-v0-formulas",
-        "parameters": [
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Get-v0-formulasResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 formulas"
-      }
-    },
-    "/v0/formulas/feed": {
-      "get": {
-        "operationId": "get-v0-formulas-feed",
-        "parameters": [
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of feed items to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of feed items to return.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FormulaFeedBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 formulas feed"
-      }
-    },
-    "/v0/formulas/{name}": {
-      "get": {
-        "operationId": "get-v0-formulas-by-name",
-        "parameters": [
-          {
-            "description": "Formula name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Formula name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Target agent for preview compilation.",
-            "explode": false,
-            "in": "query",
-            "name": "target",
-            "schema": {
-              "description": "Target agent for preview compilation.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FormulaDetailResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 formulas by name"
-      }
-    },
-    "/v0/formulas/{name}/runs": {
-      "get": {
-        "operationId": "get-v0-formulas-by-name-runs",
-        "parameters": [
-          {
-            "description": "Formula name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Formula name.",
-              "minLength": 1,
-              "pattern": "\\S",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of recent runs to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of recent runs to return.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FormulaRunsResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 formulas by name runs"
-      }
-    },
-    "/v0/mail": {
-      "get": {
-        "operationId": "get-v0-mail",
-        "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
-            "explode": false,
-            "in": "query",
-            "name": "cursor",
-            "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of results to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of results to return.",
-              "format": "int64",
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Filter by agent name.",
-            "explode": false,
-            "in": "query",
-            "name": "agent",
-            "schema": {
-              "description": "Filter by agent name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by status (unread, all).",
-            "explode": false,
-            "in": "query",
-            "name": "status",
-            "schema": {
-              "description": "Filter by status (unread, all).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by rig name.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Filter by rig name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyMessage"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 mail"
-      },
-      "post": {
-        "operationId": "send-mail",
-        "parameters": [
-          {
-            "description": "Idempotency key for safe retries.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "schema": {
-              "description": "Idempotency key for safe retries.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MailSendInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Message"
-                }
-              }
-            },
-            "description": "Created",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Send a mail message"
-      }
-    },
-    "/v0/mail/count": {
-      "get": {
-        "operationId": "get-v0-mail-count",
-        "parameters": [
-          {
-            "description": "Filter by agent name.",
-            "explode": false,
-            "in": "query",
-            "name": "agent",
-            "schema": {
-              "description": "Filter by agent name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by rig name.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Filter by rig name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MailCountOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 mail count"
-      }
-    },
-    "/v0/mail/thread/{id}": {
-      "get": {
-        "operationId": "get-v0-mail-thread-by-id",
-        "parameters": [
-          {
-            "description": "Thread ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Thread ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by rig.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Filter by rig.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyMessage"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 mail thread by ID"
-      }
-    },
-    "/v0/mail/{id}": {
-      "delete": {
-        "operationId": "delete-v0-mail-by-id",
-        "parameters": [
-          {
-            "description": "Message ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Message ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Rig hint.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Rig hint.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 mail by ID"
-      },
-      "get": {
-        "operationId": "get-v0-mail-by-id",
-        "parameters": [
-          {
-            "description": "Message ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Message ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Rig hint for O(1) lookup.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Rig hint for O(1) lookup.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Message"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 mail by ID"
-      }
-    },
-    "/v0/mail/{id}/archive": {
-      "post": {
-        "operationId": "post-v0-mail-by-id-archive",
-        "parameters": [
-          {
-            "description": "Message ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Message ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Rig hint.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Rig hint.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 mail by ID archive"
-      }
-    },
-    "/v0/mail/{id}/mark-unread": {
-      "post": {
-        "operationId": "post-v0-mail-by-id-mark-unread",
-        "parameters": [
-          {
-            "description": "Message ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Message ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Rig hint.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Rig hint.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 mail by ID mark unread"
-      }
-    },
-    "/v0/mail/{id}/read": {
-      "post": {
-        "operationId": "post-v0-mail-by-id-read",
-        "parameters": [
-          {
-            "description": "Message ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Message ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Rig hint.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Rig hint.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 mail by ID read"
-      }
-    },
-    "/v0/mail/{id}/reply": {
-      "post": {
-        "operationId": "reply-mail",
-        "parameters": [
-          {
-            "description": "Message ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Message ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Rig hint.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Rig hint.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MailReplyInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Message"
-                }
-              }
-            },
-            "description": "Created",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Reply to a mail message"
-      }
-    },
-    "/v0/order/history/{bead_id}": {
-      "get": {
-        "operationId": "get-v0-order-history-by-bead-id",
-        "parameters": [
-          {
-            "description": "Bead ID for the order run.",
-            "in": "path",
-            "name": "bead_id",
-            "required": true,
-            "schema": {
-              "description": "Bead ID for the order run.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrderHistoryDetailResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 order history by bead ID"
-      }
-    },
-    "/v0/order/{name}": {
-      "get": {
-        "operationId": "get-v0-order-by-name",
-        "parameters": [
-          {
-            "description": "Order name or scoped name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Order name or scoped name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrderResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 order by name"
-      }
-    },
-    "/v0/order/{name}/disable": {
-      "post": {
-        "operationId": "post-v0-order-by-name-disable",
-        "parameters": [
-          {
-            "description": "Order name or scoped name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Order name or scoped name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 order by name disable"
-      }
-    },
-    "/v0/order/{name}/enable": {
-      "post": {
-        "operationId": "post-v0-order-by-name-enable",
-        "parameters": [
-          {
-            "description": "Order name or scoped name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Order name or scoped name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 order by name enable"
-      }
-    },
-    "/v0/orders": {
-      "get": {
-        "operationId": "get-v0-orders",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Get-v0-ordersResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 orders"
-      }
-    },
-    "/v0/orders/check": {
-      "get": {
-        "operationId": "get-v0-orders-check",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Get-v0-orders-checkResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 orders check"
-      }
-    },
-    "/v0/orders/feed": {
-      "get": {
-        "operationId": "get-v0-orders-feed",
-        "parameters": [
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of feed items to return.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of feed items to return.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrdersFeedBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 orders feed"
-      }
-    },
-    "/v0/orders/history": {
-      "get": {
-        "operationId": "list-v0-orders-history",
-        "parameters": [
-          {
-            "description": "Scoped order name.",
-            "explode": false,
-            "in": "query",
-            "name": "scoped_name",
-            "schema": {
-              "description": "Scoped order name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Maximum number of history entries.",
-            "explode": false,
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "description": "Maximum number of history entries.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Return entries before this RFC3339 timestamp.",
-            "explode": false,
-            "in": "query",
-            "name": "before",
-            "schema": {
-              "description": "Return entries before this RFC3339 timestamp.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/OrderHistoryEntry"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "List v0 orders history"
-      }
-    },
-    "/v0/packs": {
-      "get": {
-        "operationId": "get-v0-packs",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Get-v0-packsResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 packs"
-      }
-    },
     "/v0/provider-readiness": {
       "get": {
         "operationId": "get-v0-provider-readiness",
@@ -11796,134 +12798,6 @@
           }
         },
         "summary": "Get v0 readiness"
-      }
-    },
-    "/v0/service/{name}": {
-      "get": {
-        "operationId": "get-v0-service-by-name",
-        "parameters": [
-          {
-            "description": "Service name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Service name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Status"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 service by name"
-      }
-    },
-    "/v0/service/{name}/restart": {
-      "post": {
-        "operationId": "post-v0-service-by-name-restart",
-        "parameters": [
-          {
-            "description": "Service name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Service name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ServiceRestartOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 service by name restart"
-      }
-    },
-    "/v0/services": {
-      "get": {
-        "operationId": "get-v0-services",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyStatus"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 services"
       }
     },
     "/v0/session/{id}": {
@@ -13015,182 +13889,6 @@
           }
         },
         "summary": "Create a session"
-      }
-    },
-    "/v0/sling": {
-      "post": {
-        "operationId": "post-v0-sling",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SlingInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SlingResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 sling"
-      }
-    },
-    "/v0/workflow/{workflow_id}": {
-      "delete": {
-        "operationId": "delete-v0-workflow-by-workflow-id",
-        "parameters": [
-          {
-            "description": "Workflow (convoy) ID.",
-            "in": "path",
-            "name": "workflow_id",
-            "required": true,
-            "schema": {
-              "description": "Workflow (convoy) ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Permanently delete beads from store (true/false).",
-            "explode": false,
-            "in": "query",
-            "name": "delete",
-            "schema": {
-              "description": "Permanently delete beads from store (true/false).",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkflowDeleteResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 workflow by workflow ID"
-      },
-      "get": {
-        "operationId": "get-v0-workflow-by-workflow-id",
-        "parameters": [
-          {
-            "description": "Workflow (convoy) ID.",
-            "in": "path",
-            "name": "workflow_id",
-            "required": true,
-            "schema": {
-              "description": "Workflow (convoy) ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope kind (city or rig).",
-            "explode": false,
-            "in": "query",
-            "name": "scope_kind",
-            "schema": {
-              "description": "Scope kind (city or rig).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Scope reference.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_ref",
-            "schema": {
-              "description": "Scope reference.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkflowSnapshotResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 workflow by workflow ID"
       }
     }
   }
