@@ -7,4 +7,4 @@
 description = "Evaluate and close pending gates (timer, condition, GitHub)"
 gate = "cooldown"
 interval = "30s"
-exec = "$PACK_DIR/scripts/gate-sweep.sh"
+exec = "$PACK_DIR/assets/scripts/gate-sweep.sh"

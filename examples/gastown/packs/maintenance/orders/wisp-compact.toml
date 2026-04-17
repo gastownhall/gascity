@@ -2,4 +2,4 @@
 description = "TTL-based cleanup of expired ephemeral beads (wisps)"
 gate = "cooldown"
 interval = "1h"
-exec = "$PACK_DIR/scripts/wisp-compact.sh"
+exec = "$PACK_DIR/assets/scripts/wisp-compact.sh"
