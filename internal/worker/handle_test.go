@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -11,7 +12,7 @@ import (
 )
 
 func TestSessionHandleStartStopState(t *testing.T) {
-	handle, store, _, mgr := newTestSessionHandle(t, SessionSpec{
+	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
@@ -68,12 +69,18 @@ func TestSessionHandleStartStopState(t *testing.T) {
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+	callCount := len(sp.Calls)
 	state, err = handle.State(context.Background())
 	if err != nil {
 		t.Fatalf("State(after stop): %v", err)
 	}
 	if state.Phase != PhaseStopped {
 		t.Fatalf("State(after stop) = %s, want %s", state.Phase, PhaseStopped)
+	}
+	for _, call := range sp.Calls[callCount:] {
+		if call.Method == "Pending" {
+			t.Fatalf("State(after stop) probed Pending on a stopped session: %#v", sp.Calls[callCount:])
+		}
 	}
 }
 
@@ -246,6 +253,54 @@ func TestSessionHandleStartPassesSessionEnv(t *testing.T) {
 	}
 }
 
+func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
+	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude --dangerously-skip-permissions",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+	firstStart := firstCall(sp.Calls, "Start")
+	if firstStart == nil {
+		t.Fatalf("runtime calls = %#v, want initial Start", sp.Calls)
+	}
+	firstCommand := firstStart.Config.Command
+	if !strings.Contains(firstCommand, "--session-id") {
+		t.Fatalf("first start command = %q, want --session-id", firstCommand)
+	}
+	if strings.Contains(firstCommand, "--resume") {
+		t.Fatalf("first start command = %q, want no --resume", firstCommand)
+	}
+
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(second): %v", err)
+	}
+	if len(sp.Calls) < 3 {
+		t.Fatalf("runtime calls = %#v, want second Start after Stop", sp.Calls)
+	}
+	secondStart := lastCall(sp.Calls, "Start")
+	if secondStart == nil {
+		t.Fatalf("runtime calls = %#v, want second Start", sp.Calls)
+	}
+	if !strings.Contains(secondStart.Config.Command, "--resume") {
+		t.Fatalf("second start command = %q, want --resume", secondStart.Config.Command)
+	}
+}
+
 func newTestSessionHandle(t *testing.T, spec SessionSpec) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
 	t.Helper()
 
@@ -260,6 +315,24 @@ func newTestSessionHandle(t *testing.T, spec SessionSpec) (*SessionHandle, *bead
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
 	return handle, store, sp, manager
+}
+
+func lastCall(calls []runtime.Call, method string) *runtime.Call {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].Method == method {
+			return &calls[i]
+		}
+	}
+	return nil
+}
+
+func firstCall(calls []runtime.Call, method string) *runtime.Call {
+	for i := range calls {
+		if calls[i].Method == method {
+			return &calls[i]
+		}
+	}
+	return nil
 }
 
 func containsSubsequence(have, want []string) bool {
