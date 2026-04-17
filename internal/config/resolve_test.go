@@ -128,6 +128,9 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	if rp.ResumeStyle != "subcommand" {
 		t.Errorf("ResumeStyle = %q, want subcommand", rp.ResumeStyle)
 	}
+	if rp.ReadyPromptPrefix != "› " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "› ")
+	}
 }
 
 func TestResolveProviderWorkspaceStartCommand(t *testing.T) {

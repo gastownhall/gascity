@@ -29,6 +29,7 @@ type Fake struct {
 	Responses            map[string][]InteractionResponse
 	SleepCapabilityValue SessionSleepCapability
 	WaitForIdleErrors    map[string]error
+	WaitForIdleSequence  map[string][]error
 	DialogErrors         map[string]error
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
@@ -66,6 +67,7 @@ func NewFake() *Fake {
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
 		WaitForIdleErrors:    make(map[string]error),
+		WaitForIdleSequence:  make(map[string][]error),
 		DialogErrors:         make(map[string]error),
 		WaitForIdleGates:     make(map[string]chan struct{}),
 	}
@@ -86,6 +88,7 @@ func NewFailFake() *Fake {
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
 		WaitForIdleErrors:    make(map[string]error),
+		WaitForIdleSequence:  make(map[string][]error),
 		DialogErrors:         make(map[string]error),
 		WaitForIdleGates:     make(map[string]chan struct{}),
 		broken:               true,
@@ -442,6 +445,12 @@ func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) er
 	if f.broken {
 		f.mu.Unlock()
 		return fmt.Errorf("session unavailable")
+	}
+	if seq := f.WaitForIdleSequence[name]; len(seq) > 0 {
+		err := seq[0]
+		f.WaitForIdleSequence[name] = append([]error(nil), seq[1:]...)
+		f.mu.Unlock()
+		return err
 	}
 	err, ok := f.WaitForIdleErrors[name]
 	if !ok {

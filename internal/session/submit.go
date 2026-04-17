@@ -20,8 +20,9 @@ import (
 
 const (
 	defaultQueuedSubmitTTL    = 24 * time.Hour
-	claudeInterruptClearDelay = 100 * time.Millisecond
+	interruptClearDelay       = 100 * time.Millisecond
 	codexDeferredDialogDelay  = 2 * time.Second
+	softInterruptFallbackWait = 2 * time.Second
 	startupDialogVerifiedKey  = "startup_dialog_verified"
 )
 
@@ -129,17 +130,13 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if err := m.stopTurnLocked(b, sessName); err != nil {
 		return err
 	}
-	if waitsForIdleAfterInterrupt(b) {
-		if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
-			if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-				// Idle wait failed (e.g. timeout). Fall back to hard
-				// restart so the session isn't left in limbo.
-				if stopErr := m.sp.Stop(sessName); stopErr != nil {
-					return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
-				}
-				return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
-			}
+	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
+		// Idle wait failed (e.g. timeout). Fall back to hard
+		// restart so the session isn't left in limbo.
+		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 	}
 	if shouldClearInterruptedInputBeforeSubmit(b) {
 		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
@@ -198,6 +195,38 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	return nil
 }
 
+func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if !waitsForIdleAfterInterrupt(b) {
+		return nil
+	}
+	waiter, ok := m.sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return nil
+	}
+	waitForIdle := func(timeout time.Duration) error {
+		err := waiter.WaitForIdle(ctx, sessName, timeout)
+		if errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return nil
+		}
+		return err
+	}
+	if usesSoftEscapeInterrupt(b) {
+		if requiresImmediateInterruptConfirm(b) {
+			if err := m.sp.Interrupt(sessName); err != nil {
+				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
+			}
+			return waitForIdle(15 * time.Second)
+		}
+		if err := waitForIdle(softInterruptFallbackWait); err == nil {
+			return nil
+		}
+		if err := m.sp.Interrupt(sessName); err != nil {
+			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
+		}
+	}
+	return waitForIdle(15 * time.Second)
+}
+
 // providerKind returns the canonical provider kind for a session bead.
 // It checks provider_kind metadata first (set for custom aliases that derive
 // from a builtin), then falls back to the raw provider metadata value.
@@ -224,24 +253,41 @@ func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	return providerKind(b) == "claude"
+	switch providerKind(b) {
+	case "claude", "codex", "gemini":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldClearInterruptedInputBeforeSubmit(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	return providerKind(b) == "claude"
+	switch providerKind(b) {
+	case "claude", "gemini":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
 	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
-	if err := sleepWithContext(ctx, claudeInterruptClearDelay); err != nil {
+	if err := sleepWithContext(ctx, interruptClearDelay); err != nil {
 		return err
 	}
 	return nil
+}
+
+func requiresImmediateInterruptConfirm(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "gemini"
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {

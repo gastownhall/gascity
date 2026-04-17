@@ -744,6 +744,13 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	if err == nil {
 		return nil // created successfully
 	}
+	if errors.Is(err, ErrNoServer) {
+		time.Sleep(50 * time.Millisecond)
+		err = ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
+		if err == nil {
+			return nil
+		}
+	}
 	if !errors.Is(err, ErrSessionExists) {
 		return fmt.Errorf("creating session: %w", err)
 	}
