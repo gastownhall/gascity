@@ -122,6 +122,12 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 			}
 		}
 	}
+	if rp.ResumeFlag != "resume" {
+		t.Errorf("ResumeFlag = %q, want resume", rp.ResumeFlag)
+	}
+	if rp.ResumeStyle != "subcommand" {
+		t.Errorf("ResumeStyle = %q, want subcommand", rp.ResumeStyle)
+	}
 }
 
 func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
