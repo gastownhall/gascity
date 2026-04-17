@@ -211,11 +211,11 @@ func (h *SessionHandle) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resumeCommand, err := h.resumeCommand(id)
+	startCommand, err := h.startCommand(id)
 	if err != nil {
 		return err
 	}
-	return h.manager.Start(ctx, id, resumeCommand, h.runtimeHints())
+	return h.manager.Start(ctx, id, startCommand, h.runtimeHints())
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
@@ -245,34 +245,43 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		Detail:      string(info.State),
 	}
 
-	pending, err := h.Pending(ctx)
-	if err != nil {
-		return State{}, err
-	}
-	if pending != nil {
-		state.Phase = PhaseBlocked
-		state.Pending = pending
-		return state, nil
-	}
-
 	switch info.State {
 	case sessionpkg.StateCreating:
 		state.Phase = PhaseStarting
+		return state, nil
 	case sessionpkg.StateDraining:
 		state.Phase = PhaseStopping
+		return state, nil
 	case sessionpkg.StateAsleep, sessionpkg.StateSuspended, sessionpkg.StateDrained, sessionpkg.StateArchived:
 		state.Phase = PhaseStopped
+		return state, nil
 	case sessionpkg.StateQuarantined:
+		pending, err := h.Pending(ctx)
+		if err != nil {
+			return State{}, err
+		}
 		state.Phase = PhaseBlocked
+		state.Pending = pending
+		return state, nil
 	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		pending, err := h.Pending(ctx)
+		if err != nil {
+			return State{}, err
+		}
+		if pending != nil {
+			state.Phase = PhaseBlocked
+			state.Pending = pending
+			return state, nil
+		}
 		state.Phase = PhaseReady
 		if history, histErr := h.History(ctx, HistoryRequest{}); histErr == nil && history != nil && history.TailState.Activity == TailActivityInTurn {
 			state.Phase = PhaseBusy
 		}
+		return state, nil
 	default:
 		if info.Closed {
 			state.Phase = PhaseStopped
-			break
+			return state, nil
 		}
 		state.Phase = PhaseUnknown
 	}
@@ -289,7 +298,7 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (Messag
 	if err != nil {
 		return MessageResult{}, err
 	}
-	resumeCommand, err := h.resumeCommand(id)
+	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -318,7 +327,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) error {
 	if err != nil {
 		return err
 	}
-	resumeCommand, err := h.resumeCommand(id)
+	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return err
 	}
@@ -362,6 +371,17 @@ func (h *SessionHandle) History(context.Context, HistoryRequest) (*HistorySnapsh
 func (h *SessionHandle) Pending(context.Context) (*PendingInteraction, error) {
 	id := h.currentSessionID()
 	if id == "" {
+		return nil, nil
+	}
+	info, err := h.manager.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if info.Closed {
+		return nil, nil
+	}
+	switch info.State {
+	case sessionpkg.StateAsleep, sessionpkg.StateSuspended, sessionpkg.StateDrained, sessionpkg.StateArchived:
 		return nil, nil
 	}
 	pending, supported, err := h.manager.Pending(id)
@@ -425,10 +445,26 @@ func (h *SessionHandle) currentSessionID() string {
 	return h.sessionID
 }
 
-func (h *SessionHandle) resumeCommand(id string) (string, error) {
+func (h *SessionHandle) startCommand(id string) (string, error) {
 	info, err := h.manager.Get(id)
 	if err != nil {
 		return "", err
+	}
+	if info.State == sessionpkg.StateCreating && h.session.Resume.SessionIDFlag != "" && strings.TrimSpace(info.SessionKey) != "" {
+		command := strings.TrimSpace(info.Command)
+		if command == "" {
+			command = strings.TrimSpace(h.session.Command)
+		}
+		if command == "" {
+			command = strings.TrimSpace(info.Provider)
+		}
+		if command == "" {
+			command = strings.TrimSpace(h.session.Provider)
+		}
+		if command == "" {
+			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
+		}
+		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
 	}
 	return sessionpkg.BuildResumeCommand(info), nil
 }

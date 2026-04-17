@@ -153,46 +153,50 @@ func TestWorkerInferenceSmoke(t *testing.T) {
 		t.FailNow()
 	}
 
+	harness, err := newLiveWorkerHandleHarness(t)
+	if err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceFreshSpawn, err.Error()).WithEvidence(map[string]string{
+			"profile":     string(liveSetup.Profile),
+			"provider":    liveSetup.Provider,
+			"binary_path": liveSetup.BinaryPath,
+		}))
+		t.FailNow()
+	}
+
 	outputRel := fmt.Sprintf("worker-inference-%s.txt", liveSetup.Provider)
 	outputText := fmt.Sprintf("%s live inference ok", liveSetup.Provider)
 	prompt := fmt.Sprintf("Create a file named %s containing exactly %q and nothing else.", outputRel, outputText)
 
-	run, spawnEvidence, taskEvidence, stage, err := runFreshInitSlingWork(t, liveSetup.Provider, prompt, outputRel)
+	startState, startEvidence, err := harness.start()
 	if err != nil {
-		requirement := workertest.RequirementInferenceFreshSpawn
-		evidence := spawnEvidence
-		if stage == "task" {
-			requirement = workertest.RequirementInferenceFreshTask
-			evidence = taskEvidence
-		}
-		reporter.Record(liveFailureResult(profileID, requirement, err.Error(), evidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshSpawn, err.Error(), startEvidence))
 		t.FailNow()
 	}
-	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshSpawn, "fresh city sling spawned a live worker session").WithEvidence(spawnEvidence))
+	if startState.Phase != workerpkg.PhaseReady {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshSpawn, fmt.Sprintf("worker Start phase = %s, want ready", startState.Phase), startEvidence))
+		t.FailNow()
+	}
+	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshSpawn, "worker handle started a live worker session").WithEvidence(startEvidence))
 
+	_, output, taskEvidence, err := harness.submitAndWaitForFile(prompt, outputRel, workerpkg.DeliveryIntentDefault)
 	taskEvidence["expected_output"] = outputText
-	if strings.TrimSpace(run.OutputContents) != outputText {
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, err.Error(), taskEvidence))
+		t.FailNow()
+	}
+	if strings.TrimSpace(output) != outputText {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "live worker output did not match the requested content", taskEvidence))
 		t.FailNow()
 	}
 	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshTask, "live worker completed a machine-checkable file-writing task").WithEvidence(taskEvidence))
 
-	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
-	transcriptPath, snapshot, transcriptEvidence, err := waitForTranscript(
-		adapter,
-		liveSetup.Profile,
-		run.CityDir,
-		run.SpawnedSession.SessionName,
-		run.SpawnedSession.SessionKey,
-		"",
-		"",
-	)
+	snapshot, transcriptEvidence, err := harness.waitForHistory("", "")
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceTranscript, err.Error(), transcriptEvidence))
 		t.FailNow()
 	}
 
-	transcriptEvidence["transcript_path"] = transcriptPath
+	transcriptEvidence["transcript_path"] = snapshot.TranscriptStreamID
 	transcriptEvidence["entry_count"] = strconv.Itoa(len(snapshot.Entries))
 	transcriptEvidence["tail_activity"] = string(snapshot.TailState.Activity)
 	transcriptEvidence["logical_conversation_id"] = snapshot.LogicalConversationID
@@ -220,6 +224,16 @@ func TestWorkerInferenceWorkspaceTask(t *testing.T) {
 		t.FailNow()
 	}
 
+	harness, err := newLiveWorkerHandleHarness(t)
+	if err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceWorkspaceTask, err.Error()).WithEvidence(map[string]string{
+			"profile":     string(liveSetup.Profile),
+			"provider":    liveSetup.Provider,
+			"binary_path": liveSetup.BinaryPath,
+		}))
+		t.FailNow()
+	}
+
 	inputRel := filepath.Join("inputs", fmt.Sprintf("worker-inference-source-%s.txt", liveSetup.Provider))
 	outputRel := fmt.Sprintf("worker-inference-workspace-%s.txt", liveSetup.Provider)
 	expected := fmt.Sprintf("workspace-anchor-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
@@ -235,34 +249,36 @@ func TestWorkerInferenceWorkspaceTask(t *testing.T) {
 		inputRel,
 	)
 
-	run, spawnEvidence, taskEvidence, stage, err := runFreshInitSlingWorkWithSetup(
-		t,
-		liveSetup.Provider,
-		prompt,
-		outputRel,
-		func(cityDir string) error {
-			path := filepath.Join(cityDir, inputRel)
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				return err
-			}
-			return os.WriteFile(path, []byte(sourceBody), 0o644)
-		},
-	)
-	if err != nil {
-		requirement := workertest.RequirementInferenceFreshSpawn
-		evidence := spawnEvidence
-		if stage == "task" {
-			requirement = workertest.RequirementInferenceWorkspaceTask
-			evidence = taskEvidence
-		}
-		reporter.Record(liveFailureResult(profileID, requirement, err.Error(), evidence))
+	path := filepath.Join(harness.workDir, inputRel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceWorkspaceTask, err.Error()).WithEvidence(harness.baseEvidence()))
+		t.FailNow()
+	}
+	if err := os.WriteFile(path, []byte(sourceBody), 0o644); err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceWorkspaceTask, err.Error()).WithEvidence(harness.baseEvidence()))
 		t.FailNow()
 	}
 
-	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshSpawn, "fresh city sling spawned a live worker session").WithEvidence(spawnEvidence))
-	taskEvidence["source_path"] = filepath.Join(run.CityDir, inputRel)
+	startState, spawnEvidence, err := harness.start()
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshSpawn, err.Error(), spawnEvidence))
+		t.FailNow()
+	}
+	if startState.Phase != workerpkg.PhaseReady {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshSpawn, fmt.Sprintf("worker Start phase = %s, want ready", startState.Phase), spawnEvidence))
+		t.FailNow()
+	}
+
+	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshSpawn, "worker handle started a live worker session").WithEvidence(spawnEvidence))
+
+	_, output, taskEvidence, err := harness.submitAndWaitForFile(prompt, outputRel, workerpkg.DeliveryIntentDefault)
+	taskEvidence["source_path"] = path
 	taskEvidence["expected_output"] = expected
-	if strings.TrimSpace(run.OutputContents) != expected {
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceWorkspaceTask, err.Error(), taskEvidence))
+		t.FailNow()
+	}
+	if strings.TrimSpace(output) != expected {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceWorkspaceTask, "live worker did not extract the expected workspace content", taskEvidence))
 		t.FailNow()
 	}
@@ -290,6 +306,16 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 		t.FailNow()
 	}
 
+	harness, err := newLiveWorkerHandleHarness(t)
+	if err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceContinuation, err.Error()).WithEvidence(map[string]string{
+			"profile":     string(liveSetup.Profile),
+			"provider":    liveSetup.Provider,
+			"binary_path": liveSetup.BinaryPath,
+		}))
+		t.FailNow()
+	}
+
 	anchorText := fmt.Sprintf("continuation-anchor-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
 	readyRel := fmt.Sprintf("worker-inference-continuation-ready-%s.txt", liveSetup.Provider)
 	readyText := "ready"
@@ -300,173 +326,110 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 		anchorText,
 	)
 
-	run, spawnEvidence, taskEvidence, stage, err := runFreshNamedSessionTurn(t, liveSetup.Provider, inferenceProbeTemplate, firstPrompt, readyRel)
+	startState, startEvidence, err := harness.start()
 	if err != nil {
-		evidence := spawnEvidence
-		if stage == "task" {
-			evidence = taskEvidence
-		}
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), evidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), startEvidence))
+		t.FailNow()
+	}
+	if startState.Phase != workerpkg.PhaseReady {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("worker Start phase = %s, want ready", startState.Phase), startEvidence))
 		t.FailNow()
 	}
 
-	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
-	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
+	_, readyOutput, taskEvidence, err := harness.submitAndWaitForFile(firstPrompt, readyRel, workerpkg.DeliveryIntentDefault)
+	taskEvidence["expected_output"] = readyText
 	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), beforeEvidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), mergeEvidence(startEvidence, taskEvidence)))
 		t.FailNow()
 	}
-	sessionKeySource := ""
-	resumeSessionKey := ""
-	if strings.TrimSpace(run.SessionKey) == "" && strings.TrimSpace(beforeSnapshot.ProviderSessionID) != "" {
-		resumeSessionKey = providerResumeSessionKey(liveSetup.Provider, beforeSnapshot.ProviderSessionID)
-		sessionKeySource = "provider_transcript"
-	}
-
-	restartEvidence := map[string]string{
-		"city_dir":            run.CityDir,
-		"provider":            liveSetup.Provider,
-		"session_bead_id":     run.SessionID,
-		"session_alias":       run.SessionAlias,
-		"session_name":        run.SessionName,
-		"session_key":         run.SessionKey,
-		"first_transcript":    beforeTranscriptPath,
-		"first_entry_count":   strconv.Itoa(len(beforeSnapshot.Entries)),
-		"first_logical_conv":  beforeSnapshot.LogicalConversationID,
-		"first_provider_sess": beforeSnapshot.ProviderSessionID,
-		"anchor_text":         anchorText,
-	}
-	if sessionKeySource != "" {
-		restartEvidence["session_key_source"] = sessionKeySource
-		restartEvidence["persisted_resume_session_key"] = resumeSessionKey
-	}
-
-	stopOut, err := stopLiveCityForRestart(run.CityDir, run.SessionName)
-	restartEvidence["restart_stop_out"] = strings.TrimSpace(stopOut)
-	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), restartEvidence))
-		t.FailNow()
-	}
-	if resumeSessionKey != "" {
-		if err := persistLiveSessionKey(run.CityDir, run.SessionID, resumeSessionKey); err != nil {
-			evidence := mergeEvidence(restartEvidence, map[string]string{
-				"city_dir":            run.CityDir,
-				"session_bead_id":     run.SessionID,
-				"provider_session_id": beforeSnapshot.ProviderSessionID,
-				"resume_session_key":  resumeSessionKey,
-			})
-			reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("persisting discovered provider session id after stop: %v", err), evidence))
-			t.FailNow()
-		}
-		run.SessionKey = resumeSessionKey
-		restartEvidence["session_key"] = run.SessionKey
-		restartEvidence["persisted_resume_session_key"] = resumeSessionKey
-	}
-	startOut, err := startLiveCityAfterRestart(run.CityDir)
-	restartEvidence["restart_start_out"] = strings.TrimSpace(startOut)
-	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), restartEvidence))
+	if readyOutput != readyText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, "live worker did not produce the expected bootstrap output", mergeEvidence(startEvidence, taskEvidence)))
 		t.FailNow()
 	}
 
-	runningSession, statusOut, err := waitForSessionRunning(run.CityDir, run.Identity, run.SessionName)
-	restartEvidence["resume_status"] = strings.TrimSpace(statusOut)
+	beforeSnapshot, beforeEvidence, err := harness.waitForHistory(firstPrompt, readyText)
 	if err != nil {
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), restartEvidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence)))
 		t.FailNow()
 	}
-	restartEvidence["running_session_id"] = runningSession.ID
-	restartEvidence["running_session_alias"] = runningSession.Alias
-	restartEvidence["running_session_name"] = runningSession.SessionName
-	restartEvidence["running_session_state"] = runningSession.State
-	restartEvidence["running_session_key"] = runningSession.SessionKey
-	restartEvidence["running_session_last_active"] = runningSession.LastActive
-	if strings.TrimSpace(run.SessionKey) != "" && strings.TrimSpace(runningSession.SessionKey) != "" && run.SessionKey != runningSession.SessionKey {
+
+	stopState, stopEvidence, err := harness.stop()
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence)))
+		t.FailNow()
+	}
+	if stopState.Phase != workerpkg.PhaseStopped {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("worker Stop phase = %s, want stopped", stopState.Phase), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence)))
+		t.FailNow()
+	}
+
+	restartState, restartEvidence, err := harness.start()
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence, restartEvidence)))
+		t.FailNow()
+	}
+	if restartState.Phase != workerpkg.PhaseReady {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("worker restart phase = %s, want ready", restartState.Phase), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence, restartEvidence)))
+		t.FailNow()
+	}
+	if startState.SessionID != "" && restartState.SessionID != "" && startState.SessionID != restartState.SessionID {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf(
-			"session key changed across restart: %q -> %q",
-			run.SessionKey,
-			runningSession.SessionKey,
-		), restartEvidence))
+			"session id changed across restart: %q -> %q",
+			startState.SessionID,
+			restartState.SessionID,
+		), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence, restartEvidence)))
 		t.FailNow()
 	}
-	resumeTranscriptPath, resumeSnapshot, resumeEvidence, err := waitForTranscriptPath(adapter, liveSetup.Profile, beforeTranscriptPath, run.SessionKey)
-	restartEvidence = mergeEvidence(restartEvidence, resumeEvidence)
-	if err != nil {
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("restarted session transcript never became ready: %v", err), restartEvidence))
-		t.FailNow()
-	}
-	restartEvidence["resume_transcript"] = resumeTranscriptPath
-	restartEvidence["resume_entry_count"] = strconv.Itoa(len(resumeSnapshot.Entries))
 
 	recallPrompt := fmt.Sprintf(
 		"Without reading files or manually searching history, create a file named %s containing exactly the remembered phrase from our earlier turn and nothing else.",
 		fmt.Sprintf("worker-inference-continuation-proof-%s.txt", liveSetup.Provider),
 	)
 	recallRel := fmt.Sprintf("worker-inference-continuation-proof-%s.txt", liveSetup.Provider)
-	if blocked, blockErr := detectLiveBlockedInteraction(run.CityDir, runningSession.SessionName); blockErr != nil {
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("checking blocked state before recall nudge: %v", blockErr), restartEvidence))
-		t.FailNow()
-	} else if blocked != nil {
-		restartEvidence = mergeEvidence(restartEvidence, blocked.evidence())
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, blocked.err().Error(), restartEvidence))
-		t.FailNow()
-	}
-	nudgeOut, err := runGCWithTimeout(20*time.Second, liveEnv, run.CityDir, "session", "nudge", "--delivery", "immediate", run.Identity, recallPrompt)
-	restartEvidence["nudge_out"] = strings.TrimSpace(nudgeOut)
-	if err != nil {
-		if blocked, blockErr := detectLiveBlockedInteraction(run.CityDir, runningSession.SessionName); blockErr == nil && blocked != nil {
-			restartEvidence = mergeEvidence(restartEvidence, blocked.evidence())
-			restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-			reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, blocked.err().Error(), restartEvidence))
-			t.FailNow()
-		}
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("gc session nudge failed: %v", err), restartEvidence))
-		t.FailNow()
-	}
 
-	proofPath := filepath.Join(run.CityDir, recallRel)
-	proofText, proofEvidence, err := waitForLiveFileText(run.CityDir, runningSession.SessionName, proofPath, 4*time.Minute)
-	restartEvidence["proof_path"] = proofPath
-	restartEvidence = mergeEvidence(restartEvidence, proofEvidence)
-	restartEvidence["proof_contents"] = proofText
+	_, proofText, proofEvidence, err := harness.submitAndWaitForFile(recallPrompt, recallRel, workerpkg.DeliveryIntentDefault)
+	proofEvidence["expected_output"] = anchorText
 	if err != nil {
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), restartEvidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence, restartEvidence, proofEvidence)))
 		t.FailNow()
 	}
 	if strings.TrimSpace(proofText) != anchorText {
-		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, "continued worker did not reproduce the remembered phrase", restartEvidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, "continued worker did not reproduce the remembered phrase", mergeEvidence(startEvidence, taskEvidence, beforeEvidence, stopEvidence, restartEvidence, proofEvidence)))
 		t.FailNow()
 	}
 
-	afterTranscriptPath, afterSnapshot, continuationEvidence, err := waitForContinuationTranscript(
-		adapter,
-		liveSetup.Profile,
-		run.CityDir,
-		runningSession.SessionName,
-		run.SessionKey,
-		beforeTranscriptPath,
-		beforeSnapshot,
-		recallPrompt,
-	)
+	afterSnapshot, continuationEvidence, err := harness.waitForContinuationHistory(beforeSnapshot, recallPrompt)
 	if err != nil {
-		merged := mergeEvidence(restartEvidence, continuationEvidence)
-		merged["supervisor_logs"] = supervisorLogs(run.CityDir)
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), merged))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), mergeEvidence(
+			startEvidence,
+			taskEvidence,
+			beforeEvidence,
+			stopEvidence,
+			restartEvidence,
+			proofEvidence,
+			continuationEvidence,
+		)))
 		t.FailNow()
 	}
 
-	merged := mergeEvidence(restartEvidence, continuationEvidence)
-	merged["after_transcript"] = afterTranscriptPath
-	merged["after_entry_count"] = strconv.Itoa(len(afterSnapshot.Entries))
-	merged["after_logical_conv"] = afterSnapshot.LogicalConversationID
-	merged["after_provider_sess"] = afterSnapshot.ProviderSessionID
+	merged := mergeEvidence(
+		startEvidence,
+		taskEvidence,
+		beforeEvidence,
+		stopEvidence,
+		restartEvidence,
+		proofEvidence,
+		continuationEvidence,
+		map[string]string{
+			"anchor_text":          anchorText,
+			"before_transcript":    beforeSnapshot.TranscriptStreamID,
+			"after_transcript":     afterSnapshot.TranscriptStreamID,
+			"after_entry_count":    strconv.Itoa(len(afterSnapshot.Entries)),
+			"after_logical_conv":   afterSnapshot.LogicalConversationID,
+			"after_provider_sess":  afterSnapshot.ProviderSessionID,
+			"continued_file_value": proofText,
+		},
+	)
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceContinuation, "restarted live worker resumed the same conversation and recalled prior context").WithEvidence(merged))
 }
 
@@ -492,6 +455,16 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 		t.FailNow()
 	}
 
+	harness, err := newLiveWorkerHandleHarness(t)
+	if err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error()).WithEvidence(map[string]string{
+			"profile":     string(liveSetup.Profile),
+			"provider":    liveSetup.Provider,
+			"binary_path": liveSetup.BinaryPath,
+		}))
+		t.FailNow()
+	}
+
 	anchorText := fmt.Sprintf("multi-turn-anchor-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
 	readyRel := fmt.Sprintf("worker-inference-multi-turn-ready-%s.txt", liveSetup.Provider)
 	readyText := "ready"
@@ -502,20 +475,30 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 		anchorText,
 	)
 
-	run, spawnEvidence, taskEvidence, stage, err := runFreshManualSessionTurn(t, liveSetup.Provider, inferenceProbeTemplate, inferenceProbeManualID, firstPrompt, readyRel)
+	startState, startEvidence, err := harness.start()
 	if err != nil {
-		evidence := spawnEvidence
-		if stage == "task" {
-			evidence = taskEvidence
-		}
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), evidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), startEvidence))
+		t.FailNow()
+	}
+	if startState.Phase != workerpkg.PhaseReady {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, fmt.Sprintf("worker Start phase = %s, want ready", startState.Phase), startEvidence))
 		t.FailNow()
 	}
 
-	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
-	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
+	_, firstOutput, taskEvidence, err := harness.submitAndWaitForFile(firstPrompt, readyRel, workerpkg.DeliveryIntentDefault)
+	taskEvidence["expected_output"] = readyText
 	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence)))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(startEvidence, taskEvidence)))
+		t.FailNow()
+	}
+	if firstOutput != readyText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "first workflow turn did not produce the expected ready output", mergeEvidence(startEvidence, taskEvidence)))
+		t.FailNow()
+	}
+
+	beforeSnapshot, beforeEvidence, err := harness.waitForHistory(firstPrompt, readyText)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence)))
 		t.FailNow()
 	}
 
@@ -524,39 +507,21 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 		"Without reading files or manually searching history, create a file named %s containing exactly the remembered phrase from our earlier turn and nothing else.",
 		secondRel,
 	)
-	secondSession, secondOutput, secondEvidence, err := submitLiveSessionTurnAndWaitForFile(
-		t,
-		run.CityDir,
-		run.SessionID,
-		run.SessionName,
-		secondPrompt,
-		filepath.Join(run.CityDir, secondRel),
-		sessionpkg.SubmitIntentDefault,
-	)
+	_, secondOutput, secondEvidence, err := harness.submitAndWaitForFile(secondPrompt, secondRel, workerpkg.DeliveryIntentDefault)
 	secondEvidence["expected_output"] = anchorText
 	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, secondEvidence)))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, secondEvidence)))
 		t.FailNow()
 	}
 	if secondOutput != anchorText {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "second workflow turn did not recall the remembered phrase", mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, secondEvidence)))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "second workflow turn did not recall the remembered phrase", mergeEvidence(startEvidence, taskEvidence, beforeEvidence, secondEvidence)))
 		t.FailNow()
 	}
 
-	sessionKey := firstNonEmpty(secondSession.SessionKey, run.SessionKey)
-	secondTranscriptPath, secondSnapshot, secondTranscriptEvidence, err := waitForContinuationTranscript(
-		adapter,
-		liveSetup.Profile,
-		run.CityDir,
-		secondSession.SessionName,
-		sessionKey,
-		beforeTranscriptPath,
-		beforeSnapshot,
-		secondPrompt,
-	)
+	secondSnapshot, secondTranscriptEvidence, err := harness.waitForContinuationHistory(beforeSnapshot, secondPrompt)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			secondEvidence,
@@ -571,19 +536,11 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 		"Without reading files or manually searching history, create a file named %s containing exactly the word you wrote to the ready file in our first turn, then a pipe character, then the remembered phrase from that same turn, and nothing else.",
 		summaryRel,
 	)
-	thirdSession, thirdOutput, thirdEvidence, err := submitLiveSessionTurnAndWaitForFile(
-		t,
-		run.CityDir,
-		run.SessionID,
-		secondSession.SessionName,
-		thirdPrompt,
-		filepath.Join(run.CityDir, summaryRel),
-		sessionpkg.SubmitIntentDefault,
-	)
+	_, thirdOutput, thirdEvidence, err := harness.submitAndWaitForFile(thirdPrompt, summaryRel, workerpkg.DeliveryIntentDefault)
 	thirdEvidence["expected_output"] = summaryExpected
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			secondEvidence,
@@ -594,7 +551,7 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 	}
 	if thirdOutput != summaryExpected {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "final workflow turn did not combine the expected prior-turn context", mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			secondEvidence,
@@ -604,20 +561,10 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 		t.FailNow()
 	}
 
-	sessionKey = firstNonEmpty(thirdSession.SessionKey, sessionKey)
-	thirdTranscriptPath, thirdSnapshot, thirdTranscriptEvidence, err := waitForContinuationTranscript(
-		adapter,
-		liveSetup.Profile,
-		run.CityDir,
-		thirdSession.SessionName,
-		sessionKey,
-		secondTranscriptPath,
-		secondSnapshot,
-		thirdPrompt,
-	)
+	thirdSnapshot, thirdTranscriptEvidence, err := harness.waitForContinuationHistory(secondSnapshot, thirdPrompt)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			secondEvidence,
@@ -629,7 +576,7 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 	}
 
 	evidence := mergeEvidence(
-		spawnEvidence,
+		startEvidence,
 		taskEvidence,
 		beforeEvidence,
 		secondEvidence,
@@ -637,12 +584,9 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 		thirdEvidence,
 		thirdTranscriptEvidence,
 		map[string]string{
-			"session_id":              run.SessionID,
-			"session_name":            thirdSession.SessionName,
-			"session_key":             sessionKey,
-			"first_transcript":        beforeTranscriptPath,
-			"second_transcript":       secondTranscriptPath,
-			"third_transcript":        thirdTranscriptPath,
+			"first_transcript":        beforeSnapshot.TranscriptStreamID,
+			"second_transcript":       secondSnapshot.TranscriptStreamID,
+			"third_transcript":        thirdSnapshot.TranscriptStreamID,
 			"first_logical_conv":      beforeSnapshot.LogicalConversationID,
 			"second_logical_conv":     secondSnapshot.LogicalConversationID,
 			"third_logical_conv":      thirdSnapshot.LogicalConversationID,
@@ -675,6 +619,16 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
+	harness, err := newLiveWorkerHandleHarness(t)
+	if err != nil {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error()).WithEvidence(map[string]string{
+			"profile":     string(liveSetup.Profile),
+			"provider":    liveSetup.Provider,
+			"binary_path": liveSetup.BinaryPath,
+		}))
+		t.FailNow()
+	}
+
 	anchorText := fmt.Sprintf("interrupt-anchor-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
 	readyRel := fmt.Sprintf("worker-inference-interrupt-ready-%s.txt", liveSetup.Provider)
 	readyText := "ready"
@@ -685,43 +639,45 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		anchorText,
 	)
 
-	run, spawnEvidence, taskEvidence, stage, err := runFreshManualSessionTurn(t, liveSetup.Provider, inferenceProbeTemplate, inferenceProbeManualID, firstPrompt, readyRel)
+	startState, startEvidence, err := harness.start()
 	if err != nil {
-		evidence := spawnEvidence
-		if stage == "task" {
-			evidence = taskEvidence
-		}
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), evidence))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), startEvidence))
+		t.FailNow()
+	}
+	if startState.Phase != workerpkg.PhaseReady {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, fmt.Sprintf("worker Start phase = %s, want ready", startState.Phase), startEvidence))
 		t.FailNow()
 	}
 
-	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
-	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
+	_, firstOutput, taskEvidence, err := harness.submitAndWaitForFile(firstPrompt, readyRel, workerpkg.DeliveryIntentDefault)
+	taskEvidence["expected_output"] = readyText
 	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence)))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(startEvidence, taskEvidence)))
+		t.FailNow()
+	}
+	if firstOutput != readyText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "live worker did not produce the expected ready output", mergeEvidence(startEvidence, taskEvidence)))
+		t.FailNow()
+	}
+
+	beforeSnapshot, beforeEvidence, err := harness.waitForHistory(firstPrompt, readyText)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence)))
 		t.FailNow()
 	}
 
 	busyDone := fmt.Sprintf("interrupt-first-done-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
 	busyPrompt := busyTurnPrompt(fmt.Sprintf("interrupt-%s", liveSetup.Provider), 220, busyDone)
-	busySession, busyEvidence, err := submitLiveSession(
-		t,
-		run.CityDir,
-		run.SessionID,
-		run.SessionName,
-		busyPrompt,
-		sessionpkg.SubmitIntentDefault,
-	)
+	_, busyEvidence, err := harness.submit(busyPrompt, workerpkg.DeliveryIntentDefault)
 	if err != nil {
-		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, busyEvidence)))
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, busyEvidence)))
 		t.FailNow()
 	}
 
-	sessionKey := firstNonEmpty(busySession.SessionKey, run.SessionKey)
-	busyTranscriptPath, busySnapshot, busyTranscriptEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, busySession.SessionName, sessionKey, busyPrompt, "")
+	busySnapshot, busyTranscriptEvidence, err := harness.waitForHistory(busyPrompt, "")
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -740,19 +696,11 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		recoveryRel,
 		recoveryText,
 	)
-	recoverySession, recoveryOutput, recoveryEvidence, err := submitLiveSessionTurnAndWaitForFile(
-		t,
-		run.CityDir,
-		run.SessionID,
-		busySession.SessionName,
-		recoveryPrompt,
-		filepath.Join(run.CityDir, recoveryRel),
-		sessionpkg.SubmitIntentInterruptNow,
-	)
+	_, recoveryOutput, recoveryEvidence, err := harness.submitAndWaitForFile(recoveryPrompt, recoveryRel, workerpkg.DeliveryIntentInterruptNow)
 	recoveryEvidence["expected_output"] = recoveryText
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -763,7 +711,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 	}
 	if recoveryOutput != recoveryText {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "replacement turn did not produce the expected recovery output", mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -773,20 +721,10 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
-	sessionKey = firstNonEmpty(recoverySession.SessionKey, sessionKey)
-	recoveryTranscriptPath, recoverySnapshot, recoveryTranscriptEvidence, err := waitForContinuationTranscript(
-		adapter,
-		liveSetup.Profile,
-		run.CityDir,
-		recoverySession.SessionName,
-		sessionKey,
-		busyTranscriptPath,
-		busySnapshot,
-		recoveryPrompt,
-	)
+	recoverySnapshot, recoveryTranscriptEvidence, err := harness.waitForInterruptContinuationHistory(busySnapshot, busyPrompt, recoveryPrompt)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -798,7 +736,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 	}
 	if historyContainsAfterPrompt(recoverySnapshot, busyPrompt, busyDone) {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "interrupt_now replacement still allowed the interrupted turn to finish", mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -815,19 +753,11 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		"Without reading files or manually searching history, create a file named %s containing exactly the replacement token from the prior interrupt-recovery turn and nothing else.",
 		continueRel,
 	)
-	continueSession, continueOutput, continueEvidence, err := submitLiveSessionTurnAndWaitForFile(
-		t,
-		run.CityDir,
-		run.SessionID,
-		recoverySession.SessionName,
-		continuePrompt,
-		filepath.Join(run.CityDir, continueRel),
-		sessionpkg.SubmitIntentDefault,
-	)
+	_, continueOutput, continueEvidence, err := harness.submitAndWaitForFile(continuePrompt, continueRel, workerpkg.DeliveryIntentDefault)
 	continueEvidence["expected_output"] = recoveryText
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -840,7 +770,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 	}
 	if continueOutput != recoveryText {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "post-recovery continuation did not recall the replacement turn output", mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -852,20 +782,10 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
-	sessionKey = firstNonEmpty(continueSession.SessionKey, sessionKey)
-	continueTranscriptPath, continueSnapshot, continueTranscriptEvidence, err := waitForContinuationTranscript(
-		adapter,
-		liveSetup.Profile,
-		run.CityDir,
-		continueSession.SessionName,
-		sessionKey,
-		recoveryTranscriptPath,
-		recoverySnapshot,
-		continuePrompt,
-	)
+	continueSnapshot, continueTranscriptEvidence, err := harness.waitForContinuationHistory(recoverySnapshot, continuePrompt)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -879,7 +799,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 	}
 	if historyContainsAfterPrompt(continueSnapshot, busyPrompt, busyDone) {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "interrupted completion marker appeared later in the continued transcript", mergeEvidence(
-			spawnEvidence,
+			startEvidence,
 			taskEvidence,
 			beforeEvidence,
 			busyEvidence,
@@ -894,7 +814,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 	}
 
 	evidence := mergeEvidence(
-		spawnEvidence,
+		startEvidence,
 		taskEvidence,
 		beforeEvidence,
 		busyEvidence,
@@ -904,13 +824,10 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		continueEvidence,
 		continueTranscriptEvidence,
 		map[string]string{
-			"session_id":                    run.SessionID,
-			"session_name":                  continueSession.SessionName,
-			"session_key":                   sessionKey,
-			"first_transcript":              beforeTranscriptPath,
-			"interrupted_transcript":        busyTranscriptPath,
-			"recovery_transcript":           recoveryTranscriptPath,
-			"continue_transcript":           continueTranscriptPath,
+			"first_transcript":              beforeSnapshot.TranscriptStreamID,
+			"interrupted_transcript":        busySnapshot.TranscriptStreamID,
+			"recovery_transcript":           recoverySnapshot.TranscriptStreamID,
+			"continue_transcript":           continueSnapshot.TranscriptStreamID,
 			"first_logical_conv":            beforeSnapshot.LogicalConversationID,
 			"interrupted_logical_conv":      busySnapshot.LogicalConversationID,
 			"recovery_logical_conv":         recoverySnapshot.LogicalConversationID,
@@ -1385,6 +1302,84 @@ func TestContinuationSnapshotErrorIgnoresClaudeStopHookSummary(t *testing.T) {
 
 	if err := continuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, transcript, before, transcript, after, recall); err != nil {
 		t.Fatalf("continuationSnapshotError(claude stop hook summary) = %v", err)
+	}
+}
+
+func TestInterruptContinuationSnapshotErrorAllowsInterruptedTailRewrite(t *testing.T) {
+	const (
+		transcript        = "/tmp/claude/session.jsonl"
+		sessionID         = "claude-session-1"
+		interruptedPrompt = "write 220 numbered lines and finish with interrupt-done"
+		recoveryPrompt    = "create recovery.txt containing replacement-token"
+	)
+	before := &workerpkg.HistorySnapshot{
+		TranscriptStreamID:    transcript,
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     sessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-partial"},
+		Entries: []workerpkg.HistoryEntry{
+			{ID: "user-1", Actor: workerpkg.ActorUser, Kind: "user", Text: "remember alpha"},
+			{ID: "assistant-1", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "ready"},
+			{ID: "user-2", Actor: workerpkg.ActorUser, Kind: "user", Text: interruptedPrompt},
+			{ID: "assistant-partial", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "1\n2\n3"},
+		},
+	}
+	after := &workerpkg.HistorySnapshot{
+		TranscriptStreamID:    transcript,
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     sessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-2"},
+		Entries: []workerpkg.HistoryEntry{
+			before.Entries[0],
+			before.Entries[1],
+			before.Entries[2],
+			{ID: "user-3", Actor: workerpkg.ActorUser, Kind: "user", Text: recoveryPrompt},
+			{ID: "assistant-2", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "replacement-token"},
+		},
+	}
+
+	if err := continuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, transcript, before, transcript, after, recoveryPrompt); err == nil {
+		t.Fatalf("continuationSnapshotError() succeeded, want strict interrupted-tail preservation failure")
+	}
+	if err := interruptContinuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, before, after, interruptedPrompt, recoveryPrompt); err != nil {
+		t.Fatalf("interruptContinuationSnapshotError() = %v", err)
+	}
+}
+
+func TestInterruptContinuationSnapshotErrorAllowsDroppedInterruptedPrompt(t *testing.T) {
+	const (
+		transcript        = "/tmp/claude/session.jsonl"
+		sessionID         = "claude-session-1"
+		interruptedPrompt = "write 220 numbered lines and finish with interrupt-done"
+		recoveryPrompt    = "create recovery.txt containing replacement-token"
+	)
+	before := &workerpkg.HistorySnapshot{
+		TranscriptStreamID:    transcript,
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     sessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-partial"},
+		Entries: []workerpkg.HistoryEntry{
+			{ID: "user-1", Actor: workerpkg.ActorUser, Kind: "user", Text: "remember alpha"},
+			{ID: "assistant-1", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "ready"},
+			{ID: "user-2", Actor: workerpkg.ActorUser, Kind: "user", Text: interruptedPrompt},
+			{ID: "assistant-partial", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "1\n2\n3"},
+		},
+	}
+	after := &workerpkg.HistorySnapshot{
+		TranscriptStreamID:    transcript,
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     sessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-2"},
+		Entries: []workerpkg.HistoryEntry{
+			before.Entries[0],
+			before.Entries[1],
+			{ID: "user-3", Actor: workerpkg.ActorUser, Kind: "user", Text: recoveryPrompt},
+			{ID: "assistant-2", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "replacement-token"},
+		},
+	}
+
+	if err := interruptContinuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, before, after, interruptedPrompt, recoveryPrompt); err != nil {
+		t.Fatalf("interruptContinuationSnapshotError(dropped interrupted prompt) = %v", err)
 	}
 }
 
@@ -3447,6 +3442,65 @@ func continuationSnapshotError(
 	}
 	if promptIndex >= len(after.Entries)-1 {
 		return fmt.Errorf("continued transcript did not record any response after the recall prompt")
+	}
+	return nil
+}
+
+func interruptContinuationSnapshotError(
+	profile workerpkg.Profile,
+	before *workerpkg.HistorySnapshot,
+	after *workerpkg.HistorySnapshot,
+	interruptedPrompt string,
+	recoveryPrompt string,
+) error {
+	if before == nil || after == nil {
+		return fmt.Errorf("missing normalized history snapshot")
+	}
+	if beforePath, afterPath := strings.TrimSpace(before.TranscriptStreamID), strings.TrimSpace(after.TranscriptStreamID); beforePath != "" && afterPath != "" && beforePath != afterPath {
+		return fmt.Errorf("transcript path changed from %q to %q", beforePath, afterPath)
+	}
+	if strings.TrimSpace(before.LogicalConversationID) == "" || strings.TrimSpace(after.LogicalConversationID) == "" {
+		return fmt.Errorf("logical conversation identity is empty")
+	}
+	if !sameContinuationIdentity(profile, before.LogicalConversationID, after.LogicalConversationID) {
+		return fmt.Errorf("logical conversation changed from %q to %q", before.LogicalConversationID, after.LogicalConversationID)
+	}
+	if before.ProviderSessionID != "" && after.ProviderSessionID != "" && !sameContinuationIdentity(profile, before.ProviderSessionID, after.ProviderSessionID) {
+		return fmt.Errorf("provider session changed from %q to %q", before.ProviderSessionID, after.ProviderSessionID)
+	}
+	if strings.TrimSpace(before.Cursor.AfterEntryID) == "" || strings.TrimSpace(after.Cursor.AfterEntryID) == "" {
+		return fmt.Errorf("continuation cursor is empty")
+	}
+	if before.Cursor.AfterEntryID == after.Cursor.AfterEntryID {
+		return fmt.Errorf("continuation cursor did not advance")
+	}
+	interruptedPrompt = strings.TrimSpace(interruptedPrompt)
+	if interruptedPrompt == "" {
+		return fmt.Errorf("interrupted prompt is empty")
+	}
+	recoveryPrompt = strings.TrimSpace(recoveryPrompt)
+	if recoveryPrompt == "" {
+		return fmt.Errorf("replacement prompt is empty")
+	}
+	beforeInterruptedIndex := findEntryTextIndex(before.Entries, 0, interruptedPrompt)
+	if beforeInterruptedIndex < 0 {
+		return fmt.Errorf("prior normalized history missing interrupted prompt %q", interruptedPrompt)
+	}
+	stablePrefixEnd := historySubsequenceEnd(after.Entries, continuationComparableEntries(before.Entries[:beforeInterruptedIndex]))
+	if stablePrefixEnd < 0 {
+		return fmt.Errorf("interrupt recovery transcript does not preserve stable pre-interrupt history")
+	}
+	afterInterruptedIndex := findEntryTextIndex(after.Entries, stablePrefixEnd, interruptedPrompt)
+	searchStart := stablePrefixEnd
+	if afterInterruptedIndex >= 0 {
+		searchStart = afterInterruptedIndex + 1
+	}
+	recoveryIndex := findEntryTextIndex(after.Entries, searchStart, recoveryPrompt)
+	if recoveryIndex < 0 {
+		return fmt.Errorf("interrupt recovery transcript missing replacement prompt %q", recoveryPrompt)
+	}
+	if recoveryIndex >= len(after.Entries)-1 {
+		return fmt.Errorf("interrupt recovery transcript did not record any response after the replacement prompt")
 	}
 	return nil
 }

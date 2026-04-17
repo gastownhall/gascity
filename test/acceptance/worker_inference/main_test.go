@@ -468,6 +468,37 @@ func stagedSecretSource(provider string, fromFile bool) string {
 	return "inline-secret:" + provider
 }
 
+func stageClaudeOAuthSource(sourceDir, rootConfigPath, gcHome string) error {
+	sourceDir = strings.TrimSpace(sourceDir)
+	if sourceDir == "" {
+		return fmt.Errorf("claude source config dir is empty")
+	}
+	dstClaudeDir := filepath.Join(gcHome, ".claude")
+	if err := os.MkdirAll(dstClaudeDir, 0o755); err != nil {
+		return err
+	}
+	for _, name := range []string{".credentials.json", "settings.json"} {
+		if err := copyFileIfExists(filepath.Join(sourceDir, name), filepath.Join(dstClaudeDir, name), 0o600); err != nil {
+			return err
+		}
+	}
+	rootConfigPath = strings.TrimSpace(rootConfigPath)
+	if rootConfigPath == "" {
+		rootConfigPath = filepath.Join(filepath.Dir(sourceDir), ".claude.json")
+	}
+	if err := mergeClaudeLocalConfig(
+		rootConfigPath,
+		filepath.Join(sourceDir, ".claude.json"),
+		filepath.Join(dstClaudeDir, ".claude.json"),
+	); err != nil {
+		return err
+	}
+	if err := copyFileIfExists(rootConfigPath, filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
+		return err
+	}
+	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())
+}
+
 func stageClaudeOAuth(realHome, gcHome string) error {
 	srcClaudeDir := filepath.Join(realHome, ".claude")
 	dstClaudeDir := filepath.Join(gcHome, ".claude")
