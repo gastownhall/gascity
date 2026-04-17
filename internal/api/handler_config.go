@@ -58,13 +58,25 @@ type configPatchesResponse struct {
 	ProviderCount int `json:"provider_count"`
 }
 
+// agentResponseName returns the name an API client should use as the agent's
+// identity within a (optional) rig scope. For V2 imported agents this prefixes
+// the bare Name with BindingName so callers can reconstruct the same qualified
+// identity that appears in session.template (e.g. "gastown.mayor"). Keeping
+// Dir separate preserves the existing `dir/name` reconstruction contract.
+func agentResponseName(a config.Agent) string {
+	if a.BindingName == "" {
+		return a.Name
+	}
+	return a.BindingName + "." + a.Name
+}
+
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.state.Config()
 
 	agents := make([]configAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		agents = append(agents, configAgentResponse{
-			Name:      a.Name,
+			Name:      agentResponseName(a),
 			Dir:       a.Dir,
 			Provider:  a.Provider,
 			IsPool:    isMultiSessionAgent(a),
@@ -146,7 +158,7 @@ func (s *Server) handleConfigExplain(w http.ResponseWriter, _ *http.Request) {
 		origin := agentOrigin(a, rawCfg, cfg)
 		agents = append(agents, annotatedAgent{
 			configAgentResponse: configAgentResponse{
-				Name:      a.Name,
+				Name:      agentResponseName(a),
 				Dir:       a.Dir,
 				Provider:  a.Provider,
 				IsPool:    isMultiSessionAgent(a),
