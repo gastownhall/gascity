@@ -140,6 +140,7 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 
 func startPasswordedDoltServer(t *testing.T, repoDir string, setupQueries ...string) (string, int, int, func()) {
 	t.Helper()
+	configureTestDoltIdentityEnv(t)
 
 	doltPath := os.Getenv("GC_DOLT_REAL_BINARY")
 	var err error

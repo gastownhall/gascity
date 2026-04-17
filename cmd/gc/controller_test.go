@@ -478,6 +478,7 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
+	configureTestDoltIdentityEnv(t)
 
 	dir := shortSocketTempDir(t, "gc-reload-agents-")
 	tomlPath := filepath.Join(dir, "city.toml")
