@@ -266,6 +266,7 @@ func stageCodexAuth(gcHome string, env *helpers.Env) (string, error) {
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
 		return "", err
 	}
+	env.With("CODEX_HOME", codexDir)
 	stagedAuth, authFromFile, err := stagedValue(
 		"GC_WORKER_INFERENCE_CODEX_AUTH_JSON",
 		"GC_WORKER_INFERENCE_CODEX_AUTH_FILE",

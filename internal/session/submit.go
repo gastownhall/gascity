@@ -21,6 +21,8 @@ import (
 const (
 	defaultQueuedSubmitTTL    = 24 * time.Hour
 	claudeInterruptClearDelay = 100 * time.Millisecond
+	codexDeferredDialogDelay  = 2 * time.Second
+	startupDialogVerifiedKey  = "startup_dialog_verified"
 )
 
 // SubmitIntent is the semantic delivery choice for a user message.
@@ -254,6 +256,16 @@ func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {
 	default:
 		return false
 	}
+}
+
+func needsDeferredStartupDialogVerification(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	if providerKind(b) != "codex" {
+		return false
+	}
+	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {

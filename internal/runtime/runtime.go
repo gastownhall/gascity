@@ -202,6 +202,13 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// DialogProvider is an optional extension for runtimes that can detect and
+// dismiss known startup-style dialogs (workspace trust, bypass permissions,
+// rate-limit prompts) on an already-running session.
+type DialogProvider interface {
+	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
+}
+
 // ImmediateNudgeProvider is an optional extension for runtimes that can inject
 // input immediately without performing their own wait-idle heuristic first.
 type ImmediateNudgeProvider interface {

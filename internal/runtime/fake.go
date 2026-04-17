@@ -29,6 +29,7 @@ type Fake struct {
 	Responses            map[string][]InteractionResponse
 	SleepCapabilityValue SessionSleepCapability
 	WaitForIdleErrors    map[string]error
+	DialogErrors         map[string]error
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -65,6 +66,7 @@ func NewFake() *Fake {
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
 		WaitForIdleErrors:    make(map[string]error),
+		DialogErrors:         make(map[string]error),
 		WaitForIdleGates:     make(map[string]chan struct{}),
 	}
 }
@@ -84,6 +86,7 @@ func NewFailFake() *Fake {
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
 		WaitForIdleErrors:    make(map[string]error),
+		DialogErrors:         make(map[string]error),
 		WaitForIdleGates:     make(map[string]chan struct{}),
 		broken:               true,
 	}
@@ -132,6 +135,20 @@ func (f *Fake) Interrupt(name string) error {
 	f.Calls = append(f.Calls, Call{Method: "Interrupt", Name: name})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
+	}
+	return nil
+}
+
+// DismissKnownDialogs records the call and returns the configured result.
+func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "DismissKnownDialogs", Name: name, Value: timeout.String()})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.DialogErrors[name]; ok {
+		return err
 	}
 	return nil
 }

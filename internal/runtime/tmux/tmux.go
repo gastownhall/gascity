@@ -1292,7 +1292,13 @@ func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
 // Call this after starting Claude and waiting for it to initialize (WaitForCommand),
 // but before sending any prompts. Idempotent: safe to call on sessions without dialogs.
 func (t *Tmux) AcceptStartupDialogs(ctx context.Context, sess string) error {
-	return runtime.AcceptStartupDialogs(ctx,
+	return t.DismissKnownDialogs(ctx, sess, 8*time.Second)
+}
+
+// DismissKnownDialogs dismisses known trust, permissions, and rate-limit
+// dialogs using a bounded timeout.
+func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration) error {
+	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
 		func(lines int) (string, error) { return t.CapturePane(sess, lines) },
 		func(keys ...string) error {
 			for _, k := range keys {
