@@ -1,11 +1,12 @@
 // Command gen-client generates the typed Go API client from the live
-// OpenAPI spec. Phase 3 Fix 3a.
+// OpenAPI spec.
 //
 // Pipeline:
-//  1. Fetch the merged per-city + supervisor 3.0-downgrade spec via
-//     specmerge.Merged("/openapi-3.0.json"). Huma v2 emits the downgrade
+//  1. Fetch the 3.0-downgrade spec directly from a SupervisorMux built
+//     against an empty resolver. Huma v2 emits the downgrade
 //     automatically; oapi-codegen v2.6.0 consumes it cleanly where it
-//     chokes on 3.1.
+//     chokes on 3.1. The supervisor owns every operation, so one fetch
+//     yields the entire API surface — no merge step.
 //  2. Preprocess:
 //       a. Path params `{name...}` (Huma's rest-of-path syntax) are
 //          renamed to `{name}` to match the declared parameter.
@@ -29,11 +30,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"regexp"
+	"time"
 
-	"github.com/gastownhall/gascity/internal/specmerge"
+	"github.com/gastownhall/gascity/internal/api"
 )
 
 func main() {
@@ -44,10 +48,17 @@ func main() {
 }
 
 func run() error {
-	// Step 1: fetch the merged 3.0-downgraded spec.
-	spec, err := specmerge.Merged("/openapi-3.0.json")
-	if err != nil {
-		return fmt.Errorf("merged spec: %w", err)
+	// Step 1: fetch the 3.0-downgraded spec from the supervisor.
+	sm := api.NewSupervisorMux(emptyResolver{}, false, "", time.Time{})
+	req := httptest.NewRequest(http.MethodGet, "/openapi-3.0.json", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /openapi-3.0.json returned %d: %s", rec.Code, rec.Body.String())
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+		return fmt.Errorf("parse spec: %w", err)
 	}
 
 	// Step 2a: normalize path params (`{name...}` → `{name}`).
@@ -109,6 +120,13 @@ var (
 	pathParamRE    = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\.\.\.\}`)
 	responseBodyRE = regexp.MustCompile(`^(?:Get|Post|Put|Patch|Delete|Head|Options)-.*Response$`)
 )
+
+// emptyResolver implements api.CityResolver with no cities. Schema
+// generation is reflection-based and never calls resolver methods.
+type emptyResolver struct{}
+
+func (emptyResolver) ListCities() []api.CityInfo      { return nil }
+func (emptyResolver) CityState(name string) api.State { return nil }
 
 // rewriteRefs walks spec and rewrites any "$ref": "#/components/schemas/<old>"
 // values to the new name.

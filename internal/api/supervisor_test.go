@@ -337,12 +337,16 @@ func TestSupervisorHealth(t *testing.T) {
 func TestSupervisorEmptyCityName(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 
+	// "/v0/city/" is not a registered route — every per-city operation
+	// is registered at a specific scoped path like /v0/city/{cityName}/foo,
+	// and the /svc pass-through requires /v0/city/{cityName}/svc/... . A
+	// bare "/v0/city/" correctly 404s.
 	req := httptest.NewRequest("GET", "/v0/city/", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 

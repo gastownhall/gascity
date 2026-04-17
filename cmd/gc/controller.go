@@ -678,31 +678,33 @@ func runController(
 	cs.startBeadEventWatcher(ctx)
 	cr.setControllerState(cs)
 
-	// Start API server if configured.
+	// Start API server if configured. Standalone city mode wraps the
+	// single city in a SupervisorMux so every endpoint is served at its
+	// real scoped path (/v0/city/{cityName}/...) — matching the
+	// published OpenAPI contract. Clients should use NewCityScopedClient
+	// with the city name (accessible via the supervisor's /v0/cities).
 	if cfg.API.Port > 0 {
 		bind := cfg.API.BindOrDefault()
 		nonLocal := bind != "127.0.0.1" && bind != "localhost" && bind != "::1"
-		var apiSrv *api.Server
-		if nonLocal && !cfg.API.AllowMutations {
-			apiSrv = api.NewReadOnly(cs)
+		readOnly := nonLocal && !cfg.API.AllowMutations
+		if readOnly {
 			fmt.Fprintf(stderr, "api: binding to %s — mutation endpoints disabled (non-localhost)\n", bind) //nolint:errcheck
-		} else {
-			apiSrv = api.New(cs)
 		}
+		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, readOnly, "controller", time.Now())
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {
 			fmt.Fprintf(stderr, "api: WARNING: listen %s failed: %v — continuing without API server\n", addr, apiErr) //nolint:errcheck // best-effort stderr
 		} else {
 			go func() {
-				if err := apiSrv.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				if err := apiMux.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					fmt.Fprintf(stderr, "api: %v\n", err) //nolint:errcheck // best-effort stderr
 				}
 			}()
 			defer func() {
 				shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				apiSrv.Shutdown(shutCtx) //nolint:errcheck // best-effort cleanup
+				apiMux.Shutdown(shutCtx) //nolint:errcheck // best-effort cleanup
 			}()
 			fmt.Fprintf(stdout, "API server listening on http://%s\n", addr) //nolint:errcheck // best-effort stdout
 		}
@@ -716,4 +718,28 @@ func runController(
 	telemetry.RecordControllerLifecycle(context.Background(), "stopped")
 	fmt.Fprintln(stdout, "Controller stopped.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// singleCityStateResolver adapts a single api.State into an api.CityResolver
+// so the standalone `gc controller` mode can run its single city behind a
+// SupervisorMux. The resulting HTTP surface matches supervisor-mode exactly:
+// every per-city operation is served at /v0/city/{cityName}/... . No bare
+// /v0/foo alias exists.
+type singleCityStateResolver struct {
+	state api.State
+}
+
+func (r *singleCityStateResolver) ListCities() []api.CityInfo {
+	return []api.CityInfo{{
+		Name:    r.state.CityName(),
+		Path:    r.state.CityPath(),
+		Running: true,
+	}}
+}
+
+func (r *singleCityStateResolver) CityState(name string) api.State {
+	if name == r.state.CityName() {
+		return r.state
+	}
+	return nil
 }

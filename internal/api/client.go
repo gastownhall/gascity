@@ -65,9 +65,8 @@ func ShouldFallback(err error) bool {
 // generated typed client so CLI commands can route writes through the API
 // when a controller is running.
 type Client struct {
-	cw          *genclient.ClientWithResponses
-	scopePrefix string
-	cityName    string // non-empty for city-scoped clients; used by migrated scoped-path methods
+	cw       *genclient.ClientWithResponses
+	cityName string // non-empty for city-scoped clients; passed to every per-city call
 }
 
 // SessionSubmitResponse mirrors POST /v0/session/{id}/submit.
@@ -78,36 +77,28 @@ type SessionSubmitResponse struct {
 	Intent session.SubmitIntent `json:"intent"`
 }
 
-// NewClient creates a new API client targeting the given base URL
-// (e.g., "http://127.0.0.1:8080").
+// NewClient creates a new supervisor-scope API client targeting the
+// given base URL (e.g., "http://127.0.0.1:8080"). Supervisor-scope
+// operations (ListCities, ListServices-via-city, etc.) work through
+// this client; per-city calls require NewCityScopedClient.
 func NewClient(baseURL string) *Client {
-	return newScopedClient(baseURL, "")
+	return newClient(baseURL, "")
 }
 
-// NewCityScopedClient creates a client that routes requests through the
-// supervisor's city-scoped API namespace for the given city name.
+// NewCityScopedClient creates a client that targets per-city operations
+// at "/v0/city/<cityName>/...". The generated client produces those
+// paths natively — no prefix rewrite or path editor needed.
 func NewCityScopedClient(baseURL, cityName string) *Client {
-	c := newScopedClient(baseURL, "/v0/city/"+escapeName(cityName))
-	c.cityName = cityName
-	return c
+	return newClient(baseURL, cityName)
 }
 
-func newScopedClient(baseURL, scopePrefix string) *Client {
+func newClient(baseURL, cityName string) *Client {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	// The generated client uses baseURL directly — it builds operation
-	// paths itself, and for migrated scoped operations those paths
-	// already include /v0/city/{cityName}. For unmigrated bare-path
-	// methods (/v0/foo), the request editor wraps them into the
-	// city-scoped form as a transition shim. Delete that shim once
-	// every method uses the scoped generated client call.
 	cw, err := genclient.NewClientWithResponses(
 		baseURL,
 		genclient.WithHTTPClient(httpClient),
 		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
 			req.Header.Set("X-GC-Request", "true")
-			if scopePrefix != "" {
-				wrapBareV0IntoScope(req, scopePrefix)
-			}
 			return nil
 		}),
 	)
@@ -117,25 +108,7 @@ func newScopedClient(baseURL, scopePrefix string) *Client {
 		// every method rather than panicking.
 		return &Client{}
 	}
-	return &Client{cw: cw, scopePrefix: scopePrefix}
-}
-
-// wrapBareV0IntoScope rewrites unmigrated bare `/v0/<rest>` outbound
-// request paths to `<scopePrefix>/<rest>` so they hit the supervisor's
-// city-scoped forwarder. Already-scoped paths (e.g. /v0/city/<name>/...)
-// pass through unchanged. Transitional: delete when every generated
-// method used by the CLI targets a scoped path directly.
-func wrapBareV0IntoScope(req *http.Request, scopePrefix string) {
-	path := req.URL.Path
-	// Already scoped — no rewrite.
-	if strings.HasPrefix(path, scopePrefix+"/") || path == scopePrefix {
-		return
-	}
-	// Bare /v0/... → <scopePrefix>/...
-	if strings.HasPrefix(path, "/v0/") {
-		req.URL.Path = scopePrefix + strings.TrimPrefix(path, "/v0")
-		req.URL.RawPath = ""
-	}
+	return &Client{cw: cw, cityName: cityName}
 }
 
 // --- Lookup methods ---

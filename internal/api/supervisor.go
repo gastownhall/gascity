@@ -85,51 +85,32 @@ func NewSupervisorMux(resolver CityResolver, readOnly bool, version string, star
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()
-	// Transitional forwarding catchall for per-city paths that have not
-	// yet been migrated to scoped Huma registrations. Go 1.22+ mux
-	// prefers specific segment-pattern routes over prefix handlers, so
-	// migrated ops registered at "/v0/city/{cityName}/foo" take
-	// precedence; unmigrated paths hit this catchall and are forwarded
-	// to the per-city Server's mux. Delete when migration is complete.
-	humaMux.HandleFunc("/v0/city/", sm.legacyCityForwarder)
+	// /svc/* workspace-service pass-through. This is the single remaining
+	// non-Huma registration on the supervisor — untyped by design (the
+	// proxy passes bodies through to external service processes, which
+	// own their own HTTP contracts). Go 1.22+ mux: "/v0/city/{cityName}/svc/"
+	// as a prefix pattern only matches that subtree; everything else is
+	// a typed Huma operation registered at its real scoped path.
+	humaMux.HandleFunc("/v0/city/{cityName}/svc/", sm.serveCitySvcProxy)
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
 
-// legacyCityForwarder handles /v0/city/{name}/<rest> paths that have
-// NOT been migrated to scoped Huma registrations. It extracts the city
-// name and forwards the inner path to the per-city Server's mux.
-//
-// This is transitional: once every per-city operation is registered at
-// its scoped path on sm.humaAPI, Go 1.22+ mux specificity ensures this
-// catchall is never reached, and it should be deleted along with the
-// per-city Server.mux registration.
-func (sm *SupervisorMux) legacyCityForwarder(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	rest := strings.TrimPrefix(path, "/v0/city/")
-	idx := strings.IndexByte(rest, '/')
-	var cityName, suffix string
-	if idx < 0 {
-		cityName = rest
-		suffix = ""
-	} else {
-		cityName = rest[:idx]
-		suffix = rest[idx:]
-	}
+// serveCitySvcProxy forwards /v0/city/{cityName}/svc/... to the per-city
+// Server's mux at /svc/... (where handleServiceProxy is registered).
+// The /svc/* surface is explicitly excluded from the "spec drives
+// everything" principle: it is a raw pass-through to external service
+// processes that own their own HTTP contracts.
+func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Request) {
+	cityName := r.PathValue("cityName")
 	if cityName == "" {
 		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "bad_request: city name required in URL")
 		return
 	}
-	var targetPath string
-	switch {
-	case suffix == "":
-		targetPath = "/v0/status"
-	case strings.HasPrefix(suffix, "/svc/"):
-		targetPath = suffix
-	default:
-		targetPath = "/v0" + suffix
-	}
-	sm.serveCityRequest(w, r, cityName, targetPath)
+	// Strip the /v0/city/<name> prefix; the remaining path is /svc/...
+	// which per-city Server.mux handles via handleServiceProxy.
+	svcPath := strings.TrimPrefix(r.URL.Path, "/v0/city/"+cityName)
+	sm.serveCityRequest(w, r, cityName, svcPath)
 }
 
 // Handler returns an http.Handler with the standard middleware chain applied.

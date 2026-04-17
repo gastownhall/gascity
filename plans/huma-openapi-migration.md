@@ -71,9 +71,16 @@ the consumer side are both fully spec-driven.
   checks in city-create dropped — covered by `minLength:"1"` tags.
   `BootstrapProfile` switch replaced by `enum:"..."` tag on the
   field. Formula `name == ""` check dropped — covered by
-  `minLength:"1" pattern:"\\S"` on the path parameter. The one
-  remaining handler-side validation is the runtime provider-builtin
-  membership check, which can't be expressed as a static enum.
+  `minLength:"1" pattern:"\\S"` on the path parameter. The remaining
+  handler-side validations are all runtime-state-dependent and
+  genuinely can't be expressed as static Huma tags:
+  - `huma_handlers_supervisor.go` — provider-builtin membership
+    check (enum over config-loaded providers, not a static set).
+  - `huma_handlers_extmsg.go` — conditional Provider/AccountID
+    required when `input.Body.Message == nil` (sibling-field gate,
+    not expressible as a tag).
+  - `huma_handlers_convoys.go` — rig-required check when multiple
+    rigs are configured (runtime store count).
 
 - **Supervisor topology collapse.** The bare-path backward-compat
   branch in `SupervisorMux.ServeHTTP` is deleted. Gas City is

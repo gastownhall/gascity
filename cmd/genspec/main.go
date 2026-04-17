@@ -1,15 +1,15 @@
 // Command genspec writes the live OpenAPI 3.1 spec to disk so downstream
 // clients (CLI, dashboard, third-party consumers) can be generated from
-// it. The spec is the merged per-city + supervisor spec (see
-// internal/specmerge), which is the authoritative contract for every
-// HTTP endpoint the control plane exposes.
+// it. The supervisor's Huma API owns every operation, so we fetch
+// /openapi.json directly from a supervisor constructed against an empty
+// resolver — no merge step, no per-city spec to combine, one
+// authoritative source of truth.
 //
 // Usage:
 //
 //	go run ./cmd/genspec > internal/api/openapi.json
 //
-// This is the "spec drives everything" entry point: the committed spec
-// is the contract; if it drifts from what the server actually serves,
+// If this output drifts from what the running supervisor serves,
 // TestOpenAPISpecInSync fails.
 package main
 
@@ -17,22 +17,34 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"time"
 
-	"github.com/gastownhall/gascity/internal/specmerge"
+	"github.com/gastownhall/gascity/internal/api"
 )
 
 func main() {
-	spec, err := specmerge.Merged("/openapi.json")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "merged spec: %v\n", err)
+	sm := api.NewSupervisorMux(emptyResolver{}, false, "", time.Time{})
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "GET /openapi.json returned %d: %s\n", rec.Code, rec.Body.String())
 		os.Exit(1)
 	}
 
+	// Pretty-print for a stable, reviewable diff.
+	var raw any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		fmt.Fprintf(os.Stderr, "parse spec: %v\n", err)
+		os.Exit(1)
+	}
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(spec); err != nil {
+	if err := enc.Encode(raw); err != nil {
 		fmt.Fprintf(os.Stderr, "encode spec: %v\n", err)
 		os.Exit(1)
 	}
@@ -41,3 +53,10 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// emptyResolver implements api.CityResolver with no cities. Schema
+// generation is reflection-based and never calls resolver methods.
+type emptyResolver struct{}
+
+func (emptyResolver) ListCities() []api.CityInfo      { return nil }
+func (emptyResolver) CityState(name string) api.State { return nil }

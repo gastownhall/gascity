@@ -5897,8 +5897,7 @@
     }
   },
   "info": {
-    "description": "Gas City orchestration API",
-    "title": "Gas City API",
+    "title": "Gas City Supervisor API",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",

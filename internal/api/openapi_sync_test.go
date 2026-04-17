@@ -3,28 +3,38 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/gastownhall/gascity/internal/specmerge"
+	"github.com/gastownhall/gascity/internal/api"
 )
 
 // TestOpenAPISpecInSync enforces that the committed openapi.json file
-// matches the merged per-city + supervisor spec that the control plane
-// actually serves. If this test fails, regenerate the spec via:
+// matches the spec the supervisor actually serves. If this test fails,
+// regenerate the spec via:
 //
 //	go run ./cmd/genspec > internal/api/openapi.json
 //
-// This is how the spec becomes a first-class artifact of the repo — any
-// change to Huma types, routes, or handlers forces a spec update in the
-// same PR so downstream client generators stay in sync.
+// The supervisor is the single Huma API; a GET /openapi.json against it
+// yields the authoritative contract for every HTTP endpoint the control
+// plane exposes.
 func TestOpenAPISpecInSync(t *testing.T) {
-	live, err := specmerge.Merged("/openapi.json")
-	if err != nil {
-		t.Fatalf("merged spec: %v", err)
+	sm := api.NewSupervisorMux(emptyTestResolver{}, false, "", time.Time{})
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json returned %d: %s", rec.Code, rec.Body.String())
 	}
 
+	var live any
+	if err := json.Unmarshal(rec.Body.Bytes(), &live); err != nil {
+		t.Fatalf("parse live spec: %v", err)
+	}
 	var liveBuf bytes.Buffer
 	enc := json.NewEncoder(&liveBuf)
 	enc.SetIndent("", "  ")
@@ -39,9 +49,16 @@ func TestOpenAPISpecInSync(t *testing.T) {
 	}
 
 	if !bytes.Equal(onDisk, liveBuf.Bytes()) {
-		t.Fatalf("openapi.json is out of sync with the merged live spec.\n"+
+		t.Fatalf("openapi.json is out of sync with the live server spec.\n"+
 			"Run `go run ./cmd/genspec > internal/api/openapi.json` to regenerate.\n"+
 			"Live spec size: %d bytes, on-disk size: %d bytes",
 			liveBuf.Len(), len(onDisk))
 	}
 }
+
+// emptyTestResolver is a CityResolver with no cities. Huma schema
+// generation is reflection-based and never calls resolver methods.
+type emptyTestResolver struct{}
+
+func (emptyTestResolver) ListCities() []api.CityInfo      { return nil }
+func (emptyTestResolver) CityState(name string) api.State { return nil }
