@@ -442,6 +442,27 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	return n, nil
 }
 
+// sweepOrphanedOrderTrackingRetry calls sweepOrphanedOrderTracking with
+// bounded retries. On startup the bead store's backing server may not be
+// query-ready yet (dolt cold-start race, #753). Errors where no beads
+// were closed (n == 0) are retried; partial closes (n > 0) are returned
+// immediately to avoid double-closing.
+func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var n int
+	var err error
+	for i := range attempts {
+		n, err = sweepOrphanedOrderTracking(store)
+		if err == nil || n > 0 || i == attempts-1 {
+			return n, err
+		}
+		time.Sleep(backoff)
+	}
+	return n, err
+}
+
 // effectiveTimeout returns the timeout to use for an order dispatch.
 // Uses the order's configured timeout (or default), capped by maxTimeout.
 func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
