@@ -1373,8 +1373,38 @@ type AgentDefaults struct {
 	MCP []string `toml:"mcp,omitempty"`
 }
 
+func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "model") {
+		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "wake_mode") {
+		dst.WakeMode = src.WakeMode
+	}
+	if !meta.IsDefined("agent_defaults", "default_sling_formula") {
+		dst.DefaultSlingFormula = src.DefaultSlingFormula
+	}
+	if !meta.IsDefined("agent_defaults", "allow_overlay") {
+		dst.AllowOverlay = append([]string(nil), src.AllowOverlay...)
+	}
+	if !meta.IsDefined("agent_defaults", "allow_env_override") {
+		dst.AllowEnvOverride = append([]string(nil), src.AllowEnvOverride...)
+	}
+	if !meta.IsDefined("agent_defaults", "append_fragments") {
+		dst.AppendFragments = append([]string(nil), src.AppendFragments...)
+	}
+	if !meta.IsDefined("agent_defaults", "skills") {
+		dst.Skills = append([]string(nil), src.Skills...)
+	}
+	if !meta.IsDefined("agent_defaults", "mcp") {
+		dst.MCP = append([]string(nil), src.MCP...)
+	}
+}
+
 func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 	if meta.IsDefined("agent_defaults") {
+		if meta.IsDefined("agents") {
+			mergeAgentDefaultsAliasPreferCanonical(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
+		}
 		cfg.AgentsDefaults = AgentDefaults{}
 		return
 	}

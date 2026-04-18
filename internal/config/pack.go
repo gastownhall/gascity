@@ -879,7 +879,9 @@ func normalizePackAgentDefaultsAlias(cfg *packConfig, meta toml.MetaData) {
 		cfg.AgentsDefaults = AgentDefaults{}
 		return
 	}
-	if !meta.IsDefined("agent_defaults") {
+	if meta.IsDefined("agent_defaults") {
+		mergeAgentDefaultsAliasPreferCanonical(&cfg.AgentDefaults, cfg.AgentsDefaults, meta)
+	} else {
 		cfg.AgentDefaults = cfg.AgentsDefaults
 	}
 	cfg.AgentsDefaults = AgentDefaults{}

@@ -364,6 +364,46 @@ scope = "city"
 	}
 }
 
+func TestLoadWithIncludes_PackAgentDefaultsMergesNonOverlappingAgentsAliasFields(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+includes = ["packs/imported"]
+`)
+	fs.Files["/city/packs/imported/pack.toml"] = []byte(`
+[pack]
+name = "imported"
+schema = 2
+
+[agent_defaults]
+append_fragments = ["canonical-footer"]
+
+[agents]
+default_sling_formula = "mol-legacy"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(explicitAgents(cfg.Agents)) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(explicitAgents(cfg.Agents)))
+	}
+	agent := explicitAgents(cfg.Agents)[0]
+	if got := agent.EffectiveDefaultSlingFormula(); got != "mol-legacy" {
+		t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, "mol-legacy")
+	}
+	if !reflect.DeepEqual(agent.InheritedAppendFragments, []string{"canonical-footer"}) {
+		t.Fatalf("InheritedAppendFragments = %v, want %v", agent.InheritedAppendFragments, []string{"canonical-footer"})
+	}
+}
+
 func TestLoadWithIncludes_ImportedPackWarningsSurfaceInProvenanceWithoutRigPacks(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
