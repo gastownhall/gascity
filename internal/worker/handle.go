@@ -252,6 +252,20 @@ func (h *SessionHandle) Start(ctx context.Context) error {
 	return h.manager.Start(ctx, id, startCommand, h.runtimeHints())
 }
 
+// Attach ensures the worker runtime is live and then attaches the caller's
+// terminal using the underlying session transport.
+func (h *SessionHandle) Attach(ctx context.Context) error {
+	id, err := h.ensureSessionID()
+	if err != nil {
+		return err
+	}
+	resumeCommand, err := h.startCommand(id)
+	if err != nil {
+		return err
+	}
+	return h.manager.Attach(ctx, id, resumeCommand, h.runtimeHints())
+}
+
 // Create materializes the worker session without requiring API callers to
 // invoke session.Manager lifecycle methods directly.
 func (h *SessionHandle) Create(ctx context.Context, mode CreateMode) (sessionpkg.Info, error) {
@@ -580,7 +594,23 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		}
 		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
 	}
-	return sessionpkg.BuildResumeCommand(info), nil
+	resumeInfo := info
+	if command := strings.TrimSpace(h.session.Command); command != "" {
+		resumeInfo.Command = command
+	}
+	if provider := strings.TrimSpace(h.session.Provider); provider != "" {
+		resumeInfo.Provider = provider
+	}
+	if resumeFlag := strings.TrimSpace(h.session.Resume.ResumeFlag); resumeFlag != "" {
+		resumeInfo.ResumeFlag = resumeFlag
+	}
+	if resumeStyle := strings.TrimSpace(h.session.Resume.ResumeStyle); resumeStyle != "" {
+		resumeInfo.ResumeStyle = resumeStyle
+	}
+	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
+		resumeInfo.ResumeCommand = resumeCommand
+	}
+	return sessionpkg.BuildResumeCommand(resumeInfo), nil
 }
 
 func (h *SessionHandle) providerLabel() string {

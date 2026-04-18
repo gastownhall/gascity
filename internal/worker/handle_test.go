@@ -99,6 +99,56 @@ func TestSessionHandleStartStopState(t *testing.T) {
 	}
 }
 
+func TestSessionHandleAttachUsesWorkerBoundary(t *testing.T) {
+	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", info.ID, err)
+	}
+	if bead.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateActive)
+	}
+
+	updated, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", info.ID, err)
+	}
+
+	start := firstCall(sp.Calls, "Start")
+	if start == nil {
+		t.Fatalf("runtime calls = %#v, want Start", sp.Calls)
+	}
+	if start.Name != updated.SessionName {
+		t.Fatalf("Start name = %q, want %q", start.Name, updated.SessionName)
+	}
+	attach := firstCall(sp.Calls, "Attach")
+	if attach == nil {
+		t.Fatalf("runtime calls = %#v, want Attach", sp.Calls)
+	}
+	if attach.Name != updated.SessionName {
+		t.Fatalf("Attach name = %q, want %q", attach.Name, updated.SessionName)
+	}
+	if attachIndex(sp.Calls, "Start") > attachIndex(sp.Calls, "Attach") {
+		t.Fatalf("runtime call order = %#v, want Start before Attach", sp.Calls)
+	}
+}
+
 func TestSessionHandleCreateDeferred(t *testing.T) {
 	handle, store, sp, _ := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -628,6 +678,67 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	}
 }
 
+func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+
+	info, err := manager.Create(
+		context.Background(),
+		"probe",
+		"Probe",
+		"legacy-agent",
+		t.TempDir(),
+		"legacy-agent",
+		nil,
+		sessionpkg.ProviderResume{
+			ResumeFlag:    "--old-resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager: manager,
+		Session: SessionSpec{
+			ID:       info.ID,
+			Command:  "fresh-agent --new-flag",
+			Provider: "fresh-agent",
+			WorkDir:  info.WorkDir,
+			Resume: sessionpkg.ProviderResume{
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+
+	sp.Calls = nil
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	start := firstCall(sp.Calls, "Start")
+	if start == nil {
+		t.Fatalf("runtime calls = %#v, want Start", sp.Calls)
+	}
+	if strings.Contains(start.Config.Command, "--old-resume") {
+		t.Fatalf("start command = %q, used stale resume flag", start.Config.Command)
+	}
+	if !strings.Contains(start.Config.Command, "fresh-agent --new-flag --resume "+info.SessionKey) {
+		t.Fatalf("start command = %q, want current command and resume flag for %s", start.Config.Command, info.SessionKey)
+	}
+}
+
 func newTestSessionHandle(t *testing.T, spec SessionSpec) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
 	t.Helper()
 
@@ -660,6 +771,15 @@ func firstCall(calls []runtime.Call, method string) *runtime.Call {
 		}
 	}
 	return nil
+}
+
+func attachIndex(calls []runtime.Call, method string) int {
+	for i := range calls {
+		if calls[i].Method == method {
+			return i
+		}
+	}
+	return -1
 }
 
 func containsSubsequence(have, want []string) bool {
