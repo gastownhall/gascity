@@ -896,16 +896,14 @@ func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]
 	if err != nil {
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
+	slingOutput := out
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	if _, wid, err := waitForBeadMetadataValue(t, cityDir, issueID, "workflow_id", 10*time.Second); err == nil {
+		return issueID, wid
+	} else {
 		issue := showBead(t, cityDir, issueID)
-		if wid := metaValue(issue, "workflow_id"); wid != "" {
-			return issueID, wid
-		}
-		time.Sleep(200 * time.Millisecond)
+		t.Fatalf("timed out waiting for workflow_id on %s: %v\ngc sling output:\n%s\nsource bead:\n%+v", issueID, err, slingOutput, issue)
 	}
-	t.Fatalf("timed out waiting for workflow_id on %s", issueID)
 	return "", ""
 }
 

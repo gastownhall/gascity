@@ -209,35 +209,26 @@ func startScopedWorkflow(t *testing.T, cityDir string) (string, string) {
 	}
 	slingOutput := out
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	if _, workflowID, err := waitForBeadMetadataValue(t, cityDir, issueID, "workflow_id", 10*time.Second); err == nil {
+		return issueID, workflowID
+	} else {
 		issue := showBead(t, cityDir, issueID)
-		if workflowID := metaValue(issue, "workflow_id"); workflowID != "" {
-			return issueID, workflowID
-		}
-		time.Sleep(200 * time.Millisecond)
+		t.Fatalf("timed out waiting for workflow_id on source bead %s: %v\ngc sling output:\n%s\nsource bead:\n%+v", issueID, err, slingOutput, issue)
 	}
-
-	issue := showBead(t, cityDir, issueID)
-	t.Fatalf("timed out waiting for workflow_id on source bead %s\ngc sling output:\n%s\nsource bead:\n%+v", issueID, slingOutput, issue)
 	return "", ""
 }
 
 func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		bead, err := tryShowBead(cityDir, beadID)
-		if err != nil {
-			t.Logf("bd show error (retrying): %v", err)
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		if bead.Status == "closed" {
-			return bead
-		}
-		time.Sleep(200 * time.Millisecond)
+	var waitErr error
+	if bead, err := waitForBeadCondition(t, cityDir, beadID, timeout, func(bead graphBead) bool {
+		return bead.Status == "closed"
+	}); err == nil {
+		return bead
+	} else {
+		waitErr = err
+		t.Logf("waitForBeadClosed(%s) ended with %v; collecting diagnostics", beadID, err)
 	}
 
 	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
@@ -262,8 +253,8 @@ func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Durati
 	}
 	traceOut := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
 	workflowTraceOut := readOptionalFile(filepath.Join(cityDir, "control-dispatcher-trace.log"))
-	t.Fatalf("timed out waiting for bead %s to close\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
-		beadID, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
+	t.Fatalf("waiting for bead %s to close failed: %v\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
+		beadID, waitErr, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
 	return graphBead{}
 }
 

@@ -168,6 +168,10 @@ show_assignee() {
     timeout 10 bd show --json "$1" | json_payload | jq_bead '.assignee'
 }
 
+refresh_bead_json() {
+    timeout 10 bd show --json "$1" 2>/dev/null
+}
+
 owned_status_ok() {
     local status="$1"
     local assignee="$2"
@@ -412,29 +416,20 @@ while true; do
             ;;
     esac
 
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
-    if [ "$outcome_before" = "skipped" ]; then
-        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+    if ! bead_json=$(refresh_bead_json "$bead_id"); then
+        trace "state-refresh-failed bead=$bead_id ref=$ref"
         sleep 0.2
         continue
     fi
-    if [ "$owns_bead" = "true" ]; then
-        if ! owned_status_ok "$status_before" "$assignee_before"; then
-            trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
-            sleep 0.2
-            continue
-        fi
-    elif [ "$status_before" != "open" ]; then
-        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+    bead_payload=$(printf '%s\n' "$bead_json" | json_payload)
+    if [ -z "$bead_payload" ] || ! printf '%s\n' "$bead_payload" | jq -e . >/dev/null 2>&1; then
+        trace "state-refresh-failed bead=$bead_id ref=$ref reason=invalid-json"
         sleep 0.2
         continue
     fi
-
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
+    status_before=$(printf '%s\n' "$bead_payload" | jq_bead '.status')
+    outcome_before=$(printf '%s\n' "$bead_payload" | jq_bead '.metadata["gc.outcome"]')
+    assignee_before=$(printf '%s\n' "$bead_payload" | jq_bead '.assignee')
     if [ "$outcome_before" = "skipped" ]; then
         trace "skip-before-action bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
         sleep 0.2
