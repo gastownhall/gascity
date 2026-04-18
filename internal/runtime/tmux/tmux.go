@@ -2483,7 +2483,7 @@ func waitForIdlePoll(ctx context.Context, d time.Duration) error {
 // WaitForInterruptBoundary waits for a provider-native interrupt
 // acknowledgement before the next user turn is injected.
 func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
-	provider, err := t.GetEnvironment(session, "GC_PROVIDER")
+	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
 	switch strings.TrimSpace(provider) {
 	case "", "codex":
 		// Continue below. Empty provider env can happen in tests or with
@@ -2555,12 +2555,16 @@ func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
 	return latestPath, latestMod, nil
 }
 
-func readFileTail(path string, maxBytes int64) (string, error) {
+func readFileTail(path string, maxBytes int64) (_ string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	info, err := f.Stat()
 	if err != nil {

@@ -319,15 +319,17 @@ func reconcileSessionBeadsTraced(
 			}
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
-			if preserveConfiguredNamedSessionBead(*session, cfg, cityName) {
+			switch {
+			case preserveConfiguredNamedSessionBead(*session, cfg, cityName):
 				template := normalizedSessionTemplate(*session, cfg)
 				if template == "" {
 					template = session.Metadata["template"]
 				}
 				preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
-				if err != nil {
+				switch {
+				case err != nil:
 					fmt.Fprintf(stderr, "session reconciler: resolve preserved named session %s: %v\n", name, err) //nolint:errcheck
-				} else {
+				default:
 					tp = preservedTP
 					desired = true
 				}
@@ -340,7 +342,7 @@ func reconcileSessionBeadsTraced(
 						"degraded":       err != nil,
 					}, nil, "")
 				}
-			} else if pendingCreateSessionStillLeased(*session, cfg, clk) {
+			case pendingCreateSessionStillLeased(*session, cfg, clk):
 				template := normalizedSessionTemplate(*session, cfg)
 				if template == "" {
 					template = session.Metadata["template"]
@@ -353,7 +355,7 @@ func reconcileSessionBeadsTraced(
 					}, nil, "")
 				}
 				continue
-			} else {
+			default:
 				if providerAlive {
 					// When a store query failed (partial results),
 					// skip drain — the session may have work that we

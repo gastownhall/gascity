@@ -337,7 +337,7 @@ func writeEvent(dst io.Writer, event Event) error {
 	return enc.Encode(event)
 }
 
-func appendTranscript(path string, sequence int, ts time.Time, transcript TranscriptEvent) error {
+func appendTranscript(path string, sequence int, ts time.Time, transcript TranscriptEvent) (err error) {
 	if path == "" {
 		return nil
 	}
@@ -345,7 +345,11 @@ func appendTranscript(path string, sequence int, ts time.Time, transcript Transc
 	if err != nil {
 		return err
 	}
-	defer fh.Close()
+	defer func() {
+		if closeErr := fh.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 	record := struct {
 		Time      time.Time         `json:"time"`
 		Sequence  int               `json:"sequence"`
@@ -369,7 +373,8 @@ func appendTranscript(path string, sequence int, ts time.Time, transcript Transc
 		IsError:   transcript.IsError,
 		Metadata:  transcript.Metadata,
 	}
-	return json.NewEncoder(fh).Encode(record)
+	err = json.NewEncoder(fh).Encode(record)
+	return err
 }
 
 func mergeMetadata(parts ...map[string]string) map[string]string {
@@ -398,7 +403,7 @@ func writeState(path, state string) error {
 	return os.WriteFile(path, []byte(state+"\n"), 0o644)
 }
 
-func writeFile(path, content string, appendMode bool) error {
+func writeFile(path, content string, appendMode bool) (err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
@@ -407,7 +412,11 @@ func writeFile(path, content string, appendMode bool) error {
 		if err != nil {
 			return err
 		}
-		defer fh.Close()
+		defer func() {
+			if closeErr := fh.Close(); closeErr != nil && err == nil {
+				err = closeErr
+			}
+		}()
 		_, err = fh.WriteString(content)
 		return err
 	}

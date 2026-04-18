@@ -115,15 +115,15 @@ func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptRes
 		sess *sessionlog.Session
 		err  error
 	)
-	if req.Raw {
-		if strings.TrimSpace(req.BeforeEntryID) != "" {
-			sess, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, req.BeforeEntryID)
-		} else {
-			sess, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
-		}
-	} else if strings.TrimSpace(req.BeforeEntryID) != "" {
-		sess, err = sessionlog.ReadProviderFileOlder(req.Provider, path, req.TailCompactions, req.BeforeEntryID)
-	} else {
+	beforeID := strings.TrimSpace(req.BeforeEntryID)
+	switch {
+	case req.Raw && beforeID != "":
+		sess, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, beforeID)
+	case req.Raw:
+		sess, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+	case beforeID != "":
+		sess, err = sessionlog.ReadProviderFileOlder(req.Provider, path, req.TailCompactions, beforeID)
+	default:
 		sess, err = sessionlog.ReadProviderFile(req.Provider, path, req.TailCompactions)
 	}
 	if err != nil {

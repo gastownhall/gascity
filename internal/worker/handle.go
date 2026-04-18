@@ -965,7 +965,8 @@ func mergeHistoryEntries(previous, current []HistoryEntry) []HistoryEntry {
 	prev := cloneHistoryEntries(previous)
 	curr := cloneHistoryEntries(current)
 	overlap := historyEntryOverlap(prev, curr)
-	merged := append(prev, curr[overlap:]...)
+	prev = append(prev, curr[overlap:]...)
+	merged := prev
 	for idx := range merged {
 		merged[idx].Order = idx
 	}

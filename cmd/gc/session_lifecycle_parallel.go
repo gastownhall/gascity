@@ -526,13 +526,14 @@ func executePreparedStartWave(
 				err = nil
 			case errors.Is(err, runtime.ErrSessionExists):
 				running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
-				if runningErr != nil || !running {
+				switch {
+				case runningErr != nil || !running:
 					outcome = "provider_error"
-				} else if rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+				case rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
 					outcome = "session_exists_converged"
 					err = nil
 					rollbackPending = false
-				} else {
+				default:
 					outcome = "session_exists"
 				}
 			default:

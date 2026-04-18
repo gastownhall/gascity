@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -205,7 +206,7 @@ func decodeYAMLStrict(name string, data []byte, out any) error {
 		return fmt.Errorf("decode %s: %w", name, err)
 	}
 	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return fmt.Errorf("decode %s: trailing YAML content", name)
 		}

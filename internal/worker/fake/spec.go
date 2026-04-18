@@ -260,7 +260,7 @@ func validateDuration(field, value string, root error) error {
 		return nil
 	}
 	if _, err := time.ParseDuration(value); err != nil {
-		return fmt.Errorf("%w: invalid %s %q: %v", root, field, value, err)
+		return fmt.Errorf("%w: invalid %s %q: %w", root, field, value, err)
 	}
 	return nil
 }

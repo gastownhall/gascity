@@ -340,21 +340,22 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	))
 	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-	} else if gcProvider := strings.TrimSpace(b.Metadata["provider"]); gcProvider != "" {
-		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
+		switch {
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if err != nil {
 				return err
 			}
 			started = retried
-		} else if errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName) {
+		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
 			return err
-		} else {
+		default:
 			if unroute != nil {
 				unroute()
 			}
