@@ -185,6 +185,10 @@ const outputStreamPollInterval = 2 * time.Second
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
 func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name string, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	// Derive provider from agent config for session log parsing.
 	cfg := s.state.Config()
 	agentCfg, _ := findAgent(cfg, name)
@@ -285,6 +289,10 @@ func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name str
 
 // streamPeekOutput polls Peek() and emits changes as SSE events.
 func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, cfg *config.City) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
 

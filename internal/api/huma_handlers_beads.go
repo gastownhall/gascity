@@ -54,11 +54,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			if !query.HasFilter() {
 				query.AllowScan = true
 			}
+			pa.attempt()
 			list, err := store.List(query)
 			if err != nil {
 				pa.record("rig "+rigName, err)
 				continue
 			}
+			pa.success()
 			for _, b := range list {
 				dedupeKey := rigName + "\x00" + b.ID
 				if dedupe && seen[dedupeKey] {
@@ -70,6 +72,9 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				all = append(all, b)
 			}
 		}
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
 	}
 
 	if all == nil {
@@ -121,12 +126,17 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	var all []beads.Bead
 	var pa partialAggregator
 	for _, rigName := range rigNames {
+		pa.attempt()
 		ready, err := stores[rigName].Ready()
 		if err != nil {
 			pa.record("rig "+rigName, err)
 			continue
 		}
+		pa.success()
 		all = append(all, ready...)
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
 	}
 
 	if all == nil {

@@ -6,7 +6,6 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // Provider-native session transcript frame types. These describe the JSON
@@ -153,52 +152,24 @@ func (SessionStreamCommonEvent) Schema(r huma.Registry) *huma.Schema {
 	return &huma.Schema{Ref: schemaRefPrefix + name}
 }
 
-// sessionFrameVariants enumerates the known provider-native frame
-// shapes. Each type is forcibly registered in components.schemas so
-// downstream clients can reference the individual shapes by name — but
-// the SessionRawMessageFrame schema itself stays honestly opaque: the
-// supervisor forwards whatever JSON the provider wrote, so a oneOf
-// here would claim a closed-set contract we do not keep.
-var sessionFrameVariants = []any{
-	CodexRawEntry{},
-	CodexEventMsg{},
-	CodexResponseItem{},
-	GeminiThought{},
-	GeminiToolCall{},
-	sessionlog.Entry{},
-	sessionlog.MessageContent{},
-	sessionlog.ContentBlock{},
-	sessionlog.CompactMeta{},
-}
-
 // Schema registers and references the SessionRawMessageFrame schema.
 // Implements huma.SchemaProvider.
 //
-// The Go value is marshaled verbatim from whatever the provider wrote
-// to its session log, so the published schema is an open object:
-// additionalProperties stays true, properties is empty. Consumers
-// dispatch on the SSE event name (or, for the transcript GET response,
-// on session provider metadata) and then narrow to one of the named
-// per-provider frame shapes this file exports.
+// The supervisor forwards whatever JSON the provider wrote to its
+// session log — objects, arrays, nulls, primitives are all possible.
+// The published schema therefore declares no type and no properties;
+// OpenAPI 3.1 treats that as "any JSON value," which makes generated
+// clients decode the field as a raw JSON value rather than a
+// narrowly-typed map. Consumers that want to narrow further can import
+// the per-provider frame types (CodexRawEntry, CodexEventMsg, etc.)
+// directly — they live as exported Go types in this package and in
+// internal/sessionlog.
 func (SessionRawMessageFrame) Schema(r huma.Registry) *huma.Schema {
 	const name = "SessionRawMessageFrame"
 	if _, ok := r.Map()[name]; !ok {
-		// Register each known variant type in components.schemas so
-		// downstream consumers can import them by name. The variants
-		// are not referenced from SessionRawMessageFrame itself —
-		// including them in a oneOf without a discriminator would
-		// force code generators to guess, and the wire contract does
-		// not actually constrain the shape.
-		for _, v := range sessionFrameVariants {
-			t := reflect.TypeOf(v)
-			_ = r.Schema(t, true, t.Name())
-		}
-		trueVal := true
 		r.Map()[name] = &huma.Schema{
-			Title:                "Session raw transcript frame",
-			Description:          "Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific. Dispatch on the SSE event name (or on session provider metadata for the transcript GET endpoint) and narrow to one of the named per-provider frame types (CodexRawEntry, CodexEventMsg, CodexResponseItem, GeminiThought, GeminiToolCall, Entry, MessageContent, ContentBlock, CompactMeta).",
-			Type:                 huma.TypeObject,
-			AdditionalProperties: &trueVal,
+			Title:       "Session raw transcript frame",
+			Description: "Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value (object, array, null, primitive).",
 		}
 	}
 	return &huma.Schema{Ref: schemaRefPrefix + name}

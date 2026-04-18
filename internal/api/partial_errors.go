@@ -1,14 +1,37 @@
 package api
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/danielgtaylor/huma/v2"
+)
 
 // partialAggregator collects errors from per-rig/per-backend operations
 // that aggregate into a single list response. Handlers that previously
 // did `if err != nil { continue }` now record the error through this
 // helper so ListBody.Partial / ListBody.PartialErrors can surface the
 // failure to clients instead of silently dropping a rig.
+//
+// It also tracks how many backends attempted the operation and how many
+// of those succeeded, so handlers can fail hard (503) when every
+// backend errored instead of synthesizing a 200 + empty list that looks
+// indistinguishable from "no data."
 type partialAggregator struct {
-	errs []string
+	errs      []string
+	attempts  int
+	successes int
+}
+
+// attempt records that a backend attempt was made (whether it succeeded
+// or not). Call before calling record / success.
+func (p *partialAggregator) attempt() {
+	p.attempts++
+}
+
+// success records a successful backend call.
+func (p *partialAggregator) success() {
+	p.successes++
 }
 
 // record appends a per-rig error. label is a short stable identifier
@@ -35,4 +58,23 @@ func (p *partialAggregator) messages() []string {
 	out := make([]string, len(p.errs))
 	copy(out, p.errs)
 	return out
+}
+
+// totalOutage reports whether every attempted backend failed. Callers
+// check this before returning a 200 + empty list; when totalOutage is
+// true the right response is a 503 with the aggregated errors so
+// clients can tell "everything is down" from "there is no data."
+func (p *partialAggregator) totalOutage() bool {
+	return p.attempts > 0 && p.successes == 0
+}
+
+// outageError returns a 503 Problem Details error carrying the
+// aggregated per-backend messages, suitable for direct return from a
+// Huma handler when totalOutage() is true.
+func (p *partialAggregator) outageError() error {
+	detail := "all backends failed"
+	if msgs := p.messages(); len(msgs) > 0 {
+		detail = detail + ": " + strings.Join(msgs, "; ")
+	}
+	return huma.Error503ServiceUnavailable(detail)
 }

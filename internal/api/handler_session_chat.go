@@ -286,6 +286,10 @@ func (s *Server) emitClosedSessionSnapshotRaw(send sse.Sender, info session.Info
 }
 
 func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
@@ -424,6 +428,10 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sen
 }
 
 func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
@@ -527,6 +535,10 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender
 // messages so MC's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
 func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	sp := s.state.SessionProvider()
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
@@ -596,6 +608,10 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 }
 
 func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	sp := s.state.SessionProvider()
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()

@@ -80,6 +80,25 @@ func TestBeadListSurfacesStoreErrorsAsPartial(t *testing.T) {
 	}
 }
 
+// When EVERY rig store fails, returning 200 + empty + partial=true
+// conflates outage with "no data". The handler must return 503 so
+// clients can tell the difference.
+func TestBeadListReturns503OnTotalOutage(t *testing.T) {
+	fs := newFakeState(t)
+	boom := errors.New("disk is on fire")
+	// Wrap myrig (the only rig) so its store always errors.
+	wrapped := &failingBeadStore{Store: fs.stores["myrig"], listErr: boom}
+	fs.stores["myrig"] = wrapped
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest("GET", cityURL(fs, "/beads"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 503 {
+		t.Errorf("status = %d, want 503 when every backend fails (body=%q)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestBeadReadySurfacesStoreErrorsAsPartial(t *testing.T) {
 	boom := errors.New("ready: disk is on fire")
 	fs := newPartialListState(t, nil, boom)

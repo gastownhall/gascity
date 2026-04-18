@@ -16,6 +16,30 @@ import (
 
 const sseKeepalive = 15 * time.Second
 
+// cancelOnSendError wraps an sse.Sender so that on the first send
+// failure it cancels the supplied context and subsequent send calls
+// short-circuit to the original error. Stream loops that poll file
+// watchers / tmux panes / session cursors then exit promptly via
+// ctx.Done() instead of continuing to drain events onto a dead client.
+//
+// Returning a wrapper (rather than threading errors back through every
+// closure) keeps the call-site change minimal: handlers call send() as
+// before but the first write failure tears the stream down.
+func cancelOnSendError(send sse.Sender, cancel context.CancelFunc) sse.Sender {
+	var firstErr error
+	return func(msg sse.Message) error {
+		if firstErr != nil {
+			return firstErr
+		}
+		if err := send(msg); err != nil {
+			firstErr = err
+			cancel()
+			return err
+		}
+		return nil
+	}
+}
+
 // StreamFunc is the callback signature for SSE streaming handlers
 // registered via registerSSE. It receives the huma context (for setting
 // custom response headers before streaming starts), the parsed input,

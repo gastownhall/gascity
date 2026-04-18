@@ -78,12 +78,17 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	var pa partialAggregator
 	for _, rigName := range rigNames {
 		store := stores[rigName]
+		pa.attempt()
 		list, err := store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			pa.record("rig "+rigName, err)
 			continue
 		}
+		pa.success()
 		convoys = append(convoys, list...)
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
 	}
 
 	if convoys == nil {

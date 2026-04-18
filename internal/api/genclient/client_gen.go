@@ -2017,8 +2017,8 @@ type SessionPendingResponse struct {
 	Supported bool                `json:"supported"`
 }
 
-// SessionRawMessageFrame Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific. Dispatch on the SSE event name (or on session provider metadata for the transcript GET endpoint) and narrow to one of the named per-provider frame types (CodexRawEntry, CodexEventMsg, CodexResponseItem, GeminiThought, GeminiToolCall, Entry, MessageContent, ContentBlock, CompactMeta).
-type SessionRawMessageFrame map[string]interface{}
+// SessionRawMessageFrame Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value (object, array, null, primitive).
+type SessionRawMessageFrame = interface{}
 
 // SessionRenameInputBody defines model for SessionRenameInputBody.
 type SessionRenameInputBody struct {

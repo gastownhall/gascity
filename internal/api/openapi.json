@@ -1069,117 +1069,6 @@
         },
         "type": "object"
       },
-      "CodexEventMsg": {
-        "additionalProperties": false,
-        "properties": {
-          "message": {
-            "description": "Message text for user_message/agent_message entries.",
-            "type": "string"
-          },
-          "text": {
-            "description": "Text for agent_reasoning entries.",
-            "type": "string"
-          },
-          "type": {
-            "description": "user_message, agent_message, agent_reasoning, token_count.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "type": "object"
-      },
-      "CodexRawEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "payload": {},
-          "timestamp": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "timestamp",
-          "type",
-          "payload"
-        ],
-        "type": "object"
-      },
-      "CodexResponseItem": {
-        "additionalProperties": false,
-        "properties": {
-          "call_id": {
-            "type": "string"
-          },
-          "content": {
-            "items": {
-              "$ref": "#/components/schemas/CodexTextContent"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "output": {
-            "type": "string"
-          },
-          "role": {
-            "type": "string"
-          },
-          "summary": {
-            "items": {
-              "$ref": "#/components/schemas/CodexTextContent"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "type": {
-            "description": "message, reasoning, function_call, function_call_output.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "type": "object"
-      },
-      "CodexTextContent": {
-        "additionalProperties": false,
-        "properties": {
-          "text": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "text"
-        ],
-        "type": "object"
-      },
-      "CompactMeta": {
-        "additionalProperties": false,
-        "properties": {
-          "preTokens": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "trigger": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "trigger",
-          "preTokens"
-        ],
-        "type": "object"
-      },
       "ConfigAgentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1379,35 +1268,6 @@
           "valid",
           "errors",
           "warnings"
-        ],
-        "type": "object"
-      },
-      "ContentBlock": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {},
-          "id": {
-            "type": "string"
-          },
-          "input": {},
-          "is_error": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          },
-          "tool_use_id": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "type"
         ],
         "type": "object"
       },
@@ -1811,52 +1671,6 @@
           "issue_id",
           "depends_on_id",
           "type"
-        ],
-        "type": "object"
-      },
-      "Entry": {
-        "additionalProperties": false,
-        "properties": {
-          "compactMetadata": {
-            "$ref": "#/components/schemas/CompactMeta"
-          },
-          "isCompactSummary": {
-            "type": "boolean"
-          },
-          "logicalParentUuid": {
-            "type": "string"
-          },
-          "message": {},
-          "parentUuid": {
-            "type": "string"
-          },
-          "sessionId": {
-            "type": "string"
-          },
-          "subtype": {
-            "type": "string"
-          },
-          "timestamp": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "toolUseID": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          },
-          "uuid": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "uuid",
-          "parentUuid",
-          "type",
-          "subtype",
-          "message",
-          "timestamp"
         ],
         "type": "object"
       },
@@ -2814,90 +2628,6 @@
         ],
         "type": "object"
       },
-      "GeminiFunctionResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "response": {
-            "$ref": "#/components/schemas/GeminiFunctionResponseOutput"
-          }
-        },
-        "required": [
-          "id",
-          "response"
-        ],
-        "type": "object"
-      },
-      "GeminiFunctionResponseOutput": {
-        "additionalProperties": false,
-        "properties": {
-          "output": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "output"
-        ],
-        "type": "object"
-      },
-      "GeminiThought": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "type": "string"
-          },
-          "subject": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "subject",
-          "description"
-        ],
-        "type": "object"
-      },
-      "GeminiToolCall": {
-        "additionalProperties": false,
-        "properties": {
-          "args": {},
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "result": {
-            "items": {
-              "$ref": "#/components/schemas/GeminiToolCallResultEntry"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "args",
-          "result"
-        ],
-        "type": "object"
-      },
-      "GeminiToolCallResultEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "functionResponse": {
-            "$ref": "#/components/schemas/GeminiFunctionResponse"
-          }
-        },
-        "required": [
-          "functionResponse"
-        ],
-        "type": "object"
-      },
       "GitStatus": {
         "additionalProperties": false,
         "properties": {
@@ -3734,20 +3464,6 @@
           "body",
           "created_at",
           "read"
-        ],
-        "type": "object"
-      },
-      "MessageContent": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {},
-          "role": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "role",
-          "content"
         ],
         "type": "object"
       },
@@ -5402,10 +5118,8 @@
         "type": "object"
       },
       "SessionRawMessageFrame": {
-        "additionalProperties": true,
-        "description": "Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific. Dispatch on the SSE event name (or on session provider metadata for the transcript GET endpoint) and narrow to one of the named per-provider frame types (CodexRawEntry, CodexEventMsg, CodexResponseItem, GeminiThought, GeminiToolCall, Entry, MessageContent, ContentBlock, CompactMeta).",
-        "title": "Session raw transcript frame",
-        "type": "object"
+        "description": "Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value (object, array, null, primitive).",
+        "title": "Session raw transcript frame"
       },
       "SessionRenameInputBody": {
         "additionalProperties": false,
