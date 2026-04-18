@@ -944,7 +944,8 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
-	warnings := CheckUndecodedKeys(md, source)
+	warnings := agentDefaultsCompatibilityWarnings(md, source)
+	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return &cfg, md, warnings, nil
 }
 

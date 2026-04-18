@@ -99,17 +99,22 @@ my-city/
 ```toml
 # pack.toml — pack-wide defaults
 [agent_defaults]
-provider = "claude"
-scope = "rig"
+default_sling_formula = "mol-do-work"
 ```
 
 ```toml
 # city.toml — city-level overrides (optional)
 [agent_defaults]
-model = "claude-sonnet-4-20250514"
+append_fragments = ["operational-awareness"]
 ```
 
-These apply to every agent in the city. Individual agents override in their own `agent.toml`:
+In this release wave the actively-applied defaults are still narrow:
+`default_sling_formula` plus `[agent_defaults].append_fragments` during
+prompt rendering. Other `AgentDefaults` fields are parsed and composed,
+but are not yet auto-inherited at runtime. Per-agent fields such as
+`provider` and `scope` still live in `agents/<name>/agent.toml`.
+
+Individual agents override in their own `agent.toml`:
 
 ```toml
 # agents/mayor/agent.toml — only what differs from defaults
@@ -360,20 +365,18 @@ The three-layer injection pipeline (inline templates → global_fragments → in
 
 #### Auto-append (opt-in)
 
-For migration and convenience, an agent can opt into auto-appending fragments via `append_fragments` in agent.toml:
+For migration and convenience, city-wide or pack-wide defaults can
+auto-append fragments via `[agent_defaults].append_fragments`:
 
 ```toml
-# agents/polecat/agent.toml
-append_fragments = ["operational-awareness", "command-glossary"]
-```
-
-City-wide defaults can set this for all agents:
-
-```toml
-# city.toml
+# pack.toml or city.toml
 [agent_defaults]
 append_fragments = ["operational-awareness", "command-glossary"]
 ```
+
+Agent-local `append_fragments` remains a follow-up tracked in
+[#671](https://github.com/gastownhall/gascity/issues/671); it is not part
+of the supported migration contract in this wave.
 
 `append_fragments` only works on `.template.md` prompts. Plain `.md` prompts are inert — nothing is injected, no template engine runs.
 
@@ -478,7 +481,7 @@ A rig patch can undo a city-level patch for that one rig.
 ## Scope and impact
 
 - **Breaking:** `[[agent]]` tables move to `agents/` directories. Migration tooling needed.
-- **Config:** city.toml gains `[agents]` defaults section, loses `[[agent]]` tables. `agent.toml` is new per-agent.
+- **Config:** city.toml gains canonical `[agent_defaults]` defaults, loses `[[agent]]` tables. `agent.toml` is new per-agent. `[agents]` remains a compatibility alias only.
 - **Prompts:** `.template.md` infix becomes required for template processing. Existing `.md` prompts using `{{` need renaming to `.template.md`.
 - **New features:** Skills, MCP TOML abstraction, `per-provider/` overlays, `template-fragments/` convention, `patches/` directory.
 - **Naming:** Current `[[rigs.overrides]]` renamed to `[[rigs.patches]]` for consistency with `[[patches.agent]]`.

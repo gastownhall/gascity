@@ -167,9 +167,9 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula plus shared skill/MCP
-	// attachment baselines; other fields are parsed/composed but not yet
-	// inherited automatically.
+	// currently applies default_sling_formula and uses append_fragments
+	// during prompt rendering; other fields are parsed/composed but not
+	// yet inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -1327,8 +1327,9 @@ func (c *City) FormulasDir() string {
 
 // AgentDefaults provides city-level agent defaults declared via
 // [agent_defaults] in city.toml. The runtime currently applies
-// default_sling_formula and append_fragments; the remaining fields are
-// parsed and composed but are not yet inherited onto agents automatically.
+// default_sling_formula and uses append_fragments during prompt
+// rendering; the remaining fields are parsed and composed but are not
+// yet inherited onto agents automatically.
 type AgentDefaults struct {
 	// Model is the parsed/composed default model name for agents
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at

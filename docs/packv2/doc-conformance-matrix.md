@@ -59,8 +59,9 @@ These are settled enough, and implemented enough, to block CI now.
 | Provider overlay filtering | only `per-provider/<provider>/` content for the effective provider is materialized | Unit | `internal/overlay/overlay.go` |
 | Namepool convention | `agents/<name>/namepool.txt` is discovered by convention | Unit | `internal/config/agent_discovery.go` |
 | Template fragments | `template-fragments/` and `agents/<name>/template-fragments/` are discovered and rendered into template prompts | Unit + testscript | `cmd/gc/prompt.go` |
-| Agent-local auto-append bridge | `append_fragments` declared on an agent applies only to `.template.md` prompts and does nothing to plain `.md` prompts | Unit + testscript | `cmd/gc/prompt.go` |
 | `[agent_defaults]` auto-append bridge | `[agent_defaults].append_fragments` composes and auto-appends only for `.template.md` prompts | Unit + testscript | `internal/config/compose.go`, `cmd/gc/prompt.go` |
+| `[agents]` compatibility alias | `[agents]` still parses as a compatibility alias for `[agent_defaults]`, normalizes to the canonical table, and emits a deprecation warning | Unit | `internal/config/compose.go`, `internal/config/undecoded.go` |
+| Unsupported `AgentDefaults` migration keys | `[agent_defaults].provider`, `.scope`, and `.install_agent_hooks` emit migration-oriented warnings instead of generic unknown-field hints | Unit | `internal/config/undecoded.go` |
 | Agent defaults layering | `[agent_defaults]` is legal in both `pack.toml` and `city.toml`, with city winning on merge; runtime inheritance is gated only for fields the implementation actually applies today | Unit | `internal/config/compose.go`, `internal/config/config.go` |
 | Qualified patch targeting | imported agents can be targeted by qualified name in `[[patches.agent]]` | Unit | `internal/config/patch.go` |
 | Patch prompt template gating | An explicitly patched `prompt_template` path follows the same `.template.` rule as agent prompt files: `.template.md` renders, plain `.md` stays inert | Unit | `internal/config/patch.go`, `cmd/gc/prompt.go` |
@@ -85,7 +86,7 @@ warning surface is implemented end to end.
 | Legacy prompt injection | `global_fragments`, `inject_fragments`, and `inject_fragments_append` emit deprecation warnings toward `append_fragments` or explicit `{{ template }}` | Testscript + unit |
 | Legacy fallback model | `fallback` emits a loud warning and is not part of the v.next authoring surface | Testscript |
 | Legacy path wiring | `prompt_template`, `overlay_dir`, and `namepool` on legacy agent definitions warn during migration-facing flows | Testscript |
-| Workspace soft deprecations | `workspace.provider`, `workspace.start_command`, `workspace.install_agent_hooks`, `workspace.name`, and `workspace.prefix` warn with the documented replacement path, but warning coverage must not imply that runtime precedence already matches the post-migration ideal | Testscript |
+| Workspace soft deprecations | `workspace.start_command`, `workspace.name`, `workspace.prefix`, and any future workspace-surface migration warnings must not imply that runtime precedence already matches a later design | Testscript |
 | Formula directory path | `[formulas].dir = "formulas"` soft-warns; any other value is rejected | Unit + testscript |
 | Rig override naming | `rig.overrides` is accepted with a soft warning in favor of `rig.patches` | Unit + testscript |
 | Fragment-only include | top-level `include` stays fragment-only and rejects pack-composition content such as `[imports]`, include-based composition, or `pack.toml` references | Unit + testscript |
@@ -98,7 +99,7 @@ unsettled to be reliable release gates.
 | Area | Current status | Why it is non-gating for now |
 |---|---|---|
 | `[defaults.rig.imports]` loader support | documented intent, not implemented | Migration tooling may write it, but the loader does not yet honor it |
-| `[agent_defaults] provider` driving runtime provider selection | migration target is documented, but runtime behavior is not aligned enough to gate | Current implementation still resolves runtime defaults through `workspace.provider` / `ResolveProvider`; locking in the future rule now would create false failures |
+| Agent-local `append_fragments` | documented intent, not implemented | Current runtime only supports `[agent_defaults].append_fragments`; agent-local parity stays tracked in [#671](https://github.com/gastownhall/gascity/issues/671) |
 | `patches/` directory convention for imported prompt replacements | documented in v.next docs, not implemented | Current implementation still relies on explicit patch fields rather than full loader-discovered patch files |
 | Pack `skills/` discovery | documented, not implemented | First slice is current-city-pack only with list-only visibility; imported-pack catalogs are later |
 | `mcp/` TOML abstraction | documented, not implemented | Same first-slice scope as skills: current-city-pack only, list-only visibility first, provider projection later |
@@ -156,8 +157,7 @@ that would materially raise confidence without exploding scope.
 - `internal/config/agent_discovery.go`: `agents/<name>/`, prompt naming,
   overlay and namepool conventions
 - `cmd/gc/prompt.go`: `.template.` gating, fragment lookup, and
-  `append_fragments` behavior for both agent-local and
-  `[agent_defaults]` sources
+  `[agent_defaults].append_fragments` behavior
 - `internal/overlay/overlay.go`: provider filtering and overlay layering
 - `internal/config/patch.go`: qualified-name patch targeting and patched
   prompt-template path handling

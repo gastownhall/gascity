@@ -453,9 +453,9 @@ template inclusion.
 | `inject_fragments_append` on patches | Gone — same approach |
 | All `.md` files run through Go templates | Only `.template.md` files run through Go templates |
 
-For migration convenience, `append_fragments` in `agent.toml` or
-`[agent_defaults]` auto-appends named fragments to `.template.md`
-prompts without editing each prompt file:
+For migration convenience, `[agent_defaults].append_fragments`
+auto-appends named fragments to `.template.md` prompts without editing
+each prompt file:
 
 ```toml
 # pack.toml or city.toml
@@ -633,7 +633,7 @@ schema, plus the qualified rows that matter most during migration.
 | `[session_sleep]` | Sleep policy defaults | Keep in `city.toml`. |
 | `[convergence]` | Convergence limits | Keep in `city.toml`. |
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
-| `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. |
+| `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. In this wave the actively-applied defaults are still narrow: `default_sling_formula` plus `[agent_defaults].append_fragments`. |
 
 ## Reference: Gas City 0.14.0 `pack.toml` elements to PackV2
 

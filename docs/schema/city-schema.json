@@ -971,7 +971,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula plus shared skill/MCP\nattachment baselines; other fields are parsed/composed but not yet\ninherited automatically."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and uses append_fragments\nduring prompt rendering; other fields are parsed/composed but not\nyet inherited automatically."
         }
       },
       "additionalProperties": false,

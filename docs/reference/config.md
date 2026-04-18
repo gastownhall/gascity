@@ -32,7 +32,7 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
-| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula plus shared skill/MCP attachment baselines; other fields are parsed/composed but not yet inherited automatically. |
+| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and uses append_fragments during prompt rendering; other fields are parsed/composed but not yet inherited automatically. |
 
 ## ACPSessionConfig
 
