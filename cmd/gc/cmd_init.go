@@ -861,6 +861,15 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		return 1
 	}
 
+	// Ensure V2 convention directories (formulas, orders, prompts, etc.)
+	// exist even when the copied template doesn't ship them. Compose
+	// references these paths unconditionally, so tests that stat the
+	// computed formula layers expect them to resolve.
+	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// Install Claude Code hooks.
 	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
 		return code

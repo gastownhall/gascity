@@ -31,8 +31,11 @@ var (
 )
 
 var (
-	sessionNamePattern  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
-	sessionAliasPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*(/[a-zA-Z0-9][a-zA-Z0-9_-]*)*$`)
+	sessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+	// sessionAliasPattern allows dots so that V2 import-bound identities
+	// (e.g. "gastown.mayor") are legal as user-facing session aliases.
+	// Session names themselves stay tmux-safe via SanitizeQualifiedNameForSession.
+	sessionAliasPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*(/[a-zA-Z0-9][a-zA-Z0-9_.-]*)*$`)
 	sessionIDPattern    = regexp.MustCompile(`^gc-[0-9]+$`)
 )
 

@@ -99,7 +99,7 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 			"packs/gastown/agents",
 			"packs/gastown/template-fragments",
 			"packs/gastown/formulas",
-			"packs/gastown/scripts",
+			"packs/gastown/assets/scripts",
 			"packs/maintenance/pack.toml",
 			"packs/maintenance/agents",
 			"packs/maintenance/formulas",

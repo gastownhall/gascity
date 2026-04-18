@@ -48,7 +48,13 @@ func TestAgentAddCommands(t *testing.T) {
 	})
 
 	t.Run("WithPromptTemplate", func(t *testing.T) {
-		srcPath := filepath.Join(c.Dir, "prompts", "planner.md")
+		// V2 init no longer seeds a top-level prompts/ dir, so the test
+		// fixture creates the source location before writing the sample.
+		srcDir := filepath.Join(c.Dir, "prompts")
+		if err := os.MkdirAll(srcDir, 0o755); err != nil {
+			t.Fatalf("creating prompts/: %v", err)
+		}
+		srcPath := filepath.Join(srcDir, "planner.md")
 		if err := os.WriteFile(srcPath, []byte("You are the planner.\n"), 0o644); err != nil {
 			t.Fatalf("writing prompt template source: %v", err)
 		}

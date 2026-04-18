@@ -75,19 +75,20 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: CopyDirForProvider copies universal
-	// files and then per-provider/<ProviderName>/ files (flattened).
-	// Pack-level overlays (lower priority, merged additively).
+	// V2 per-provider overlay support: CopyDirForProviders copies universal
+	// files then per-provider/<provider>/ slots for ProviderName plus any
+	// InstallAgentHooks entries (flattened).
+	overlayProviders := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := overlay.CopyDirForProvider(od, cfg.WorkDir, cfg.ProviderName, io.Discard); err != nil {
+			if err := overlay.CopyDirForProviders(od, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := overlay.CopyDirForProvider(cfg.OverlayDir, cfg.WorkDir, cfg.ProviderName, io.Discard); err != nil {
+		if err := overlay.CopyDirForProviders(cfg.OverlayDir, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
 	}

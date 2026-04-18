@@ -158,7 +158,7 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 	if err := os.MkdirAll(checksDir, 0o755); err != nil {
 		t.Fatalf("mkdir checks: %v", err)
 	}
-	packChecks := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "scripts", "checks")
+	packChecks := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks")
 	checkEntries, err := os.ReadDir(packChecks)
 	if err != nil {
 		t.Fatalf("reading pack checks: %v", err)

@@ -333,10 +333,17 @@ type Config struct {
 	SessionLive []string
 
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
-	// Used for per-provider overlay filtering: only files from
-	// overlays/per-provider/<ProviderName>/ are copied. Empty means
-	// provider-specific filtering is skipped (all files copied).
+	// Used for per-provider overlay filtering: files from
+	// overlays/per-provider/<ProviderName>/ are copied alongside any extras
+	// listed in InstallAgentHooks.
 	ProviderName string
+
+	// InstallAgentHooks lists additional provider hook slots whose
+	// overlays/per-provider/<name>/ content should be staged alongside
+	// ProviderName's. Populated from the agent's install_agent_hooks
+	// config, so an agent running Claude can still get a materialized
+	// .gemini/settings.json for parallel tooling.
+	InstallAgentHooks []string
 
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,
