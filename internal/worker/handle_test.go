@@ -993,6 +993,198 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleNudgeImmediateUsesImmediateProvider(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryImmediate,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(immediate): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(immediate) Delivered = false, want true")
+	}
+
+	var nudgeNow, nudge int
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "NudgeNow":
+			nudgeNow++
+		case "Nudge":
+			nudge++
+		}
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
+	}
+	if nudge != 0 {
+		t.Fatalf("Nudge calls = %d, want 0", nudge)
+	}
+}
+
+func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true")
+	}
+
+	var waitCalls, nudgeNow int
+	var delivered string
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitCalls++
+		case "NudgeNow":
+			nudgeNow++
+			delivered = call.Message
+		}
+	}
+	if waitCalls != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", waitCalls)
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
+	}
+	if !strings.Contains(delivered, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system reminder", delivered)
+	}
+	if !strings.Contains(delivered, "[mail] check deploy status") {
+		t.Fatalf("delivered message = %q, want mail-tagged reminder", delivered)
+	}
+}
+
+func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false for unsupported provider")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery for unsupported provider", sp.Calls)
+		}
+	}
+}
+
+func TestSessionCatalogUsesWorkerBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := sessionpkg.NewManagerWithCityPath(store, sp, t.TempDir())
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager: mgr,
+		Session: SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  t.TempDir(),
+			Provider: "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+
+	catalog, err := NewSessionCatalog(mgr)
+	if err != nil {
+		t.Fatalf("NewSessionCatalog: %v", err)
+	}
+
+	got, err := catalog.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ID != info.ID {
+		t.Fatalf("Get().ID = %q, want %q", got.ID, info.ID)
+	}
+
+	caps, err := catalog.SubmissionCapabilities(info.ID)
+	if err != nil {
+		t.Fatalf("SubmissionCapabilities: %v", err)
+	}
+	if !caps.SupportsFollowUp {
+		t.Fatal("SupportsFollowUp = false, want true")
+	}
+	if !caps.SupportsInterruptNow {
+		t.Fatal("SupportsInterruptNow = false, want true")
+	}
+
+	title := "Renamed Session"
+	alias := "renamed-session"
+	if err := catalog.UpdatePresentation(info.ID, &title, &alias); err != nil {
+		t.Fatalf("UpdatePresentation: %v", err)
+	}
+	updated, err := catalog.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(after update): %v", err)
+	}
+	if updated.Title != title {
+		t.Fatalf("updated.Title = %q, want %q", updated.Title, title)
+	}
+	if updated.Alias != alias {
+		t.Fatalf("updated.Alias = %q, want %q", updated.Alias, alias)
+	}
+}
+
 func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(base, "workspace")
