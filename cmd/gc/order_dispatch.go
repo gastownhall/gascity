@@ -444,23 +444,30 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 
 // sweepOrphanedOrderTrackingRetry calls sweepOrphanedOrderTracking with
 // bounded retries. On startup the bead store's backing server may not be
-// query-ready yet (dolt cold-start race, #753). Errors where no beads
-// were closed (n == 0) are retried; partial closes (n > 0) are returned
-// immediately to avoid double-closing.
+// query-ready yet (dolt cold-start race, #753). Errors are retried; the
+// total count of beads closed across attempts is returned. Retrying on
+// partial closes is safe because beads.Store.CloseAll skips already-closed
+// beads (see internal/beads/beads.go). The wrapper sleeps for up to
+// attempts*backoff in the worst case.
 func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
 	if attempts <= 0 {
 		attempts = 1
 	}
-	var n int
+	total := 0
 	var err error
 	for i := range attempts {
+		var n int
 		n, err = sweepOrphanedOrderTracking(store)
-		if err == nil || n > 0 || i == attempts-1 {
-			return n, err
+		total += n
+		if err == nil {
+			return total, nil
+		}
+		if i == attempts-1 {
+			return total, fmt.Errorf("sweep failed after %d attempts: %w", attempts, err)
 		}
 		time.Sleep(backoff)
 	}
-	return n, err
+	return total, err
 }
 
 // effectiveTimeout returns the timeout to use for an order dispatch.

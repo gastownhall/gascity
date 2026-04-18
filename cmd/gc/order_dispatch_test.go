@@ -974,12 +974,12 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 
 	// Production startup sequence: sweep first, then build dispatcher.
-	// This mirrors newCityRuntime which calls sweepOrphanedOrderTracking
+	// This mirrors newCityRuntime which calls sweepOrphanedOrderTrackingRetry
 	// before buildOrderDispatcher. The sweep is intentionally NOT inside
 	// buildOrderDispatcher so config reloads don't close in-flight beads.
-	closed, err := sweepOrphanedOrderTracking(store)
+	closed, err := sweepOrphanedOrderTrackingRetry(store, 3, time.Millisecond)
 	if err != nil {
-		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+		t.Fatalf("sweepOrphanedOrderTrackingRetry: %v", err)
 	}
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1", closed)
@@ -1050,7 +1050,7 @@ func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
 	}
 }
 
-func TestSweepOrphanedOrderTracking_NoRetryOnPartialClose(t *testing.T) {
+func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
 	inner := beads.NewMemStore()
 	_, err := inner.Create(beads.Bead{
 		Title:  "order:test",
@@ -1060,19 +1060,25 @@ func TestSweepOrphanedOrderTracking_NoRetryOnPartialClose(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// closeFailStore returns (1, err) from CloseAll — simulating a partial
-	// close. The retry loop must NOT retry when n > 0.
+	// closeFailStore returns (1, err) from every CloseAll call — simulating
+	// a partial close that keeps erroring. The retry loop MUST retry because
+	// beads.Store.CloseAll skips already-closed beads, so retrying after a
+	// partial close is safe. We verify the total count accumulates across
+	// attempts and the final error is wrapped with the attempt count.
 	fs := &closeFailStore{Store: inner, closeN: 1}
 	n, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error from CloseAll failure")
 	}
-	if n != 1 {
-		t.Fatalf("n = %d, want 1 (partial close result preserved)", n)
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("error = %q, want attempt count in message", err.Error())
 	}
-	// Partial close (n > 0) should not be retried.
-	if fs.listCalls != 1 {
-		t.Fatalf("ListByLabel calls = %d, want 1 (no retry after partial close)", fs.listCalls)
+	// Each of 3 attempts closes 1 bead → total = 3.
+	if n != 3 {
+		t.Fatalf("n = %d, want 3 (accumulated across retries)", n)
+	}
+	if fs.listCalls != 3 {
+		t.Fatalf("ListByLabel calls = %d, want 3 (retry on partial close)", fs.listCalls)
 	}
 }
 
