@@ -230,49 +230,17 @@ change based on what our two in-tree consumers need.
 
 ## Known gaps against these principles
 
-### Events-stream wire schema (Principle 7)
+None open. Every principle holds end-to-end including the
+events-stream wire schema — both `/v0/events/stream` and
+`/v0/city/{cityName}/events/stream` now emit a discriminated-union
+of 36 typed variants (one per `events.KnownEventTypes` entry), each
+with a `type` const and a `payload` $ref to the registered payload
+schema. Consumers generate compile-time-checked switches by event
+type across the full catalog. The registry-coverage test
+(`event_payloads_coverage_test.go`) fails CI if a new event-type
+constant is added without registering a payload.
 
-**Status: partial — registry infrastructure done, SSE projection not yet rewired.**
-
-The emission side is typed: every event emitter takes a sealed
-`events.Payload` value, and every registered payload type is defined
-in Go source (see `internal/events/payload.go`,
-`internal/api/event_payloads.go`, `internal/extmsg/events.go`). Twelve
-event types are registered today (seven `mail.*`, five `extmsg.*`,
-plus `extmsg.inbound` / `extmsg.outbound`). The bus stores payloads as
-`[]byte` per Principle 4's edge case; the registry knows how to decode
-each back into the correct Go type.
-
-**What remains to close the gap:**
-
-1. **SSE projection rewrite** for `/v0/events/stream` and
-   `/v0/city/{cityName}/events/stream`. Today both forward
-   `eventStreamEnvelope{Event, Workflow}` with `Event.Payload
-   json.RawMessage` as opaque bytes. They must instead call
-   `events.DecodePayload(event.Type, event.Payload)` per event and
-   emit a typed envelope. The Huma `eventTypeMap` on both SSE
-   registrations grows from one entry to one-per-registered-type so
-   the spec emits a discriminated-union (`oneOf`) wire schema.
-2. **Enumerate and type the remaining event types.** ~26 event-type
-   constants in `internal/events/events.go` (session.*, bead.*,
-   convoy.*, controller.*, city.*, order.*, provider.*) have no
-   registered payload. Many emit only `Actor`/`Subject`/`Message` and
-   map cleanly to `events.NoPayload`; some emission sites pass a
-   `json.RawMessage` payload (notably the beads-cache reconcile path
-   in `cmd/gc/api_state.go:111`) that needs a proper struct.
-3. **Unregistered-type policy.** Pick one and enforce in CI: (a)
-   strict — every event-type constant must have a registry entry or
-   startup panics; (b) lenient — unregistered types pass through as
-   opaque with a warning. Principle 7 argues for (a); gradual
-   migration may need (b) as a transitional state.
-
-Trigger: this gap matters for every external consumer of
-`/v0/events/stream`. Until the SSE projection is rewired, third-party
-clients still hand-parse `payload` as opaque bytes and build their
-own switch table. The infrastructure is in place; the wire payoff
-lands when the projection commits.
-
-### Consumer alignment (ongoing)
+## Consumer alignment (ongoing)
 
 - The TS SPA consumes the published API contract via generated TS
   types from `internal/api/openapi.json` and `openapi-fetch`. SSE
