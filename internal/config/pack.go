@@ -1575,6 +1575,9 @@ func copyStringPtr(in *string) *string {
 
 func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 	for i := range agents {
+		if agents[i].BindingName != "" {
+			continue
+		}
 		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil {
 			agents[i].InheritedDefaultSlingFormula = copyStringPtr(&defaults.DefaultSlingFormula)
 		}
