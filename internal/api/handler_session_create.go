@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -230,7 +229,6 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	// Resolve options against the provider's schema.
-	var extraArgs []string
 	var optMeta map[string]string
 	if len(body.Options) > 0 && len(resolved.OptionsSchema) == 0 {
 		s.idem.unreserve(idemKey)
@@ -239,7 +237,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	if len(resolved.OptionsSchema) > 0 {
 		var optErr error
-		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
+		_, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
 		if optErr != nil {
 			s.idem.unreserve(idemKey)
 			if errors.Is(optErr, config.ErrUnknownOption) {
@@ -276,10 +274,17 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	command := firstNonEmptyString(resolved.CommandString(), resolved.Name)
-	if len(extraArgs) > 0 {
-		command = command + " " + shellquote.Join(extraArgs)
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		if errors.Is(err, config.ErrUnknownOption) {
+			writeError(w, http.StatusBadRequest, "unknown_option", err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
+		return
 	}
+	command := launchCommand.Command
 
 	resolvedCfg, err := resolvedSessionConfigForProvider(alias, "", template, title, "", map[string]string{
 		"session_origin": "manual",

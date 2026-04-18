@@ -119,6 +119,10 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
+		sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil)
+		if err != nil {
+			return "", err
+		}
 		workDirQualifiedName := workdirutil.SessionQualifiedName(cityPath, *spec.Agent, cfg.Rigs, spec.Identity, "")
 		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, workDirQualifiedName)
 		if err != nil {
@@ -153,7 +157,7 @@ func materializeSessionForTemplateWithOptions(
 			spec.SessionName,
 			templateIdentity,
 			title,
-			resolved.CommandString(),
+			sessionCommand,
 			providerName,
 			workDir,
 			spec.Agent.Session,
@@ -259,6 +263,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
+	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil)
+	if err != nil {
+		return "", err
+	}
 	explicitName, err := sessionExplicitNameForNewSession(agentCfg, "")
 	if err != nil {
 		return "", err
@@ -292,7 +300,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		explicitName,
 		agentCfg.QualifiedName(),
 		title,
-		resolved.CommandString(),
+		sessionCommand,
 		agentCfg.Provider,
 		workDir,
 		agentCfg.Session,

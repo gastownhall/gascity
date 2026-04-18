@@ -268,6 +268,10 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if err != nil {
 		return "", err
 	}
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil)
+	if err != nil {
+		return "", err
+	}
 	var workDir string
 	workDirQualifiedName := workdirutil.SessionQualifiedName(s.state.CityPath(), *spec.Agent, s.state.Config().Rigs, spec.Identity, "")
 	workDir, err = s.resolveSessionWorkDir(*spec.Agent, workDirQualifiedName)
@@ -280,7 +284,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	resolvedCfg, err := resolvedSessionConfigForProvider(spec.Identity, spec.SessionName, qualifiedTemplate, spec.Identity, transport, extraMeta, resolved, "", workDir)
+	resolvedCfg, err := resolvedSessionConfigForProvider(spec.Identity, spec.SessionName, qualifiedTemplate, spec.Identity, transport, extraMeta, resolved, launchCommand.Command, workDir)
 	if err != nil {
 		return "", err
 	}
