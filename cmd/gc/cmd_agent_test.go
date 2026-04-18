@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -164,7 +165,7 @@ append_fragments = ["footer"]
 	}
 }
 
-func TestLoadCityConfigFSDedupesProvenanceWarningsAcrossCalls(t *testing.T) {
+func TestLoadCityConfigFSEmitsMigrationWarningsAcrossCalls(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 name = "test-city"
@@ -192,8 +193,30 @@ append_fragments = ["footer"]
 	}
 
 	const want = "[agents] is a deprecated compatibility alias for [agent_defaults]"
-	if got := strings.Count(stderr.String(), want); got != 1 {
-		t.Fatalf("warning count = %d, want 1; stderr=%q", got, stderr.String())
+	if got := strings.Count(stderr.String(), want); got != 2 {
+		t.Fatalf("warning count = %d, want 2; stderr=%q", got, stderr.String())
+	}
+}
+
+func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
+	var stderr bytes.Buffer
+	emitLoadCityConfigWarnings(&stderr, &config.Provenance{
+		Warnings: []string{
+			`workspace.name redefined by "/city/defaults.toml"`,
+			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+			`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+		},
+	})
+
+	output := stderr.String()
+	if strings.Contains(output, `workspace.name redefined by "/city/defaults.toml"`) {
+		t.Fatalf("non-migration warning should be filtered, got %q", output)
+	}
+	if !strings.Contains(output, `[agents] is a deprecated compatibility alias for [agent_defaults]`) {
+		t.Fatalf("expected alias warning, got %q", output)
+	}
+	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
+		t.Fatalf("expected unsupported-key warning, got %q", output)
 	}
 }
 
