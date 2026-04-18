@@ -2,10 +2,19 @@ package events
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 )
+
+// ErrNoWatchers reports that Multiplexer.Watch was called against a
+// non-empty set of city providers but none of them could attach a
+// watcher. Callers (notably the supervisor SSE endpoint) dispatch on
+// this sentinel before committing response headers so the client sees
+// 503 instead of 200 followed by an immediate EOF.
+var ErrNoWatchers = errors.New("events: no city watchers could be attached")
 
 // TaggedEvent is an Event annotated with the city that produced it.
 type TaggedEvent struct {
@@ -85,6 +94,10 @@ func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 // Watch returns a Watcher that merges events from all currently registered
 // city providers. Events are yielded in approximate time order. The cursor
 // is a map of city→seq positions (use ParseCursor/FormatCursor to persist).
+//
+// Returns ErrNoWatchers when providers are registered but none of them
+// could attach a watcher — callers use this to fail fast with 503
+// before committing SSE response headers.
 func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*MuxWatcher, error) {
 	providers := m.snapshot()
 	childCtx, cancel := context.WithCancel(ctx)
@@ -96,12 +109,18 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 	}
 
 	var wg sync.WaitGroup
+	attached := 0
 	for city, p := range providers {
 		afterSeq := cursors[city]
 		watcher, err := p.Watch(childCtx, afterSeq)
 		if err != nil {
-			continue // skip cities whose watcher fails
+			// Log so operators can diagnose one-bad-city scenarios.
+			// Previously silent; the SSE endpoint would commit headers
+			// and immediately EOF when every watcher dropped out.
+			log.Printf("events: mux watcher attach failed for city %q: %v", city, err)
+			continue
 		}
+		attached++
 		wg.Add(1)
 		go func(city string, watcher Watcher) {
 			defer wg.Done()
@@ -121,6 +140,12 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 				}
 			}
 		}(city, watcher)
+	}
+
+	if len(providers) > 0 && attached == 0 {
+		cancel()
+		close(w.ch)
+		return nil, ErrNoWatchers
 	}
 
 	// Close the channel when all watchers finish.

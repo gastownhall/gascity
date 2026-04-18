@@ -202,11 +202,16 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")
 	}
 
-	// Pre-validate all items exist before creating the convoy to avoid orphans.
+	// Pre-validate all items exist AND capture their current parent so
+	// a mid-link failure can roll each one back, not just delete the
+	// new convoy and leave items pointing at a deleted ID.
+	prevParent := make(map[string]string, len(input.Body.Items))
 	for _, itemID := range input.Body.Items {
-		if _, err := store.Get(itemID); err != nil {
+		item, err := store.Get(itemID)
+		if err != nil {
 			return nil, storeError(err)
 		}
+		prevParent[itemID] = item.ParentID
 	}
 
 	convoy, err := store.Create(beads.Bead{
@@ -217,18 +222,23 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	// Link child items to convoy. If any Update fails (e.g. a concurrent
-	// writer deleted an item between pre-validation and link), delete
-	// the convoy bead we just created so we never leave a half-populated
-	// convoy behind.
+	// Link child items to convoy one at a time. On first failure,
+	// roll back previously-reparented items to their original
+	// parents (via rollbackConvoyMembership) and THEN delete the
+	// new convoy bead. Earlier code deleted the convoy without
+	// restoring item parents, leaving items pointing at a deleted
+	// convoy ID — a worse state than half-populated.
+	applied := make([]string, 0, len(input.Body.Items))
 	for _, itemID := range input.Body.Items {
 		pid := convoy.ID
 		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
+			rollbackConvoyMembership(store, applied, prevParent, "convoy.create")
 			if delErr := store.Delete(convoy.ID); delErr != nil {
 				log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", convoy.ID, delErr)
 			}
 			return nil, huma.Error500InternalServerError("failed to link item " + itemID + ": " + err.Error())
 		}
+		applied = append(applied, itemID)
 	}
 
 	return &IndexOutput[beads.Bead]{

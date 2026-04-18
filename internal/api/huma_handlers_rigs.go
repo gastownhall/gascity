@@ -200,10 +200,16 @@ func (s *Server) humaHandleRigRestart(name string) (*RigActionResponse, error) {
 	if len(failed) > 0 {
 		resp.Body.Failed = failed
 		if len(killed) == 0 {
+			// Total failure: return 200 with Status="failed" + the
+			// populated Failed list. Huma's 5xx path would discard
+			// the typed body and emit Problem Details, which strips
+			// the agent names operators need to diagnose. The 200
+			// carries the full per-agent detail; callers dispatch
+			// on Body.Status.
 			resp.Body.Status = "failed"
-			return nil, huma.Error500InternalServerError("all agents failed to stop")
+		} else {
+			resp.Body.Status = "partial"
 		}
-		resp.Body.Status = "partial"
 	} else {
 		resp.Body.Status = "ok"
 	}

@@ -10,13 +10,17 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// failingBeadStore wraps an in-memory bead store and forces List/Ready to
-// fail. Used to verify list handlers surface store errors as
-// Partial/PartialErrors instead of silently dropping the rig.
+// failingBeadStore wraps an in-memory bead store and injects failures
+// into List, Ready, or Update. Used to verify list handlers surface
+// store errors as Partial/PartialErrors instead of silently dropping
+// a rig, and to drive the convoy rollback tests which need Update to
+// fail on a specific item ID.
 type failingBeadStore struct {
 	beads.Store
-	listErr  error
-	readyErr error
+	listErr        error
+	readyErr       error
+	updateFailAt   map[string]error // item ID → error (fails Update for that ID)
+	updateCallback func(id string)  // optional: called on every Update before injecting failure
 }
 
 func (f *failingBeadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -31,6 +35,16 @@ func (f *failingBeadStore) Ready() ([]beads.Bead, error) {
 		return nil, f.readyErr
 	}
 	return f.Store.Ready()
+}
+
+func (f *failingBeadStore) Update(id string, opts beads.UpdateOpts) error {
+	if f.updateCallback != nil {
+		f.updateCallback(id)
+	}
+	if err, ok := f.updateFailAt[id]; ok {
+		return err
+	}
+	return f.Store.Update(id, opts)
 }
 
 func newPartialListState(t *testing.T, listErr, readyErr error) *fakeState {

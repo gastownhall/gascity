@@ -355,17 +355,29 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---
 
-// precheckGlobalEventStream validates that at least one running city
-// has an event provider before the SSE stream commits its 200 headers.
-// buildMultiplexer always returns a non-nil *Multiplexer; the real
-// "nothing to watch" signal is its provider count. Returning a 503 here
-// means the client sees a proper Problem Details body instead of a
-// 200 text/event-stream with immediate EOF — which was the old bug
-// (Codex Critical, 2026-04-17).
-func (sm *SupervisorMux) precheckGlobalEventStream(_ context.Context, _ *SupervisorEventStreamInput) error {
-	if sm.buildMultiplexer().Len() == 0 {
+// precheckGlobalEventStream validates that the global event stream can
+// actually deliver events before committing 200 headers. Two failure
+// modes both produce 503 Problem Details instead of 200+EOF:
+//
+//  1. No event providers registered at all (empty mux).
+//  2. Providers exist but none can attach a watcher right now.
+//
+// The precheck attaches a watcher and closes it immediately — a
+// cheap probe that surfaces per-city watcher failures at the point
+// where we can still return a proper HTTP error.
+func (sm *SupervisorMux) precheckGlobalEventStream(ctx context.Context, _ *SupervisorEventStreamInput) error {
+	mux := sm.buildMultiplexer()
+	if mux.Len() == 0 {
 		return huma.Error503ServiceUnavailable("no_providers: no event providers available")
 	}
+	probe, err := mux.Watch(ctx, nil)
+	if err != nil {
+		if errors.Is(err, events.ErrNoWatchers) {
+			return huma.Error503ServiceUnavailable("no_watchers: event providers are registered but none are watchable")
+		}
+		return huma.Error503ServiceUnavailable("watch_failed: " + err.Error())
+	}
+	_ = probe.Close()
 	return nil
 }
 
