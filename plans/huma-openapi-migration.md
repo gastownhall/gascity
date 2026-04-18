@@ -159,8 +159,8 @@ before emission.
 **Discrimination design.** The envelope itself carries a plain
 `type: string` field; the `payload` field is the discriminated
 `oneOf` union. Consumers switch on `type` and narrow `payload`
-explicitly (e.g. `if event.type === "mail.sent") (event.payload as
-MailEventPayload)`). We would prefer envelope-level discrimination —
+explicitly (e.g. `if (event.type === "mail.sent") { use(event.payload
+as MailEventPayload); }`). We would prefer envelope-level discrimination —
 each event-type constant pinned as a `type` const in its own
 envelope variant, with OpenAPI 3.1 discriminators giving consumers
 automatic narrowing — but no current Go OpenAPI client generator
