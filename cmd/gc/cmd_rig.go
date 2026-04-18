@@ -325,7 +325,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
-	nextCfg := cfg
+	var nextCfg *config.City
 	if reAdd {
 		next := *cfg
 		next.Rigs = append([]config.Rig{}, cfg.Rigs...)

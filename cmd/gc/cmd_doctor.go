@@ -171,10 +171,10 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			if rig.Suspended {
 				continue
 			}
-			d.Register(doctor.NewRigPathCheck(rig))
 			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
+			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			d.Register(doctor.NewRigDoltServerCheck(cityPath, rig, skipDolt))

@@ -46,9 +46,9 @@ func LoadSiteBinding(fs fsys.FS, cityRoot string) (*SiteBinding, error) {
 	return &binding, nil
 }
 
-// ApplySiteBindings overlays .gc/site.toml onto cfg. Legacy city.toml rig
-// paths are ignored after the overlay so runtime callers only see site-bound
-// rig paths.
+// ApplySiteBindings overlays .gc/site.toml onto cfg. Site bindings take
+// precedence, but legacy city.toml rig paths still flow through as a
+// compatibility fallback until users migrate them into .gc/site.toml.
 func ApplySiteBindings(fs fsys.FS, cityRoot string, cfg *City) ([]string, error) {
 	return applySiteBindings(fs, cityRoot, cfg, false)
 }
@@ -88,15 +88,15 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 			cfg.Rigs[i].Path = path
 			continue
 		}
-		if keepLegacy {
+		if keepLegacy || legacyPath != "" {
 			cfg.Rigs[i].Path = legacyPath
+			if legacyPath != "" && !keepLegacy {
+				warnings = append(warnings,
+					fmt.Sprintf("rig %q still declares path in city.toml; move it to .gc/site.toml (run `gc doctor --fix`)", name))
+			}
 			continue
 		}
 		cfg.Rigs[i].Path = ""
-		if legacyPath != "" {
-			warnings = append(warnings,
-				fmt.Sprintf("rig %q still declares path in city.toml; move it to .gc/site.toml (run `gc doctor --fix`)", name))
-		}
 	}
 	for name := range paths {
 		if _, ok := seen[name]; ok {

@@ -455,11 +455,18 @@ func TestDoBeadsCityUseExternalRewritesCompatRigWithRelativePath(t *testing.T) {
 	}
 
 	got := readCityEndpointRigCompat(t, cityDir, "frontend")
-	if got.Path != inheritRel {
-		t.Fatalf("frontend city.toml rig path = %q, want %q", got.Path, inheritRel)
+	if got.Path != "" {
+		t.Fatalf("frontend city.toml rig path = %q, want empty after site-binding write", got.Path)
 	}
 	if got.DoltHost != "db.example.com" || got.DoltPort != "4406" {
 		t.Fatalf("frontend city.toml rig compat = %+v", got)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != inheritRel {
+		t.Fatalf("site binding = %+v, want frontend=%s", binding.Rigs, inheritRel)
 	}
 	state := readRigEndpointConfigState(t, inheritDir)
 	if state.EndpointOrigin != contract.EndpointOriginInheritedCity || state.DoltHost != "db.example.com" || state.DoltPort != "4406" || state.DoltUser != "city-user" {

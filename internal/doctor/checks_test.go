@@ -128,7 +128,7 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "mayor"}},
-		Rigs:      []config.Rig{{Name: "rig1"}}, // missing path
+		Rigs:      []config.Rig{{}}, // missing name
 	}
 	c := NewConfigValidCheck(cfg)
 	r := c.Run(&CheckContext{})

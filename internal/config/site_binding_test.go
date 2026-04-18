@@ -99,7 +99,7 @@ path = "/site/frontend"
 	}
 }
 
-func TestLoadWithIncludes_WarnsOnLegacyRigPathWithoutSiteBinding(t *testing.T) {
+func TestLoadWithIncludes_FallsBackToLegacyRigPathWithoutSiteBinding(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -114,8 +114,8 @@ path = "/legacy/frontend"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if cfg.Rigs[0].Path != "" {
-		t.Fatalf("Path = %q, want empty without site binding", cfg.Rigs[0].Path)
+	if cfg.Rigs[0].Path != "/legacy/frontend" {
+		t.Fatalf("Path = %q, want legacy path fallback without site binding", cfg.Rigs[0].Path)
 	}
 	if len(prov.Warnings) != 1 || !strings.Contains(prov.Warnings[0], ".gc/site.toml") {
 		t.Fatalf("warnings = %v, want legacy site binding guidance", prov.Warnings)

@@ -1643,7 +1643,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Path is the filesystem path to the rig's repository as stored in\ncity.toml. May be a relative path; callers must invoke\nresolveRigPaths(cityPath, rigs) before using this value for filesystem\noperations."
+          "description": "Path is the effective filesystem path to the rig's repository. New\nwrites persist it to .gc/site.toml; legacy city.toml paths are accepted\nonly so edit/migration flows can move them into site binding state."
         },
         "prefix": {
           "type": "string",
@@ -1709,8 +1709,7 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "name",
-        "path"
+        "name"
       ],
       "description": "Rig defines an external project registered in the city."
     },
