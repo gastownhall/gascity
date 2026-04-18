@@ -379,18 +379,20 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 	}
 
 	omitted := map[string]bool{
-		"Name":                 true,
-		"PromptTemplate":       true,
-		"Namepool":             true,
-		"NamepoolNames":        true,
-		"OverlayDir":           true,
-		"SourceDir":            true,
-		"Implicit":             true,
-		"Fallback":             true,
-		"SleepAfterIdleSource": true,
-		"PoolName":             true,
-		"BindingName":          true,
-		"PackName":             true,
+		"Name":                         true,
+		"PromptTemplate":               true,
+		"Namepool":                     true,
+		"NamepoolNames":                true,
+		"OverlayDir":                   true,
+		"SourceDir":                    true,
+		"InheritedDefaultSlingFormula": true,
+		"InheritedAppendFragments":     true,
+		"Implicit":                     true,
+		"Fallback":                     true,
+		"SleepAfterIdleSource":         true,
+		"PoolName":                     true,
+		"BindingName":                  true,
+		"PackName":                     true,
 		// v0.15.1 tombstones — still on Agent but intentionally not propagated
 		// by migrate (removed in v0.16).
 		"Skills":       true,
