@@ -178,11 +178,11 @@ test-integration-review-formulas-basic:
 test-integration-review-formulas-basic-cover:
 	GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic.txt ./scripts/test-integration-shard review-formulas-basic
 
-## test-integration-review-formulas-retries: run the retry-heavy review-formulas tests
+## test-integration-review-formulas-retries: run the retry/soft-fail review-formulas tests
 test-integration-review-formulas-retries:
 	./scripts/test-integration-shard review-formulas-retries
 
-## test-integration-review-formulas-retries-cover: run the retry-heavy review-formulas shard with coverage
+## test-integration-review-formulas-retries-cover: run the retry/soft-fail review-formulas shard with coverage
 test-integration-review-formulas-retries-cover:
 	GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries.txt ./scripts/test-integration-shard review-formulas-retries
 
