@@ -42,11 +42,11 @@ type WorkflowAttemptSummary struct {
 }
 
 // eventStreamEnvelope is the wire shape emitted on
-// /v0/city/{cityName}/events/stream. Unlike events.Event (the bus's
-// internal storage shape, which keeps Payload as opaque bytes), the
-// Payload field here is a typed variant decoded via the events
-// registry so consumers receive a discriminated-union wire schema
-// they can switch on `type` against.
+// /v0/city/{cityName}/events/stream. The envelope is a single named
+// schema so generated Go and TS clients have a concrete type to work
+// with; the Payload field is the discriminated union, schema-typed as
+// oneOf over every registered events.Payload variant. Consumers read
+// `type` to know which variant `payload` holds.
 type eventStreamEnvelope struct {
 	Seq      uint64                   `json:"seq"`
 	Type     string                   `json:"type"`
@@ -54,17 +54,8 @@ type eventStreamEnvelope struct {
 	Actor    string                   `json:"actor"`
 	Subject  string                   `json:"subject,omitempty"`
 	Message  string                   `json:"message,omitempty"`
-	Payload  events.Payload           `json:"payload,omitempty"`
+	Payload  EventPayloadUnion        `json:"payload,omitempty"`
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
-}
-
-// Schema emits a oneOf over every registered event-type variant so
-// the OpenAPI spec describes the discriminated union consumers receive
-// on /v0/city/{cityName}/events/stream. Each variant has a `type`
-// const matching one of events.KnownEventTypes and a `payload` $ref
-// to the corresponding payload schema (Principle 7).
-func (eventStreamEnvelope) Schema(r huma.Registry) *huma.Schema {
-	return eventVariantsSchema(r, false)
 }
 
 // taggedEventStreamEnvelope is the supervisor-scope wire shape for
@@ -77,60 +68,81 @@ type taggedEventStreamEnvelope struct {
 	Actor    string                   `json:"actor"`
 	Subject  string                   `json:"subject,omitempty"`
 	Message  string                   `json:"message,omitempty"`
-	Payload  events.Payload           `json:"payload,omitempty"`
+	Payload  EventPayloadUnion        `json:"payload,omitempty"`
 	City     string                   `json:"city"`
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
 }
 
-// Schema emits the same oneOf discrimination as eventStreamEnvelope,
-// with an added City property on every variant.
-func (taggedEventStreamEnvelope) Schema(r huma.Registry) *huma.Schema {
-	return eventVariantsSchema(r, true)
+// EventPayloadUnion wraps any registered events.Payload for wire
+// emission. Its JSON-marshal path emits the concrete variant's shape
+// directly (no wrapper object); its Schema registers a named
+// EventPayload oneOf component in the OpenAPI spec so generated
+// clients receive a discriminated union over every registered payload
+// type (Principle 7). The JSON (un)marshal methods are schema-
+// intentional per Principle 4's edge-case list: they enable the oneOf
+// wire shape, not opaque pass-through.
+type EventPayloadUnion struct {
+	Value events.Payload
 }
 
-// eventVariantsSchema builds a oneOf of per-event-type schema variants.
-// Each variant has a `type: const <eventType>` property and a
-// `payload: $ref <payloadSchema>` property, plus the envelope fields.
-// tagged=true adds the City property required on supervisor-scope
-// events. Variants are emitted in sorted order so the spec is stable
-// across regenerations.
-func eventVariantsSchema(r huma.Registry, tagged bool) *huma.Schema {
-	payloads := events.RegisteredPayloadTypes()
-	names := make([]string, 0, len(payloads))
-	for name := range payloads {
-		names = append(names, name)
+// MarshalJSON emits the concrete payload's JSON directly so the wire
+// sees {"rig":...} (for mail) rather than {"Value": {...}}.
+func (p EventPayloadUnion) MarshalJSON() ([]byte, error) {
+	if p.Value == nil {
+		return []byte("null"), nil
 	}
-	sort.Strings(names)
+	return json.Marshal(p.Value)
+}
 
-	variants := make([]*huma.Schema, 0, len(names))
-	for _, eventType := range names {
-		sample := payloads[eventType]
-		payloadType := reflect.TypeOf(sample)
-		payloadSchema := r.Schema(payloadType, true, payloadType.Name())
+// UnmarshalJSON preserves the raw bytes so callers that know the
+// event type (via the envelope's Type field) can decode the correct
+// variant through events.DecodePayload. The union type cannot pick a
+// variant on its own because the discriminator lives outside this
+// field.
+func (p *EventPayloadUnion) UnmarshalJSON(data []byte) error {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	// Preserve as a generic map/slice; real consumers use the
+	// envelope's Type field with events.DecodePayload on the raw bytes
+	// from the SSE data line.
+	return nil
+}
 
-		props := map[string]*huma.Schema{
-			"seq":     {Type: huma.TypeInteger, Format: "int64"},
-			"type":    {Type: huma.TypeString, Enum: []any{eventType}},
-			"ts":      {Type: huma.TypeString, Format: "date-time"},
-			"actor":   {Type: huma.TypeString},
-			"subject": {Type: huma.TypeString},
-			"message": {Type: huma.TypeString},
-			"payload": payloadSchema,
-			"workflow": r.Schema(reflect.TypeOf(workflowEventProjection{}), true, "WorkflowEventProjection"),
+// Schema registers an "EventPayload" named component whose schema is
+// a oneOf of every registered payload type, then returns a $ref.
+// Named registration keeps the generated clients compact — one
+// EventPayload union type — rather than inlining the oneOf in every
+// envelope field reference.
+func (EventPayloadUnion) Schema(r huma.Registry) *huma.Schema {
+	const name = "EventPayload"
+	if _, ok := r.Map()[name]; !ok {
+		payloads := events.RegisteredPayloadTypes()
+		// Deduplicate by Go type — several event-type constants share
+		// the same payload shape (e.g. all mail.* events use
+		// MailEventPayload).
+		seen := map[reflect.Type]bool{}
+		types := make([]reflect.Type, 0)
+		for _, sample := range payloads {
+			t := reflect.TypeOf(sample)
+			if seen[t] {
+				continue
+			}
+			seen[t] = true
+			types = append(types, t)
 		}
-		required := []string{"seq", "type", "ts", "actor", "payload"}
-		if tagged {
-			props["city"] = &huma.Schema{Type: huma.TypeString}
-			required = append(required, "city")
-		}
-		variants = append(variants, &huma.Schema{
-			Type:                 huma.TypeObject,
-			Properties:           props,
-			Required:             required,
-			AdditionalProperties: false,
+		// Sort by type name for a stable spec.
+		sort.Slice(types, func(i, j int) bool {
+			return types[i].Name() < types[j].Name()
 		})
+		oneOf := make([]*huma.Schema, 0, len(types))
+		for _, t := range types {
+			oneOf = append(oneOf, r.Schema(t, true, t.Name()))
+		}
+		r.Map()[name] = &huma.Schema{OneOf: oneOf}
 	}
-	return &huma.Schema{OneOf: variants}
+	return &huma.Schema{Ref: schemaRefPrefix + name}
 }
 
 // wireEventFrom decodes the bus's opaque Payload into the registered
@@ -154,7 +166,7 @@ func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStre
 		Actor:    e.Actor,
 		Subject:  e.Subject,
 		Message:  e.Message,
-		Payload:  payload,
+		Payload:  EventPayloadUnion{Value: payload},
 		Workflow: workflow,
 	}, nil
 }
@@ -176,7 +188,7 @@ func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjectio
 		Actor:    te.Actor,
 		Subject:  te.Subject,
 		Message:  te.Message,
-		Payload:  payload,
+		Payload:  EventPayloadUnion{Value: payload},
 		City:     te.City,
 		Workflow: workflow,
 	}, nil

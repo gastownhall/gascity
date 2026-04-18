@@ -827,7 +827,7 @@ func cityEnvelopesFor(items []genclient.Event) []genclient.EventStreamEnvelope {
 		out = append(out, genclient.EventStreamEnvelope{
 			Actor:   item.Actor,
 			Message: item.Message,
-			Payload: item.Payload,
+			Payload: toEventPayload(item.Payload),
 			Seq:     item.Seq,
 			Subject: item.Subject,
 			Ts:      item.Ts,
@@ -844,7 +844,7 @@ func taggedEnvelopesFor(items []genclient.TaggedEvent) []genclient.TaggedEventSt
 			Actor:   item.Actor,
 			City:    item.City,
 			Message: item.Message,
-			Payload: item.Payload,
+			Payload: toEventPayload(item.Payload),
 			Seq:     item.Seq,
 			Subject: item.Subject,
 			Ts:      item.Ts,
@@ -852,6 +852,30 @@ func taggedEnvelopesFor(items []genclient.TaggedEvent) []genclient.TaggedEventSt
 		})
 	}
 	return out
+}
+
+// toEventPayload converts the list-endpoint's interface{} payload
+// into the stream envelope's *EventPayload union. The list and stream
+// endpoints use different generated types for the payload — list's
+// Event has `interface{}` (the list endpoint's response schema still
+// refs events.Event's bus-internal shape), stream's
+// EventStreamEnvelope has a typed oneOf union. This bridge
+// re-marshals and unmarshals through the union's JSON methods so the
+// JSONL output from `gc events` has one stable shape whether the
+// source was list or stream. Returns nil if the input is nil.
+func toEventPayload(v interface{}) *genclient.EventPayload {
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	p := &genclient.EventPayload{}
+	if err := p.UnmarshalJSON(b); err != nil {
+		return nil
+	}
+	return p
 }
 
 func derefString(value *string) string {

@@ -802,6 +802,23 @@ type EventEmitRequest struct {
 	Type string `json:"type"`
 }
 
+// EventPayload defines model for EventPayload.
+type EventPayload struct {
+	union json.RawMessage
+}
+
+// EventStreamEnvelope defines model for EventStreamEnvelope.
+type EventStreamEnvelope struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  *EventPayload            `json:"payload,omitempty"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // ExtMsgAdapterRegisterInputBody defines model for ExtMsgAdapterRegisterInputBody.
 type ExtMsgAdapterRegisterInputBody struct {
 	// AccountId Account ID.
@@ -2399,6 +2416,19 @@ type TaggedEvent struct {
 	Type    string      `json:"type"`
 }
 
+// TaggedEventStreamEnvelope defines model for TaggedEventStreamEnvelope.
+type TaggedEventStreamEnvelope struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  *EventPayload            `json:"payload,omitempty"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TranscriptMessageKind Direction of a transcript entry.
 type TranscriptMessageKind string
 
@@ -3121,6 +3151,250 @@ type CreateSessionJSONRequestBody = SessionCreateBody
 
 // PostV0CityByCityNameSlingJSONRequestBody defines body for PostV0CityByCityNameSling for application/json ContentType.
 type PostV0CityByCityNameSlingJSONRequestBody = SlingInputBody
+
+// AsAdapterEventPayload returns the union data inside the EventPayload as a AdapterEventPayload
+func (t EventPayload) AsAdapterEventPayload() (AdapterEventPayload, error) {
+	var body AdapterEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromAdapterEventPayload overwrites any union data inside the EventPayload as the provided AdapterEventPayload
+func (t *EventPayload) FromAdapterEventPayload(v AdapterEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeAdapterEventPayload performs a merge with any union data inside the EventPayload, using the provided AdapterEventPayload
+func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBeadEventPayload returns the union data inside the EventPayload as a BeadEventPayload
+func (t EventPayload) AsBeadEventPayload() (BeadEventPayload, error) {
+	var body BeadEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadEventPayload overwrites any union data inside the EventPayload as the provided BeadEventPayload
+func (t *EventPayload) FromBeadEventPayload(v BeadEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadEventPayload performs a merge with any union data inside the EventPayload, using the provided BeadEventPayload
+func (t *EventPayload) MergeBeadEventPayload(v BeadEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBoundEventPayload returns the union data inside the EventPayload as a BoundEventPayload
+func (t EventPayload) AsBoundEventPayload() (BoundEventPayload, error) {
+	var body BoundEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBoundEventPayload overwrites any union data inside the EventPayload as the provided BoundEventPayload
+func (t *EventPayload) FromBoundEventPayload(v BoundEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBoundEventPayload performs a merge with any union data inside the EventPayload, using the provided BoundEventPayload
+func (t *EventPayload) MergeBoundEventPayload(v BoundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
+func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
+	var body GroupCreatedEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromGroupCreatedEventPayload overwrites any union data inside the EventPayload as the provided GroupCreatedEventPayload
+func (t *EventPayload) FromGroupCreatedEventPayload(v GroupCreatedEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeGroupCreatedEventPayload performs a merge with any union data inside the EventPayload, using the provided GroupCreatedEventPayload
+func (t *EventPayload) MergeGroupCreatedEventPayload(v GroupCreatedEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInboundEventPayload returns the union data inside the EventPayload as a InboundEventPayload
+func (t EventPayload) AsInboundEventPayload() (InboundEventPayload, error) {
+	var body InboundEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInboundEventPayload overwrites any union data inside the EventPayload as the provided InboundEventPayload
+func (t *EventPayload) FromInboundEventPayload(v InboundEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInboundEventPayload performs a merge with any union data inside the EventPayload, using the provided InboundEventPayload
+func (t *EventPayload) MergeInboundEventPayload(v InboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsMailEventPayload returns the union data inside the EventPayload as a MailEventPayload
+func (t EventPayload) AsMailEventPayload() (MailEventPayload, error) {
+	var body MailEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromMailEventPayload overwrites any union data inside the EventPayload as the provided MailEventPayload
+func (t *EventPayload) FromMailEventPayload(v MailEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeMailEventPayload performs a merge with any union data inside the EventPayload, using the provided MailEventPayload
+func (t *EventPayload) MergeMailEventPayload(v MailEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsNoPayload returns the union data inside the EventPayload as a NoPayload
+func (t EventPayload) AsNoPayload() (NoPayload, error) {
+	var body NoPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromNoPayload overwrites any union data inside the EventPayload as the provided NoPayload
+func (t *EventPayload) FromNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
+func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOutboundEventPayload returns the union data inside the EventPayload as a OutboundEventPayload
+func (t EventPayload) AsOutboundEventPayload() (OutboundEventPayload, error) {
+	var body OutboundEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOutboundEventPayload overwrites any union data inside the EventPayload as the provided OutboundEventPayload
+func (t *EventPayload) FromOutboundEventPayload(v OutboundEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOutboundEventPayload performs a merge with any union data inside the EventPayload, using the provided OutboundEventPayload
+func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsUnboundEventPayload returns the union data inside the EventPayload as a UnboundEventPayload
+func (t EventPayload) AsUnboundEventPayload() (UnboundEventPayload, error) {
+	var body UnboundEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromUnboundEventPayload overwrites any union data inside the EventPayload as the provided UnboundEventPayload
+func (t *EventPayload) FromUnboundEventPayload(v UnboundEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeUnboundEventPayload performs a merge with any union data inside the EventPayload, using the provided UnboundEventPayload
+func (t *EventPayload) MergeUnboundEventPayload(v UnboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t EventPayload) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *EventPayload) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
 
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
