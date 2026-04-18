@@ -365,6 +365,17 @@ func TestSessionHandlePendingRespondAndBlockedState(t *testing.T) {
 		Metadata:  map[string]string{"tool": "Read"},
 	})
 
+	pendingStatus, supported, err := handle.PendingStatus(context.Background())
+	if err != nil {
+		t.Fatalf("PendingStatus: %v", err)
+	}
+	if !supported {
+		t.Fatal("PendingStatus supported = false, want true")
+	}
+	if pendingStatus == nil || pendingStatus.RequestID != "req-1" {
+		t.Fatalf("PendingStatus() = %#v, want request req-1", pendingStatus)
+	}
+
 	pending, err := handle.Pending(context.Background())
 	if err != nil {
 		t.Fatalf("Pending: %v", err)

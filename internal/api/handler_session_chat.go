@@ -899,15 +899,29 @@ func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	pending, supported, err := mgr.Pending(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
+	pending, supported, err := handle.PendingStatus(r.Context())
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	var pendingResp *runtime.PendingInteraction
+	if pending != nil {
+		pendingResp = &runtime.PendingInteraction{
+			RequestID: pending.RequestID,
+			Kind:      pending.Kind,
+			Prompt:    pending.Prompt,
+			Options:   append([]string(nil), pending.Options...),
+			Metadata:  cloneStringMap(pending.Metadata),
+		}
+	}
 	writeJSON(w, http.StatusOK, sessionPendingResponse{
 		Supported: supported,
-		Pending:   pending,
+		Pending:   pendingResp,
 	})
 }
 
