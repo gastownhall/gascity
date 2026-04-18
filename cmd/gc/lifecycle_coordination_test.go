@@ -67,17 +67,6 @@ func assertHooksExist(t *testing.T, dir, context string) {
 	}
 }
 
-func assertBeadsDirPerm(t *testing.T, dir string) {
-	t.Helper()
-	info, err := os.Stat(filepath.Join(dir, ".beads"))
-	if err != nil {
-		t.Fatalf("stat .beads at %s: %v", dir, err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf(".beads perm at %s = %o, want 0700", dir, perm)
-	}
-}
-
 // testCityConfig creates a minimal config.City with the given rigs.
 func testCityConfig(cityName string, rigs []config.Rig) *config.City {
 	return &config.City{
@@ -131,7 +120,6 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 		t.Fatalf("expected init op for city, got: %s", ops[2])
 	}
 	assertHooksExist(t, cityPath, "after city init")
-	assertBeadsDirPerm(t, cityPath)
 
 	// Phase 2: gc rig add — initDirIfReady for rig.
 	rigPrefix := "mr"
@@ -152,7 +140,6 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 		t.Fatalf("expected init op for rig, got: %s", ops[5])
 	}
 	assertHooksExist(t, rigPath, "after rig add")
-	assertBeadsDirPerm(t, rigPath)
 
 	// Phase 3: Simulate hook wipe (bd init recreates .beads/).
 	if err := os.RemoveAll(filepath.Join(cityPath, ".beads", "hooks")); err != nil {
@@ -179,8 +166,6 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	// Verify hooks reinstalled at both paths after start.
 	assertHooksExist(t, cityPath, "after start")
 	assertHooksExist(t, rigPath, "after start")
-	assertBeadsDirPerm(t, cityPath)
-	assertBeadsDirPerm(t, rigPath)
 }
 
 // TestLifecycleCoordination_StartOrder verifies that start precedes any

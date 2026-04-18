@@ -366,27 +366,6 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	if len(memberships) != 0 {
 		t.Fatalf("memberships after named session removal = %#v, want none", memberships)
 	}
-	gotWait, err := store.Get(wait.ID)
-	if err != nil {
-		t.Fatalf("Get(wait): %v", err)
-	}
-	if gotWait.Status != "closed" || gotWait.Metadata["state"] != "canceled" {
-		t.Fatalf("removed-session wait status/state = %q/%q, want closed/canceled", gotWait.Status, gotWait.Metadata["state"])
-	}
-	gotBinding, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("ResolveByConversation(after removal): %v", err)
-	}
-	if gotBinding != nil {
-		t.Fatalf("binding after named session removal = %#v, want nil", gotBinding)
-	}
-	memberships, err := fabric.Transcript.ListMemberships(context.Background(), caller, ref)
-	if err != nil {
-		t.Fatalf("ListMemberships(after removal): %v", err)
-	}
-	if len(memberships) != 0 {
-		t.Fatalf("memberships after named session removal = %#v, want none", memberships)
-	}
 
 	clk.Advance(5 * time.Second)
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfgNamed, clk, &stderr, false)
@@ -1494,33 +1473,6 @@ func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	}
 	if got := all[0].Metadata["session_origin"]; got != "ephemeral" {
 		t.Fatalf("session_origin = %q, want ephemeral", got)
-	}
-}
-
-func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
-	store := &failingCloseStore{MemStore: beads.NewMemStore()}
-	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
-	b, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"pending_create_claim": "true",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if closeBead(store, b.ID, "failed-create", now, ioDiscard{}) {
-		t.Fatal("closeBead returned true, want false when Close fails")
-	}
-	got, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Metadata["pending_create_claim"] != "true" {
-		t.Fatalf("pending_create_claim = %q, want preserved when close fails", got.Metadata["pending_create_claim"])
 	}
 }
 

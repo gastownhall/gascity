@@ -30,10 +30,6 @@ func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
 }
 
-func namedSessionBackingTemplate(spec namedSessionSpec) string {
-	return session.NamedSessionBackingTemplate(spec)
-}
-
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {
 	return session.ResolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
 }

@@ -777,10 +777,31 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
+	// When workDir == cityPath, relWorkDir is "." and path.Join collapses it.
 	relWorkDir := "."
 	if workDir != cityPath {
 		if r, err := filepath.Rel(cityPath, workDir); err == nil {
 			relWorkDir = r
+		}
+	}
+
+	// workDir-based hooks: gemini, codex, opencode, copilot, cursor, pi, omp.
+	for _, rel := range []string{
+		path.Join(".gemini", "settings.json"),
+		path.Join(".codex", "hooks.json"),
+		path.Join(".opencode", "plugins", "gascity.js"),
+		path.Join(".github", "hooks", "gascity.json"),
+		path.Join(".github", "copilot-instructions.md"),
+		path.Join(".cursor", "hooks.json"),
+		path.Join(".pi", "extensions", "gc-hooks.js"),
+		path.Join(".omp", "hooks", "gc-hook.ts"),
+	} {
+		abs := filepath.Join(workDir, rel)
+		if _, err := os.Stat(abs); err == nil {
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: abs, RelDst: path.Join(relWorkDir, rel),
+				Probed: true, ContentHash: runtime.HashPathContent(abs),
+			})
 		}
 	}
 
