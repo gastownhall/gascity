@@ -22,12 +22,27 @@ func (f *fakeAdoptionProvider) ListRunning(_ string) ([]string, error) {
 	return f.running, nil
 }
 
+func (f *fakeAdoptionProvider) IsRunning(name string) bool {
+	for _, running := range f.running {
+		if running == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeAdoptionProvider) ProcessAlive(name string, _ []string) bool {
 	if f.alive == nil {
 		return true
 	}
 	return f.alive[name]
 }
+
+func (f *fakeAdoptionProvider) IsAttached(string) bool { return false }
+
+func (f *fakeAdoptionProvider) GetMeta(string, string) (string, error) { return "", nil }
+
+func (f *fakeAdoptionProvider) GetLastActivity(string) (time.Time, error) { return time.Time{}, nil }
 
 func TestAdoptionBarrier_NoRunning(t *testing.T) {
 	store := beads.NewMemStore()

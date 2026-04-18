@@ -31,6 +31,7 @@ const (
 	RequirementInferenceMultiTurnWorkflow          RequirementCode = "WI-MTURN-001"
 	RequirementInferenceTranscript                 RequirementCode = "WI-TX-001"
 	RequirementInferenceContinuation               RequirementCode = "WI-CONT-001"
+	RequirementInferenceFreshReset                 RequirementCode = "WI-RESET-001"
 	RequirementInferenceInterruptRecoverContinue   RequirementCode = "WI-INT-001"
 )
 
@@ -112,6 +113,11 @@ func InferenceCatalog() []Requirement {
 			Code:        RequirementInferenceContinuation,
 			Group:       "live_continuation",
 			Description: "A restarted live worker continues the same logical conversation and recalls prior turn context.",
+		},
+		{
+			Code:        RequirementInferenceFreshReset,
+			Group:       "live_fresh_reset",
+			Description: "A fresh-reset live worker preserves the session bead but starts a new logical conversation that does not recall prior turn context.",
 		},
 		{
 			Code:        RequirementInferenceInterruptRecoverContinue,

@@ -53,15 +53,15 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 	if err != nil {
 		t.Fatalf("Get session: %v", err)
 	}
-	if got.State != sessionpkg.StateActive {
-		t.Fatalf("state = %q, want %q", got.State, sessionpkg.StateActive)
+	if got.State != sessionpkg.StateCreating {
+		t.Fatalf("state = %q, want %q before commit", got.State, sessionpkg.StateCreating)
 	}
 	updatedBead, err := store.Get(info.ID)
 	if err != nil {
 		t.Fatalf("Get updated bead: %v", err)
 	}
-	if updatedBead.Metadata["pending_create_claim"] != "" {
-		t.Fatalf("pending_create_claim = %q, want cleared", updatedBead.Metadata["pending_create_claim"])
+	if updatedBead.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want preserved before commit", updatedBead.Metadata["pending_create_claim"])
 	}
 	if !sp.IsRunning(info.SessionName) {
 		t.Fatal("session should be running after prepared start")

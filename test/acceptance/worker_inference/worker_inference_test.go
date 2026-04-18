@@ -433,6 +433,358 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceContinuation, "restarted live worker resumed the same conversation and recalled prior context").WithEvidence(merged))
 }
 
+func TestWorkerInferenceFreshResetIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("WorkerInference: skipping in short mode")
+	}
+
+	profileID := workertest.ProfileID(liveSetup.Profile)
+	reporter := workertest.NewSuiteReporter(t, "worker-inference-reset", map[string]string{
+		"lane":        "live",
+		"profile":     string(liveSetup.Profile),
+		"provider":    liveSetup.Provider,
+		"auth_source": liveSetup.AuthSource,
+	})
+
+	if liveSetup.SetupError != "" {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceFreshReset, liveSetup.SetupError).WithEvidence(map[string]string{
+			"profile":  string(liveSetup.Profile),
+			"provider": liveSetup.Provider,
+		}))
+		t.FailNow()
+	}
+
+	phase1Profile, ok := phase1ProfileForLiveProfile(liveSetup.Profile)
+	if !ok {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf("no phase-1 oracle for %s", liveSetup.Profile)).WithEvidence(map[string]string{
+			"profile":  string(liveSetup.Profile),
+			"provider": liveSetup.Provider,
+		}))
+		t.FailNow()
+	}
+
+	readyRel := fmt.Sprintf("worker-inference-reset-ready-%s.txt", liveSetup.Provider)
+	readyText := "ready"
+	alias := fmt.Sprintf("probe-reset-%s", liveSetup.Provider)
+	firstPrompt := fmt.Sprintf(
+		"Create a file named %s containing exactly %q and nothing else. Also remember this exact summary phrase for a later message: %q. Do not write that remembered phrase to any file right now.",
+		readyRel,
+		readyText,
+		phase1Profile.Continuation.AnchorText,
+	)
+
+	run, client, cityScope, spawnEvidence, err := startManagedInferenceSession(
+		t,
+		liveSetup.Provider,
+		inferenceProbeTemplate,
+		alias,
+	)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), spawnEvidence))
+		t.FailNow()
+	}
+
+	sessionInfo, statusOut, err := sendSessionMessageWhenReady(run.CityDir, run.SessionID, run.SessionName, client, firstPrompt)
+	readyPath := filepath.Join(run.CityDir, readyRel)
+	taskEvidence := map[string]string{
+		"city_dir":         run.CityDir,
+		"provider":         liveSetup.Provider,
+		"template":         inferenceProbeTemplate,
+		"alias":            alias,
+		"session_id":       run.SessionID,
+		"session_alias":    run.SessionAlias,
+		"session_name":     run.SessionName,
+		"session_key":      run.SessionKey,
+		"gc_session_id":    run.SessionKey,
+		"api_city_scope":   cityScope,
+		"message_delivery": "session_api",
+		"output_path":      readyPath,
+		"expected_output":  readyText,
+		"status":           strings.TrimSpace(statusOut),
+	}
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf("initial session API message failed: %v", err), mergeEvidence(spawnEvidence, taskEvidence)))
+		t.FailNow()
+	}
+
+	readyOutput, readyFileEvidence, err := waitForLiveFileText(run.CityDir, sessionInfo.SessionName, readyPath, 4*time.Minute)
+	taskEvidence = mergeEvidence(taskEvidence, readyFileEvidence)
+	taskEvidence["output_contents"] = readyOutput
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), mergeEvidence(spawnEvidence, taskEvidence)))
+		t.FailNow()
+	}
+	if strings.TrimSpace(readyOutput) != readyText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "live worker did not produce the expected bootstrap output before reset", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+		)))
+		t.FailNow()
+	}
+	if refreshedSession, refreshedStatus, refreshErr := sessionStateSnapshot(run.CityDir, run.SessionID, run.SessionName, false); refreshErr == nil {
+		if strings.TrimSpace(refreshedSession.SessionName) != "" {
+			run.SessionName = refreshedSession.SessionName
+			taskEvidence["session_name"] = refreshedSession.SessionName
+		}
+		if strings.TrimSpace(refreshedSession.SessionKey) != "" {
+			run.SessionKey = refreshedSession.SessionKey
+			taskEvidence["session_key"] = refreshedSession.SessionKey
+			taskEvidence["gc_session_id"] = refreshedSession.SessionKey
+		}
+		if strings.TrimSpace(refreshedSession.Alias) != "" {
+			run.SessionAlias = refreshedSession.Alias
+			taskEvidence["session_alias"] = refreshedSession.Alias
+		}
+		if strings.TrimSpace(refreshedStatus) != "" {
+			taskEvidence["status_after_bootstrap"] = strings.TrimSpace(refreshedStatus)
+		}
+	}
+
+	resetOut, resetErr := runGCWithTimeout(liveControlTimeout, liveEnv, run.CityDir, "session", "reset", run.SessionID)
+	resetEvidence := map[string]string{
+		"city_dir":      run.CityDir,
+		"provider":      liveSetup.Provider,
+		"session_id":    run.SessionID,
+		"session_alias": run.SessionAlias,
+		"session_name":  run.SessionName,
+		"session_key":   run.SessionKey,
+		"gc_session_id": run.SessionKey,
+		"before_output": readyOutput,
+		"reset_command": "gc session reset",
+		"reset_out":     strings.TrimSpace(resetOut),
+	}
+	if resetErr != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf("gc session reset failed: %v", resetErr), mergeEvidence(spawnEvidence, taskEvidence, resetEvidence)))
+		t.FailNow()
+	}
+
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
+	beforePath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, resetEvidence, beforeEvidence)))
+		t.FailNow()
+	}
+	resetEvidence["before_transcript"] = beforePath
+
+	resetSession, resetStatus, err := waitForSessionFreshReset(run.CityDir, run.SessionID, run.SessionKey)
+	resetEvidence["reset_status"] = strings.TrimSpace(resetStatus)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, resetEvidence)))
+		t.FailNow()
+	}
+	if resetSession.ID != run.SessionID {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf("session id changed across reset: %q -> %q", run.SessionID, resetSession.ID), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			map[string]string{
+				"after_session_id": resetSession.ID,
+			},
+		)))
+		t.FailNow()
+	}
+	if strings.TrimSpace(run.SessionKey) != "" && strings.TrimSpace(resetSession.SessionKey) != "" &&
+		strings.TrimSpace(resetSession.SessionKey) == strings.TrimSpace(run.SessionKey) {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf("session key did not rotate across reset: %q", resetSession.SessionKey), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			map[string]string{
+				"after_session_key": resetSession.SessionKey,
+			},
+		)))
+		t.FailNow()
+	}
+
+	proofRel := fmt.Sprintf("worker-inference-reset-proof-%s.txt", liveSetup.Provider)
+	expectedProof := phase1Profile.Continuation.ResetResponseContains
+	proofPrompt := fmt.Sprintf(
+		"Without reading files or manually searching history, create a file named %s containing exactly the summary phrase from our earlier turn if you still know it. If you cannot do that because this is a fresh session, write exactly %q and nothing else.",
+		proofRel,
+		expectedProof,
+	)
+	sessionInfo, statusOut, err = sendSessionMessageWhenReady(run.CityDir, run.SessionID, resetSession.SessionName, client, proofPrompt)
+	proofPath := filepath.Join(run.CityDir, proofRel)
+	proofEvidence := map[string]string{
+		"city_dir":         run.CityDir,
+		"provider":         liveSetup.Provider,
+		"session_id":       run.SessionID,
+		"session_alias":    resetSession.Alias,
+		"session_name":     resetSession.SessionName,
+		"session_key":      resetSession.SessionKey,
+		"gc_session_id":    resetSession.SessionKey,
+		"api_city_scope":   cityScope,
+		"message_delivery": "session_api",
+		"output_path":      proofPath,
+		"expected_output":  expectedProof,
+		"status":           strings.TrimSpace(statusOut),
+	}
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf("post-reset session API message failed: %v", err), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+		)))
+		t.FailNow()
+	}
+
+	proofText, fileEvidence, err := waitForLiveFileText(run.CityDir, sessionInfo.SessionName, proofPath, 4*time.Minute)
+	proofEvidence = mergeEvidence(proofEvidence, fileEvidence)
+	proofEvidence["output_contents"] = proofText
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+		)))
+		t.FailNow()
+	}
+	if strings.TrimSpace(proofText) != expectedProof {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "fresh reset did not suppress prior-turn recall", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			map[string]string{
+				"anchor_text": phase1Profile.Continuation.AnchorText,
+			},
+		)))
+		t.FailNow()
+	}
+
+	afterSessionKey := strings.TrimSpace(sessionInfo.SessionKey)
+	if afterSessionKey == "" {
+		afterSessionKey = strings.TrimSpace(resetSession.SessionKey)
+	}
+	afterPath, afterSnapshot, afterEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, sessionInfo.SessionName, afterSessionKey, proofPrompt, expectedProof)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+		)))
+		t.FailNow()
+	}
+
+	if strings.TrimSpace(beforeSnapshot.LogicalConversationID) == "" || strings.TrimSpace(afterSnapshot.LogicalConversationID) == "" {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "logical conversation identity is empty across reset", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+		)))
+		t.FailNow()
+	}
+	if sameContinuationIdentity(liveSetup.Profile, beforeSnapshot.LogicalConversationID, afterSnapshot.LogicalConversationID) {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf(
+			"logical conversation did not reset: %q",
+			afterSnapshot.LogicalConversationID,
+		), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+			map[string]string{
+				"before_logical_conv": beforeSnapshot.LogicalConversationID,
+				"after_logical_conv":  afterSnapshot.LogicalConversationID,
+			},
+		)))
+		t.FailNow()
+	}
+	if beforeSnapshot.ProviderSessionID != "" && afterSnapshot.ProviderSessionID != "" &&
+		sameContinuationIdentity(liveSetup.Profile, beforeSnapshot.ProviderSessionID, afterSnapshot.ProviderSessionID) {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, fmt.Sprintf(
+			"provider session did not reset: %q",
+			afterSnapshot.ProviderSessionID,
+		), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+			map[string]string{
+				"before_provider_session": beforeSnapshot.ProviderSessionID,
+				"after_provider_session":  afterSnapshot.ProviderSessionID,
+			},
+		)))
+		t.FailNow()
+	}
+	if historySubsequenceEnd(afterSnapshot.Entries, continuationComparableEntries(beforeSnapshot.Entries)) >= 0 {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "reset transcript still preserves the prior normalized conversation history", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+		)))
+		t.FailNow()
+	}
+	if historyContains(afterSnapshot, phase1Profile.Continuation.AnchorText) {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "reset transcript still contains the prior-turn anchor text", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+			map[string]string{
+				"anchor_text": phase1Profile.Continuation.AnchorText,
+			},
+		)))
+		t.FailNow()
+	}
+	if strings.TrimSpace(afterSnapshot.Cursor.AfterEntryID) == "" {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshReset, "reset transcript cursor is empty", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			resetEvidence,
+			proofEvidence,
+			afterEvidence,
+		)))
+		t.FailNow()
+	}
+
+	evidence := mergeEvidence(
+		spawnEvidence,
+		taskEvidence,
+		beforeEvidence,
+		resetEvidence,
+		proofEvidence,
+		afterEvidence,
+		map[string]string{
+			"before_transcript":       beforePath,
+			"after_transcript":        afterPath,
+			"before_logical_conv":     beforeSnapshot.LogicalConversationID,
+			"after_logical_conv":      afterSnapshot.LogicalConversationID,
+			"before_provider_session": beforeSnapshot.ProviderSessionID,
+			"after_provider_session":  afterSnapshot.ProviderSessionID,
+			"anchor_text":             phase1Profile.Continuation.AnchorText,
+			"expected_output":         expectedProof,
+			"after_session_name":      sessionInfo.SessionName,
+			"after_session_key":       afterSessionKey,
+			"after_gc_session_id":     afterSessionKey,
+		},
+	)
+	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceFreshReset, "live worker reset preserved the bead but started a fresh logical conversation").WithEvidence(evidence))
+}
+
 func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("WorkerInference: skipping in short mode")
@@ -1479,6 +1831,212 @@ func liveCurrentDoltPort(cityDir string) string {
 		}
 	}
 	return ""
+}
+
+func startManagedInferenceSession(
+	t *testing.T,
+	provider string,
+	templateName string,
+	alias string,
+) (inferenceSessionRun, *api.Client, string, map[string]string, error) {
+	t.Helper()
+
+	c := newLiveCity(t)
+	initArgs := []string{"init", "--skip-provider-readiness"}
+	if provider != "" {
+		initArgs = append(initArgs, "--provider", provider)
+	}
+	initArgs = append(initArgs, c.Dir)
+	initOut, initErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, "", initArgs...)
+	if initErr != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir": c.Dir,
+			"provider": provider,
+			"template": templateName,
+			"alias":    alias,
+			"init_out": strings.TrimSpace(initOut),
+			"stage":    "init",
+		}, fmt.Errorf("gc init failed: %w", initErr)
+	}
+	if err := seedLiveProviderState(c.Dir); err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir": c.Dir,
+			"provider": provider,
+			"template": templateName,
+			"alias":    alias,
+			"init_out": strings.TrimSpace(initOut),
+			"stage":    "seed",
+		}, fmt.Errorf("seeding live provider state: %w", err)
+	}
+	if err := installInferenceProbeAgent(c.Dir, true); err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir": c.Dir,
+			"provider": provider,
+			"template": templateName,
+			"alias":    alias,
+			"init_out": strings.TrimSpace(initOut),
+			"stage":    "install_agent",
+		}, fmt.Errorf("installing worker inference probe agent: %w", err)
+	}
+	if err := installLiveProviderCommandOverride(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames); err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir":    c.Dir,
+			"binary_path": liveSetup.BinaryPath,
+			"provider":    provider,
+			"template":    templateName,
+			"alias":       alias,
+			"init_out":    strings.TrimSpace(initOut),
+			"stage":       "install_override",
+		}, fmt.Errorf("installing live provider command override: %w", err)
+	}
+	if err := setAgentSuspended(c.Dir, "mayor", true); err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir": c.Dir,
+			"provider": provider,
+			"template": templateName,
+			"alias":    alias,
+			"init_out": strings.TrimSpace(initOut),
+			"stage":    "suspend_mayor",
+		}, fmt.Errorf("suspending default mayor session: %w", err)
+	}
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
+	if err := closeLiveSessionsByTemplate(c.Dir, "mayor"); err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir": c.Dir,
+			"provider": provider,
+			"template": templateName,
+			"alias":    alias,
+			"init_out": strings.TrimSpace(initOut),
+			"stage":    "close_mayor",
+		}, fmt.Errorf("closing stale mayor sessions before live start: %w", err)
+	}
+	if err := closeLiveSessionsByTemplate(c.Dir, templateName); err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir": c.Dir,
+			"provider": provider,
+			"template": templateName,
+			"alias":    alias,
+			"init_out": strings.TrimSpace(initOut),
+			"stage":    "close_template",
+		}, fmt.Errorf("closing stale %s sessions before managed session start: %w", templateName, err)
+	}
+
+	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
+	startTimedOut := isRunTimeout(startErr)
+	t.Cleanup(func() {
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+		_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
+	})
+
+	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
+		_, err := bdCmd(liveEnv, c.Dir, "list", "--json", "--limit=1")
+		return err == nil
+	})
+	if !beadReady {
+		detail := beadStoreNotReadyDetail("bead store did not become ready after gc start", startErr)
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir":  c.Dir,
+			"provider":  provider,
+			"template":  templateName,
+			"alias":     alias,
+			"init_out":  strings.TrimSpace(initOut),
+			"start_out": strings.TrimSpace(startOut),
+			"start_err": strings.TrimSpace(errorString(startErr)),
+			"stage":     "start",
+		}, errors.New(detail)
+	}
+
+	var (
+		sessionInfo     sessionJSON
+		statusOut       string
+		sessionListJSON string
+	)
+	ready := pollForCondition(liveSpawnTimeout, 5*time.Second, func() bool {
+		statusNow, _ := runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "status")
+		statusOut = strings.TrimSpace(statusNow)
+
+		sessionsOut, sessionsErr := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "session", "list", "--json")
+		sessionListJSON = strings.TrimSpace(sessionsOut)
+		if sessionsErr != nil {
+			statusOut = strings.TrimSpace(statusOut + "\nSESSIONS_ERR: " + sessionsErr.Error())
+			return false
+		}
+		sessions, err := parseSessionListJSON(sessionsOut)
+		if err != nil {
+			statusOut = strings.TrimSpace(statusOut + "\nSESSIONS_PARSE_ERR: " + err.Error())
+			return false
+		}
+		detected, ok, detectErr := selectInferenceSpawnedSession(sessions, "", func(name string) (bool, error) {
+			return tmuxSessionLive(c.Dir, name)
+		})
+		if detectErr != nil {
+			statusOut = strings.TrimSpace(statusOut + "\nTMUX_ERR: " + detectErr.Error())
+			return false
+		}
+		if ok {
+			sessionInfo = detected
+			return true
+		}
+		return false
+	})
+	if !ready || strings.TrimSpace(sessionInfo.ID) == "" {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir":     c.Dir,
+			"provider":     provider,
+			"template":     templateName,
+			"alias":        alias,
+			"init_out":     strings.TrimSpace(initOut),
+			"start_out":    strings.TrimSpace(startOut),
+			"status":       strings.TrimSpace(statusOut),
+			"session_list": sessionListJSON,
+			"stage":        "wait_named_session",
+		}, fmt.Errorf("named %s session did not reach a running state within the timeout", templateName)
+	}
+
+	client, cityScope, err := liveCityAPIClient(c.Dir)
+	if err != nil {
+		return inferenceSessionRun{}, nil, "", map[string]string{
+			"city_dir":  c.Dir,
+			"provider":  provider,
+			"template":  templateName,
+			"alias":     alias,
+			"init_out":  strings.TrimSpace(initOut),
+			"start_out": strings.TrimSpace(startOut),
+			"status":    strings.TrimSpace(statusOut),
+			"stage":     "client",
+		}, fmt.Errorf("creating city API client: %w", err)
+	}
+
+	evidence := map[string]string{
+		"city_dir":       c.Dir,
+		"provider":       provider,
+		"template":       templateName,
+		"alias":          alias,
+		"session_id":     sessionInfo.ID,
+		"session_alias":  sessionInfo.Alias,
+		"session_name":   sessionInfo.SessionName,
+		"session_key":    sessionInfo.SessionKey,
+		"gc_session_id":  sessionInfo.SessionKey,
+		"init_out":       strings.TrimSpace(initOut),
+		"start_out":      strings.TrimSpace(startOut),
+		"session_list":   sessionListJSON,
+		"api_city_scope": cityScope,
+	}
+	if startTimedOut {
+		evidence["start_timed_out"] = "true"
+	}
+
+	return inferenceSessionRun{
+		CityDir:      c.Dir,
+		SessionID:    sessionInfo.ID,
+		SessionAlias: sessionInfo.Alias,
+		SessionName:  sessionInfo.SessionName,
+		SessionKey:   sessionInfo.SessionKey,
+		LastStatus:   strings.TrimSpace(statusOut),
+	}, client, cityScope, evidence, nil
 }
 
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
@@ -2774,6 +3332,57 @@ func waitForSessionRunning(cityDir, identity, expectedSessionName string) (sessi
 	return liveSession, lastStatus, nil
 }
 
+func waitForSessionFreshReset(cityDir, identity, previousSessionKey string) (sessionJSON, string, error) {
+	var (
+		lastStatus  string
+		liveSession sessionJSON
+		lastErr     error
+		sawRestart  bool
+	)
+	previousSessionKey = strings.TrimSpace(previousSessionKey)
+	ready := pollForCondition(4*time.Minute, 5*time.Second, func() bool {
+		snapshot, statusOut, err := sessionStateSnapshot(cityDir, identity, "", false)
+		if strings.TrimSpace(statusOut) != "" {
+			lastStatus = strings.TrimSpace(statusOut)
+		}
+		if snapshot.ID != "" {
+			liveSession = snapshot
+		}
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		if !sessionStateCountsAsRunning(snapshot.State) {
+			sawRestart = true
+			lastErr = fmt.Errorf("session %s reset still in progress", identity)
+			return false
+		}
+		if previousSessionKey == "" {
+			if sawRestart {
+				return true
+			}
+			lastErr = fmt.Errorf("session %s reset has not completed a visible restart transition yet", identity)
+			return false
+		}
+		if strings.TrimSpace(snapshot.SessionKey) == "" {
+			lastErr = fmt.Errorf("session %s reset completed without a rotated session key", identity)
+			return false
+		}
+		if strings.TrimSpace(snapshot.SessionKey) == previousSessionKey {
+			lastErr = fmt.Errorf("session %s reset still reports the prior session key %q", identity, snapshot.SessionKey)
+			return false
+		}
+		return true
+	})
+	if !ready {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("session %s did not complete fresh reset within the timeout", identity)
+		}
+		return liveSession, lastStatus, lastErr
+	}
+	return liveSession, lastStatus, nil
+}
+
 func sessionStateSnapshot(cityDir, identity, expectedSessionName string, requireRunning bool) (sessionJSON, string, error) {
 	sessionsOut, sessionsErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "session", "list", "--json")
 	lastSessions := strings.TrimSpace(sessionsOut)
@@ -3842,6 +4451,15 @@ func containsAny(haystack string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func phase1ProfileForLiveProfile(profile workerpkg.Profile) (workertest.Profile, bool) {
+	for _, candidate := range workertest.Phase1Profiles() {
+		if string(candidate.ID) == string(profile) {
+			return candidate, true
+		}
+	}
+	return workertest.Profile{}, false
 }
 
 func readFileTail(path string, maxBytes int) string {

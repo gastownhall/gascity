@@ -476,15 +476,26 @@ func executePreparedStartWave(
 				startCtx, cancel = context.WithTimeout(ctx, startupTimeout)
 			}
 			defer cancel()
-			usedWorkerBoundary, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+			_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+			if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
+				running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				if runningErr == nil && running {
+					err = nil
+				}
+			}
 			// Stale session key detection: if the session was started
 			// with a resume flag but dies immediately, the session key
 			// likely references a conversation that no longer exists
 			// (e.g., "No conversation found"). Report as a failure so
 			// recordWakeFailure clears the key for the next attempt.
-			if err == nil && !usedWorkerBoundary && item.candidate.session.Metadata["session_key"] != "" {
+			if err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
 				time.Sleep(staleKeyDetectDelay)
-				running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				running := false
+				if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
+					running = sp != nil && sp.IsRunning(item.candidate.name())
+				} else {
+					running, err = workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				}
 				if err != nil || !running {
 					err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -103,12 +104,19 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store bead
 	if logCtx.sessionID != "" {
 		handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
 		if err == nil {
-			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil {
+			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
 				return path, logCtx.provider, true
 			}
 		}
 	}
-	return resolveSessionLogPath(searchPaths, logCtx), logCtx.provider, true
+	path := resolveSessionLogPath(searchPaths, logCtx)
+	if path == "" && canFallbackStoredSessionLogByWorkDir(store, logCtx) {
+		factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
+		if err == nil {
+			path = factory.DiscoverWorkDirTranscript(logCtx.provider, logCtx.workDir)
+		}
+	}
+	return path, logCtx.provider, true
 }
 
 type sessionLogContext struct {
@@ -144,6 +152,34 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Sto
 		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
 		provider:   provider,
 	}, true
+}
+
+func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogContext) bool {
+	if store == nil || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
+		return false
+	}
+	all, err := store.ListByLabel(sessionpkg.LabelSession, 0)
+	if err != nil {
+		return false
+	}
+	matches := 0
+	for _, b := range all {
+		if strings.TrimSpace(b.Metadata["work_dir"]) != logCtx.workDir {
+			continue
+		}
+		provider := strings.TrimSpace(b.Metadata["provider_kind"])
+		if provider == "" {
+			provider = strings.TrimSpace(b.Metadata["provider"])
+		}
+		if logCtx.provider != "" && provider != "" && provider != logCtx.provider {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return false
+		}
+	}
+	return matches == 1
 }
 
 func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, identifier string) (string, bool) {

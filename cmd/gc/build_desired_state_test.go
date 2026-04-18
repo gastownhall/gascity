@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -212,6 +213,67 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
 		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
+func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
+		Providers: map[string]config.ProviderSpec{
+			"test": {Command: "echo", PromptMode: "none"},
+		},
+		Agents: []config.Agent{{
+			Name:              "probe",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkDir:           "worker",
+			InstallAgentHooks: []string{"gemini"},
+		}},
+	}
+
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(first.State) != 1 {
+		t.Fatalf("first desired state size = %d, want 1", len(first.State))
+	}
+	var firstTP TemplateParams
+	for _, tp := range first.State {
+		firstTP = tp
+	}
+
+	hookPath := filepath.Join(cityPath, "worker", ".gemini", "settings.json")
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("stat gemini hook %q: %v", hookPath, err)
+	}
+
+	firstCfg := templateParamsToConfig(firstTP)
+	wantRelDst := path.Join("worker", ".gemini", "settings.json")
+	foundHook := false
+	for _, entry := range firstCfg.CopyFiles {
+		if entry.RelDst != wantRelDst {
+			continue
+		}
+		foundHook = true
+		if entry.Src != hookPath {
+			t.Fatalf("CopyFiles hook src = %q, want %q", entry.Src, hookPath)
+		}
+	}
+	if !foundHook {
+		t.Fatalf("first fingerprint missing gemini hook copy file %q: %#v", wantRelDst, firstCfg.CopyFiles)
+	}
+
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(second.State) != 1 {
+		t.Fatalf("second desired state size = %d, want 1", len(second.State))
+	}
+	var secondTP TemplateParams
+	for _, tp := range second.State {
+		secondTP = tp
+	}
+	secondCfg := templateParamsToConfig(secondTP)
+
+	if got, want := runtime.CoreFingerprint(secondCfg), runtime.CoreFingerprint(firstCfg); got != want {
+		t.Fatalf("core fingerprint changed after hook install: got %q want %q", got, want)
 	}
 }
 

@@ -1890,7 +1890,10 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 	results := executePreparedStartWave(
 		context.Background(),
-		[]preparedStart{{candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}}}},
+		[]preparedStart{{
+			candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}},
+			cfg:       runtime.Config{Command: "panic-provider"},
+		}},
 		&panicStartProvider{Fake: runtime.NewFake()},
 		nil,
 		"",
@@ -2109,8 +2112,12 @@ func (p *dieAfterStartProvider) Start(ctx context.Context, name string, cfg runt
 		return err
 	}
 	// Simulate the pane dying immediately.
-	_ = p.Stop(name)
+	_ = p.Fake.Stop(name)
 	return nil
+}
+
+func (p *dieAfterStartProvider) IsRunning(name string) bool {
+	return p.Fake.IsRunning(name)
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {

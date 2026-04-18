@@ -297,7 +297,7 @@ func (h *SessionHandle) Start(ctx context.Context) error {
 // StartResolved starts or resumes the worker using a caller-supplied runtime
 // command and hints. This is a migration bridge for higher layers that already
 // materialize provider-specific runtime config but should still delegate the
-// actual session mutation and state convergence through the worker boundary.
+// provider-specific runtime bring-up through the worker boundary.
 func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, hints runtime.Config) error {
 	id, err := h.ensureSessionID()
 	if err != nil {
@@ -314,7 +314,7 @@ func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, 
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	return h.manager.Start(ctx, id, command, startHints)
+	return h.manager.StartRuntimeOnly(ctx, id, command, startHints)
 }
 
 // Attach ensures the worker runtime is live and then attaches the caller's
