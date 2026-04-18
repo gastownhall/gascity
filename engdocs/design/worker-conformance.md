@@ -1475,11 +1475,12 @@ Current branch progress:
 - API session creation and configured named-session materialization now
   materialize sessions through a worker-owned creation seam rather than
   calling `session.Manager` lifecycle methods directly
+- session transcript streaming now projects from worker-history reads
+  through the concrete handle instead of parsing provider files directly
+  in the production stream path
 
 Remaining branch-local Phase 4 gaps:
 
-- transcript streaming endpoints still read provider files directly
-  instead of projecting from worker history
 - reconciler and controller orchestration still own start/stop policy
   beneath the worker boundary
 

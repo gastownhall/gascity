@@ -984,15 +984,21 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
+		return
+	}
+	history, historyErr := handle.History(r.Context(), worker.HistoryRequest{})
+	hasHistory := historyErr == nil && history != nil
+	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+		writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
 		return
 	}
 
 	sp := s.state.SessionProvider()
 	running := info.State == session.StateActive && sp.IsRunning(info.SessionName)
-	if path == "" && !running {
+	if !hasHistory && !running {
 		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
 		return
 	}
@@ -1015,18 +1021,18 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	if info.Closed {
 		if format == "raw" {
-			s.emitClosedSessionSnapshotRaw(w, info, path)
+			s.emitClosedSessionSnapshotRaw(w, info, history)
 		} else {
-			s.emitClosedSessionSnapshot(w, info, path)
+			s.emitClosedSessionSnapshot(w, info, history)
 		}
 		return
 	}
 	switch {
-	case path != "":
+	case hasHistory:
 		if format == "raw" {
-			s.streamSessionTranscriptLogRaw(ctx, w, info, path)
+			s.streamSessionTranscriptHistoryRaw(ctx, w, info, handle, history)
 		} else {
-			s.streamSessionTranscriptLog(ctx, w, info, path)
+			s.streamSessionTranscriptHistory(ctx, w, info, handle, history)
 		}
 	case format == "raw":
 		// No log file yet. If the session is running, poll tmux pane content
@@ -1049,23 +1055,11 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, logPath string) {
-	if logPath == "" {
+func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, history *worker.HistorySnapshot) {
+	if history == nil {
 		return
 	}
-	sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
-	if err != nil {
-		return
-	}
-
-	turns := make([]outputTurn, 0, len(sess.Messages))
-	for _, entry := range sess.Messages {
-		turn := entryToTurn(entry)
-		if turn.Text == "" {
-			continue
-		}
-		turns = append(turns, turn)
-	}
+	turns, _ := historySnapshotTurns(history)
 	if len(turns) == 0 {
 		return
 	}
@@ -1085,22 +1079,11 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 	writeSSE(w, "activity", 2, actData)
 }
 
-func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info session.Info, logPath string) {
-	if logPath == "" {
+func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info session.Info, history *worker.HistorySnapshot) {
+	if history == nil {
 		return
 	}
-	sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 0)
-	if err != nil {
-		return
-	}
-
-	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
-	for _, entry := range sess.Messages {
-		if len(entry.Raw) == 0 {
-			continue
-		}
-		rawMessages = append(rawMessages, entry.Raw)
-	}
+	rawMessages, _ := historySnapshotRawMessages(history)
 	if len(rawMessages) == 0 {
 		return
 	}
@@ -1118,6 +1101,210 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 	// Closed session is definitionally idle.
 	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
 	writeSSE(w, "activity", 2, actData)
+}
+
+func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastSentID string
+	var seq uint64
+	var lastActivity string
+	var lastPendingID string
+	lastProgress := time.Now()
+	sentIDs := make(map[string]struct{})
+	currentActivity := historySnapshotActivity(initial)
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+		if snapshot == nil {
+			return
+		}
+		currentActivity = historySnapshotActivity(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		if len(rawMessages) > 0 {
+			var toSend []json.RawMessage
+			if lastSentID == "" {
+				toSend = rawMessages
+			} else {
+				found := false
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = rawMessages[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, rawMessages[i])
+						}
+					}
+				}
+			}
+			if len(toSend) > 0 {
+				seq++
+				data, err := json.Marshal(sessionRawTranscriptResponse{
+					ID:       info.ID,
+					Template: info.Template,
+					Format:   "raw",
+					Messages: toSend,
+				})
+				if err == nil {
+					writeSSE(w, "message", seq, data)
+					lastProgress = time.Now()
+					lastPendingID = ""
+				}
+			}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
+			}
+		}
+		if currentActivity != "" && currentActivity != lastActivity {
+			lastActivity = currentActivity
+			seq++
+			actData, _ := json.Marshal(map[string]string{"activity": currentActivity})
+			writeSSE(w, "activity", seq, actData)
+			lastProgress = time.Now()
+		}
+	}
+
+	emitPending := func() {
+		if time.Since(lastProgress) < 5*time.Second {
+			return
+		}
+		pending, err := handle.Pending(ctx)
+		if err != nil || pending == nil {
+			if lastPendingID != "" {
+				lastPendingID = ""
+				activity := currentActivity
+				if activity == "" {
+					activity = "in-turn"
+				}
+				seq++
+				actData, _ := json.Marshal(map[string]string{"activity": activity})
+				writeSSE(w, "activity", seq, actData)
+			}
+			return
+		}
+		if pending.RequestID == lastPendingID {
+			return
+		}
+		lastPendingID = pending.RequestID
+		seq++
+		pendingData, _ := json.Marshal(pending)
+		writeSSE(w, "pending", seq, pendingData)
+	}
+
+	emitSnapshot(initial)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			snapshot, err := handle.History(ctx, worker.HistoryRequest{})
+			switch {
+			case err == nil:
+				emitSnapshot(snapshot)
+			case errors.Is(err, worker.ErrHistoryUnavailable):
+			default:
+				log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
+			}
+			emitPending()
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
+
+func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastSentID string
+	var seq uint64
+	var lastActivity string
+	sentIDs := make(map[string]struct{})
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+		if snapshot == nil {
+			return
+		}
+		turns, ids := historySnapshotTurns(snapshot)
+		if len(turns) > 0 {
+			var toSend []outputTurn
+			if lastSentID == "" {
+				toSend = turns
+			} else {
+				found := false
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = turns[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, turns[i])
+						}
+					}
+				}
+			}
+			if len(toSend) > 0 {
+				seq++
+				data, err := json.Marshal(sessionTranscriptResponse{
+					ID:       info.ID,
+					Template: info.Template,
+					Format:   "conversation",
+					Turns:    toSend,
+				})
+				if err == nil {
+					writeSSE(w, "turn", seq, data)
+				}
+			}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
+			}
+		}
+		activity := historySnapshotActivity(snapshot)
+		if activity != "" && activity != lastActivity {
+			lastActivity = activity
+			seq++
+			actData, _ := json.Marshal(map[string]string{"activity": activity})
+			writeSSE(w, "activity", seq, actData)
+		}
+	}
+
+	emitSnapshot(initial)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			snapshot, err := handle.History(ctx, worker.HistoryRequest{})
+			switch {
+			case err == nil:
+				emitSnapshot(snapshot)
+			case errors.Is(err, worker.ErrHistoryUnavailable):
+			default:
+				log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
+			}
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
 }
 
 func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
