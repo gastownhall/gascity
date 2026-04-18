@@ -1,3 +1,4 @@
+// Package fake defines the scripted fake-worker profiles used by worker tests.
 package fake
 
 import (
@@ -11,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// LoadProfile reads and validates a fake worker profile from disk.
 func LoadProfile(path string) (Profile, error) {
 	var profile Profile
 	if err := loadFile(path, &profile); err != nil {
@@ -22,6 +24,7 @@ func LoadProfile(path string) (Profile, error) {
 	return profile, nil
 }
 
+// LoadScenario reads and validates a fake worker scenario from disk.
 func LoadScenario(path string) (Scenario, error) {
 	var scenario Scenario
 	if err := loadFile(path, &scenario); err != nil {
@@ -33,6 +36,7 @@ func LoadScenario(path string) (Scenario, error) {
 	return scenario, nil
 }
 
+// LoadHelperConfig reads and validates standalone fake worker config from disk.
 func LoadHelperConfig(path string) (HelperConfig, error) {
 	var cfg HelperConfig
 	if err := loadFile(path, &cfg); err != nil {

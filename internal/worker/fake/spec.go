@@ -7,9 +7,12 @@ import (
 )
 
 var (
-	ErrInvalidProfile  = errors.New("invalid fake worker profile")
+	// ErrInvalidProfile reports invalid fake-worker profile configuration.
+	ErrInvalidProfile = errors.New("invalid fake worker profile")
+	// ErrInvalidScenario reports invalid fake-worker scenario configuration.
 	ErrInvalidScenario = errors.New("invalid fake worker scenario")
-	ErrInvalidConfig   = errors.New("invalid fake worker config")
+	// ErrInvalidConfig reports invalid standalone fake-worker helper config.
+	ErrInvalidConfig = errors.New("invalid fake worker config")
 )
 
 // Profile describes a provider-flavored fake worker contract surface.
@@ -24,6 +27,7 @@ type Profile struct {
 	Interactions []InteractionSpec `json:"interactions,omitempty" yaml:"interactions,omitempty"`
 }
 
+// Claims describes the behavior a fake profile advertises to callers.
 type Claims struct {
 	ProfileFlavor        string   `json:"profile_flavor,omitempty" yaml:"profile_flavor,omitempty"`
 	RequirementCodes     []string `json:"requirement_codes,omitempty" yaml:"requirement_codes,omitempty"`
@@ -31,24 +35,28 @@ type Claims struct {
 	SupportsTranscript   bool     `json:"supports_transcript,omitempty" yaml:"supports_transcript,omitempty"`
 }
 
+// LaunchSpec describes how the fake worker should appear at startup.
 type LaunchSpec struct {
 	Args    []string          `json:"args,omitempty" yaml:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	Startup StartupSpec       `json:"startup,omitempty" yaml:"startup,omitempty"`
 }
 
+// StartupSpec defines startup timing and control behavior for the fake worker.
 type StartupSpec struct {
 	Outcome            string `json:"outcome,omitempty" yaml:"outcome,omitempty"`
 	ReadyAfter         string `json:"ready_after,omitempty" yaml:"ready_after,omitempty"`
 	RequireControlFile bool   `json:"require_control_file,omitempty" yaml:"require_control_file,omitempty"`
 }
 
+// TranscriptSpec defines transcript output behavior for the fake worker.
 type TranscriptSpec struct {
 	Format   string `json:"format,omitempty" yaml:"format,omitempty"`
 	Path     string `json:"path,omitempty" yaml:"path,omitempty"`
 	StreamID string `json:"stream_id,omitempty" yaml:"stream_id,omitempty"`
 }
 
+// ContinuationSpec defines how the fake worker simulates continuation.
 type ContinuationSpec struct {
 	Mode              string `json:"mode,omitempty" yaml:"mode,omitempty"`
 	HandleEnv         string `json:"handle_env,omitempty" yaml:"handle_env,omitempty"`
@@ -56,6 +64,7 @@ type ContinuationSpec struct {
 	ConversationIDEnv string `json:"conversation_id_env,omitempty" yaml:"conversation_id_env,omitempty"`
 }
 
+// InteractionSpec declares one interaction kind the fake worker can emit.
 type InteractionSpec struct {
 	Kind     string `json:"kind" yaml:"kind"`
 	Required bool   `json:"required,omitempty" yaml:"required,omitempty"`
@@ -71,6 +80,7 @@ type Scenario struct {
 	Steps       []Step            `json:"steps" yaml:"steps"`
 }
 
+// Step is one scripted action in a fake-worker scenario.
 type Step struct {
 	ID            string            `json:"id,omitempty" yaml:"id,omitempty"`
 	Action        string            `json:"action" yaml:"action"`
@@ -87,6 +97,7 @@ type Step struct {
 	Metadata      map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
+// TranscriptEvent describes one transcript append operation.
 type TranscriptEvent struct {
 	Role      string            `json:"role,omitempty" yaml:"role,omitempty"`
 	Type      string            `json:"type,omitempty" yaml:"type,omitempty"`
@@ -98,6 +109,7 @@ type TranscriptEvent struct {
 	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
+// InteractionEvent describes one interactive prompt or response event.
 type InteractionEvent struct {
 	Kind      string            `json:"kind,omitempty" yaml:"kind,omitempty"`
 	RequestID string            `json:"request_id,omitempty" yaml:"request_id,omitempty"`
@@ -108,6 +120,7 @@ type InteractionEvent struct {
 	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
+// InputEvent describes one awaited input file exchange.
 type InputEvent struct {
 	Path        string            `json:"path,omitempty" yaml:"path,omitempty"`
 	Expect      string            `json:"expect,omitempty" yaml:"expect,omitempty"`
@@ -125,18 +138,21 @@ type HelperConfig struct {
 	Control  ControlSpec `json:"control,omitempty" yaml:"control,omitempty"`
 }
 
+// OutputSpec defines where the fake worker writes its outputs.
 type OutputSpec struct {
 	EventLogPath   string `json:"event_log_path,omitempty" yaml:"event_log_path,omitempty"`
 	TranscriptPath string `json:"transcript_path,omitempty" yaml:"transcript_path,omitempty"`
 	StatePath      string `json:"state_path,omitempty" yaml:"state_path,omitempty"`
 }
 
+// ControlSpec defines external control files and timing for the fake worker.
 type ControlSpec struct {
 	StartFile      string `json:"start_file,omitempty" yaml:"start_file,omitempty"`
 	StartupTimeout string `json:"startup_timeout,omitempty" yaml:"startup_timeout,omitempty"`
 	PollInterval   string `json:"poll_interval,omitempty" yaml:"poll_interval,omitempty"`
 }
 
+// Validate checks that the fake-worker profile is internally consistent.
 func (p Profile) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrInvalidProfile)
@@ -170,6 +186,7 @@ func (p Profile) Validate() error {
 	return nil
 }
 
+// Validate checks that the fake-worker scenario can be executed safely.
 func (s Scenario) Validate() error {
 	if s.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrInvalidScenario)
@@ -190,6 +207,7 @@ func (s Scenario) Validate() error {
 	return nil
 }
 
+// Validate checks that the standalone fake-worker helper config is usable.
 func (c HelperConfig) Validate() error {
 	if c.Profile == nil && c.Scenario.Profile == nil {
 		return fmt.Errorf("%w: profile or scenario.profile is required", ErrInvalidConfig)

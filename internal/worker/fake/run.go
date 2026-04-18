@@ -1,3 +1,4 @@
+// Package fake defines the scripted fake-worker profiles used by worker tests.
 package fake
 
 import (
@@ -12,11 +13,13 @@ import (
 	"time"
 )
 
+// Default worker runtime timings for the standalone fake helper.
 const (
 	DefaultStartupTimeout = 30 * time.Second
 	DefaultPollInterval   = 100 * time.Millisecond
 )
 
+// Event is one structured record emitted by the standalone fake worker.
 type Event struct {
 	Time        time.Time         `json:"time"`
 	Kind        string            `json:"kind"`
@@ -33,10 +36,12 @@ type Event struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
+// Runner executes a scripted fake-worker scenario.
 type Runner struct {
 	Now func() time.Time
 }
 
+// Run executes the configured fake-worker scenario and writes event output.
 func (r Runner) Run(ctx context.Context, cfg HelperConfig, stdout io.Writer) error {
 	if err := cfg.Validate(); err != nil {
 		return err
