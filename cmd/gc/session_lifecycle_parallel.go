@@ -1096,6 +1096,49 @@ func filterStopTargets(targets []stopTarget, names []string) []stopTarget {
 	return filtered
 }
 
+func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
+	if store == nil || len(targets) == 0 {
+		return targets
+	}
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if strings.TrimSpace(target.name) == "" {
+			continue
+		}
+		names = append(names, target.name)
+	}
+	if len(names) == 0 {
+		return targets
+	}
+	hydrated := stopTargetsForNames(names, cfg, store, stderr)
+	byName := make(map[string]stopTarget, len(hydrated))
+	for _, target := range hydrated {
+		byName[target.name] = target
+	}
+	merged := make([]stopTarget, 0, len(targets))
+	for _, target := range targets {
+		if hydratedTarget, ok := byName[target.name]; ok {
+			if strings.TrimSpace(target.sessionID) == "" {
+				target.sessionID = hydratedTarget.sessionID
+			}
+			if strings.TrimSpace(target.template) == "" {
+				target.template = hydratedTarget.template
+			}
+			if strings.TrimSpace(target.subject) == "" {
+				target.subject = hydratedTarget.subject
+			}
+			if !target.resolved {
+				target.resolved = hydratedTarget.resolved
+			}
+			if !target.poolManaged {
+				target.poolManaged = hydratedTarget.poolManaged
+			}
+		}
+		merged = append(merged, target)
+	}
+	return merged
+}
+
 func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
 	if target.sessionID == "" || store == nil {
 		return sp.Stop(target.name)
@@ -1108,6 +1151,7 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 }
 
 func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
+	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
 	// them forever. Stop them immediately instead of interrupting —
@@ -1155,6 +1199,7 @@ func stopTargetsBounded(
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
+	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	for _, target := range targets {
 		if !target.resolved {
 			if cfg != nil {
