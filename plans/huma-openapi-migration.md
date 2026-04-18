@@ -23,6 +23,19 @@ same city (to avoid lock conflicts). Remote access is not a first-class
 CLI concern; the HTTP surface exists for non-Go consumers (the TS
 dashboard SPA, third-party tooling).
 
+The dashboard is a static TypeScript SPA served by a tiny Go binary
+(`cmd/gc/dashboard/`) whose only jobs are to embed the compiled bundle
+and inject the supervisor URL into `index.html`. The SPA talks
+directly to the supervisor's typed OpenAPI endpoints from the browser
+— the dashboard server is NOT an API proxy. The dashboard server also
+hosts one narrow operational debug endpoint (`POST /api/clientlog`)
+that accepts browser-side error logs for centralized debugging. This
+endpoint is intentionally outside the typed HTTP + SSE control plane
+these principles govern: it is a one-way sink for diagnostic text, not
+a domain API. It may use standard `encoding/json` for body decoding
+without violating Principle 4, because it lives outside `internal/api/`
+and outside the published OpenAPI contract.
+
 ## Core principles
 
 These are the invariants. Every one is load-bearing — violating any of
@@ -271,14 +284,6 @@ several of them. Closing these is the concrete work under this plan.
   is parsing an external-tool-owned file, not a wire type. Confirm no
   handler response puts this value on the wire as-is; if it does,
   model the typed cases we care about.
-
-### Dead code (general principle: delete what we don't need)
-
-- `cmd/gc/dashboard/handler.go`, `serve.go`, `handler_test.go` — the
-  legacy hand-written Go dashboard proxy. The dashboard is now a TS
-  SPA consuming the published API contract. `gc dashboard` must still
-  launch and serve the SPA, but via a static file server only. Delete
-  all `/v0/*` routing from this path.
 
 ### Consumer alignment (ongoing)
 
