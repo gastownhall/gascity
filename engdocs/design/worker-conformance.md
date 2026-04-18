@@ -1458,6 +1458,30 @@ Deliverables:
 - reduce worker-level `gc` and supervisor coverage to thin E2E wiring
   proofs
 
+Current branch progress:
+
+- the shared worker corpus already runs through the concrete
+  `internal/worker` handle
+- canonical built-in profile definitions now live under
+  `internal/worker/builtin`, with `config.ProviderSpec` materialized from
+  that source rather than hand-authoring built-ins separately
+- worker handles stamp explicit profile identity and certification
+  fingerprint metadata into production session beads
+- transcript discovery policy now routes through
+  `internal/worker/transcript` for worker, API, and `gc session logs`
+- API submit / background-nudge / stop-turn / respond paths now call the
+  worker handle rather than invoking `session.Manager` semantics
+  directly
+
+Remaining branch-local Phase 4 gaps:
+
+- session creation and named-session materialization still create sessions
+  below the worker boundary
+- transcript streaming endpoints still read provider files directly
+  instead of projecting from worker history
+- reconciler and controller orchestration still own start/stop policy
+  beneath the worker boundary
+
 Done when:
 
 - the shared worker corpus no longer shells `gc start` / `gc stop` or

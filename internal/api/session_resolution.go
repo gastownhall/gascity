@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -396,29 +397,29 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 }
 
 func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	return mgr.Submit(ctx, id, message, resumeCommand, hints, intent)
+	result, err := handle.Message(ctx, worker.MessageRequest{
+		Text:     message,
+		Delivery: workerDeliveryIntent(intent),
+	})
+	if err != nil {
+		return session.SubmitOutcome{}, err
+	}
+	return session.SubmitOutcome{Queued: result.Queued}, nil
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it.
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	if err := mgr.Send(ctx, id, message, resumeCommand, hints); err != nil {
-		return err
-	}
-	return nil
+	return handle.Nudge(ctx, worker.NudgeRequest{Text: message})
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
@@ -426,4 +427,67 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
 	return err
+}
+
+func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.SessionHandle, error) {
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	spec := worker.SessionSpec{
+		ID:       id,
+		Provider: info.Provider,
+		WorkDir:  info.WorkDir,
+		Resume: session.ProviderResume{
+			ResumeFlag:    info.ResumeFlag,
+			ResumeStyle:   info.ResumeStyle,
+			ResumeCommand: info.ResumeCommand,
+		},
+	}
+	if store != nil {
+		if bead, beadErr := store.Get(id); beadErr == nil {
+			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
+				spec.Profile = worker.Profile(profile)
+			}
+		}
+	}
+	if resolved, workDir := s.resolveSessionRuntime(info); resolved != nil {
+		spec.Provider = firstNonEmptyString(resolved.Name, spec.Provider)
+		spec.WorkDir = firstNonEmptyString(spec.WorkDir, workDir)
+		spec.Hints = sessionResumeHints(resolved, spec.WorkDir)
+		spec.Resume = session.ProviderResume{
+			ResumeFlag:    resolved.ResumeFlag,
+			ResumeStyle:   resolved.ResumeStyle,
+			ResumeCommand: resolved.ResumeCommand,
+			SessionIDFlag: resolved.SessionIDFlag,
+		}
+	}
+
+	return worker.NewSessionHandle(worker.SessionHandleConfig{
+		Manager:     mgr,
+		SearchPaths: s.sessionLogPaths(),
+		Session:     spec,
+	})
+}
+
+func workerDeliveryIntent(intent session.SubmitIntent) worker.DeliveryIntent {
+	switch intent {
+	case session.SubmitIntentFollowUp:
+		return worker.DeliveryIntentFollowUp
+	case session.SubmitIntentInterruptNow:
+		return worker.DeliveryIntentInterruptNow
+	default:
+		return worker.DeliveryIntentDefault
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

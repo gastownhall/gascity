@@ -1,6 +1,9 @@
 package config
 
-import "github.com/gastownhall/gascity/internal/shellquote"
+import (
+	"github.com/gastownhall/gascity/internal/shellquote"
+	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
+)
 
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in a dashboard's session creation form.
@@ -200,264 +203,99 @@ func (ps *ProviderSpec) pathCheckBinary() string {
 	return ps.Command
 }
 
-// builtinProviderOrder is the priority order for provider detection and
-// wizard display. Claude is first (default), followed by major providers
-// in rough popularity order.
-var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "cursor", "copilot",
-	"amp", "opencode", "auggie", "pi", "omp",
-}
-
 // BuiltinProviderOrder returns the provider names in their canonical order.
 // Used by the wizard for display and by auto-detection for priority.
 func BuiltinProviderOrder() []string {
-	out := make([]string, len(builtinProviderOrder))
-	copy(out, builtinProviderOrder)
-	return out
+	return workerbuiltin.BuiltinProviderOrder()
 }
 
 // BuiltinProviders returns the built-in provider presets.
 // These are available without any [providers] section in city.toml.
-// Lifted from gastown's AgentPresetInfo table — only the runtime-facing
-// fields Gas City currently uses are included here.
 func BuiltinProviders() map[string]ProviderSpec {
-	return map[string]ProviderSpec{
-		"claude": {
-			DisplayName: "Claude Code",
-			Command:     "claude",
-			Args:        nil,
-			OptionDefaults: map[string]string{
-				"permission_mode": "unrestricted",
-				"effort":          "max",
-			},
-			PromptMode:             "arg",
-			ReadyDelayMs:           10000,
-			ReadyPromptPrefix:      "\u276f ", // ❯
-			ProcessNames:           []string{"node", "claude"},
-			EmitsPermissionWarning: true,
-			SupportsACP:            true,
-			SupportsHooks:          true,
-			InstructionsFile:       "CLAUDE.md",
-			ResumeFlag:             "--resume",
-			ResumeStyle:            "flag",
-			SessionIDFlag:          "--session-id",
-			PrintArgs:              []string{"-p"},
-			TitleModel:             "haiku",
-			PermissionModes: map[string]string{
-				"unrestricted": "--dangerously-skip-permissions",
-				"plan":         "--permission-mode plan",
-				"auto-edit":    "--permission-mode auto-edit",
-				"full-auto":    "--permission-mode full-auto",
-			},
-			OptionsSchema: []ProviderOption{
-				{
-					Key: "permission_mode", Label: "Permission Mode", Type: "select",
-					Default: "auto-edit",
-					Choices: []OptionChoice{
-						{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "auto-edit"}},
-						{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "full-auto"}},
-						{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
-						{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
-					},
-				},
-				{
-					Key: "effort", Label: "Effort", Type: "select",
-					Default: "",
-					Choices: []OptionChoice{
-						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
-						{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
-						{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
-						{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
-					},
-				},
-				{
-					Key: "model", Label: "Model", Type: "select",
-					Default: "",
-					Choices: []OptionChoice{
-						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
-						{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
-						{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}},
-					},
-				},
-			},
-		},
-		"codex": {
-			DisplayName: "Codex CLI",
-			Command:     "codex",
-			Args:        nil,
-			OptionDefaults: map[string]string{
-				"permission_mode": "unrestricted",
-				"effort":          "xhigh",
-			},
-			PromptMode:        "arg",
-			ReadyPromptPrefix: "\u203a ", // ›
-			ReadyDelayMs:      3000,
-			ProcessNames:      []string{"codex"},
-			SupportsHooks:     true,
-			InstructionsFile:  "AGENTS.md",
-			ResumeFlag:        "resume",
-			ResumeStyle:       "subcommand",
-			PrintArgs:         []string{"exec"},
-			TitleModel:        "o4-mini",
-			PermissionModes: map[string]string{
-				"suggest":      "--ask-for-approval untrusted --sandbox read-only",
-				"auto-edit":    "--full-auto",
-				"unrestricted": "--dangerously-bypass-approvals-and-sandbox",
-			},
-			OptionsSchema: []ProviderOption{
-				{
-					Key: "permission_mode", Label: "Approval Policy", Type: "select",
-					Default: "unrestricted",
-					Choices: []OptionChoice{
-						{Value: "suggest", Label: "Suggest (ask for approval)", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
-						{Value: "auto-edit", Label: "Full auto (sandboxed)", FlagArgs: []string{"--full-auto"}},
-						{Value: "unrestricted", Label: "Bypass all (no sandbox)", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
-					},
-				},
-				{
-					Key: "model", Label: "Model", Type: "select",
-					Default: "",
-					Choices: []OptionChoice{
-						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}},
-						{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}},
-					},
-				},
-				{
-					Key: "sandbox", Label: "Sandbox", Type: "select",
-					Default: "",
-					Choices: []OptionChoice{
-						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "read-only", Label: "Read Only", FlagArgs: []string{"--sandbox", "read-only"}},
-						{Value: "network-off", Label: "Network Off", FlagArgs: []string{"--sandbox", "network-off"}},
-					},
-				},
-				{
-					Key: "effort", Label: "Effort", Type: "select",
-					Default: "",
-					Choices: []OptionChoice{
-						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "low", Label: "Low", FlagArgs: []string{"-c", "model_reasoning_effort=low"}},
-						{Value: "medium", Label: "Medium", FlagArgs: []string{"-c", "model_reasoning_effort=medium"}},
-						{Value: "high", Label: "High", FlagArgs: []string{"-c", "model_reasoning_effort=high"}},
-						{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"-c", "model_reasoning_effort=xhigh"}},
-					},
-				},
-			},
-		},
-		"gemini": {
-			DisplayName: "Gemini CLI",
-			Command:     "gemini",
-			Args:        nil,
-			OptionDefaults: map[string]string{
-				"permission_mode": "unrestricted",
-			},
-			PromptMode:        "arg",
-			ReadyPromptPrefix: "> ",
-			ReadyDelayMs:      5000,
-			ProcessNames:      []string{"gemini", "node"},
-			SupportsHooks:     true,
-			InstructionsFile:  "AGENTS.md",
-			ResumeFlag:        "--resume",
-			ResumeStyle:       "flag",
-			PrintArgs:         []string{"-p"},
-			TitleModel:        "gemini-2.5-flash",
-			PermissionModes: map[string]string{
-				"default":      "--approval-mode default",
-				"auto-edit":    "--approval-mode auto_edit",
-				"plan":         "--approval-mode plan",
-				"unrestricted": "--approval-mode yolo",
-			},
-			OptionsSchema: []ProviderOption{
-				{
-					Key: "permission_mode", Label: "Approval Mode", Type: "select",
-					Default: "unrestricted",
-					Choices: []OptionChoice{
-						{Value: "default", Label: "Ask before actions", FlagArgs: []string{"--approval-mode", "default"}},
-						{Value: "auto-edit", Label: "Auto-approve edits", FlagArgs: []string{"--approval-mode", "auto_edit"}},
-						{Value: "plan", Label: "Read-only (plan)", FlagArgs: []string{"--approval-mode", "plan"}},
-						{Value: "unrestricted", Label: "YOLO (approve all)", FlagArgs: []string{"--approval-mode", "yolo"}},
-					},
-				},
-				{
-					Key: "model", Label: "Model", Type: "select",
-					Default: "",
-					Choices: []OptionChoice{
-						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "gemini-2.5-pro", Label: "Gemini 2.5 Pro", FlagArgs: []string{"--model", "gemini-2.5-pro"}},
-						{Value: "gemini-2.5-flash", Label: "Gemini 2.5 Flash", FlagArgs: []string{"--model", "gemini-2.5-flash"}},
-					},
-				},
-			},
-		},
-		"cursor": {
-			DisplayName:      "Cursor Agent",
-			Command:          "cursor-agent",
-			Args:             []string{"-f"},
-			PromptMode:       "arg",
-			ProcessNames:     []string{"cursor-agent"},
-			SupportsHooks:    true,
-			InstructionsFile: "AGENTS.md",
-		},
-		"copilot": {
-			DisplayName:       "GitHub Copilot",
-			Command:           "copilot",
-			Args:              []string{"--yolo"},
-			PromptMode:        "arg",
-			ReadyPromptPrefix: "\u276f ", // ❯
-			ReadyDelayMs:      5000,
-			ProcessNames:      []string{"copilot"},
-			SupportsHooks:     true,
-			InstructionsFile:  "AGENTS.md",
-		},
-		"amp": {
-			DisplayName:      "Sourcegraph AMP",
-			Command:          "amp",
-			Args:             []string{"--dangerously-allow-all", "--no-ide"},
-			PromptMode:       "arg",
-			ProcessNames:     []string{"amp"},
-			InstructionsFile: "AGENTS.md",
-		},
-		"opencode": {
-			DisplayName:      "OpenCode",
-			Command:          "opencode",
-			Args:             []string{},
-			PromptMode:       "none",
-			ReadyDelayMs:     8000,
-			ProcessNames:     []string{"opencode", "node", "bun"},
-			Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-			SupportsACP:      true,
-			SupportsHooks:    true,
-			InstructionsFile: "AGENTS.md",
-		},
-		"auggie": {
-			DisplayName:      "Auggie CLI",
-			Command:          "auggie",
-			Args:             []string{"--allow-indexing"},
-			PromptMode:       "arg",
-			ProcessNames:     []string{"auggie"},
-			InstructionsFile: "AGENTS.md",
-		},
-		"pi": {
-			DisplayName:      "Pi Coding Agent",
-			Command:          "pi",
-			Args:             []string{"-e", ".pi/extensions/gc-hooks.js"},
-			PromptMode:       "arg",
-			ReadyDelayMs:     8000,
-			ProcessNames:     []string{"pi", "node", "bun"},
-			SupportsHooks:    true,
-			InstructionsFile: "AGENTS.md",
-		},
-		"omp": {
-			DisplayName:      "Oh My Pi (OMP)",
-			Command:          "omp",
-			Args:             []string{"--hook", ".omp/hooks/gc-hook.ts"},
-			PromptMode:       "arg",
-			ProcessNames:     []string{"omp", "node", "bun"},
-			SupportsHooks:    true,
-			InstructionsFile: "AGENTS.md",
-		},
+	specs := workerbuiltin.BuiltinProviders()
+	out := make(map[string]ProviderSpec, len(specs))
+	for name, spec := range specs {
+		out[name] = providerSpecFromWorker(spec)
 	}
+	return out
+}
+
+func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec {
+	return ProviderSpec{
+		DisplayName:            spec.DisplayName,
+		Command:                spec.Command,
+		Args:                   cloneStrings(spec.Args),
+		PromptMode:             spec.PromptMode,
+		PromptFlag:             spec.PromptFlag,
+		ReadyDelayMs:           spec.ReadyDelayMs,
+		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
+		ProcessNames:           cloneStrings(spec.ProcessNames),
+		EmitsPermissionWarning: spec.EmitsPermissionWarning,
+		Env:                    cloneStringMap(spec.Env),
+		PathCheck:              spec.PathCheck,
+		SupportsACP:            spec.SupportsACP,
+		SupportsHooks:          spec.SupportsHooks,
+		InstructionsFile:       spec.InstructionsFile,
+		ResumeFlag:             spec.ResumeFlag,
+		ResumeStyle:            spec.ResumeStyle,
+		ResumeCommand:          spec.ResumeCommand,
+		SessionIDFlag:          spec.SessionIDFlag,
+		PermissionModes:        cloneStringMap(spec.PermissionModes),
+		OptionDefaults:         cloneStringMap(spec.OptionDefaults),
+		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
+		PrintArgs:              cloneStrings(spec.PrintArgs),
+		TitleModel:             spec.TitleModel,
+	}
+}
+
+func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []ProviderOption {
+	if options == nil {
+		return nil
+	}
+	out := make([]ProviderOption, len(options))
+	for i, option := range options {
+		out[i] = ProviderOption{
+			Key:     option.Key,
+			Label:   option.Label,
+			Type:    option.Type,
+			Default: option.Default,
+			Choices: providerChoicesFromWorker(option.Choices),
+		}
+	}
+	return out
+}
+
+func providerChoicesFromWorker(choices []workerbuiltin.BuiltinOptionChoice) []OptionChoice {
+	if choices == nil {
+		return nil
+	}
+	out := make([]OptionChoice, len(choices))
+	for i, choice := range choices {
+		out[i] = OptionChoice{
+			Value:    choice.Value,
+			Label:    choice.Label,
+			FlagArgs: cloneStrings(choice.FlagArgs),
+		}
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
 }

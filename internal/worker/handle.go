@@ -182,6 +182,7 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 	if spec.Profile != "" && strings.TrimSpace(spec.Metadata["worker_profile"]) == "" {
 		spec.Metadata["worker_profile"] = string(spec.Profile)
 	}
+	applyCanonicalProfileIdentityMetadata(spec.Profile, spec.Metadata)
 	if spec.ID == "" {
 		switch {
 		case strings.TrimSpace(spec.Template) == "":
@@ -206,6 +207,28 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 		session:     spec,
 		sessionID:   strings.TrimSpace(spec.ID),
 	}, nil
+}
+
+func applyCanonicalProfileIdentityMetadata(profile Profile, metadata map[string]string) {
+	if metadata == nil {
+		return
+	}
+	identity, ok := CanonicalProfileIdentity(profile)
+	if !ok {
+		return
+	}
+	setIfEmpty(metadata, "worker_profile_provider_family", identity.ProviderFamily)
+	setIfEmpty(metadata, "worker_profile_transport_class", identity.TransportClass)
+	setIfEmpty(metadata, "worker_profile_behavior_version", identity.BehaviorClaimsVersion)
+	setIfEmpty(metadata, "worker_profile_transcript_adapter_version", identity.TranscriptAdapterVersion)
+	setIfEmpty(metadata, "worker_profile_compatibility_version", identity.CompatibilityVersion)
+	setIfEmpty(metadata, "worker_profile_certification_fingerprint", identity.CertificationFingerprint)
+}
+
+func setIfEmpty(metadata map[string]string, key, value string) {
+	if strings.TrimSpace(metadata[key]) == "" && strings.TrimSpace(value) != "" {
+		metadata[key] = value
+	}
 }
 
 // Start ensures the worker exists and its runtime is live.
