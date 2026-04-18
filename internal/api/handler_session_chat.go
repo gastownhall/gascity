@@ -363,30 +363,40 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
 		}
 	}
+	if extraMeta == nil {
+		extraMeta = make(map[string]string)
+	}
+	extraMeta["session_origin"] = "ephemeral"
 
 	// Agent sessions always use async (bead-only) creation. The reconciler
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets MC
 	// show the session in the sidebar immediately via optimistic UI.
-	mgr := s.sessionManager(store)
+	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
+		Alias:     alias,
+		Template:  template,
+		Title:     title,
+		Command:   command,
+		WorkDir:   workDir,
+		Provider:  resolved.Name,
+		Transport: transport,
+		Env:       resolved.Env,
+		Resume:    resume,
+		Hints:     sessionCreateHints(resolved),
+		Metadata:  extraMeta,
+	})
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-			alias,
-			"",
-			template,
-			title,
-			command,
-			workDir,
-			resolved.Name,
-			transport,
-			resume,
-			extraMeta,
-		)
+		info, createErr = handle.Create(r.Context(), worker.CreateModeDeferred)
 		return createErr
 	})
 	if err != nil {
@@ -507,28 +517,34 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		command = command + " " + shellquote.Join(extraArgs)
 	}
 
-	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
+	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
+		Alias:     alias,
+		Template:  template,
+		Title:     title,
+		Command:   command,
+		WorkDir:   workDir,
+		Provider:  resolved.Name,
+		Transport: "",
+		Env:       resolved.Env,
+		Resume:    resume,
+		Hints:     hints,
+		Metadata: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransport(
-			r.Context(),
-			alias,
-			"",
-			template,
-			title,
-			command,
-			workDir,
-			resolved.Name,
-			"",
-			resolved.Env,
-			resume,
-			hints,
-		)
+		info, createErr = handle.Create(r.Context(), worker.CreateModeStarted)
 		return createErr
 	})
 	if err != nil {

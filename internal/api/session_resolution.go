@@ -282,14 +282,29 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
-	mgr := s.sessionManager(store)
 	extraMeta := map[string]string{
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	hints := sessionCreateHints(resolved)
+	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
+		Alias:        spec.Identity,
+		ExplicitName: spec.SessionName,
+		Template:     qualifiedTemplate,
+		Title:        spec.Identity,
+		Command:      resolved.CommandString(),
+		WorkDir:      workDir,
+		Provider:     resolved.Name,
+		Transport:    transport,
+		Env:          resolved.Env,
+		Resume:       resume,
+		Hints:        sessionCreateHints(resolved),
+		Metadata:     extraMeta,
+	})
+	if err != nil {
+		return "", err
+	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
@@ -299,21 +314,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-			ctx,
-			spec.Identity,
-			spec.SessionName,
-			qualifiedTemplate,
-			spec.Identity,
-			resolved.CommandString(),
-			workDir,
-			resolved.Name,
-			transport,
-			resolved.Env,
-			resume,
-			hints,
-			extraMeta,
-		)
+		info, createErr = handle.Create(ctx, worker.CreateModeStarted)
 		return createErr
 	})
 	if err == nil {
@@ -467,6 +468,14 @@ func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.S
 
 	return worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager:     mgr,
+		SearchPaths: s.sessionLogPaths(),
+		Session:     spec,
+	})
+}
+
+func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (*worker.SessionHandle, error) {
+	return worker.NewSessionHandle(worker.SessionHandleConfig{
+		Manager:     s.sessionManager(store),
 		SearchPaths: s.sessionLogPaths(),
 		Session:     spec,
 	})
