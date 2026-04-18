@@ -268,6 +268,9 @@ func historySnapshotTurns(snapshot *worker.HistorySnapshot) ([]outputTurn, []str
 	turns := make([]outputTurn, 0, len(snapshot.Entries))
 	ids := make([]string, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
+		if !historyEntryVisibleInConversation(entry) {
+			continue
+		}
 		turn := historyEntryToTurn(entry)
 		if turn.Text == "" {
 			continue
@@ -276,6 +279,19 @@ func historySnapshotTurns(snapshot *worker.HistorySnapshot) ([]outputTurn, []str
 		ids = append(ids, entry.ID)
 	}
 	return turns, ids
+}
+
+func historyEntryVisibleInConversation(entry worker.HistoryEntry) bool {
+	switch entry.Provenance.RawType {
+	case "user", "assistant", "system", "result":
+		return true
+	}
+	switch entry.Kind {
+	case "user", "assistant", "system", "result":
+		return true
+	default:
+		return false
+	}
 }
 
 func historySnapshotRawMessages(snapshot *worker.HistorySnapshot) ([]json.RawMessage, []string) {

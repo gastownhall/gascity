@@ -392,7 +392,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) error {
 }
 
 // History returns the normalized worker transcript.
-func (h *SessionHandle) History(context.Context, HistoryRequest) (*HistorySnapshot, error) {
+func (h *SessionHandle) History(_ context.Context, req HistoryRequest) (*HistorySnapshot, error) {
+	return h.historyWithRequest(req)
+}
+
+func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot, error) {
 	id := h.currentSessionID()
 	if id == "" {
 		return nil, ErrHistoryUnavailable
@@ -415,14 +419,19 @@ func (h *SessionHandle) History(context.Context, HistoryRequest) (*HistorySnapsh
 		gcSessionID = info.ID
 	}
 	snapshot, err := h.adapter.LoadHistory(LoadRequest{
-		Provider:       h.historyProvider(info),
-		TranscriptPath: path,
-		GCSessionID:    gcSessionID,
+		Provider:              h.historyProvider(info),
+		TranscriptPath:        path,
+		GCSessionID:           gcSessionID,
+		LogicalConversationID: strings.TrimSpace(req.LogicalID),
+		TailCompactions:       req.TailCompactions,
 	})
 	if err != nil {
 		return nil, err
 	}
 	h.maybePersistDerivedSessionKey(id, info, snapshot)
+	if req.TailCompactions > 0 {
+		return cloneHistorySnapshot(snapshot), nil
+	}
 	return h.mergeLoadedHistorySnapshot(snapshot), nil
 }
 

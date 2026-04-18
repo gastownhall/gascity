@@ -989,7 +989,11 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	history, historyErr := handle.History(r.Context(), worker.HistoryRequest{})
+	historyReq := worker.HistoryRequest{}
+	if r.URL.Query().Get("format") == "raw" && !info.Closed {
+		historyReq.TailCompactions = 1
+	}
+	history, historyErr := handle.History(r.Context(), historyReq)
 	hasHistory := historyErr == nil && history != nil
 	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
 		writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
@@ -1030,7 +1034,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case hasHistory:
 		if format == "raw" {
-			s.streamSessionTranscriptHistoryRaw(ctx, w, info, handle, history)
+			s.streamSessionTranscriptHistoryRaw(ctx, w, info, handle, history, historyReq)
 		} else {
 			s.streamSessionTranscriptHistory(ctx, w, info, handle, history)
 		}
@@ -1103,7 +1107,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 	writeSSE(w, "activity", 2, actData)
 }
 
-func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot) {
+func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot, req worker.HistoryRequest) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1207,7 +1211,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		case <-ctx.Done():
 			return
 		case <-poll.C:
-			snapshot, err := handle.History(ctx, worker.HistoryRequest{})
+			snapshot, err := handle.History(ctx, req)
 			switch {
 			case err == nil:
 				emitSnapshot(snapshot)
