@@ -33,6 +33,9 @@ func TestGCNonTestFilesStayOnWorkerBoundary(t *testing.T) {
 			`"github.com/gastownhall/gascity/internal/sessionlog"`,
 			"worker.NewSessionHandle(",
 			"worker.NewSessionCatalog(",
+			"session.NewManager(",
+			"session.NewManagerWithCityPath(",
+			"session.NewManagerWithTransportResolverAndCityPath(",
 		} {
 			if strings.Contains(content, needle) {
 				t.Fatalf("%s contains forbidden worker-boundary bypass %q", path, needle)
