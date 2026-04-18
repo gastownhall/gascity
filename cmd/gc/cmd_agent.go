@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
@@ -17,7 +18,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var loadCityConfigWarningWriter io.Writer = os.Stderr
+var (
+	loadCityConfigWarningMu     sync.Mutex
+	loadCityConfigWarningWriter io.Writer = os.Stderr
+	loadCityConfigWarningsSeen            = map[string]struct{}{}
+)
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
 
@@ -35,7 +40,7 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 	if err != nil {
 		return nil, err
 	}
-	emitLoadCityConfigWarnings(loadCityConfigWarningWriter, prov)
+	emitLoadCityConfigWarnings(currentLoadCityConfigWarningWriter(), prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -65,21 +70,42 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 	if err != nil {
 		return nil, err
 	}
-	emitLoadCityConfigWarnings(loadCityConfigWarningWriter, prov)
+	emitLoadCityConfigWarnings(currentLoadCityConfigWarningWriter(), prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
+}
+
+func currentLoadCityConfigWarningWriter() io.Writer {
+	loadCityConfigWarningMu.Lock()
+	defer loadCityConfigWarningMu.Unlock()
+	return loadCityConfigWarningWriter
+}
+
+func setLoadCityConfigWarningWriterForTest(w io.Writer) func() {
+	loadCityConfigWarningMu.Lock()
+	prev := loadCityConfigWarningWriter
+	loadCityConfigWarningWriter = w
+	loadCityConfigWarningsSeen = map[string]struct{}{}
+	loadCityConfigWarningMu.Unlock()
+	return func() {
+		loadCityConfigWarningMu.Lock()
+		loadCityConfigWarningWriter = prev
+		loadCityConfigWarningsSeen = map[string]struct{}{}
+		loadCityConfigWarningMu.Unlock()
+	}
 }
 
 func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 	if w == nil || prov == nil || len(prov.Warnings) == 0 {
 		return
 	}
-	seen := make(map[string]bool, len(prov.Warnings))
+	loadCityConfigWarningMu.Lock()
+	defer loadCityConfigWarningMu.Unlock()
 	for _, warning := range prov.Warnings {
-		if seen[warning] {
+		if _, dup := loadCityConfigWarningsSeen[warning]; dup {
 			continue
 		}
-		seen[warning] = true
+		loadCityConfigWarningsSeen[warning] = struct{}{}
 		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
 	}
 }
