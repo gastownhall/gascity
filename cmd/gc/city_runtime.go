@@ -309,6 +309,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// fast even before CachingStore is primed).
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
+	// Reap stale session beads from a previous run before building desired
+	// state, so buildDesiredState does not reference already-closed beads (#742).
+	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
 	result := cr.buildDesiredState(sessionBeads, startupTrace)
 	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
 	result = refreshDesiredStateWithSessionBeads(
@@ -440,6 +445,13 @@ func (cr *CityRuntime) tick(
 	// Post-reconcile sync was intentionally removed: the daemon's next tick
 	// corrects bead state, and the pre-reconcile sync is sufficient for
 	// the reconciler to read/write hashes during reconciliation.
+	// Reap open session beads whose tmux session is dead. This must run
+	// before buildDesiredState so the desired state does not reference
+	// already-closed beads, and before syncBeadsAndUpdateIndex to prevent
+	// stale beads from blocking session name availability (#742).
+	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
 	result := cr.buildDesiredState(sessionBeads, trace)
 	_ = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
 	// Reload snapshot after sync so the reconciler sees metadata written

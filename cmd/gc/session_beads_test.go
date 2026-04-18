@@ -2478,3 +2478,272 @@ func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 		t.Fatalf("found bead ID = %q, want newest canonical %q", found.ID, newer.ID)
 	}
 }
+
+func TestReapStaleSessionBeads(t *testing.T) {
+	// MemStore.Create sets CreatedAt = time.Now(). Each subtest computes
+	// its fake clock relative to the created bead's CreatedAt so the test
+	// is deterministic regardless of wall-clock latency.
+	type clockMode int
+	const (
+		clockPastGrace   clockMode = iota // 2 min past bead creation
+		clockWithinGrace                  // 30s past bead creation
+	)
+
+	tests := []struct {
+		name       string
+		beads      []beads.Bead
+		running    []string // session names that are alive in the provider
+		draining   []string // bead IDs with active drains
+		clock      clockMode
+		wantReaped int
+		wantOpen   int // expected number of open beads after reap
+	}{
+		{
+			name: "dead_session_reaped",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "active",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 1,
+			wantOpen:   0,
+		},
+		{
+			name: "live_session_kept",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "active",
+				},
+			}},
+			running:    []string{"worker-1"},
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "creating_state_skipped",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "creating",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "pending_create_skipped",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":         "worker-1",
+					"state":                "stopped",
+					"pending_create_claim": "true",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "grace_period_honored",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "active",
+				},
+			}},
+			running:    nil,
+			clock:      clockWithinGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "no_session_name_skipped",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"state": "active",
+				},
+			}},
+			running:    nil,
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "draining_session_skipped",
+			beads: []beads.Bead{{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "active",
+				},
+			}},
+			running:    nil,
+			draining:   []string{""}, // uses createdIDs[0] as bead ID
+			clock:      clockPastGrace,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "multiple_stale_reaped",
+			beads: []beads.Bead{
+				{
+					Title:  "worker",
+					Type:   sessionBeadType,
+					Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{
+						"session_name": "worker-1",
+						"state":        "active",
+					},
+				},
+				{
+					Title:  "mayor",
+					Type:   sessionBeadType,
+					Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{
+						"session_name": "mayor",
+						"state":        "awake",
+					},
+				},
+				{
+					Title:  "polecat",
+					Type:   sessionBeadType,
+					Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{
+						"session_name": "polecat-1",
+						"state":        "active",
+					},
+				},
+			},
+			running:    []string{"polecat-1"}, // only polecat is alive
+			clock:      clockPastGrace,
+			wantReaped: 2,
+			wantOpen:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+
+			// Clock is set after bead creation, relative to CreatedAt.
+			var clk *clock.Fake
+
+			// Start running sessions in the provider.
+			for _, name := range tt.running {
+				if err := sp.Start(context.TODO(), name, runtime.Config{Command: "test"}); err != nil {
+					t.Fatalf("Start(%s): %v", name, err)
+				}
+			}
+
+			// Create beads in the store. MemStore sets CreatedAt = time.Now().
+			var createdIDs []string
+			var firstCreatedAt time.Time
+			for _, b := range tt.beads {
+				created, err := store.Create(b)
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				createdIDs = append(createdIDs, created.ID)
+				if firstCreatedAt.IsZero() {
+					firstCreatedAt = created.CreatedAt
+				}
+			}
+
+			// Set the fake clock relative to bead creation time.
+			switch tt.clock {
+			case clockPastGrace:
+				clk = &clock.Fake{Time: firstCreatedAt.Add(2 * time.Minute)}
+			case clockWithinGrace:
+				clk = &clock.Fake{Time: firstCreatedAt.Add(30 * time.Second)}
+			}
+
+			// Set up drain tracker with draining beads.
+			var dt *drainTracker
+			if len(tt.draining) > 0 {
+				dt = newDrainTracker()
+				for i, id := range tt.draining {
+					beadID := id
+					if beadID == "" && i < len(createdIDs) {
+						beadID = createdIDs[i]
+					}
+					dt.mu.Lock()
+					dt.drains[beadID] = &drainState{reason: "test"}
+					dt.mu.Unlock()
+				}
+			}
+
+			var stderr bytes.Buffer
+			got := reapStaleSessionBeads(store, sp, dt, clk, &stderr)
+			if got != tt.wantReaped {
+				t.Errorf("reapStaleSessionBeads() = %d, want %d\nstderr: %s", got, tt.wantReaped, stderr.String())
+			}
+
+			// Verify open bead count.
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if len(open) != tt.wantOpen {
+				t.Errorf("open beads = %d, want %d", len(open), tt.wantOpen)
+			}
+
+			// For reaped beads, verify close_reason.
+			if tt.wantReaped > 0 {
+				all := allSessionBeads(t, store)
+				for _, b := range all {
+					if b.Status == "closed" && b.Metadata["close_reason"] != "stale-session" {
+						t.Errorf("closed bead %s has close_reason=%q, want %q",
+							b.ID, b.Metadata["close_reason"], "stale-session")
+					}
+				}
+				if !strings.Contains(stderr.String(), "WARN: reconciler: reaped stale session bead") {
+					t.Error("expected WARN log line for reaped bead")
+				}
+			}
+		})
+	}
+}
+
+func TestReapStaleSessionBeads_NilStoreAndProvider(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now()}
+	var stderr bytes.Buffer
+
+	if got := reapStaleSessionBeads(nil, nil, nil, clk, &stderr); got != 0 {
+		t.Errorf("nil store+provider: got %d, want 0", got)
+	}
+	if got := reapStaleSessionBeads(beads.NewMemStore(), nil, nil, clk, &stderr); got != 0 {
+		t.Errorf("nil provider: got %d, want 0", got)
+	}
+	if got := reapStaleSessionBeads(nil, runtime.NewFake(), nil, clk, &stderr); got != 0 {
+		t.Errorf("nil store: got %d, want 0", got)
+	}
+}

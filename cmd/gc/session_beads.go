@@ -1140,6 +1140,64 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 	return nil
 }
 
+// reapStaleSessionBeads cross-references open session beads against live
+// tmux sessions. If a bead claims a session_name but no matching tmux
+// session exists, and the bead has been in that state past the startup
+// grace period, the bead is closed.
+//
+// This prevents infinite retry loops where a dead tmux session's bead
+// blocks name availability for new sessions (see #742).
+//
+// Returns the number of beads reaped.
+func reapStaleSessionBeads(
+	store beads.Store,
+	sp runtime.Provider,
+	dt *drainTracker,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	if store == nil || sp == nil {
+		return 0
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		fmt.Fprintf(stderr, "reapStaleSessionBeads: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	now := clk.Now()
+	reaped := 0
+	for _, b := range open {
+		sn := b.Metadata["session_name"]
+		if sn == "" {
+			continue
+		}
+		// Don't reap beads whose tmux session hasn't been started yet.
+		if b.Metadata["state"] == "creating" || strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
+			continue
+		}
+		// Don't reap beads with an active drain — the drainTracker is
+		// managing their lifecycle and the tmux session may have just died
+		// as part of the drain sequence.
+		if dt != nil && dt.get(b.ID) != nil {
+			continue
+		}
+		// Session is alive — nothing to reap.
+		if sp.IsRunning(sn) {
+			continue
+		}
+		// Startup grace: don't reap beads younger than the creating-state
+		// timeout. Zero CreatedAt means unknown age — skip conservatively.
+		if b.CreatedAt.IsZero() || now.Sub(b.CreatedAt) < staleCreatingStateTimeout {
+			continue
+		}
+		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "WARN: reconciler: reaped stale session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
+			reaped++
+		}
+	}
+	return reaped
+}
+
 // closeBead sets final metadata on a session bead and closes it.
 // This completes the bead's lifecycle record. The close_reason distinguishes
 // why the bead was closed (e.g., "orphaned", "suspended").
