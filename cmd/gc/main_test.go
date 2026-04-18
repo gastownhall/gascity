@@ -1551,6 +1551,26 @@ func TestDoInitBootstrapsExistingCityToml(t *testing.T) {
 	}
 }
 
+// When bootstrapping an existing city.toml with no --name override, the
+// "Bootstrapped city" stdout line must report the persisted workspace.name
+// rather than the target directory basename (the two can diverge).
+func TestDoInitBootstrapPreservesPersistedName(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files[filepath.Join("/target-basename", "city.toml")] = []byte("[workspace]\nname = \"mining\"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/target-basename", defaultWizardConfig(), "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"mining"`) {
+		t.Errorf("stdout = %q, want persisted name %q in bootstrap message", stdout.String(), "mining")
+	}
+	if strings.Contains(stdout.String(), `"target-basename"`) {
+		t.Errorf("stdout = %q, should not report basename when workspace.name is set", stdout.String())
+	}
+}
+
 func TestDoInitBootstrapWithNameOverride(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files[filepath.Join("/city", "city.toml")] = []byte("[workspace]\nname = \"old-name\"\n")
@@ -2591,6 +2611,12 @@ func TestResolveCityName(t *testing.T) {
 		{"override wins over dir when no source", "custom", "", "/path/to/dir", "custom"},
 		{"source preserved when no override", "", "template", "/path/to/dir", "template"},
 		{"dir basename used as fallback when both empty", "", "", "/path/to/dir", "dir"},
+		// Whitespace trimming matches runtime config.EffectiveCityName so
+		// that a stray-space name resolves identically at init and runtime.
+		{"override trims whitespace", "  custom  ", "template", "/path/to/dir", "custom"},
+		{"source trims whitespace", "", "  mining  ", "/path/to/dir", "mining"},
+		{"whitespace-only override falls through to source", "   ", "template", "/path/to/dir", "template"},
+		{"whitespace-only source falls through to basename", "", "   ", "/path/to/dir", "dir"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

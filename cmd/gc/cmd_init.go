@@ -552,7 +552,18 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 				return code
 			}
 		}
-		cityName := resolveCityName(nameOverride, "", cityPath)
+		// Preserve the persisted workspace.name when no --name override
+		// was supplied, so the bootstrap message reports the real city
+		// name rather than the target dir basename.
+		var persistedName string
+		if nameOverride == "" {
+			if data, err := fs.ReadFile(tomlPath); err == nil {
+				if existing, perr := config.Parse(data); perr == nil {
+					persistedName = existing.Workspace.Name
+				}
+			}
+		}
+		cityName := resolveCityName(nameOverride, persistedName, cityPath)
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                              //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Bootstrapped city %q runtime scaffold.\n", cityName) //nolint:errcheck // best-effort stdout
 		return 0
@@ -769,14 +780,17 @@ func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 // sourceName is the workspace.name already present in a template TOML (for
 // `gc init --file` and `gc init --from`); pass "" at call sites that have no
 // such source, and the fallback becomes the target dir basename.
+// Matches runtime config.EffectiveCityName by trimming whitespace on all
+// inputs so a name with stray spaces resolves the same way at init time
+// and at runtime.
 func resolveCityName(nameOverride, sourceName, cityPath string) string {
-	if nameOverride != "" {
-		return nameOverride
+	if n := strings.TrimSpace(nameOverride); n != "" {
+		return n
 	}
-	if sourceName != "" {
-		return sourceName
+	if n := strings.TrimSpace(sourceName); n != "" {
+		return n
 	}
-	return filepath.Base(cityPath)
+	return strings.TrimSpace(filepath.Base(cityPath))
 }
 
 func cmdInitFromDirWithOptions(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
