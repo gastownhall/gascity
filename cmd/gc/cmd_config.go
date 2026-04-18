@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,12 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
+
+func jsonEncoder(w io.Writer) *json.Encoder {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc
+}
 
 func newConfigCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -211,21 +218,41 @@ func padRight(s string, n int) string {
 func newConfigExplainCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rigFilter string
 	var agentFilter string
+	var providerFilter string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "explain",
-		Short: "Show resolved agent config with provenance annotations",
-		Long: `Show the resolved configuration for each agent with provenance.
+		Short: "Show resolved config with provenance annotations",
+		Long: `Show the resolved configuration with provenance.
 
-Displays every resolved field with an annotation showing which config
-file provided the value. Use --rig and --agent to filter the output.
-Useful for debugging config composition and understanding override
-resolution.`,
+For agents (default): displays every resolved field with an annotation
+showing which config file provided the value. Use --rig and --agent to
+filter.
+
+For providers (--provider): displays the resolved ProviderSpec along
+with per-field and per-map-key attribution — which chain layer
+(builtin:X or providers.Y) contributed each value. Useful for
+debugging base-chain inheritance.
+
+Use --json to emit machine-readable output (providers only).`,
 		Example: `  gc config explain
   gc config explain --agent mayor
   gc config explain --rig my-project
+  gc config explain --provider codex-max
+  gc config explain --provider codex-max --json
   gc config explain -f overlay.toml --agent polecat`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if providerFilter != "" {
+				if doConfigExplainProvider(providerFilter, asJSON, stdout, stderr) != 0 {
+					return errExit
+				}
+				return nil
+			}
+			if asJSON {
+				fmt.Fprintln(stderr, "gc config explain: --json is only supported with --provider") //nolint:errcheck
+				return errExit
+			}
 			if doConfigExplain(rigFilter, agentFilter, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -234,6 +261,8 @@ resolution.`,
 	}
 	cmd.Flags().StringVar(&rigFilter, "rig", "", "filter to agents in this rig")
 	cmd.Flags().StringVar(&agentFilter, "agent", "", "filter to a specific agent name")
+	cmd.Flags().StringVar(&providerFilter, "provider", "", "explain a provider's resolved chain instead of agents")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON (requires --provider)")
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
@@ -507,6 +536,198 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 			explainField(w, "drain_timeout", a.DrainTimeout, source)
 		}
 	}
+}
+
+// doConfigExplainProvider explains a single provider's resolved chain.
+// Emits human-readable output by default, or JSON when asJSON is true.
+func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
+		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
+			fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", fErr) //nolint:errcheck
+			return 1
+		}
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	resolved, ok := config.ResolvedProviderCached(cfg, providerName)
+	if !ok {
+		if _, isBuiltin := config.BuiltinProviders()[providerName]; isBuiltin {
+			fmt.Fprintf(stderr, "gc config explain: %q is a built-in provider; --provider only resolves custom entries\n", providerName) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stderr, "gc config explain: no provider %q in resolved config\n", providerName) //nolint:errcheck
+		}
+		return 1
+	}
+
+	if asJSON {
+		return renderProviderExplainJSON(resolved, providerName, stdout, stderr)
+	}
+	renderProviderExplainText(stdout, resolved, providerName)
+	return 0
+}
+
+// renderProviderExplainText writes a human-readable explanation of a
+// resolved provider chain.
+func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name string) {
+	fmt.Fprintf(w, "Provider: %s\n", name) //nolint:errcheck
+
+	if len(r.Chain) > 0 {
+		var hops []string
+		for _, h := range r.Chain {
+			if h.Kind == "builtin" {
+				hops = append(hops, config.BasePrefixBuiltin+h.Name)
+			} else {
+				hops = append(hops, "providers."+h.Name)
+			}
+		}
+		fmt.Fprintf(w, "  chain: %s\n", strings.Join(hops, " → ")) //nolint:errcheck
+	}
+	if r.BuiltinAncestor != "" {
+		fmt.Fprintf(w, "  builtin_ancestor: %s\n", r.BuiltinAncestor) //nolint:errcheck
+	}
+
+	explainProviderField(w, "command", r.Command, r.Provenance.FieldLayer["command"])
+	if len(r.Args) > 0 {
+		explainProviderField(w, "args", fmt.Sprintf("[%d]", len(r.Args)), r.Provenance.FieldLayer["args"])
+	}
+	explainProviderField(w, "prompt_mode", r.PromptMode, r.Provenance.FieldLayer["prompt_mode"])
+	explainProviderField(w, "prompt_flag", r.PromptFlag, r.Provenance.FieldLayer["prompt_flag"])
+	if r.ReadyDelayMs != 0 {
+		explainProviderField(w, "ready_delay_ms", fmt.Sprintf("%d", r.ReadyDelayMs), r.Provenance.FieldLayer["ready_delay_ms"])
+	}
+	explainProviderField(w, "ready_prompt_prefix", r.ReadyPromptPrefix, r.Provenance.FieldLayer["ready_prompt_prefix"])
+	if len(r.ProcessNames) > 0 {
+		explainProviderField(w, "process_names", strings.Join(r.ProcessNames, ","), r.Provenance.FieldLayer["process_names"])
+	}
+	explainProviderField(w, "resume_command", r.ResumeCommand, r.Provenance.FieldLayer["resume_command"])
+	explainProviderField(w, "resume_flag", r.ResumeFlag, r.Provenance.FieldLayer["resume_flag"])
+	explainProviderField(w, "resume_style", r.ResumeStyle, r.Provenance.FieldLayer["resume_style"])
+	explainProviderField(w, "session_id_flag", r.SessionIDFlag, r.Provenance.FieldLayer["session_id_flag"])
+	explainProviderField(w, "title_model", r.TitleModel, r.Provenance.FieldLayer["title_model"])
+
+	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
+	explainResolvedBool(w, "supports_acp", r.SupportsACP, r.Provenance.FieldLayer["supports_acp"])
+	explainResolvedBool(w, "emits_permission_warning", r.EmitsPermissionWarning, r.Provenance.FieldLayer["emits_permission_warning"])
+
+	explainProviderMap(w, "env", r.Env, r.Provenance.MapKeyLayer["env"])
+	explainProviderMap(w, "permission_modes", r.PermissionModes, r.Provenance.MapKeyLayer["permission_modes"])
+	explainProviderMap(w, "option_defaults", r.EffectiveDefaults, r.Provenance.MapKeyLayer["option_defaults"])
+}
+
+func explainProviderField(w io.Writer, key, value, layer string) {
+	if value == "" {
+		return
+	}
+	display := value
+	if len(display) > 60 {
+		display = display[:57] + "..."
+	}
+	if strings.ContainsAny(display, " \t") {
+		display = `"` + display + `"`
+	}
+	line := fmt.Sprintf("  %-28s = %-30s", key, display)
+	if layer != "" {
+		line += "  # " + layer
+	}
+	fmt.Fprintln(w, line) //nolint:errcheck
+}
+
+// explainResolvedBool prints a resolved boolean only when some chain
+// layer explicitly set it (layer != ""). The underlying ResolvedProvider
+// exposes a plain bool; per-layer attribution lives in Provenance and
+// carries the tri-state signal (absent layer = no explicit setter).
+func explainResolvedBool(w io.Writer, key string, value bool, layer string) {
+	if layer == "" {
+		return
+	}
+	v := "false"
+	if value {
+		v = "true"
+	}
+	explainProviderField(w, key, v, layer)
+}
+
+func explainProviderMap(w io.Writer, field string, m map[string]string, perKey map[string]string) {
+	if len(m) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		line := fmt.Sprintf("  %-28s = %-30s", field+"."+k, m[k])
+		if layer := perKey[k]; layer != "" {
+			line += "  # " + layer
+		}
+		fmt.Fprintln(w, line) //nolint:errcheck
+	}
+}
+
+// renderProviderExplainJSON emits a machine-readable view of a resolved
+// provider including chain and per-field/per-key provenance.
+func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, stderr io.Writer) int {
+	chain := make([]map[string]string, 0, len(r.Chain))
+	for _, h := range r.Chain {
+		chain = append(chain, map[string]string{"kind": h.Kind, "name": h.Name})
+	}
+	// Surface tri-state capability flags as null when no chain layer set
+	// them (i.e. Provenance has no attribution for the field). The
+	// ResolvedProvider stores bool, so we use provenance presence as the
+	// explicit-vs-default signal.
+	triStateFromProvenance := func(field string, value bool) any {
+		if _, set := r.Provenance.FieldLayer[field]; !set {
+			return nil
+		}
+		return value
+	}
+	payload := map[string]any{
+		"name":             name,
+		"builtin_ancestor": r.BuiltinAncestor,
+		"chain":            chain,
+		"resolved": map[string]any{
+			"command":                  r.Command,
+			"args":                     r.Args,
+			"prompt_mode":              r.PromptMode,
+			"prompt_flag":              r.PromptFlag,
+			"ready_delay_ms":           r.ReadyDelayMs,
+			"ready_prompt_prefix":      r.ReadyPromptPrefix,
+			"process_names":            r.ProcessNames,
+			"resume_command":           r.ResumeCommand,
+			"resume_flag":              r.ResumeFlag,
+			"resume_style":             r.ResumeStyle,
+			"session_id_flag":          r.SessionIDFlag,
+			"title_model":              r.TitleModel,
+			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
+			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),
+			"emits_permission_warning": triStateFromProvenance("emits_permission_warning", r.EmitsPermissionWarning),
+			"env":                      r.Env,
+			"permission_modes":         r.PermissionModes,
+			"option_defaults":          r.EffectiveDefaults,
+		},
+		"provenance": map[string]any{
+			"field_layer":   r.Provenance.FieldLayer,
+			"map_key_layer": r.Provenance.MapKeyLayer,
+		},
+	}
+	enc := jsonEncoder(stdout)
+	if err := enc.Encode(payload); err != nil {
+		fmt.Fprintf(stderr, "gc config explain: json encode: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	return 0
 }
 
 // explainField prints a single field with its provenance source.
