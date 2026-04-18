@@ -1533,7 +1533,7 @@ func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
 	var mappings []supervisor.RigCityMapping
 	var loadFailed bool
 	for _, c := range cities {
-		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path)
+		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, stderr)
 		if err != nil {
 			// Abort reconciliation if any city can't be loaded — a partial
 			// snapshot would cause ReconcileRigs to drop rigs from the

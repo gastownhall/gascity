@@ -1702,7 +1702,7 @@ name = "test-city"
 	}
 	t.Setenv("GC_BEADS", "exec:/definitely/missing/provider")
 
-	_, _, err := findBeadAcrossStores(cityPath, "gc-missing")
+	_, _, err := findBeadAcrossStores(cityPath, "gc-missing", io.Discard)
 	if err == nil {
 		t.Fatal("findBeadAcrossStores() error = nil, want provider failure")
 	}

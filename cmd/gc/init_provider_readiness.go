@@ -86,13 +86,14 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 
 	// Canonicalize bd-owned store files before any provider-readiness block.
 	// A failed provider auth/login check must not leave the city half-initialized.
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", opts.commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", opts.commandName, err)                //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", opts.commandName)                     //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	emitLoadCityConfigWarnings(stderr, prov)
 	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
 		cityDoltConfigs.Store(cityPath, cfg.Dolt)
 		defer cityDoltConfigs.Delete(cityPath)
@@ -204,13 +205,14 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 		fmt.Fprintf(stderr, "%s: materializing gastown packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", commandName, err)                //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
+	emitLoadCityConfigWarnings(stderr, prov)
 	ensureInitArtifacts(cityPath, cfg, stderr, commandName)
 	targets, warnings, err := collectInitProviderTargets(cfg)
 	if err != nil {

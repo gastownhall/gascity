@@ -40,9 +40,9 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 
 // loadCityConfigSuppressDeprecatedOrderWarnings performs a full config load
 // while suppressing only legacy order-path migration warnings.
-func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string) (*config.City, error) {
+func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
 	extras := builtinPackIncludes(cityPath)
-	cfg, _, err := config.LoadWithIncludesOptions(
+	cfg, prov, err := config.LoadWithIncludesOptions(
 		fsys.OSFS{},
 		filepath.Join(cityPath, "city.toml"),
 		config.LoadOptions{SuppressDeprecatedOrderWarnings: true},
@@ -50,6 +50,9 @@ func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string) (*config.Cit
 	)
 	if err != nil {
 		return nil, err
+	}
+	if len(warningWriter) > 0 {
+		emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
 	}
 	applyFeatureFlags(cfg)
 	return cfg, nil
