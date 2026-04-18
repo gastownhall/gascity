@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-cmd-gc-process test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-cmd-gc-process test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -150,11 +150,49 @@ test-integration-packages-cover:
 
 ## test-integration-review-formulas: run the long-running workflow formula integration tests
 test-integration-review-formulas:
-	./scripts/test-integration-shard review-formulas
+	@status=0; \
+	$(MAKE) test-integration-review-formulas-basic || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	$(MAKE) test-integration-review-formulas-retries || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	$(MAKE) test-integration-review-formulas-recovery || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	exit $$status
 
 ## test-integration-review-formulas-cover: run the review-formulas shard with a CI coverage profile
 test-integration-review-formulas-cover:
-	GO_TEST_COVERPROFILE=coverage.integration-review-formulas.txt ./scripts/test-integration-shard review-formulas
+	@status=0; \
+	$(MAKE) test-integration-review-formulas-basic-cover || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	$(MAKE) test-integration-review-formulas-retries-cover || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	$(MAKE) test-integration-review-formulas-recovery-cover || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	if [ $$status -eq 0 ]; then \
+		./scripts/merge-coverprofiles coverage.integration-review-formulas.txt \
+			coverage.integration-review-formulas-basic.txt \
+			coverage.integration-review-formulas-retries.txt \
+			coverage.integration-review-formulas-recovery.txt; \
+	fi; \
+	exit $$status
+
+## test-integration-review-formulas-basic: run the core happy-path review-formulas tests
+test-integration-review-formulas-basic:
+	./scripts/test-integration-shard review-formulas-basic
+
+## test-integration-review-formulas-basic-cover: run the basic review-formulas shard with coverage
+test-integration-review-formulas-basic-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic.txt ./scripts/test-integration-shard review-formulas-basic
+
+## test-integration-review-formulas-retries: run the retry-heavy review-formulas tests
+test-integration-review-formulas-retries:
+	./scripts/test-integration-shard review-formulas-retries
+
+## test-integration-review-formulas-retries-cover: run the retry-heavy review-formulas shard with coverage
+test-integration-review-formulas-retries-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries.txt ./scripts/test-integration-shard review-formulas-retries
+
+## test-integration-review-formulas-recovery: run the crash/recovery review-formulas test
+test-integration-review-formulas-recovery:
+	./scripts/test-integration-shard review-formulas-recovery
+
+## test-integration-review-formulas-recovery-cover: run the crash/recovery review-formulas shard with coverage
+test-integration-review-formulas-recovery-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-review-formulas-recovery.txt ./scripts/test-integration-shard review-formulas-recovery
 
 ## test-integration-bdstore: run the bd store conformance shard in isolation
 test-integration-bdstore:

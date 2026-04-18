@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <packages|review-formulas|bdstore|rest|rest-smoke|rest-full|all>" >&2
+  echo "usage: $0 <packages|review-formulas|review-formulas-basic|review-formulas-retries|review-formulas-recovery|bdstore|rest|rest-smoke|rest-full|all>" >&2
   exit 1
 fi
 
@@ -20,6 +20,21 @@ formula_tests=(
   TestAdoptPRSkipGemini
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
+)
+
+review_formulas_basic_tests=(
+  TestAdoptPRFormulaCompileAndRun
+  TestPersonalWorkFormulaCompileAndRun
+  TestAdoptPRSkipGemini
+)
+
+review_formulas_retry_tests=(
+  TestAdoptPRFormulaRetriesTransientReviewerStep
+  TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+)
+
+review_formulas_recovery_tests=(
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
 )
 
@@ -131,12 +146,32 @@ run_rest_full_shard() {
   run_pkg_tests "$pkg" "${rest_tests[@]}"
 }
 
+run_review_formulas_all() {
+  local status=0 st=0
+  "$0" review-formulas-basic || { st=$?; [[ $status -ne 0 ]] || status=$st; }
+  "$0" review-formulas-retries || { st=$?; [[ $status -ne 0 ]] || status=$st; }
+  "$0" review-formulas-recovery || { st=$?; [[ $status -ne 0 ]] || status=$st; }
+  exit "$status"
+}
+
 case "$shard" in
   packages)
     run_packages_shard
     ;;
   review-formulas)
-    run_pkg_tests "$pkg" "${formula_tests[@]}"
+    run_review_formulas_all
+    ;;
+  review-formulas-basic)
+    validate_selected_tests "${review_formulas_basic_tests[@]}"
+    run_pkg_tests "$pkg" "${review_formulas_basic_tests[@]}"
+    ;;
+  review-formulas-retries)
+    validate_selected_tests "${review_formulas_retry_tests[@]}"
+    run_pkg_tests "$pkg" "${review_formulas_retry_tests[@]}"
+    ;;
+  review-formulas-recovery)
+    validate_selected_tests "${review_formulas_recovery_tests[@]}"
+    run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
     run_pkg_tests "$pkg" TestBdStoreConformance
@@ -153,7 +188,9 @@ case "$shard" in
     ;;
   all)
     "$0" packages
-    "$0" review-formulas
+    "$0" review-formulas-basic
+    "$0" review-formulas-retries
+    "$0" review-formulas-recovery
     "$0" bdstore
     "$0" rest-smoke
     "$0" rest-full

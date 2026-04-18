@@ -14,10 +14,25 @@ env:
 
 jobs:
   linux-review-formulas:
-    name: Linux / integration review-formulas
+    # Nightly intentionally hard-fails here so a broken subshard still
+    # surfaces under the legacy summary check instead of disappearing
+    # behind best-effort matrix jobs.
+    name: Linux / integration review-formulas (${{ matrix.label }})
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: review-formulas-basic
+            label: basic
+            coverprofile: coverage.integration-review-formulas-basic.txt
+          - shard: review-formulas-retries
+            label: retries
+            coverprofile: coverage.integration-review-formulas-retries.txt
+          - shard: review-formulas-recovery
+            label: recovery
+            coverprofile: coverage.integration-review-formulas-recovery.txt
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -28,15 +43,33 @@ jobs:
       - name: Install tools
         run: make install-tools
       - name: Run integration review-formulas shard
-        run: make test-integration-review-formulas-cover
+        run: GO_TEST_COVERPROFILE=${{ matrix.coverprofile }} ./scripts/test-integration-shard ${{ matrix.shard }}
       - name: Upload shard coverage to Codecov
-        if: hashFiles('coverage.integration-review-formulas.txt') != ''
+        if: hashFiles(matrix.coverprofile) != ''
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
         with:
-          files: coverage.integration-review-formulas.txt
+          files: ${{ matrix.coverprofile }}
           flags: integration-review-formulas
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
+
+  linux-review-formulas-summary:
+    # Preserve the historical nightly check name while the real work runs
+    # in parallel review-formulas shards above.
+    name: Linux / integration review-formulas
+    needs:
+      - linux-review-formulas
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finalize nightly review-formulas result
+        env:
+          SHARD_RESULT: ${{ needs.linux-review-formulas.result }}
+        run: |
+          if [[ "${SHARD_RESULT}" != "success" ]]; then
+            echo "nightly review-formulas subshards failed" >&2
+            exit 1
+          fi
 
   linux-rest-smoke:
     name: Linux / integration rest-smoke
