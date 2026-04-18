@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — revised after design-review round 2 |
+| Status | Draft — revised after design-review round 3 |
 | Date | 2026-04-18 |
 | Author(s) | Julian, Claude |
 | Issue | — |
@@ -101,7 +101,7 @@ supports_hooks = false          # optional tri-state override
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `base` | `string` | no | Name of the parent provider. `""` or absent = no inheritance. `"<name>"` looks up custom first, then built-in (self-exclusion applies). `"builtin:<name>"` forces built-in lookup. `"provider:<name>"` forces custom lookup. |
+| `base` | `*string` (presence-aware) | no | Name of the parent provider. Stored as a pointer so parse/compose/patch can distinguish *omitted* from *explicit empty*. Absent = no declaration (inherits any pack-level `base` during compose; triggers Phase A warning if legacy auto-inheritance matches). `""` (explicit empty) = standalone opt-out — no inheritance at all, silences Phase A warning, bypasses Phase A legacy-merge synthesis. `"<name>"` looks up custom first, then built-in (self-exclusion applies). `"builtin:<name>"` forces built-in lookup (recommended form). `"provider:<name>"` forces custom lookup. |
 | `args_append` | `[]string` | no | String list appended to the effective `args` of the resolved chain. Applied after that layer's `args` replacement. Inner-argv composition only — cannot wrap `Command`. |
 | capability-bool overrides (`supports_hooks`, `supports_acp`, `emits_permission_warning`) | `*bool` | no | Tri-state: absent = inherit; `true` = enable; `false` = explicitly disable. Serialized as optional TOML bool; internal representation is `*bool`. |
 
@@ -117,11 +117,7 @@ New opt-in:
 |---|---|---|---|
 | `options_schema_merge` | `string` | no | `"replace"` (default, today's semantics) or `"by_key"`. When `"by_key"`, child entries with matching `Key` replace parent entries; new keys append; `omit = true` removes inherited entries. |
 
-And an existing field gets a clarifying partner:
-
-| Field | Type | Semantics |
-|---|---|---|
-| `resume_command` | `string` | Explicit resume invocation template. When set, overrides the `ResumeFlag`/`ResumeStyle`/`SessionIDFlag` heuristic. Supports `{{session_id}}` placeholder. Required for wrapper descendants of subcommand-style resume built-ins (see Resume below). |
+**`resume_command` is an existing field** ([`provider.go:73-77`](../../internal/config/provider.go#L73)). This design does not change its syntax. Existing `{{.SessionKey}}` template variable is preserved — no new placeholder is introduced. What changes: wrapper descendants of subcommand-style resume providers become **required** to declare `resume_command` (previously optional; silently broken for wrappers).
 
 ### Name resolution for `base`
 
@@ -138,8 +134,11 @@ Resolving `base = "X"` for a provider named `P`:
    - If not found, look up `X` in `BuiltinProviders()`.
    - Both miss → error `unknown base "X" for provider "P" (no custom
      provider or built-in with that name)`.
-4. **Empty / absent** (`base = ""` or field omitted): no inheritance.
-   `""` and absent are equivalent at resolution time.
+4. **Presence-aware empty / absent**:
+   - **Absent** (`base` field omitted in this layer): defer to parent layer during compose. If no layer sets `base`, the provider has no declared parent → Phase A legacy-merge synthesis applies when name/command matches a built-in; warning is emitted.
+   - **Explicit empty** (`base = ""`): standalone opt-out. No inheritance. Phase A legacy-merge synthesis is **bypassed**. Phase A warning is **silenced**. `base = ""` set at ANY layer (pack fragment, city override, patch) sticks — subsequent absent layers do not re-enable legacy merge because the explicit empty is an explicit declaration, not "no declaration."
+   - `Base` is internally `*string` so compose/patch can distinguish the two.
+   - `base = ""` on a descendant layer overrides a pack-declared non-empty `base` from an earlier layer (consistent with "explicit wins").
 
 Self-exclusion scopes to the declaring hop only, not the whole walk.
 Colons (`:`) are reserved in `base` values: a custom provider name
@@ -342,11 +341,39 @@ For the aimux-codex case:
 base = "builtin:codex"
 command = "aimux"
 args = ["run", "codex", "--", ...]
-resume_command = "aimux run codex -- resume {{session_id}}"
+resume_command = "aimux run codex -- resume {{.SessionKey}}"
+process_names = ["aimux", "codex"]
 ```
 
 End-to-end test required: spawn wrapped codex → kill → reconcile →
 assert actual executed resume command matches the declared template.
+
+The wrapper-resume check is **data-driven**, not predicated on the
+literal string `"subcommand"` — any `ResumeStyle` value that depends on
+the leaf's `Command` being an invocation of the inherited binary
+(today: `"subcommand"`; future styles may require the same) triggers
+the requirement for descendants whose `command` differs.
+
+#### Wrapper `process_names` requirement (parity with `resume_command`)
+
+When a provider's resolved `Command` differs from its inherited
+`Command` (wrapper descendant) AND `process_names` was not
+overridden, config load emits a **warning** (not error — in some cases
+the inherited process names are still valid):
+
+```
+config warning: provider "codex-mini" wraps a different command
+  ("aimux") than its inherited parent ("codex") but does not override
+  `process_names`. Supervision and PID tracking may fail. Set
+  `process_names = ["aimux", ...]` explicitly to include wrapper
+  processes.
+```
+
+Warning becomes a hard error in a future release if experience shows
+it is always wrong; starts as warning because there are legitimate
+cases where the wrapper exec-replaces itself with the wrapped binary.
+An integration test asserts the maintainer-city aimux config overrides
+`process_names` and the reconciler can supervise the wrapped process.
 
 ### Kind / provider-family propagation
 
@@ -365,6 +392,11 @@ and updates every listed call site; Phase 4 tests cover each.
 - Provider readiness init ([`init_provider_readiness.go:338`](../../cmd/gc/init_provider_readiness.go#L338))
 - Template resolve ([`template_resolve.go:251`](../../cmd/gc/template_resolve.go#L251))
 - Skill integration ([`skill_integration.go:172`](../../cmd/gc/skill_integration.go#L172))
+- Reconciler session bead creation / backfill
+  ([`session_beads.go:617-665`](../../cmd/gc/session_beads.go#L617),
+  [`session_lifecycle_parallel.go:406-409`](../../cmd/gc/session_lifecycle_parallel.go#L406))
+- Crash adoption and `GC_PROVIDER` env propagation
+  ([`manager.go:373-376`](../../internal/session/manager.go#L373))
 
 Per-site regression tests: Claude `--settings` injection for
 `claude-max base="builtin:claude"`; skill materialization for same;
@@ -394,9 +426,41 @@ CRUD validation relaxed: a provider with `base` set is authorable
 without `command` / `args` — those may be inherited. CRUD round-trip
 test for base-only descendants is required.
 
-Response DTOs strip internal fields not intended for external
-consumption (`omit = true` sentinel in schema entries is stripped
-from public JSON via `json:"-"`).
+**CRUD JSON authoring DTO** — explicit contract for the new fields:
+
+```json
+{
+  "name": "codex-max",
+  "base": "builtin:codex",
+  "args_append": ["-m", "gpt-5.4", "-c", "model_reasoning_effort=\"xhigh\""],
+  "supports_hooks": true,
+  "options_schema_merge": "by_key",
+  "options_schema": [
+    {"key": "permission_mode", "omit": true},
+    {"key": "detail", "label": "Detail", "type": "select", "choices": [...]}
+  ],
+  "resume_command": "..."
+}
+```
+
+- `base` (`null`/omitted | `""` | `"<name>"` | `"builtin:<name>"` | `"provider:<name>"`):
+  null/omitted = no declaration; `""` = explicit standalone opt-out; other
+  values are lookup forms.
+- `supports_hooks` / `supports_acp` / `emits_permission_warning`:
+  `null`/omitted = inherit; `true`/`false` = explicit.
+- `options_schema_merge`: `"replace"` (default) or `"by_key"`. Unknown
+  values → HTTP 400.
+- `omit = true` IS authorable via CRUD (the round-2 decision to strip
+  it from public DTOs is reversed — users must be able to author the
+  removal sentinel). The public *read* DTO still renders `omit`
+  entries as resolved absences rather than raw structs; the CRUD round
+  trip preserves the user's raw input.
+
+**Response DTO key naming**: `/v0/config/explain --json` maps
+provenance keys to **TOML/API names**, not Go struct identifiers.
+`Command` → `command`, `ReadyDelayMs` → `ready_delay_ms`,
+`OptionDefaults` → `option_defaults`, etc. A test asserts no
+Go-identifier leakage in any serialized response.
 
 ### Migration & deprecation window
 
@@ -469,6 +533,13 @@ config error: provider "codex-max" options_schema entry 2 duplicates
 config error: provider "codex-max" options_schema entry 2 declares both
     `omit = true` and other fields; omit entries must be key-only
 
+config error: provider "codex-max" has `omit = true` on entry 0 but
+    options_schema_merge is "replace" (or unset, defaults to "replace");
+    omit sentinel requires options_schema_merge = "by_key"
+
+config error: provider "codex-max" options_schema_merge = "layer"; valid
+    values are "replace" or "by_key"
+
 config error: custom provider name "codex:foo" contains reserved
     character ":" — reserved for namespace prefixes
 ```
@@ -524,12 +595,22 @@ type ResolvedProvider struct {
 
 type ProviderProvenance struct {
     Chain            []HopIdentity            // ordered, root → leaf
-    FieldLayer       map[string]string        // "Command" → "providers.codex"
+    FieldLayer       map[string]FieldProv     // "command" → {"layer": "providers.codex", "action": "set"}
     MapKeyLayer      map[string]map[string]string
-                                              // "OptionDefaults" → {"permission_mode": "builtin:codex", ...}
+                                              // "option_defaults" → {"permission_mode": "builtin:codex", ...}
     SchemaEntryLayer []SchemaProvenance
     ArgsSegments     []ArgsSegment
     Warnings         []string                 // Phase A warnings
+    ResumeSuperseded bool                      // true when resume_command
+                                              // set and inherited
+                                              // ResumeFlag/ResumeStyle/
+                                              // SessionIDFlag are
+                                              // shadowed
+}
+
+type FieldProv struct {
+    Layer  string   // source layer
+    Action string   // "set" | "inherited" | "cleared" (for [] clear of slice fields)
 }
 
 type HopIdentity struct {
@@ -682,6 +763,13 @@ in the next release. Phase 9 docs update ships alongside Phase 1–7.
 - Delete legacy auto-inheritance blocks.
 - Delete cache legacy-merge synthesis.
 - Promote warnings to errors.
+- **Removal-assertion tests**: explicit coverage that every surface
+  rejects an unmigrated provider. For each of: config load,
+  `lookupProvider`, `/v0/providers`, `/v0/config/explain`, provider
+  CRUD create+read, `gc doctor`, assert that a provider matching
+  legacy name-match or command-match without `base` (or with
+  `base = ""` explicitly opting out) is handled with the correct
+  Phase B behavior (hard error vs clean standalone).
 
 ### Phase 9 — docs and changelog (ships with 1–7)
 
@@ -797,13 +885,22 @@ category coverage.
 
 ### End-to-end integration
 
-- **Aimux-wrapped codex regression**: pack.toml matching the
-  maintainer-city config → resolved `codex-mini` has
-  `PermissionModes["unrestricted"]`, `ReadyDelayMs = 3000`,
-  `ResumeCommand` set, `SupportsHooks = true`,
-  `BuiltinAncestor = "codex"`. Spawn an agent; assert it does not hang
-  on first sandboxed command, hooks install, `--settings` injection
-  works for wrapper-derived Claude.
+- **Aimux-wrapped codex regression (golden fixture)**: checked-in
+  `testdata/pack_aimux_codex.toml` matching the maintainer-city config
+  → resolved `codex-mini` has `PermissionModes["unrestricted"]`,
+  `ReadyDelayMs = 3000`, `ResumeCommand` with `{{.SessionKey}}`,
+  `SupportsHooks = true`, `BuiltinAncestor = "codex"`,
+  `ProcessNames = ["aimux", "codex"]` (if overridden) or triggers
+  wrapper `process_names` warning (if not). Snapshot the full
+  resolved `ResolvedProvider` struct to a golden file; changes must
+  be intentional and visible in diff. Spawn an agent; assert it does
+  not hang on first sandboxed command, hooks install, `--settings`
+  injection works for wrapper-derived Claude, resume round-trip
+  substitutes `{{.SessionKey}}` correctly.
+- **Aimux-wrapped claude regression (golden fixture)**: similar
+  snapshot for `claude-max base="builtin:claude"` — covers claude
+  wrapper-resume (`--resume` flag style, not subcommand) and claude
+  settings injection.
 
 ### Sync enforcement
 
