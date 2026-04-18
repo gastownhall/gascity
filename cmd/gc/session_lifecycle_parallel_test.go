@@ -1602,7 +1602,7 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 			{name: "db", template: "db", subject: "db", order: 0, resolved: true},
 			{name: "worker", template: "worker", subject: "worker", order: 1, resolved: true},
 			{name: "custom", template: "custom-session", subject: "custom", order: 2, resolved: false},
-		}, cfg, sp, rec, "gc", &stdout, &stderr)
+		}, cfg, nil, sp, rec, "gc", &stdout, &stderr)
 	}()
 
 	first := sp.waitForStops(t, 1)
@@ -1663,7 +1663,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 			{name: "orphan-b", subject: "orphan-b", order: 1},
 			{name: "orphan-c", subject: "orphan-c", order: 2},
 			{name: "orphan-d", subject: "orphan-d", order: 3},
-		}, cfg, sp, rec, "gc", &stdout, &stderr)
+		}, cfg, nil, sp, rec, "gc", &stdout, &stderr)
 	}()
 
 	first := sp.waitForStops(t, 1)
@@ -1776,7 +1776,7 @@ func TestInterruptTargetsBounded_LogsSuccessOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	sent := interruptTargetsBounded([]stopTarget{{name: "worker", template: "worker", resolved: true}}, sp, &stderr)
+	sent := interruptTargetsBounded([]stopTarget{{name: "worker", template: "worker", resolved: true}}, nil, nil, sp, &stderr)
 	if sent != 1 {
 		t.Fatalf("sent = %d, want 1", sent)
 	}
@@ -1801,7 +1801,7 @@ func TestInterruptTargetsBounded_BroadcastsAllTargetsConcurrently(t *testing.T) 
 
 	done := make(chan int, 1)
 	go func() {
-		done <- interruptTargetsBounded(targets, sp, ioDiscard{})
+		done <- interruptTargetsBounded(targets, nil, nil, sp, ioDiscard{})
 	}()
 
 	first := sp.waitForInterrupts(t, len(targets))
@@ -1836,7 +1836,7 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- interruptTargetsBounded(targets, sp, ioDiscard{})
+		done <- interruptTargetsBounded(targets, nil, nil, sp, ioDiscard{})
 	}()
 
 	first := sp.waitForInterrupts(t, defaultMaxParallelInterrupts)
@@ -1860,7 +1860,6 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 
 func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 	sp := runtime.NewFake()
-	// Start both sessions.
 	for _, name := range []string{"human-worker", "pool-worker"} {
 		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatal(err)
@@ -1871,7 +1870,7 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 		{name: "pool-worker", template: "pool", resolved: true, poolManaged: true},
 	}
 	var stderr bytes.Buffer
-	sent := interruptTargetsBounded(targets, sp, &stderr)
+	sent := interruptTargetsBounded(targets, nil, nil, sp, &stderr)
 	if sent != 1 {
 		t.Fatalf("sent = %d, want 1 (only human-worker)", sent)
 	}
@@ -1931,7 +1930,7 @@ func TestStopTargetsBounded_SanitizesMultilineStopError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stopped := stopTargetsBounded([]stopTarget{{name: "worker", template: "worker", subject: "worker", resolved: true}}, &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
-	}, sp, rec, "gc", &stdout, &stderr)
+	}, nil, sp, rec, "gc", &stdout, &stderr)
 	if stopped != 0 {
 		t.Fatalf("stopped = %d, want 0", stopped)
 	}

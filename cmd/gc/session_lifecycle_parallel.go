@@ -67,6 +67,7 @@ type startResult struct {
 }
 
 type stopTarget struct {
+	sessionID   string
 	name        string
 	template    string
 	subject     string
@@ -1006,6 +1007,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 	sessionTemplates := make(map[string]string)
 	sessionSubjects := make(map[string]string)
 	sessionPoolManaged := make(map[string]bool)
+	sessionIDs := make(map[string]string)
 	if store != nil {
 		if sessionBeads, err := loadSessionBeads(store); err == nil {
 			for _, bead := range sessionBeads {
@@ -1015,6 +1017,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 					sessionTemplates[name] = template
 				}
 				if name != "" {
+					sessionIDs[name] = bead.ID
 					subject := sessionBeadAgentName(bead)
 					if subject == "" && template != "" && bead.Metadata["pool_slot"] != "" {
 						subject = template + "-" + bead.Metadata["pool_slot"]
@@ -1057,6 +1060,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 			}
 		}
 		targets = append(targets, stopTarget{
+			sessionID:   sessionIDs[name],
 			name:        name,
 			template:    template,
 			subject:     subject,
@@ -1092,7 +1096,18 @@ func filterStopTargets(targets []stopTarget, names []string) []stopTarget {
 	return filtered
 }
 
-func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr io.Writer) int {
+func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	if target.sessionID == "" || store == nil {
+		return sp.Stop(target.name)
+	}
+	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, target.sessionID)
+	if err != nil {
+		return err
+	}
+	return handle.Stop(context.Background())
+}
+
+func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
 	// them forever. Stop them immediately instead of interrupting —
@@ -1101,7 +1116,7 @@ func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr i
 	for _, t := range targets {
 		if t.poolManaged {
 			started := time.Now()
-			err := sp.Stop(t.name)
+			err := stopTargetThroughWorkerBoundary(t, store, sp, cfg)
 			outcome := "stopped_pool_managed"
 			if err != nil {
 				outcome = "stop_failed"
@@ -1128,12 +1143,13 @@ func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr i
 }
 
 func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
-	return interruptTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), sp, stderr)
+	return interruptTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, stderr)
 }
 
 func stopTargetsBounded(
 	targets []stopTarget,
 	cfg *config.City,
+	store beads.Store,
 	sp runtime.Provider,
 	rec events.Recorder,
 	actor string,
@@ -1148,7 +1164,7 @@ func stopTargetsBounded(
 			for wave, target := range targets {
 				waveStarted := time.Now()
 				results := executeTargetWave([]stopTarget{target}, 1, func(target stopTarget) error {
-					return sp.Stop(target.name)
+					return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 				})
 				for _, result := range results {
 					if shouldLogStopOutcome(result.target, cfg) {
@@ -1190,7 +1206,7 @@ func stopTargetsBounded(
 			}
 		}
 		results := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, func(target stopTarget) error {
-			return sp.Stop(target.name)
+			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 		})
 		for _, result := range results {
 			if shouldLogStopOutcome(result.target, cfg) {
@@ -1220,5 +1236,5 @@ func stopSessionsBounded(
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
-	return stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, sp, rec, actor, stdout, stderr)
+	return stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, actor, stdout, stderr)
 }

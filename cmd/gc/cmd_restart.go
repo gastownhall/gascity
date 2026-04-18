@@ -159,7 +159,7 @@ func doRigRestart(
 	if dependencyCfg == nil {
 		dependencyCfg = &config.City{Agents: agents}
 	}
-	killed := stopTargetsBounded(targets, dependencyCfg, sp, rec, eventActor(), io.Discard, stderr)
+	killed := stopTargetsBounded(targets, dependencyCfg, store, sp, rec, eventActor(), io.Discard, stderr)
 
 	fmt.Fprintf(stdout, "Restarted %d agent(s) in rig '%s' (killed sessions; reconciler will restart)\n", killed, rigName) //nolint:errcheck // best-effort stdout
 	return 0
