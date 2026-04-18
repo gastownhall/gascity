@@ -2,6 +2,7 @@ package formula
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -511,6 +512,184 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.body")
 	assertBefore("mol-scoped-work.body", "mol-scoped-work.cleanup-worktree")
 	assertBefore("mol-scoped-work.cleanup-worktree", "mol-scoped-work.workflow-finalize")
+
+	// The teardown retry control must block on its own attempt.1, matching
+	// the invariant in processRetryControl: a retry-manager is only ever
+	// processed after its latest attempt has closed. Without this edge,
+	// the control bead becomes ready as soon as the body scope closes,
+	// and the dispatcher crash-loops with "latest attempt ... is open,
+	// not closed (invariant violation)".
+	cleanupAttempt := recipe.StepByID("mol-scoped-work.cleanup-worktree.attempt.1")
+	if cleanupAttempt == nil {
+		t.Fatal("cleanup-worktree.attempt.1 step missing")
+	}
+	foundAttemptDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == cleanup.ID && dep.DependsOnID == cleanupAttempt.ID && dep.Type == "blocks" {
+			foundAttemptDep = true
+			break
+		}
+	}
+	if !foundAttemptDep {
+		t.Fatalf("teardown retry %s missing blocks dep on its attempt %s", cleanup.ID, cleanupAttempt.ID)
+	}
+}
+
+// TestCompileBugReportFlowV2 is an integration-style check that loads
+// the real tooling formula used by the bugflow workflow and asserts
+// the teardown retry control carries a blocks dep on its attempt.
+func TestCompileBugReportFlowV2(t *testing.T) {
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = false })
+
+	const toolingPath = "/home/ubuntu/tooling/formulas"
+	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
+		t.Skipf("tooling formula not present: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-bug-report-flow-v2", []string{toolingPath}, map[string]string{
+		"report_ref": "https://example.com/issues/1",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	cleanup := recipe.StepByID("mol-bug-report-flow-v2.cleanup-run-state")
+	cleanupAttempt := recipe.StepByID("mol-bug-report-flow-v2.cleanup-run-state.attempt.1")
+	if cleanup == nil {
+		t.Fatal("cleanup-run-state step missing")
+	}
+	if cleanupAttempt == nil {
+		t.Fatal("cleanup-run-state.attempt.1 step missing")
+	}
+
+	foundAttemptDep := false
+	var relevant []string
+	for _, dep := range recipe.Deps {
+		if dep.StepID == cleanup.ID {
+			relevant = append(relevant, fmt.Sprintf("  %s -> %s (%s)", dep.StepID, dep.DependsOnID, dep.Type))
+		}
+		if dep.StepID == cleanup.ID && dep.DependsOnID == cleanupAttempt.ID && dep.Type == "blocks" {
+			foundAttemptDep = true
+		}
+	}
+	if !foundAttemptDep {
+		t.Fatalf("teardown retry %s missing blocks dep on attempt %s\ncleanup's deps:\n%s",
+			cleanup.ID, cleanupAttempt.ID, strings.Join(relevant, "\n"))
+	}
+
+	// Also verify a peer body-step retry has its attempt dep, to confirm
+	// the check is real and not just passing because no retries work.
+	peer := recipe.StepByID("mol-bug-report-flow-v2.verify-run-state")
+	peerAttempt := recipe.StepByID("mol-bug-report-flow-v2.verify-run-state.attempt.1")
+	if peer == nil || peerAttempt == nil {
+		t.Fatalf("verify-run-state or its attempt missing")
+	}
+	foundPeer := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == peer.ID && dep.DependsOnID == peerAttempt.ID && dep.Type == "blocks" {
+			foundPeer = true
+		}
+	}
+	if !foundPeer {
+		t.Fatalf("peer retry %s missing blocks dep on attempt %s", peer.ID, peerAttempt.ID)
+	}
+}
+
+// TestCompileTeardownRetryWithDownstreamSibling reproduces the
+// mol-bug-report-flow-v2 shape: a teardown-scoped retry step that
+// another (later) step `needs = [...]`. A later rewrite step should
+// not strip the retry→attempt.1 edge on the teardown control.
+func TestCompileTeardownRetryWithDownstreamSibling(t *testing.T) {
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = false })
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "mol-teardown-sibling"
+phase = "liquid"
+version = 2
+
+[[steps]]
+id = "body"
+title = "Body scope"
+needs = ["work"]
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "bugflow", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "work"
+title = "Do the work"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 3
+
+[[steps]]
+id = "verify-run-state"
+title = "Verify terminal run state"
+needs = ["cleanup-run-state"]
+metadata = { "gc.continuation_group" = "main" }
+
+[steps.retry]
+max_attempts = 3
+
+[[steps]]
+id = "cleanup-run-state"
+title = "Cleanup run state"
+needs = ["body"]
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-teardown-sibling.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-teardown-sibling", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	cleanup := recipe.StepByID("mol-teardown-sibling.cleanup-run-state")
+	cleanupAttempt := recipe.StepByID("mol-teardown-sibling.cleanup-run-state.attempt.1")
+	if cleanup == nil {
+		t.Fatal("cleanup-run-state step missing")
+	}
+	if cleanupAttempt == nil {
+		t.Fatal("cleanup-run-state.attempt.1 step missing")
+	}
+	if got := cleanup.Metadata["gc.scope_role"]; got != "teardown" {
+		t.Fatalf("cleanup gc.scope_role = %q, want teardown", got)
+	}
+	if got := cleanup.Metadata["gc.kind"]; got != "retry" {
+		t.Fatalf("cleanup gc.kind = %q, want retry", got)
+	}
+
+	foundAttemptDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == cleanup.ID && dep.DependsOnID == cleanupAttempt.ID && dep.Type == "blocks" {
+			foundAttemptDep = true
+			break
+		}
+	}
+	if !foundAttemptDep {
+		t.Fatalf("teardown retry %s missing blocks dep on its attempt %s\nall deps referencing %s:\n%s",
+			cleanup.ID, cleanupAttempt.ID, cleanup.ID, formatDepsForCleanup(recipe.Deps, cleanup.ID))
+	}
+}
+
+func formatDepsForCleanup(deps []RecipeDep, stepID string) string {
+	var lines []string
+	for _, d := range deps {
+		if d.StepID == stepID {
+			lines = append(lines, fmt.Sprintf("  %s -> %s (%s)", d.StepID, d.DependsOnID, d.Type))
+		}
+	}
+	if len(lines) == 0 {
+		return "  (none)"
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestCompileGraphWorkflowRejectsCycles(t *testing.T) {

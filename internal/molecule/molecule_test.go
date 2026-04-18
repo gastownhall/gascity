@@ -13,6 +13,156 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
+// TestBuildRecipeApplyPlanBugReportFlowV2 checks that the plan built
+// from the real bug-report-flow-v2 formula carries the retry→attempt
+// edge for the teardown step. If the edge is dropped here, the bd
+// graph-apply call will never receive it, and the instantiated bead
+// graph will be missing the dep — which is exactly what we saw in
+// production.
+func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
+	formula.FormulaV2Enabled = true
+	t.Cleanup(func() { formula.FormulaV2Enabled = false })
+
+	const toolingPath = "/home/ubuntu/tooling/formulas"
+	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
+		t.Skipf("tooling formula not present: %v", err)
+	}
+
+	recipe, err := formula.Compile(context.Background(), "mol-bug-report-flow-v2", []string{toolingPath}, map[string]string{
+		"report_ref": "https://example.com/issues/1",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+
+	cleanupKey := "mol-bug-report-flow-v2.cleanup-run-state"
+	attemptKey := "mol-bug-report-flow-v2.cleanup-run-state.attempt.1"
+
+	cleanupNode := false
+	attemptNode := false
+	for _, n := range plan.Nodes {
+		if n.Key == cleanupKey {
+			cleanupNode = true
+		}
+		if n.Key == attemptKey {
+			attemptNode = true
+		}
+	}
+	if !cleanupNode {
+		t.Errorf("plan missing node %s", cleanupKey)
+	}
+	if !attemptNode {
+		t.Errorf("plan missing node %s", attemptKey)
+	}
+
+	found := false
+	var cleanupEdges []string
+	for _, e := range plan.Edges {
+		if e.FromKey == cleanupKey {
+			cleanupEdges = append(cleanupEdges, fmt.Sprintf("  %s -> %s (%s)", e.FromKey, e.ToKey, e.Type))
+		}
+		if e.FromKey == cleanupKey && e.ToKey == attemptKey && e.Type == "blocks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("plan missing edge %s -> %s (blocks)\ncleanup edges:\n%s",
+			cleanupKey, attemptKey, strings.Join(cleanupEdges, "\n"))
+	}
+}
+
+// TestCookTeardownRetryBlocksOnAttempt exercises the end-to-end Cook
+// path (compile → instantiate) to confirm that a teardown-scoped retry
+// control bead ends up with a blocks dep on its attempt bead. Without
+// this dep, the dispatcher's processRetryControl fires on the retry as
+// soon as its non-attempt blockers (body scope) close, trips the
+// "latest attempt ... is open, not closed" invariant, and crash-loops.
+func TestCookTeardownRetryBlocksOnAttempt(t *testing.T) {
+	formula.FormulaV2Enabled = true
+	t.Cleanup(func() { formula.FormulaV2Enabled = false })
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
+
+	dir := t.TempDir()
+	toml := `
+formula = "scoped-teardown"
+version = 2
+
+[[steps]]
+id = "body"
+title = "Body"
+needs = ["work"]
+metadata = { "gc.kind" = "scope", "gc.scope_role" = "body", "gc.scope_name" = "work" }
+
+[[steps]]
+id = "work"
+title = "Work"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 3
+
+[[steps]]
+id = "verify-cleanup"
+title = "Verify cleanup ran"
+needs = ["cleanup"]
+metadata = { "gc.continuation_group" = "main" }
+
+[steps.retry]
+max_attempts = 3
+
+[[steps]]
+id = "cleanup"
+title = "Cleanup"
+needs = ["body"]
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+`
+	if err := os.WriteFile(filepath.Join(dir, "scoped-teardown.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	result, err := Cook(context.Background(), store, "scoped-teardown", []string{dir}, Options{})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+
+	cleanupID := result.IDMapping["scoped-teardown.cleanup"]
+	attemptID := result.IDMapping["scoped-teardown.cleanup.attempt.1"]
+	if cleanupID == "" {
+		t.Fatal("cleanup bead not created")
+	}
+	if attemptID == "" {
+		t.Fatal("cleanup.attempt.1 bead not created")
+	}
+
+	deps, err := store.DepList(cleanupID, "down")
+	if err != nil {
+		t.Fatalf("dep list cleanup: %v", err)
+	}
+
+	foundAttemptBlock := false
+	var lines []string
+	for _, d := range deps {
+		lines = append(lines, fmt.Sprintf("  %s (%s)", d.DependsOnID, d.Type))
+		if d.Type == "blocks" && d.DependsOnID == attemptID {
+			foundAttemptBlock = true
+		}
+	}
+	if !foundAttemptBlock {
+		t.Fatalf("teardown retry %s missing blocks dep on attempt %s\ndeps:\n%s",
+			cleanupID, attemptID, strings.Join(lines, "\n"))
+	}
+}
+
 type graphApplySpyStore struct {
 	*beads.MemStore
 	plan   *beads.GraphApplyPlan
