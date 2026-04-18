@@ -1,27 +1,35 @@
 package api
 
 import (
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
-// Event-bus payload types emitted by API handlers. Every API emitter
-// takes one of these typed structs rather than map[string]any so the
-// wire-facing shape of each event type is visible in Go source and
-// checkable by the compiler (Principle 7). The event bus itself stores
-// payloads as []byte for domain-agnostic transport (Principle 4 edge
-// case); the marshal step that converts the typed struct to []byte
-// lives inside the emitter, not in the call site.
-//
-// extmsg event payloads (inbound/outbound plus Bound/Unbound/
-// GroupCreated/Adapter*) live in internal/extmsg because they flow
-// through a callback shared by the API and the extmsg package; the
-// sealed extmsg.EventPayload interface gates that callback.
+// API-layer event payload types. Every API emitter takes one of these
+// typed structs (or one defined in internal/extmsg) via the sealed
+// events.Payload interface rather than map[string]any (Principle 7).
+// The event bus stores payloads as []byte for domain-agnostic
+// transport (Principle 4 edge case); the SSE projection uses the
+// central events registry to decode the bytes back into the typed Go
+// variant before emitting on the typed /v0/events/stream wire schema.
 
 // MailEventPayload is the shape of every mail.* event payload
-// (MailSent, MailMarkedRead, MailMarkedUnread, MailArchived, MailReplied,
-// MailDeleted). Message is nil for mark/archive/delete events; present
-// for send/reply events.
+// (MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
+// MailReplied, MailDeleted). Message is nil for mark/archive/delete
+// events; present for send/reply events.
 type MailEventPayload struct {
 	Rig     string        `json:"rig"`
 	Message *mail.Message `json:"message,omitempty"`
+}
+
+func (MailEventPayload) IsEventPayload() {}
+
+func init() {
+	events.RegisterPayload(events.MailSent, MailEventPayload{})
+	events.RegisterPayload(events.MailRead, MailEventPayload{})
+	events.RegisterPayload(events.MailArchived, MailEventPayload{})
+	events.RegisterPayload(events.MailMarkedRead, MailEventPayload{})
+	events.RegisterPayload(events.MailMarkedUnread, MailEventPayload{})
+	events.RegisterPayload(events.MailReplied, MailEventPayload{})
+	events.RegisterPayload(events.MailDeleted, MailEventPayload{})
 }

@@ -53,6 +53,8 @@ const (
 	ExtMsgGroupCreated   = "extmsg.group_created"
 	ExtMsgAdapterAdded   = "extmsg.adapter_added"
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
+	ExtMsgInbound        = "extmsg.inbound"
+	ExtMsgOutbound       = "extmsg.outbound"
 )
 
 // Event is a single recorded occurrence in the system.
