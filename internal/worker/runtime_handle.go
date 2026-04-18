@@ -62,8 +62,18 @@ func (h *RuntimeHandle) Start(context.Context) error {
 	return fmt.Errorf("%w: start requires a bead-backed session", ErrOperationUnsupported)
 }
 
-func (h *RuntimeHandle) StartResolved(ctx context.Context, _ string, _ runtime.Config) error {
-	return h.Start(ctx)
+func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) error {
+	if h.provider.IsRunning(h.sessionName) {
+		return nil
+	}
+	startCfg := cfg
+	if strings.TrimSpace(startCfg.Command) == "" {
+		startCfg.Command = strings.TrimSpace(startCommand)
+	}
+	if strings.TrimSpace(startCfg.Command) == "" {
+		return fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
+	}
+	return h.provider.Start(ctx, h.sessionName, startCfg)
 }
 
 func (h *RuntimeHandle) Attach(context.Context) error {
@@ -75,6 +85,10 @@ func (h *RuntimeHandle) Attach(context.Context) error {
 
 func (h *RuntimeHandle) Create(context.Context, CreateMode) (sessionpkg.Info, error) {
 	return sessionpkg.Info{}, fmt.Errorf("%w: create requires a bead-backed session", ErrOperationUnsupported)
+}
+
+func (h *RuntimeHandle) Reset(context.Context) error {
+	return fmt.Errorf("%w: reset requires a bead-backed session", ErrOperationUnsupported)
 }
 
 func (h *RuntimeHandle) Stop(context.Context) error {

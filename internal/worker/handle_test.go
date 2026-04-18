@@ -268,6 +268,49 @@ func TestSessionHandleCreateStarted(t *testing.T) {
 	}
 }
 
+func TestSessionHandleResetUsesWorkerBoundary(t *testing.T) {
+	handle, store, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{
+		"session_key":         "original-key",
+		"started_config_hash": "hash-before-reset",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	if err := handle.Reset(context.Background()); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", info.ID, err)
+	}
+	if bead.Metadata["restart_requested"] != "true" {
+		t.Fatalf("restart_requested = %q, want true", bead.Metadata["restart_requested"])
+	}
+	if bead.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", bead.Metadata["continuation_reset_pending"])
+	}
+	if bead.Metadata["session_key"] != "original-key" {
+		t.Fatalf("session_key = %q, want original-key", bead.Metadata["session_key"])
+	}
+	if bead.Metadata["started_config_hash"] != "hash-before-reset" {
+		t.Fatalf("started_config_hash = %q, want hash-before-reset", bead.Metadata["started_config_hash"])
+	}
+}
+
 func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Template: "probe",
@@ -1038,6 +1081,41 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	}
 	if _, err := handle.AgentTranscript(context.Background(), "helper"); !errors.Is(err, ErrHistoryUnavailable) {
 		t.Fatalf("AgentTranscript err = %v, want %v", err, ErrHistoryUnavailable)
+	}
+	if err := handle.Reset(context.Background()); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("Reset err = %v, want %v", err, ErrOperationUnsupported)
+	}
+}
+
+func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
+	sp := runtime.NewFake()
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	if err := handle.StartResolved(context.Background(), "legacy --resume seeded", runtime.Config{
+		WorkDir: "/tmp/runtime-worker",
+	}); err != nil {
+		t.Fatalf("StartResolved: %v", err)
+	}
+	if !sp.IsRunning("legacy-worker") {
+		t.Fatal("legacy-worker should be running after StartResolved")
+	}
+	start := firstCall(sp.Calls, "Start")
+	if start == nil {
+		t.Fatalf("runtime calls = %#v, want Start", sp.Calls)
+	}
+	if start.Config.Command != "legacy --resume seeded" {
+		t.Fatalf("start command = %q, want legacy --resume seeded", start.Config.Command)
+	}
+	if start.Config.WorkDir != "/tmp/runtime-worker" {
+		t.Fatalf("start workdir = %q, want /tmp/runtime-worker", start.Config.WorkDir)
 	}
 }
 

@@ -241,6 +241,7 @@ type Handle interface {
 	StartResolved(ctx context.Context, startCommand string, hints runtime.Config) error
 	Attach(ctx context.Context) error
 	Create(ctx context.Context, mode CreateMode) (session.Info, error)
+	Reset(ctx context.Context) error
 	Stop(ctx context.Context) error
 	Kill(ctx context.Context) error
 	Close(ctx context.Context) error
@@ -300,7 +301,7 @@ must preserve these semantics:
 Current branch API-to-test traceability:
 
 - lifecycle materialization and identity (`Create`, `Start`, `StartResolved`,
-  `Attach`, `State`, `Stop`, `Kill`, `Close`, `Rename`, `Peek`)
+  `Attach`, `Reset`, `State`, `Stop`, `Kill`, `Close`, `Rename`, `Peek`)
   - deterministic coverage lives in `internal/worker/handle_test.go`
   - top-level caller boundary coverage lives in
     `cmd/gc/worker_boundary_import_test.go` and
@@ -1518,11 +1519,20 @@ Current branch progress:
 - API and `gc` callers no longer depend on concrete
   `*worker.SessionHandle` or `worker.SessionLogAdapter`; they consume the
   canonical `worker.Handle` / `worker.Factory` surfaces instead
+- managed fresh-restart requests (`gc session reset`, runtime
+  `request-restart`, self-handoff restart persistence) now route through
+  `worker.Handle.Reset` rather than writing restart metadata directly from
+  CLI call sites
+- reconciler/controller start fallback for runtime-only targets now routes
+  through `worker.NewRuntimeHandle` rather than calling `runtime.Provider`
+  directly from `cmd/gc`
 
 Remaining branch-local Phase 4 gaps:
 
-- reconciler and controller orchestration still own start/stop policy
-  beneath the worker boundary
+- none for production caller actuation
+- reconciler and controller still own wake/drain/restart **policy**
+  decisions, but the production start/stop/reset/attach actuation paths no
+  longer bypass `internal/worker`
 
 Done when:
 

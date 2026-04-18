@@ -67,3 +67,57 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		t.Fatal("session should be running after prepared start")
 	}
 }
+
+func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *testing.T) {
+	sp := runtime.NewFake()
+	sessionBead := &beads.Bead{
+		Metadata: map[string]string{
+			"session_name": "legacy-runtime-only",
+		},
+	}
+
+	usedWorker, err := startPreparedStartCandidate(
+		context.Background(),
+		preparedStart{
+			candidate: startCandidate{
+				session: sessionBead,
+				tp:      TemplateParams{TemplateName: "worker"},
+			},
+			cfg: runtime.Config{
+				Command: "claude --resume seeded",
+				WorkDir: t.TempDir(),
+			},
+		},
+		"",
+		nil,
+		sp,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("startPreparedStartCandidate: %v", err)
+	}
+	if !usedWorker {
+		t.Fatal("usedWorker = false, want true")
+	}
+	if !sp.IsRunning("legacy-runtime-only") {
+		t.Fatal("legacy-runtime-only should be running after prepared start")
+	}
+	var start runtime.Call
+	foundStart := false
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			start = call
+			foundStart = true
+			break
+		}
+	}
+	if !foundStart {
+		t.Fatalf("runtime calls = %#v, want Start", sp.Calls)
+	}
+	if start.Name != "legacy-runtime-only" {
+		t.Fatalf("start name = %q, want legacy-runtime-only", start.Name)
+	}
+	if start.Config.Command != "claude --resume seeded" {
+		t.Fatalf("start command = %q, want claude --resume seeded", start.Config.Command)
+	}
+}

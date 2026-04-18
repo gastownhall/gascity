@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1044,11 +1045,25 @@ func (h *sessionChaosHarness) requestRestart() {
 		h.record("request-restart skipped")
 		return
 	}
-	if err := setBeadRestartRequested(h.env.store, h.sessionName); err != nil {
+	all, err := h.env.store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
 		h.record("request-restart skipped: %v", err)
 		return
 	}
-	h.record("request-restart name=%s", h.sessionName)
+	for _, bead := range all {
+		if !session.IsSessionBeadOrRepairable(bead) || bead.Status == "closed" {
+			continue
+		}
+		if bead.Metadata["session_name"] == h.sessionName {
+			if err := h.env.store.SetMetadata(bead.ID, "restart_requested", "true"); err != nil {
+				h.record("request-restart skipped: %v", err)
+			} else {
+				h.record("request-restart name=%s", h.sessionName)
+			}
+			return
+		}
+	}
+	h.record("request-restart skipped: no open session bead for %q", h.sessionName)
 }
 
 func (h *sessionChaosHarness) toggleDesired() {

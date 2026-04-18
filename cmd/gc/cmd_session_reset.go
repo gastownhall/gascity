@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -62,10 +63,12 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if err := store.SetMetadataBatch(sessionID, map[string]string{
-		"restart_requested":          "true",
-		"continuation_reset_pending": "true",
-	}); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Reset(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

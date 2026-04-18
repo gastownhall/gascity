@@ -17,7 +17,7 @@ func TestHandoffSuccess(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, rec, dops, "mayor", "mayor",
+	code := doHandoff(store, rec, dops, nil, "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -76,7 +76,7 @@ func TestHandoffWithMessage(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, rec, dops, "polecat-1", "gc-city-polecat-1",
+	code := doHandoff(store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
 		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
 		&stdout, &stderr)
 	if code != 0 {
