@@ -162,7 +162,7 @@ func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -429,7 +429,7 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if a.IsExec() {
-		cfg, cfgErr := loadCityConfig(cityPath)
+		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
@@ -461,7 +461,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	// Exec orders: run the script directly.
 	if a.IsExec() {
-		cfg, cfgErr := loadCityConfig(cityPath)
+		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
@@ -480,7 +480,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	var cityName string
 	if citylayout.HasCityConfig(cityPath) || citylayout.HasRuntimeRoot(cityPath) {
 		var err error
-		cfg, err = loadCityConfig(cityPath)
+		cfg, err = loadCityConfig(cityPath, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

@@ -211,6 +211,33 @@ append_fragments = ["footer"]
 	}
 }
 
+func TestParseWithMetaWarnsWhenCanonicalAndAliasAgentDefaultsBothPresent(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+append_fragments = ["canonical"]
+
+[agents]
+append_fragments = ["legacy"]
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected mixed-table warning, got: %v", warnings)
+	}
+}
+
 func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T) {
 	tests := []struct {
 		name  string
