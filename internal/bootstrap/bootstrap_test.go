@@ -169,6 +169,20 @@ func TestEnsureBootstrapEmbedsImportPackRuntimeFiles(t *testing.T) {
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("doctor/python3.11/run.sh should be executable, mode = %o", info.Mode().Perm())
 	}
+
+	// Python command entrypoints need the exec bit too — V2 discovery
+	// invokes the resolved run path directly, relying on the shebang.
+	// Without +x the kernel rejects execve with "permission denied".
+	for _, name := range []string{"add", "remove", "install", "upgrade", "list"} {
+		rel := filepath.Join("commands", name, name+".py")
+		pyInfo, err := os.Stat(filepath.Join(cacheDir, rel))
+		if err != nil {
+			t.Fatalf("embedded %s missing from cache: %v", rel, err)
+		}
+		if pyInfo.Mode().Perm()&0o111 == 0 {
+			t.Errorf("%s should be executable, mode = %o", rel, pyInfo.Mode().Perm())
+		}
+	}
 }
 
 func TestEnsureBootstrapEmbedsCorePackSkills(t *testing.T) {

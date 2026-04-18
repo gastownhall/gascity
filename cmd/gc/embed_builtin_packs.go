@@ -157,11 +157,25 @@ func materializeFS(embedded fs.FS, root, dstDir string) error {
 		}
 
 		perm := os.FileMode(0o644)
-		if strings.HasSuffix(path, ".sh") {
+		if isExecutableScriptFilename(path) {
 			perm = 0o755
 		}
 		return os.WriteFile(dst, data, perm)
 	})
+}
+
+// isExecutableScriptFilename reports whether a materialized pack asset
+// should be marked executable. Shell, Python, and bash interpreters all
+// rely on shebang-based direct execution, so the file needs +x regardless
+// of extension — gc invokes resolved run paths directly rather than
+// wrapping them with an explicit interpreter command.
+func isExecutableScriptFilename(name string) bool {
+	for _, suffix := range []string{".sh", ".py", ".bash"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the

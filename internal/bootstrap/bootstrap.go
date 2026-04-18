@@ -245,11 +245,25 @@ func copyEmbeddedTree(root, dst string) error {
 			return err
 		}
 		perm := os.FileMode(0o644)
-		if strings.HasSuffix(assetPath, ".sh") {
+		if isExecutableScriptAsset(assetPath) {
 			perm = 0o755
 		}
 		return os.WriteFile(target, data, perm)
 	})
+}
+
+// isExecutableScriptAsset reports whether a materialized asset should be
+// marked executable. Shell, Python, and other script interpreters all rely
+// on shebang-based direct execution, so the file needs +x regardless of the
+// extension (gc discovers commands/doctor checks by convention and invokes
+// the resolved path directly — it does not run `bash <script>`).
+func isExecutableScriptAsset(assetPath string) bool {
+	for _, suffix := range []string{".sh", ".py", ".bash"} {
+		if strings.HasSuffix(assetPath, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func assetRel(root, assetPath string) string {
