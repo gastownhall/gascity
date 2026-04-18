@@ -21,15 +21,44 @@ import (
 
 // BlockingParam is an embeddable input mixin for long-polling endpoints.
 // When index is provided, the handler blocks until a newer event arrives.
-// Index is a string rather than uint64 because Huma doesn't support pointer
-// query params, and we need to distinguish "not provided" from "0" (which
-// means "wait for the first event").
+// Index stays typed as a string on the wire so "not provided" is
+// distinguishable from "0" (which means "wait for the first event");
+// Resolve validates the value so garbage input returns 400 instead of
+// silently blocking.
 type BlockingParam struct {
 	Index string `query:"index" doc:"Event sequence number; when provided, blocks until a newer event arrives." required:"false"`
 	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m." required:"false"`
 }
 
-// toBlockingParams converts to the internal BlockingParams type.
+// Resolve validates the blocking-query parameters. Implements huma.Resolver;
+// Huma calls this after binding the struct, so invalid values turn into
+// 422 responses rather than default-0 behavior.
+func (bp *BlockingParam) Resolve(ctx huma.Context) []error {
+	var errs []error
+	if bp.Index != "" {
+		if _, err := strconv.ParseUint(bp.Index, 10, 64); err != nil {
+			errs = append(errs, &huma.ErrorDetail{
+				Location: "query.index",
+				Message:  "index must be a non-negative integer",
+				Value:    bp.Index,
+			})
+		}
+	}
+	if bp.Wait != "" {
+		if d, err := time.ParseDuration(bp.Wait); err != nil || d <= 0 {
+			errs = append(errs, &huma.ErrorDetail{
+				Location: "query.wait",
+				Message:  "wait must be a positive Go duration string (e.g. 30s)",
+				Value:    bp.Wait,
+			})
+		}
+	}
+	return errs
+}
+
+// toBlockingParams converts to the internal BlockingParams type. Values
+// have already been validated by Resolve, so parse errors are impossible
+// here.
 func (bp *BlockingParam) toBlockingParams() BlockingParams {
 	result := BlockingParams{Wait: defaultWait}
 	if bp.Index != "" {

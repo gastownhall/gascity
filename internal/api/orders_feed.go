@@ -507,15 +507,26 @@ func orderTrackingStatus(bead beads.Bead) string {
 	return "completed"
 }
 
-func parseOrdersFeedLimit(raw string) int {
+// normalizeFeedLimit clamps a caller-supplied feed limit to a sensible
+// range. 0 (or negative) means "use the default"; anything past the
+// hard ceiling is clipped.
+func normalizeFeedLimit(raw int) int {
 	limit := 50
-	if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && parsed > 0 {
-		limit = parsed
+	if raw > 0 {
+		limit = raw
 	}
 	if limit > maxOrdersFeedLimit {
 		return maxOrdersFeedLimit
 	}
 	return limit
+}
+
+// parseOrdersFeedLimit keeps the string-input path alive for the feed
+// helpers that still read untyped config values. Prefer normalizeFeedLimit
+// in typed handlers.
+func parseOrdersFeedLimit(raw string) int {
+	parsed, _ := strconv.Atoi(strings.TrimSpace(raw))
+	return normalizeFeedLimit(parsed)
 }
 
 func workflowRunProjectionFeedItem(run workflowRunProjection) monitorFeedItemResponse {

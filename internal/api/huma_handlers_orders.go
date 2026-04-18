@@ -165,10 +165,8 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	}
 
 	limit := 20
-	if input.Limit != "" {
-		if n, err := strconv.Atoi(input.Limit); err == nil && n > 0 {
-			limit = n
-		}
+	if input.Limit > 0 {
+		limit = input.Limit
 	}
 
 	var beforeTime time.Time
@@ -341,10 +339,10 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 		return nil, huma.Error400BadRequest(scopeErr)
 	}
 
-	limit := parseOrdersFeedLimit(input.Limit)
+	limit := normalizeFeedLimit(input.Limit)
 	index := s.latestIndex()
 
-	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + input.Limit
+	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
 	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {
 		return &struct {
 			Body ordersFeedBody

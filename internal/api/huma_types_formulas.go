@@ -102,7 +102,7 @@ type FormulaFeedInput struct {
 	CityScope
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
-	Limit     string `query:"limit" required:"false" doc:"Maximum number of feed items to return."`
+	Limit     int    `query:"limit" required:"false" minimum:"0" doc:"Maximum number of feed items to return. 0 = default."`
 }
 
 // FormulaListInput is the Huma input for GET /v0/city/{cityName}/formulas.
@@ -118,7 +118,7 @@ type FormulaRunsInput struct {
 	Name      string `path:"name" minLength:"1" pattern:"\\S" doc:"Formula name."`
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
-	Limit     string `query:"limit" required:"false" doc:"Maximum number of recent runs to return."`
+	Limit     int    `query:"limit" required:"false" minimum:"0" doc:"Maximum number of recent runs to return. 0 = default."`
 }
 
 // --- Formula detail types ---

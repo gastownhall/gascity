@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -143,12 +142,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 	wantRaw := input.Format == "raw"
 
 	if path != "" {
-		tail := 0
-		if input.Tail != "" {
-			if n, convErr := strconv.Atoi(input.Tail); convErr == nil && n >= 0 {
-				tail = n
-			}
-		}
+		tail := input.Tail
 		before := input.Before
 
 		if wantRaw {

@@ -7010,7 +7010,9 @@
             "name": "tail",
             "schema": {
               "description": "Number of compaction segments to return (default 1, 0 = all).",
-              "type": "string"
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {
@@ -7471,7 +7473,9 @@
             "name": "tail",
             "schema": {
               "description": "Number of compaction segments to return (default 1, 0 = all).",
-              "type": "string"
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {
@@ -10647,13 +10651,15 @@
             }
           },
           {
-            "description": "Maximum number of feed items to return.",
+            "description": "Maximum number of feed items to return. 0 = default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of feed items to return.",
-              "type": "string"
+              "description": "Maximum number of feed items to return. 0 = default.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],
@@ -10813,13 +10819,15 @@
             }
           },
           {
-            "description": "Maximum number of recent runs to return.",
+            "description": "Maximum number of recent runs to return. 0 = default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of recent runs to return.",
-              "type": "string"
+              "description": "Maximum number of recent runs to return. 0 = default.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],
@@ -11951,7 +11959,9 @@
             "name": "limit",
             "schema": {
               "description": "Maximum number of feed items to return.",
-              "type": "string"
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],
@@ -12007,13 +12017,15 @@
             }
           },
           {
-            "description": "Maximum number of history entries.",
+            "description": "Maximum number of history entries. 0 = default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of history entries.",
-              "type": "string"
+              "description": "Maximum number of history entries. 0 = default.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {
@@ -14909,13 +14921,15 @@
             }
           },
           {
-            "description": "Number of recent entries to return.",
+            "description": "Number of recent entries to return. 0 = default.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent entries to return.",
-              "type": "string"
+              "description": "Number of recent entries to return. 0 = default.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {

@@ -365,7 +365,7 @@ func (s *Server) humaHandleAgentOutputQualified(_ context.Context, input *AgentO
 }
 
 // agentOutputByName is the shared implementation for the agent output handlers.
-func (s *Server) agentOutputByName(name, tail, before string) (*struct {
+func (s *Server) agentOutputByName(name string, tail int, before string) (*struct {
 	Body agentOutputResponse
 }, error) {
 	cfg := s.state.Config()

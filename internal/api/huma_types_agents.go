@@ -138,7 +138,7 @@ func (i *AgentActionQualifiedInput) QualifiedName() string {
 type AgentOutputInput struct {
 	CityScope
 	Name   string `path:"base" doc:"Agent base name."`
-	Tail   string `query:"tail" required:"false" doc:"Number of compaction segments to return (default 1, 0 = all)."`
+	Tail   int    `query:"tail" required:"false" minimum:"0" doc:"Number of compaction segments to return (default 1, 0 = all)."`
 	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
 }
 
@@ -147,7 +147,7 @@ type AgentOutputQualifiedInput struct {
 	CityScope
 	Dir    string `path:"dir" doc:"Agent directory (rig name)."`
 	Base   string `path:"base" doc:"Agent base name."`
-	Tail   string `query:"tail" required:"false" doc:"Number of compaction segments to return (default 1, 0 = all)."`
+	Tail   int    `query:"tail" required:"false" minimum:"0" doc:"Number of compaction segments to return (default 1, 0 = all)."`
 	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
 }
 

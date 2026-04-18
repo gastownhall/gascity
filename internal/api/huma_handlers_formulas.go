@@ -72,12 +72,8 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 	}
 
 	limit := defaultFormulaRunsLimit
-	if raw := strings.TrimSpace(input.Limit); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 {
-			return nil, huma.Error400BadRequest("limit must be a non-negative integer")
-		}
-		limit = normalizeFormulaRunsLimit(parsed)
+	if input.Limit > 0 {
+		limit = normalizeFormulaRunsLimit(input.Limit)
 	}
 
 	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
@@ -159,10 +155,10 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 		return nil, huma.Error400BadRequest(msg)
 	}
 
-	limit := parseOrdersFeedLimit(input.Limit)
+	limit := normalizeFeedLimit(input.Limit)
 	index := s.latestIndex()
 
-	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + input.Limit
+	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
 	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, index); ok {
 		return &struct {
 			Body formulaFeedBody

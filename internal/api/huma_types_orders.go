@@ -11,7 +11,7 @@ type OrdersFeedInput struct {
 	CityScope
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
-	Limit     string `query:"limit" required:"false" doc:"Maximum number of feed items to return."`
+	Limit     int    `query:"limit" required:"false" minimum:"0" doc:"Maximum number of feed items to return."`
 }
 
 // OrderListInput is the Huma input for GET /v0/city/{cityName}/orders.
@@ -34,7 +34,7 @@ type OrderCheckInput struct {
 type OrderHistoryInput struct {
 	CityScope
 	ScopedName string `query:"scoped_name" required:"false" doc:"Scoped order name."`
-	Limit      string `query:"limit" required:"false" doc:"Maximum number of history entries."`
+	Limit      int    `query:"limit" required:"false" minimum:"0" doc:"Maximum number of history entries. 0 = default."`
 	Before     string `query:"before" required:"false" doc:"Return entries before this RFC3339 timestamp."`
 }
 

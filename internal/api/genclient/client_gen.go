@@ -2548,7 +2548,7 @@ type WorkspaceResponse struct {
 // GetV0CityByCityNameAgentByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByBaseOutput.
 type GetV0CityByCityNameAgentByBaseOutputParams struct {
 	// Tail Number of compaction segments to return (default 1, 0 = all).
-	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
+	Tail *int64 `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -2560,7 +2560,7 @@ type PostV0CityByCityNameAgentByBaseByActionParamsAction string
 // GetV0CityByCityNameAgentByDirByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByDirByBaseOutput.
 type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
 	// Tail Number of compaction segments to return (default 1, 0 = all).
-	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
+	Tail *int64 `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -2760,8 +2760,8 @@ type GetV0CityByCityNameFormulasFeedParams struct {
 	// ScopeRef Scope reference.
 	ScopeRef *string `form:"scope_ref,omitempty" json:"scope_ref,omitempty"`
 
-	// Limit Maximum number of feed items to return.
-	Limit *string `form:"limit,omitempty" json:"limit,omitempty"`
+	// Limit Maximum number of feed items to return. 0 = default.
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // GetV0CityByCityNameFormulasByNameParams defines parameters for GetV0CityByCityNameFormulasByName.
@@ -2784,8 +2784,8 @@ type GetV0CityByCityNameFormulasByNameRunsParams struct {
 	// ScopeRef Scope reference.
 	ScopeRef *string `form:"scope_ref,omitempty" json:"scope_ref,omitempty"`
 
-	// Limit Maximum number of recent runs to return.
-	Limit *string `form:"limit,omitempty" json:"limit,omitempty"`
+	// Limit Maximum number of recent runs to return. 0 = default.
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // GetV0CityByCityNameMailParams defines parameters for GetV0CityByCityNameMail.
@@ -2878,7 +2878,7 @@ type GetV0CityByCityNameOrdersFeedParams struct {
 	ScopeRef *string `form:"scope_ref,omitempty" json:"scope_ref,omitempty"`
 
 	// Limit Maximum number of feed items to return.
-	Limit *string `form:"limit,omitempty" json:"limit,omitempty"`
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // GetV0CityByCityNameOrdersHistoryParams defines parameters for GetV0CityByCityNameOrdersHistory.
@@ -2886,8 +2886,8 @@ type GetV0CityByCityNameOrdersHistoryParams struct {
 	// ScopedName Scoped order name.
 	ScopedName *string `form:"scoped_name,omitempty" json:"scoped_name,omitempty"`
 
-	// Limit Maximum number of history entries.
-	Limit *string `form:"limit,omitempty" json:"limit,omitempty"`
+	// Limit Maximum number of history entries. 0 = default.
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Before Return entries before this RFC3339 timestamp.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -2952,8 +2952,8 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 	// Format Transcript format: conversation (default) or raw.
 	Format *string `form:"format,omitempty" json:"format,omitempty"`
 
-	// Tail Number of recent entries to return.
-	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
+	// Tail Number of recent entries to return. 0 = default.
+	Tail *int64 `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Pagination cursor: return entries before this UUID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -6491,7 +6491,7 @@ func NewGetV0CityByCityNameAgentByBaseOutputRequest(server string, cityName stri
 
 		if params.Tail != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -6823,7 +6823,7 @@ func NewGetV0CityByCityNameAgentByDirByBaseOutputRequest(server string, cityName
 
 		if params.Tail != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -9717,7 +9717,7 @@ func NewGetV0CityByCityNameFormulasFeedRequest(server string, cityName string, p
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -9907,7 +9907,7 @@ func NewGetV0CityByCityNameFormulasByNameRunsRequest(server string, cityName str
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -11001,7 +11001,7 @@ func NewGetV0CityByCityNameOrdersFeedRequest(server string, cityName string, par
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -11073,7 +11073,7 @@ func NewGetV0CityByCityNameOrdersHistoryRequest(server string, cityName string, 
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -13351,7 +13351,7 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 
 		if params.Tail != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

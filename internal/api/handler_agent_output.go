@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,9 +30,9 @@ type agentOutputResponse struct {
 }
 
 // trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
-// It accepts tail and before as string parameters (from query params) instead
-// of reading them from *http.Request.
-func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailStr, before string) (*agentOutputResponse, error) {
+// tail is a typed int from the query binding; before is the optional
+// UUID cursor. Zero tail means "caller did not override the default."
+func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, before string) (*agentOutputResponse, error) {
 	cfg := s.state.Config()
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	if workDir == "" {
@@ -54,10 +53,8 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	}
 
 	tail := 1
-	if tailStr != "" {
-		if n, err := strconv.Atoi(tailStr); err == nil && n >= 0 {
-			tail = n
-		}
+	if tailInput > 0 {
+		tail = tailInput
 	}
 
 	var sess *sessionlog.Session

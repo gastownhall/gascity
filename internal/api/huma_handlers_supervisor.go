@@ -416,14 +416,22 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 				TaggedEvent: r.event,
 				Workflow:    wfp,
 			}
-			_ = send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope})
+			if err := send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope}); err != nil {
+				// Client disconnected or encoding failed — draining
+				// further events off the multiplexer wastes work and
+				// masks the disconnect. Exit; the per-city stream
+				// endpoints do the same on send failure.
+				return
+			}
 			readNext()
 		case t := <-keepalive.C:
 			// Emit a heartbeat frame (no ID so reconnect cursor is preserved).
 			// Idle proxies drop long-lived SSE without traffic; skipping this
 			// makes the stream look healthy to EventSource while the
 			// connection has silently died.
-			_ = send(StringIDMessage{Data: HeartbeatEvent{Timestamp: t.UTC().Format(time.RFC3339)}})
+			if err := send(StringIDMessage{Data: HeartbeatEvent{Timestamp: t.UTC().Format(time.RFC3339)}}); err != nil {
+				return
+			}
 		}
 	}
 }
