@@ -19,6 +19,7 @@ bd dolt push          # Push beads data to remote
 Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
 
 **Use these forms instead:**
+
 ```bash
 # Force overwrite without prompting
 cp -f source dest           # NOT: cp source dest
@@ -31,12 +32,14 @@ cp -rf source dest          # NOT: cp -r source dest
 ```
 
 **Other commands that may prompt:**
+
 - `scp` - use `-o BatchMode=yes` for non-interactive
 - `ssh` - use `-o BatchMode=yes` to fail instead of prompting
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
+
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
@@ -78,8 +81,65 @@ bd close <id>         # Complete work
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - Work is NOT complete until `git push` succeeds
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Architecture Best Practices
+
+These apply to all code in this project — frontend and server:
+
+- **TDD (Test-Driven Development)** - write the tests first; the implementation
+  code isn't done until the tests pass.
+- **Consider First Principles** to assess your current architecture against the
+  one you'd use if you started over from scratch.
+- **Leverage Types** using statically typed languages (TypeScript, Rust, etc) so
+  that we can leverage the power of the compiler as guardrails and immediate
+  feedback on our code at build-time instead of waiting until run-time.
+- **DRY (Don’t Repeat Yourself)** – eliminate duplicated logic by extracting
+  shared utilities and modules.
+- **Separation of Concerns** – each module should handle one distinct
+  responsibility.
+- **Single Responsibility Principle (SRP)** – every class/module/function/file
+  should have exactly one reason to change.
+- **Clear Abstractions & Contracts** – expose intent through small, stable
+  interfaces and hide implementation details.
+- **Low Coupling, High Cohesion** – keep modules self-contained, minimize
+  cross-dependencies.
+- **Scalability & Statelessness** – design components to scale horizontally and
+  prefer stateless services when possible.
+- **Observability & Testability** – build in logging, metrics, tracing, and
+  ensure components can be unit/integration tested.
+- **KISS (Keep It Simple, Sir)** - keep solutions as simple as possible.
+- **YAGNI (You're Not Gonna Need It)** – avoid speculative complexity or
+  over-engineering.
+- **Don't Swallow Errors** by catching exceptions, silently filling in required
+  but missing values, masking deserialization with nulls or empty lists, or
+  ignoring timeouts when something hangs. All of those are errors (client-side
+  and server-side) and must be tracked in a centralized log so it can be used to
+  improve the app over time. Also, inform the user as appropriate so that they
+  can take necessary action.
+- **No Placeholder Code** - we're building production code here, not toys.
+- **No Comments for Removed Functionality** - the source is not the place to
+  keep history of what's changed; it's the place to implement the current
+  requirements only.
+- **Layered Architecture** - organize code into clear tiers where each layer
+  depends only on the one(s) below it, keeping logic cleanly separated.
+- **Use Non-Nullable Variables** when possible; use nullability only when
+  there is NO other possiblity.
+- **Use Async Notifications** when possible over inefficient polling.
+- **Eliminate Race Conditions** that might cause dropped or corrupted data
+- **Write for Maintainability** so that the code is clear and readable and easy
+  to maintain by future developers.
+- **Arrange Project Idiomatically** for the language and framework being used,
+  including recommended lints, static analysis tools, folder structure and
+  gitignore entries.
+- **Keep Serialization/Deserialization At The Edges** to make full use of
+  type-safe objects in the app itself and to centralize error handling for
+  type-system translation. Do NOT allow untyped data with known shapes to flow
+  through the system and subvert the type system.
+- **Prefer Well-Known, High Quality OSS Libraries** instead of hand-rolling your
+  own behavior to get more robust, better maintained and better tested results.
