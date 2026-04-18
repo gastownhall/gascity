@@ -1187,25 +1187,6 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 	}
 }
 
-// hooksWithoutClaude returns ih with any "claude" entries filtered out.
-// Used by installAgentSideEffects when the resolved provider is Claude —
-// in that case resolveTemplate → ensureClaudeSettingsArgs already projected
-// the settings, and running hooks.Install("claude") again would duplicate
-// filesystem I/O on every reconciler tick.
-func hooksWithoutClaude(ih []string) []string {
-	if len(ih) == 0 {
-		return ih
-	}
-	out := make([]string, 0, len(ih))
-	for _, p := range ih {
-		if p == "claude" {
-			continue
-		}
-		out = append(out, p)
-	}
-	return out
-}
-
 // poolInstanceName returns the name for pool slot N.
 // If the agent has namepool names and the slot is in range, uses the themed
 // name. Otherwise falls back to "{base}-{slot}".
