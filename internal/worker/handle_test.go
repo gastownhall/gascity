@@ -628,6 +628,43 @@ func TestSessionHandleLiveObservationUsesProviderRuntimeState(t *testing.T) {
 	if obs.Running {
 		t.Fatalf("LiveObservation.Running = true, want false after runtime stop; obs=%#v", obs)
 	}
+	if obs.Alive {
+		t.Fatalf("LiveObservation.Alive = true, want false after runtime stop; obs=%#v", obs)
+	}
+}
+
+func TestSessionHandleLiveObservationTracksProcessLiveness(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Hints: runtime.Config{
+			ProcessNames: []string{"claude"},
+		},
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.Zombies[info.SessionName] = true
+
+	obs, err := ObserveHandle(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("ObserveHandle: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("LiveObservation.Running = false, want true while tmux session still exists; obs=%#v", obs)
+	}
+	if obs.Alive {
+		t.Fatalf("LiveObservation.Alive = true, want false for zombie process; obs=%#v", obs)
+	}
 }
 
 func TestSessionHandleNudgeWaitIdleLiveOnlyDoesNotResumeStoppedSession(t *testing.T) {

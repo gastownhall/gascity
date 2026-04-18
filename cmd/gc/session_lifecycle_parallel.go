@@ -193,20 +193,20 @@ func dependencyTemplateAlive(
 	if cfgAgent == nil {
 		return false
 	}
-	for name, tp := range desiredState {
-		if tp.TemplateName != template {
-			continue
-		}
-		if sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames) {
-			return true
+	if isMultiSessionCfgAgent(cfgAgent) {
+		for name, tp := range desiredState {
+			if tp.TemplateName != template {
+				continue
+			}
+			if alive, err := workerSessionTargetAliveWithConfig("", store, sp, cfg, name, tp.Hints.ProcessNames); err == nil && alive {
+				return true
+			}
 		}
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
-	processNames := cfgAgent.ProcessNames
-	if depTP, ok := desiredState[sessionName]; ok {
-		processNames = depTP.Hints.ProcessNames
-	}
-	return sp.IsRunning(sessionName) && sp.ProcessAlive(sessionName, processNames)
+	depTP := desiredState[sessionName]
+	alive, err := workerSessionTargetAliveWithConfig("", store, sp, cfg, sessionName, depTP.Hints.ProcessNames)
+	return err == nil && alive
 }
 
 func candidateWaveOrder(
@@ -483,7 +483,8 @@ func executePreparedStartWave(
 			// recordWakeFailure clears the key for the next attempt.
 			if err == nil && !usedWorkerBoundary && item.candidate.session.Metadata["session_key"] != "" {
 				time.Sleep(staleKeyDetectDelay)
-				if !sp.IsRunning(item.candidate.name()) {
+				running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				if err != nil || !running {
 					err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				}
 			}
@@ -511,8 +512,11 @@ func executePreparedStartWave(
 			case errors.Is(err, runtime.ErrSessionInitializing):
 				outcome = "session_initializing"
 				err = nil
-			case errors.Is(err, runtime.ErrSessionExists) && sp.IsRunning(item.candidate.name()):
-				if rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+			case errors.Is(err, runtime.ErrSessionExists):
+				running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				if runningErr != nil || !running {
+					outcome = "provider_error"
+				} else if rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
 					outcome = "session_exists_converged"
 					err = nil
 					rollbackPending = false

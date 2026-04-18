@@ -951,7 +951,7 @@ func sweepUndesiredPoolSessionBeads(
 		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
 			continue
 		}
-		if sp != nil && sp.IsRunning(bead.Metadata["session_name"]) {
+		if running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, bead.ID); err == nil && running {
 			continue
 		}
 		// Don't sweep beads that the reconciler still considers "start

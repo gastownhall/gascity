@@ -239,7 +239,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 ) int {
 	var running []string
 	for _, sn := range sessionNames {
-		if sp.IsRunning(sn) {
+		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
 			running = append(running, sn)
 		}
 	}

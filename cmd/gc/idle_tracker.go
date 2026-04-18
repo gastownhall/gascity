@@ -51,7 +51,7 @@ func (m *memoryIdleTracker) checkIdle(sessionName string, sp runtime.Provider, n
 	if !ok || timeout <= 0 {
 		return false
 	}
-	lastActivity, err := sp.GetLastActivity(sessionName)
+	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, sessionName)
 	if err != nil || lastActivity.IsZero() {
 		return false
 	}

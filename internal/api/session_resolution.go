@@ -434,8 +434,11 @@ func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store
 }
 
 func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.SessionHandle, error) {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		return nil, err
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +473,7 @@ func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.S
 	}
 
 	return worker.NewSessionHandle(worker.SessionHandleConfig{
-		Manager:     mgr,
+		Manager:     s.sessionManager(store),
 		SearchPaths: s.sessionLogPaths(),
 		Session:     spec,
 	})

@@ -187,7 +187,11 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -195,7 +199,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	sessions, err := mgr.List(stateFilter, templateFilter)
+	sessions, err := catalog.List(stateFilter, templateFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -240,7 +244,11 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	cfg := s.state.Config()
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
@@ -248,7 +256,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	info, err := mgr.Get(id)
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -422,8 +430,12 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -554,9 +566,13 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	session.RepairEmptyType(store, &b)
 
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	updateFn := func() error {
-		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
+		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
 		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
@@ -578,7 +594,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, err := mgr.Get(id)
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

@@ -1061,7 +1061,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		count := 0
 		for _, qn := range instances {
 			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if sp.IsRunning(sn) {
+			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
 				count++
 			}
 		}
@@ -1086,7 +1086,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		// Fallback: individual IsRunning calls (original behavior).
 		count := 0
 		for sn := range expected {
-			if sp.IsRunning(sn) {
+			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
 				count++
 			}
 		}

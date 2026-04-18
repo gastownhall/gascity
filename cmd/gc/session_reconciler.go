@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const maxIdleSleepProbesPerTick = 3
@@ -278,7 +279,10 @@ func reconcileSessionBeadsTraced(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
-			providerAlive := sp.IsRunning(name)
+			providerAlive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
+			if err != nil {
+				providerAlive = false
+			}
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
 			if preserveConfiguredNamedSessionBead(*session, cfg, cityName) {
@@ -366,12 +370,16 @@ func reconcileSessionBeadsTraced(
 
 		// Liveness includes zombie detection: tmux session exists AND
 		// the expected child process is alive (when ProcessNames configured).
-		running := sp.IsRunning(name)
-		alive := running && sp.ProcessAlive(name, tp.Hints.ProcessNames)
+		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
+		if err != nil {
+			obs = worker.LiveObservation{}
+		}
+		running := obs.Running
+		alive := obs.Alive
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		if running && !alive {
-			if output, err := sp.Peek(name, 50); err == nil && output != "" {
+			if output, err := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, session.ID, 50, tp.Hints.ProcessNames); err == nil && output != "" {
 				rec.Record(events.Event{
 					Type:    events.SessionCrashed,
 					Actor:   "gc",
@@ -631,7 +639,8 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
-						if sp.IsAttached(name) {
+						attached, err := workerSessionTargetAttachedWithConfig(cityPath, store, sp, cfg, session.ID)
+						if err == nil && attached {
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
 									"stored_hash":  storedHash,
@@ -1100,7 +1109,7 @@ func shouldBeginIdleDrain(
 	if !probe.success {
 		return false
 	}
-	lastActivity, err := sp.GetLastActivity(session.Metadata["session_name"])
+	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, session.Metadata["session_name"])
 	if err != nil {
 		return false
 	}

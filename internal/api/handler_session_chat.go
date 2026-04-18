@@ -421,8 +421,10 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
-	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
-		resp.SubmissionCapabilities = caps
+	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
+		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
+			resp.SubmissionCapabilities = caps
+		}
 	}
 	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false)
@@ -580,8 +582,10 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "provider"
-	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
-		resp.SubmissionCapabilities = caps
+	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
+		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
+			resp.SubmissionCapabilities = caps
+		}
 	}
 	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false)
@@ -621,8 +625,12 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -993,8 +1001,12 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

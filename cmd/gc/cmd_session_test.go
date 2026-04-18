@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type attachmentAwareProvider struct {
@@ -516,8 +517,8 @@ func TestAttachmentCachingProvider_DelegatesPendingInteraction(t *testing.T) {
 		t.Fatal("pendingInteractionReady should delegate to wrapped provider")
 	}
 
-	response := runtime.InteractionResponse{RequestID: "req-1", Action: "approve"}
-	if err := wrapped.Respond("worker", response); err != nil {
+	response := worker.InteractionResponse{RequestID: "req-1", Action: "approve"}
+	if err := workerRespondSessionTargetWithConfig("", nil, provider, nil, "worker", response); err != nil {
 		t.Fatalf("Respond error = %v", err)
 	}
 	if provider.responded.RequestID != response.RequestID || provider.responded.Action != response.Action {
@@ -528,10 +529,14 @@ func TestAttachmentCachingProvider_DelegatesPendingInteraction(t *testing.T) {
 func TestAttachmentCachingProvider_RejectsUnsupportedInteraction(t *testing.T) {
 	wrapped := &attachmentCachingProvider{cache: map[string]bool{}}
 
-	if _, err := wrapped.Pending("worker"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
+	pending, err := workerSessionTargetPendingWithConfig("", nil, wrapped, nil, "worker")
+	if err != nil {
+		t.Fatalf("Pending error = %v, want nil for unsupported interaction", err)
 	}
-	if err := wrapped.Respond("worker", runtime.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+	if pending != nil {
+		t.Fatalf("Pending = %+v, want nil for unsupported interaction", pending)
+	}
+	if err := workerRespondSessionTargetWithConfig("", nil, wrapped, nil, "worker", worker.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		t.Fatalf("Respond error = %v, want ErrInteractionUnsupported", err)
 	}
 }
