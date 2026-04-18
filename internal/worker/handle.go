@@ -10,7 +10,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 var (
@@ -25,6 +24,9 @@ var (
 // Handle is the canonical in-memory worker API.
 type Handle interface {
 	Start(context.Context) error
+	StartResolved(context.Context, string, runtime.Config) error
+	Attach(context.Context) error
+	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Stop(context.Context) error
 	Kill(context.Context) error
 	Close(context.Context) error
@@ -38,10 +40,13 @@ type Handle interface {
 	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
 	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
 	TranscriptPath(context.Context) (string, error)
+	AgentMappings(context.Context) ([]AgentMapping, error)
+	AgentTranscript(context.Context, string) (*AgentTranscriptResult, error)
 
 	History(context.Context, HistoryRequest) (*HistorySnapshot, error)
 
 	Pending(context.Context) (*PendingInteraction, error)
+	PendingStatus(context.Context) (*PendingInteraction, bool, error)
 	Respond(context.Context, InteractionResponse) error
 }
 
@@ -575,7 +580,7 @@ func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (
 
 // AgentMappings returns subagent mappings discovered from the worker's
 // transcript stream.
-func (h *SessionHandle) AgentMappings(ctx context.Context) ([]sessionlog.AgentMapping, error) {
+func (h *SessionHandle) AgentMappings(ctx context.Context) ([]AgentMapping, error) {
 	path, err := h.TranscriptPath(ctx)
 	if err != nil {
 		return nil, err

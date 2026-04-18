@@ -15,7 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, spec worker.SessionSpec) (*worker.SessionHandle, error) {
+func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, spec worker.SessionSpec) (worker.Handle, error) {
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	alias, explicitName, template, title, command, provider, workDir, transport string,
 	resolved *config.ResolvedProvider,
 	metadata map[string]string,
-) (*worker.SessionHandle, error) {
+) (worker.Handle, error) {
 	if resolved == nil {
 		return nil, fmt.Errorf("resolved provider is required")
 	}
@@ -114,7 +114,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	})
 }
 
-func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (*worker.SessionHandle, error) {
+func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
 	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err

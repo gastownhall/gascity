@@ -601,20 +601,19 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
 	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	factory, err := s.workerFactory(s.state.CityBeadStore())
+	if err != nil {
+		return
 	}
-	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 	provider := strings.TrimSpace(agentCfg.Provider)
 	if provider == "" && cfg != nil {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	sessionFile := adapter.DiscoverTranscript(provider, workDir, "")
+	sessionFile := factory.DiscoverTranscript(provider, workDir, "")
 	if sessionFile == "" {
 		return
 	}
-	meta, err := adapter.TailMeta(sessionFile)
+	meta, err := factory.TailMeta(sessionFile)
 	if err != nil || meta == nil {
 		return
 	}

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -990,6 +991,53 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	}
 	if sp.IsRunning("legacy-worker") {
 		t.Fatal("legacy-worker should be stopped after Kill")
+	}
+}
+
+func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{
+		RequestID: "req-2",
+		Kind:      "approval",
+		Prompt:    "Continue?",
+	})
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := handle.StartResolved(context.Background(), "/bin/echo", runtime.Config{}); err != nil {
+		t.Fatalf("StartResolved: %v", err)
+	}
+	pending, supported, err := handle.PendingStatus(context.Background())
+	if err != nil {
+		t.Fatalf("PendingStatus: %v", err)
+	}
+	if !supported {
+		t.Fatal("PendingStatus supported = false, want true")
+	}
+	if pending == nil || pending.RequestID != "req-2" {
+		t.Fatalf("PendingStatus() = %#v, want req-2", pending)
+	}
+	if _, err := handle.Create(context.Background(), CreateModeStarted); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("Create(started) err = %v, want %v", err, ErrOperationUnsupported)
+	}
+	if _, err := handle.AgentMappings(context.Background()); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("AgentMappings err = %v, want %v", err, ErrHistoryUnavailable)
+	}
+	if _, err := handle.AgentTranscript(context.Background(), "helper"); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("AgentTranscript err = %v, want %v", err, ErrHistoryUnavailable)
 	}
 }
 

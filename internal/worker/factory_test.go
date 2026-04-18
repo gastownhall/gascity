@@ -2,7 +2,10 @@ package worker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -71,5 +74,42 @@ func TestFactoryAdapterUsesConfiguredSearchPaths(t *testing.T) {
 	adapter := factory.Adapter()
 	if !reflect.DeepEqual(adapter.SearchPaths, []string{"/tmp/factory-search"}) {
 		t.Fatalf("Adapter().SearchPaths = %#v, want %#v", adapter.SearchPaths, []string{"/tmp/factory-search"})
+	}
+}
+
+func TestFactoryTranscriptMethodsUseConfiguredSearchPaths(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	slug := strings.ReplaceAll(workDir, "/", "-")
+	slug = strings.ReplaceAll(slug, ".", "-")
+	transcriptDir := filepath.Join(searchBase, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", transcriptDir, err)
+	}
+	transcriptPath := filepath.Join(transcriptDir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(
+		"{\"uuid\":\"1\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-5-20251101\",\"usage\":{\"input_tokens\":1000}},\"timestamp\":\"2025-01-01T00:00:00Z\"}\n",
+	), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", transcriptPath, err)
+	}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:       beads.NewMemStore(),
+		SearchPaths: []string{searchBase},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	gotPath := factory.DiscoverTranscript("claude", workDir, "")
+	if gotPath != transcriptPath {
+		t.Fatalf("DiscoverTranscript() = %q, want %q", gotPath, transcriptPath)
+	}
+	meta, err := factory.TailMeta(transcriptPath)
+	if err != nil {
+		t.Fatalf("TailMeta(%q): %v", transcriptPath, err)
+	}
+	if meta == nil || meta.Model != "claude-opus-4-5-20251101" {
+		t.Fatalf("TailMeta(%q) = %#v, want model claude-opus-4-5-20251101", transcriptPath, meta)
 	}
 }

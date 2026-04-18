@@ -238,17 +238,29 @@ Illustrative shape:
 ```go
 type Handle interface {
 	Start(ctx context.Context) error
+	StartResolved(ctx context.Context, startCommand string, hints runtime.Config) error
+	Attach(ctx context.Context) error
+	Create(ctx context.Context, mode CreateMode) (session.Info, error)
 	Stop(ctx context.Context) error
+	Kill(ctx context.Context) error
+	Close(ctx context.Context) error
+	Rename(ctx context.Context, title string) error
+	Peek(ctx context.Context, lines int) (string, error)
 
 	State(ctx context.Context) (State, error)
 
 	Message(ctx context.Context, req MessageRequest) (MessageResult, error)
 	Interrupt(ctx context.Context, req InterruptRequest) error
-	Nudge(ctx context.Context, req NudgeRequest) error
+	Nudge(ctx context.Context, req NudgeRequest) (NudgeResult, error)
+	Transcript(ctx context.Context, req TranscriptRequest) (*TranscriptResult, error)
+	TranscriptPath(ctx context.Context) (string, error)
+	AgentMappings(ctx context.Context) ([]AgentMapping, error)
+	AgentTranscript(ctx context.Context, agentID string) (*AgentTranscriptResult, error)
 
 	History(ctx context.Context, req HistoryRequest) (*HistorySnapshot, error)
 
 	Pending(ctx context.Context) (*PendingInteraction, error)
+	PendingStatus(ctx context.Context) (*PendingInteraction, bool, error)
 	Respond(ctx context.Context, req InteractionResponse) error
 }
 ```
@@ -284,6 +296,31 @@ must preserve these semantics:
   - exposes the canonical normalized transcript/history contract
   - hides transcript discovery, raw provider file formats, and
     generation bookkeeping behind `internal/worker`
+
+Current branch API-to-test traceability:
+
+- lifecycle materialization and identity (`Create`, `Start`, `StartResolved`,
+  `Attach`, `State`, `Stop`, `Kill`, `Close`, `Rename`, `Peek`)
+  - deterministic coverage lives in `internal/worker/handle_test.go`
+  - top-level caller boundary coverage lives in
+    `cmd/gc/worker_boundary_import_test.go` and
+    `internal/api/worker_boundary_test.go`
+- turn delivery (`Message`, `Interrupt`, `Nudge`)
+  - deterministic worker coverage lives in `internal/worker/handle_test.go`
+  - live shared-corpus behavioral coverage lives in
+    `test/acceptance/worker_inference/worker_inference_test.go`
+- transcript and subagent surfaces (`Transcript`, `TranscriptPath`,
+  `AgentMappings`, `AgentTranscript`, `History`)
+  - deterministic coverage lives in `internal/worker/handle_test.go`,
+    `internal/worker/sessionlog_adapter_test.go`, and
+    `internal/worker/factory_test.go`
+  - live transcript/continuation coverage lives in
+    `test/acceptance/worker_inference/worker_inference_test.go`
+- interaction surfaces (`Pending`, `PendingStatus`, `Respond`)
+  - deterministic coverage lives in `internal/worker/handle_test.go`
+    and `internal/worker/workertest/phase2_conformance_test.go`
+  - live blocked-state classification coverage lives in
+    `test/acceptance/worker_inference/classification_test.go`
 
 The worker handle is therefore above `runtime.Provider`.
 
@@ -1478,6 +1515,9 @@ Current branch progress:
 - session transcript streaming now projects from worker-history reads
   through the concrete handle instead of parsing provider files directly
   in the production stream path
+- API and `gc` callers no longer depend on concrete
+  `*worker.SessionHandle` or `worker.SessionLogAdapter`; they consume the
+  canonical `worker.Handle` / `worker.Factory` surfaces instead
 
 Remaining branch-local Phase 4 gaps:
 

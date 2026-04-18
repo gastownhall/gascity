@@ -73,3 +73,35 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 func (f *Factory) Adapter() SessionLogAdapter {
 	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...)}
 }
+
+// DiscoverTranscript returns the best available transcript path for a worker.
+func (f *Factory) DiscoverTranscript(provider, workDir, gcSessionID string) string {
+	return f.Adapter().DiscoverTranscript(provider, workDir, gcSessionID)
+}
+
+// TailMeta reads model/context metadata from a discovered transcript path.
+func (f *Factory) TailMeta(path string) (*TranscriptTailMeta, error) {
+	return f.Adapter().TailMeta(path)
+}
+
+// AgentMappings lists subagent transcript mappings for a parent transcript.
+func (f *Factory) AgentMappings(path string) ([]AgentMapping, error) {
+	return f.Adapter().AgentMappings(path)
+}
+
+// ReadAgentTranscript loads a subagent transcript while preserving raw
+// message fidelity for worker-owned API surfaces.
+func (f *Factory) ReadAgentTranscript(path, agentID string) (*AgentTranscriptResult, error) {
+	return f.Adapter().ReadAgentTranscript(path, agentID)
+}
+
+// ReadTranscript loads a provider transcript while preserving raw pagination
+// and message fidelity for worker-owned API/CLI surfaces.
+func (f *Factory) ReadTranscript(req TranscriptRequest) (*TranscriptResult, error) {
+	return f.Adapter().ReadTranscript(req)
+}
+
+// LoadHistory loads and normalizes a provider transcript.
+func (f *Factory) LoadHistory(req LoadRequest) (*HistorySnapshot, error) {
+	return f.Adapter().LoadHistory(req)
+}

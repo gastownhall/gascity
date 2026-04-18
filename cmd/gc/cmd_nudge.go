@@ -717,13 +717,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func deliverImmediateNudge(sp runtime.Provider, sessionName string, content []runtime.ContentBlock) error {
-	if np, ok := sp.(runtime.ImmediateNudgeProvider); ok {
-		return np.NudgeNow(sessionName, content)
-	}
-	return sp.Nudge(sessionName, content)
-}
-
 func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 	switch nudgeDeliveryMode(raw) {
 	case nudgeDeliveryImmediate, nudgeDeliveryWaitIdle, nudgeDeliveryQueue:
