@@ -2227,8 +2227,10 @@ func TestCmdInitFromTOMLFileSuccess(t *testing.T) {
 	}
 
 	src := filepath.Join(dir, "my-config.toml")
+	// Source has no workspace.name, so init should fall back to the target
+	// dir basename ("bright-lights"). A separate test covers the case where
+	// the source has an explicit name and init must preserve it (#795).
 	tomlContent := []byte(`[workspace]
-name = "placeholder"
 provider = "claude"
 
 [[agent]]
@@ -2262,7 +2264,8 @@ scale_check = "echo 3"
 		t.Errorf("stdout missing source filename: %q", out)
 	}
 
-	// Verify city.toml was written with updated name.
+	// Verify city.toml was written with the basename fallback since the
+	// source had no explicit workspace.name.
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
@@ -2272,7 +2275,7 @@ scale_check = "echo 3"
 		t.Fatalf("parsing written config: %v", err)
 	}
 	if cfg.Workspace.Name != "bright-lights" {
-		t.Errorf("Workspace.Name = %q, want %q (should be overridden)", cfg.Workspace.Name, "bright-lights")
+		t.Errorf("Workspace.Name = %q, want %q (dir basename fallback)", cfg.Workspace.Name, "bright-lights")
 	}
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
@@ -2380,6 +2383,86 @@ func TestCmdInitFromTOMLFileAlreadyInitializedByCityToml(t *testing.T) {
 	}
 }
 
+// Regression for #795: gc init --file must preserve workspace.name from the
+// source template rather than silently replacing it with the target dir
+// basename. The --name override still wins over the source.
+func TestCmdInitFromTOMLFileNamePriority(t *testing.T) {
+	tomlWithName := []byte(`[workspace]
+name = "mining"
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`)
+
+	tests := []struct {
+		name         string
+		nameOverride string
+		wantName     string
+		checkPack    bool
+	}{
+		{
+			name:         "source name preserved when no override",
+			nameOverride: "",
+			wantName:     "mining",
+			checkPack:    true, // pack.toml must agree with the effective city name
+		},
+		{
+			name:         "name override wins over source",
+			nameOverride: "explicit-override",
+			wantName:     "explicit-override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_DOLT", "skip")
+			configureIsolatedRuntimeEnv(t)
+
+			dir := t.TempDir()
+			cityPath := filepath.Join(dir, "target-basename")
+			if err := os.MkdirAll(cityPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			src := filepath.Join(dir, "template.toml")
+			if err := os.WriteFile(src, tomlWithName, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, tt.nameOverride, &stdout, &stderr, false)
+			if code != 0 {
+				t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+			}
+
+			data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+			if err != nil {
+				t.Fatalf("reading city.toml: %v", err)
+			}
+			cfg, err := config.Parse(data)
+			if err != nil {
+				t.Fatalf("parsing written config: %v", err)
+			}
+			if cfg.Workspace.Name != tt.wantName {
+				t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, tt.wantName)
+			}
+
+			if tt.checkPack {
+				packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+				if err != nil {
+					t.Fatalf("reading pack.toml: %v", err)
+				}
+				want := fmt.Sprintf(`name = %q`, tt.wantName)
+				if !strings.Contains(string(packData), want) {
+					t.Errorf("pack.toml missing %s:\n%s", want, packData)
+				}
+			}
+		})
+	}
+}
+
 // --- gc init --from tests ---
 
 func TestDoInitFromDirSuccess(t *testing.T) {
@@ -2389,13 +2472,15 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// Create a minimal source city.
+	// Create a minimal source city. Source has no workspace.name, so init
+	// --from should fall back to the target dir basename. A separate test
+	// covers the case where the source sets an explicit name (#795).
 	srcDir := filepath.Join(dir, "my-template")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte("[workspace]\nprovider = \"claude\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(srcDir, "prompts"), 0o755); err != nil {
@@ -2424,7 +2509,7 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 		t.Errorf("stdout missing city name: %q", out)
 	}
 
-	// Verify city.toml was copied and name updated.
+	// Verify city.toml was copied and basename fallback applied.
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
@@ -2434,7 +2519,7 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 		t.Fatalf("parsing written config: %v", err)
 	}
 	if cfg.Workspace.Name != "bright-lights" {
-		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+		t.Errorf("Workspace.Name = %q, want %q (dir basename fallback)", cfg.Workspace.Name, "bright-lights")
 	}
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
@@ -2451,22 +2536,68 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 	}
 }
 
+// Regression for the #795 parallel-sibling: gc init --from must preserve an
+// explicit workspace.name set on the template city.toml rather than silently
+// replacing it with the target directory basename.
+func TestDoInitFromDirPreservesSourceName(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+
+	srcDir := filepath.Join(dir, "my-template")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nname = \"mining\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "target-basename")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDir(srcDir, cityPath, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInitFromDir = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if cfg.Workspace.Name != "mining" {
+		t.Errorf("Workspace.Name = %q, want %q (source name must be preserved)", cfg.Workspace.Name, "mining")
+	}
+}
+
 func TestResolveCityName(t *testing.T) {
 	tests := []struct {
 		name         string
 		nameOverride string
+		sourceName   string
 		cityPath     string
 		want         string
 	}{
-		{"override wins over dir", "custom", "/path/to/dir", "custom"},
-		{"dir basename used as fallback", "", "/path/to/dir", "dir"},
+		{"override wins over source and dir", "custom", "template", "/path/to/dir", "custom"},
+		{"override wins over dir when no source", "custom", "", "/path/to/dir", "custom"},
+		{"source preserved when no override", "", "template", "/path/to/dir", "template"},
+		{"dir basename used as fallback when both empty", "", "", "/path/to/dir", "dir"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveCityName(tt.nameOverride, tt.cityPath)
+			got := resolveCityName(tt.nameOverride, tt.sourceName, tt.cityPath)
 			if got != tt.want {
-				t.Errorf("resolveCityName(%q, %q) = %q, want %q",
-					tt.nameOverride, tt.cityPath, got, tt.want)
+				t.Errorf("resolveCityName(%q, %q, %q) = %q, want %q",
+					tt.nameOverride, tt.sourceName, tt.cityPath, got, tt.want)
 			}
 		})
 	}
@@ -2584,6 +2715,9 @@ func TestInitNameFlagWithBareInit(t *testing.T) {
 	}
 }
 
+// --from falls back to the target directory basename when the source city
+// has no explicit workspace.name. (If the source sets a name, it is
+// preserved instead — see TestDoInitFromDirPreservesSourceName for #795.)
 func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -2591,13 +2725,13 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// Source has workspace.name = "template" — should NOT propagate.
+	// Source has no workspace.name, so --from should use target dir basename.
 	srcDir := filepath.Join(dir, "template")
 	if err := os.MkdirAll(filepath.Join(srcDir, "prompts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"), 0o644); err != nil {
+		[]byte("[workspace]\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "prompts", "mayor.md"), []byte("prompt"), 0o644); err != nil {

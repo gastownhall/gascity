@@ -32,6 +32,13 @@ stdout 'custom-name'
 exists $WORK/named-city/city.toml
 exec grep 'custom-name' $WORK/named-city/city.toml
 
+# gc init --from preserves an explicit workspace.name from the template
+# (#795 parallel-sibling); only the basename fallback kicks in when the
+# template does not set a name.
+exec gc init --from $WORK/named-template $WORK/other-basename
+exec grep 'name = "mining"' $WORK/other-basename/city.toml
+! exec grep 'name = "other-basename"' $WORK/other-basename/city.toml
+
 # gc init --from rejects already-initialized city.
 ! exec gc init --from $WORK/template $WORK/my-city
 stderr 'already initialized'
@@ -45,7 +52,6 @@ stderr 'no city.toml'
 
 -- template/city.toml --
 [workspace]
-name = "template"
 provider = "claude"
 
 [[agent]]
@@ -60,5 +66,17 @@ package test
 
 -- template/.gc/old-state.json --
 {"stale": true}
+
+-- named-template/city.toml --
+[workspace]
+name = "mining"
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+-- named-template/prompts/mayor.md --
+You are the mayor.
 
 -- no-city/.keep --
