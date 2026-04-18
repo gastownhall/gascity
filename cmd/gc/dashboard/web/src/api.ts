@@ -17,12 +17,38 @@ import { cityScope as currentCityScope } from "./state";
 // can call the supervisor cross-origin. Same-origin-only dashboards
 // (dev with the Vite proxy) set this to an empty string and rely on
 // relative URLs.
-function supervisorBaseURL(): string {
+export function supervisorBaseURL(): string {
   const meta = document.querySelector<HTMLMetaElement>(
     'meta[name="supervisor-url"]',
   );
   const raw = meta?.content ?? "";
   return raw.replace(/\/+$/, "");
+}
+
+// SSE path templates checked against the generated OpenAPI `paths`
+// type at compile time. `openapi-fetch` can't drive SSE (EventSource
+// needs a string URL), so these helpers are the typed seam between
+// SSE callers and the spec: if a route is renamed in Huma and the
+// spec regenerates, the literal below stops matching `keyof paths`
+// and the TS build fails loudly instead of silently 404ing at
+// runtime.
+type SpecPath = keyof paths;
+
+export function sseSupervisorEventsURL(): string {
+  const path = "/v0/events/stream" satisfies SpecPath;
+  return `${supervisorBaseURL()}${path}`;
+}
+
+export function sseCityEventsURL(city: string): string {
+  const template = "/v0/city/{cityName}/events/stream" satisfies SpecPath;
+  return `${supervisorBaseURL()}${template.replace("{cityName}", encodeURIComponent(city))}`;
+}
+
+export function sseSessionStreamURL(city: string, sessionID: string): string {
+  const template = "/v0/city/{cityName}/session/{id}/stream" satisfies SpecPath;
+  return `${supervisorBaseURL()}${template
+    .replace("{cityName}", encodeURIComponent(city))
+    .replace("{id}", encodeURIComponent(sessionID))}`;
 }
 
 // cityScope reads the dashboard's current city from the `?city=...`

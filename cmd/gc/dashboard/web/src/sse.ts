@@ -1,14 +1,12 @@
-import type {
-  CityEventStreamEnvelope,
-  HeartbeatEvent,
-  SupervisorEventStreamEnvelope,
+import {
+  sseCityEventsURL,
+  sseSessionStreamURL,
+  sseSupervisorEventsURL,
+  type CityEventStreamEnvelope,
+  type HeartbeatEvent,
+  type SupervisorEventStreamEnvelope,
 } from "./api";
 import { reportUIError } from "./ui";
-
-function supervisorBaseURL(): string {
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="supervisor-url"]');
-  return (meta?.content ?? "").replace(/\/+$/, "");
-}
 
 export interface SSEHandle {
   close(): void;
@@ -54,7 +52,7 @@ export function connectEvents(
   opts?: SSEOptions,
 ): SSEHandle {
   return connectTypedStream(
-    `${supervisorBaseURL()}/v0/events/stream`,
+    sseSupervisorEventsURL(),
     decodeSupervisorMessage,
     onEvent,
     opts,
@@ -67,7 +65,7 @@ export function connectCityEvents(
   opts?: SSEOptions,
 ): SSEHandle {
   return connectTypedStream(
-    `${supervisorBaseURL()}/v0/city/${encodeURIComponent(city)}/events/stream`,
+    sseCityEventsURL(city),
     decodeCityMessage,
     onEvent,
     opts,
@@ -146,7 +144,7 @@ export function connectAgentOutput(
   sessionID: string,
   onEvent: (msg: AgentOutputMessage) => void,
 ): SSEHandle {
-  const url = `${supervisorBaseURL()}/v0/city/${encodeURIComponent(city)}/session/${encodeURIComponent(sessionID)}/stream`;
+  const url = sseSessionStreamURL(city, sessionID);
   const source = new EventSource(url, { withCredentials: false });
   // SSE fires both onmessage AND addEventListener("message") for any frame
   // whose event-type resolves to "message" (the default). Wiring both
