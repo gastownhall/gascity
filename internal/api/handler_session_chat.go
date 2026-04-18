@@ -1146,7 +1146,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 	writeSSE(w, "activity", 2, actData)
 }
 
-func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot, req worker.HistoryRequest) {
+func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.Handle, initial *worker.HistorySnapshot, req worker.HistoryRequest) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1265,7 +1265,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 	}
 }
 
-func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot) {
+func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.Handle, initial *worker.HistorySnapshot) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1350,258 +1350,10 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	}
 }
 
-func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
-
-	var lastSize int64
-	var lastSentUUID string
-	var seq uint64
-	var lastActivity string
-	sentUUIDs := make(map[string]struct{})
-	lw.onReset = func() { lastSize = 0; lastActivity = "" }
-
-	readAndEmit := func() {
-		stat, err := os.Stat(logPath)
-		if err != nil {
-			return
-		}
-		if stat.Size() == lastSize {
-			return
-		}
-
-		// Use tail=1 (last compaction segment) to limit parsing scope,
-		// consistent with the non-raw streaming path.
-		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
-			Provider:        info.Provider,
-			TranscriptPath:  logPath,
-			TailCompactions: 1,
-			Raw:             true,
-		})
-		if err != nil {
-			return
-		}
-		sess := transcript.Session
-		lastSize = stat.Size()
-
-		// Compute activity early (used after message emission).
-		activity := worker.InferTranscriptActivity(sess.Messages)
-
-		rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			if len(entry.Raw) == 0 {
-				continue
-			}
-			rawMessages = append(rawMessages, entry.Raw)
-			uuids = append(uuids, entry.UUID)
-		}
-
-		// Emit messages if there are new ones.
-		if len(rawMessages) > 0 {
-			var toSend []json.RawMessage
-
-			if lastSentUUID == "" {
-				// First emission: send everything.
-				toSend = rawMessages
-			} else {
-				found := false
-				for i, uuid := range uuids {
-					if uuid == lastSentUUID {
-						toSend = rawMessages[i+1:]
-						found = true
-						break
-					}
-				}
-				if !found {
-					// Cursor lost (DAG rewrite, compaction). Instead of
-					// re-syncing from the beginning (which causes duplicate/
-					// out-of-order messages on the client), emit only messages
-					// we haven't previously sent.
-					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentUUID)
-					for i, uuid := range uuids {
-						if _, seen := sentUUIDs[uuid]; !seen {
-							toSend = append(toSend, rawMessages[i])
-						}
-					}
-				}
-			}
-
-			if len(toSend) > 0 {
-				seq++
-				data, err := json.Marshal(sessionRawTranscriptResponse{
-					ID:       info.ID,
-					Template: info.Template,
-					Format:   "raw",
-					Messages: toSend,
-				})
-				if err == nil {
-					writeSSE(w, "message", seq, data)
-				}
-			}
-
-			// Track all current UUIDs so cursor-lost can filter correctly.
-			lastSentUUID = uuids[len(uuids)-1]
-			for _, uuid := range uuids {
-				sentUUIDs[uuid] = struct{}{}
-			}
-		}
-
-		// Emit activity after content so clients receive data before state change.
-		if activity != "" && activity != lastActivity {
-			lastActivity = activity
-			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
-		}
-	}
-
-	// Stall detection: when the log hasn't grown for 5s, check the tmux
-	// pane for a tool approval prompt. If found, emit a "pending" SSE event
-	// so the UI can show the approval panel.
-	var lastPendingID string
-	onStall := func() {
-		sp := s.state.SessionProvider()
-		ip, ok := sp.(runtime.InteractionProvider)
-		if !ok {
-			return
-		}
-		pending, err := ip.Pending(info.SessionName)
-		if err != nil || pending == nil {
-			if lastPendingID != "" {
-				// Approval cleared — emit activity update.
-				lastPendingID = ""
-				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": "in-turn"})
-				writeSSE(w, "activity", seq, actData)
-			}
-			return
-		}
-		if pending.RequestID == lastPendingID {
-			return // already emitted this approval
-		}
-		lastPendingID = pending.RequestID
-		seq++
-		pendingData, _ := json.Marshal(pending)
-		writeSSE(w, "pending", seq, pendingData)
-	}
-
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{
-		OnStall:      onStall,
-		StallTimeout: 5 * time.Second,
-	})
-}
-
-func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
-
-	var lastSize int64
-	var lastSentUUID string
-	var seq uint64
-	var lastActivity string
-	sentUUIDs := make(map[string]struct{})
-	lw.onReset = func() { lastSize = 0; lastActivity = "" }
-
-	readAndEmit := func() {
-		stat, err := os.Stat(logPath)
-		if err != nil {
-			return
-		}
-		if stat.Size() == lastSize {
-			return
-		}
-
-		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
-			Provider:       info.Provider,
-			TranscriptPath: logPath,
-		})
-		if err != nil {
-			return
-		}
-		sess := transcript.Session
-		lastSize = stat.Size()
-
-		// Compute activity early (used after turn emission).
-		activity := worker.InferTranscriptActivity(sess.Messages)
-
-		turns := make([]outputTurn, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			turn := entryToTurn(entry)
-			if turn.Text == "" {
-				continue
-			}
-			turns = append(turns, turn)
-			uuids = append(uuids, entry.UUID)
-		}
-
-		// Emit turns if there are new ones.
-		if len(turns) > 0 {
-			var toSend []outputTurn
-
-			if lastSentUUID == "" {
-				// First emission: send everything.
-				toSend = turns
-			} else {
-				found := false
-				for i, uuid := range uuids {
-					if uuid == lastSentUUID {
-						toSend = turns[i+1:]
-						found = true
-						break
-					}
-				}
-				if !found {
-					// Cursor lost (DAG rewrite, compaction). Instead of
-					// re-syncing from the beginning (which causes duplicate/
-					// out-of-order messages on the client), emit only turns
-					// we haven't previously sent.
-					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentUUID)
-					for i, uuid := range uuids {
-						if _, seen := sentUUIDs[uuid]; !seen {
-							toSend = append(toSend, turns[i])
-						}
-					}
-				}
-			}
-
-			if len(toSend) > 0 {
-				seq++
-				data, err := json.Marshal(sessionTranscriptResponse{
-					ID:       info.ID,
-					Template: info.Template,
-					Format:   "conversation",
-					Turns:    toSend,
-				})
-				if err == nil {
-					writeSSE(w, "turn", seq, data)
-				}
-			}
-
-			// Track all current UUIDs so cursor-lost can filter correctly.
-			lastSentUUID = uuids[len(uuids)-1]
-			for _, uuid := range uuids {
-				sentUUIDs[uuid] = struct{}{}
-			}
-		}
-
-		// Emit activity after content so clients receive data before state change.
-		if activity != "" && activity != lastActivity {
-			lastActivity = activity
-			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
-		}
-	}
-
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
-}
-
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
 // messages so MC's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
-func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle) {
+func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.Handle) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1672,7 +1424,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 	}
 }
 
-func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle) {
+func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.Handle) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)

@@ -433,7 +433,7 @@ func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store
 	return err
 }
 
-func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.SessionHandle, error) {
+func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {
 	catalog, err := s.workerSessionCatalog(store)
 	if err != nil {
 		return nil, err
@@ -506,7 +506,7 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	})
 }
 
-func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (*worker.SessionHandle, error) {
+func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (worker.Handle, error) {
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err

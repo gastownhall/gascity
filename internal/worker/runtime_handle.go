@@ -62,6 +62,21 @@ func (h *RuntimeHandle) Start(context.Context) error {
 	return fmt.Errorf("%w: start requires a bead-backed session", ErrOperationUnsupported)
 }
 
+func (h *RuntimeHandle) StartResolved(ctx context.Context, _ string, _ runtime.Config) error {
+	return h.Start(ctx)
+}
+
+func (h *RuntimeHandle) Attach(context.Context) error {
+	if !h.provider.IsRunning(h.sessionName) {
+		return fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+	}
+	return h.provider.Attach(h.sessionName)
+}
+
+func (h *RuntimeHandle) Create(context.Context, CreateMode) (sessionpkg.Info, error) {
+	return sessionpkg.Info{}, fmt.Errorf("%w: create requires a bead-backed session", ErrOperationUnsupported)
+}
+
 func (h *RuntimeHandle) Stop(context.Context) error {
 	return h.provider.Stop(h.sessionName)
 }
@@ -160,6 +175,14 @@ func (h *RuntimeHandle) TranscriptPath(context.Context) (string, error) {
 	return "", ErrHistoryUnavailable
 }
 
+func (h *RuntimeHandle) AgentMappings(context.Context) ([]AgentMapping, error) {
+	return nil, ErrHistoryUnavailable
+}
+
+func (h *RuntimeHandle) AgentTranscript(context.Context, string) (*AgentTranscriptResult, error) {
+	return nil, ErrHistoryUnavailable
+}
+
 func (h *RuntimeHandle) History(context.Context, HistoryRequest) (*HistorySnapshot, error) {
 	return nil, ErrHistoryUnavailable
 }
@@ -183,6 +206,15 @@ func (h *RuntimeHandle) Pending(context.Context) (*PendingInteraction, error) {
 		Options:   append([]string(nil), pending.Options...),
 		Metadata:  cloneStringMap(pending.Metadata),
 	}, nil
+}
+
+func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction, bool, error) {
+	_, supported := h.provider.(runtime.InteractionProvider)
+	pending, err := h.Pending(ctx)
+	if err != nil {
+		return nil, supported, err
+	}
+	return pending, supported, nil
 }
 
 // LiveObservation reports runtime presence metadata for a legacy runtime-only

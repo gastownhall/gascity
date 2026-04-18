@@ -476,20 +476,16 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
 		}
-		searchPaths := s.sessionLogSearchPaths
-		if searchPaths == nil && cfg != nil {
-			searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
 		}
-		if searchPaths == nil {
-			searchPaths = worker.DefaultSearchPaths()
-		}
-		adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
 		var sessionFile string
-		sessionFile = adapter.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
+		sessionFile = factory.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
 		if sessionFile != "" {
-			if meta, err := adapter.TailMeta(sessionFile); err == nil && meta != nil {
+			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage

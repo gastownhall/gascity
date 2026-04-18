@@ -8,6 +8,8 @@ type (
 	TranscriptContentBlock   = sessionlog.ContentBlock
 	TranscriptMessageContent = sessionlog.MessageContent
 	TranscriptPagination     = sessionlog.PaginationInfo
+	TranscriptTailMeta       = sessionlog.TailMeta
+	TranscriptContextUsage   = sessionlog.ContextUsage
 	AgentMapping             = sessionlog.AgentMapping
 )
 

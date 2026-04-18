@@ -33,6 +33,8 @@ func TestGCNonTestFilesStayOnWorkerBoundary(t *testing.T) {
 			`"github.com/gastownhall/gascity/internal/sessionlog"`,
 			"worker.NewSessionHandle(",
 			"worker.NewSessionCatalog(",
+			"worker.SessionHandle",
+			"worker.SessionLogAdapter{",
 			"session.NewManager(",
 			"session.NewManagerWithCityPath(",
 			"session.NewManagerWithTransportResolverAndCityPath(",
