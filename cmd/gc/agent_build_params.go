@@ -32,7 +32,7 @@ type agentBuildParams struct {
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
-	appendFragments []string // V2: from [agents].append_fragments / [agent_defaults].append_fragments
+	appendFragments []string // V2: city-level [agents].append_fragments / [agent_defaults].append_fragments
 	stderr          io.Writer
 
 	// beadStore is the city-level bead store for session bead lookups.
