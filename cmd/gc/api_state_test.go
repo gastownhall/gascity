@@ -478,7 +478,10 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 		"    ;;\n" +
 		"  *) exit 2 ;;\n" +
 		"esac\n"
-	scriptPath := writeTempScript(t, "beads-provider", []byte(scriptContent))
+	scriptPath := filepath.Join(t.TempDir(), "beads-provider.sh")
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o755); err != nil {
+		t.Fatalf("writing provider script: %v", err)
+	}
 
 	t.Setenv("GC_BEADS", "exec:"+scriptPath)
 
@@ -536,11 +539,6 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantPrefix, env)
 		}
 
-		wantBeadsDir := "BEADS_DIR=" + filepath.Join(tc.rigPath, ".beads")
-		if !strings.Contains(env, wantBeadsDir) {
-			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantBeadsDir, env)
-		}
-
 		wantRigRoot := "GC_RIG_ROOT=" + tc.rigPath
 		if !strings.Contains(env, wantRigRoot) {
 			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantRigRoot, env)
@@ -549,6 +547,16 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 		wantRig := "GC_RIG=" + tc.rig
 		if !strings.Contains(env, wantRig) {
 			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantRig, env)
+		}
+
+		// Post-#790 contract: BEADS_DIR is intentionally empty for exec
+		// stores (store_target_exec.go). Scope is communicated via
+		// GC_RIG_ROOT / GC_STORE_ROOT instead. Assert we did NOT regress
+		// back to a per-rig BEADS_DIR projection.
+		if strings.Contains(env, "BEADS_DIR="+filepath.Join(tc.rigPath, ".beads")) {
+			t.Errorf("rig %q: BEADS_DIR is projecting a rig-specific path; "+
+				"exec contract (PR #790) requires BEADS_DIR to stay empty so scope "+
+				"is routed via GC_RIG_ROOT/GC_STORE_ROOT. env:\n%s", tc.rig, env)
 		}
 	}
 
