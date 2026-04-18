@@ -126,6 +126,19 @@ func (t nudgeTarget) sessionTransport() string {
 	return t.agent.Session
 }
 
+func (t nudgeTarget) providerName() string {
+	if t.resolved != nil && strings.TrimSpace(t.resolved.Name) != "" {
+		return strings.TrimSpace(t.resolved.Name)
+	}
+	if strings.TrimSpace(t.agent.Provider) != "" {
+		return strings.TrimSpace(t.agent.Provider)
+	}
+	if t.cfg != nil {
+		return strings.TrimSpace(t.cfg.Workspace.Provider)
+	}
+	return ""
+}
+
 type queuedNudgeOptions struct {
 	ID                string
 	SessionID         string
@@ -478,7 +491,8 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
 	if !ok {
-		return deliverSessionNudgeWithProvider(target, sp, message, mode, stdout, stderr)
+		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
+		return 1
 	}
 	handle, err := workerHandleForNudgeTarget(target, store, sp)
 	if err != nil {
@@ -505,7 +519,12 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 	if target.sessionID != "" {
 		return workerHandleForSessionWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
 	}
-	return workerHandleForSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  target.sessionName,
+		ProviderName: strings.TrimSpace(target.providerName()),
+		Transport:    strings.TrimSpace(target.sessionTransport()),
+	})
 }
 
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
@@ -516,67 +535,11 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 }
 
 func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
-	switch mode {
-	case nudgeDeliveryImmediate:
-		if !sp.IsRunning(target.sessionName) {
-			fmt.Fprintf(stderr, "gc session nudge: session %q is not running\n", target.agentKey()) //nolint:errcheck
-			return 1
-		}
-		if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(message)); err != nil {
-			telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-		fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
-		return 0
-	case nudgeDeliveryQueue:
-		if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
-			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		if sp.IsRunning(target.sessionName) {
-			maybeStartNudgePoller(target)
-		}
-		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
-		return 0
-	case nudgeDeliveryWaitIdle:
-		if !sp.IsRunning(target.sessionName) {
-			if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
-				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
-				return 1
-			}
-			fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
-			return 0
-		}
-		if tryDeliverWaitIdleNudge(target, sp, "session", message) {
-			telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-			fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
-			return 0
-		}
-		if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
-			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		maybeStartNudgePoller(target)
-		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
-		return 0
-	default:
-		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
-		return 1
-	}
+	return deliverSessionNudgeWithWorker(target, nil, sp, message, mode, stdout, stderr)
 }
 
 func queueSessionNudge(target nudgeTarget, sp runtime.Provider, message string, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if sp.IsRunning(target.sessionName) {
-		maybeStartNudgePoller(target)
-	}
-	fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
-	return 0
+	return queueSessionNudgeWithWorker(target, nil, sp, message, stdout, stderr)
 }
 
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, stdout, stderr io.Writer) int {
@@ -600,20 +563,7 @@ func sendMailNotify(target nudgeTarget, sender string) error {
 }
 
 func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender string) error {
-	msg := fmt.Sprintf("You have mail from %s", sender)
-	now := time.Now()
-	running := sp.IsRunning(target.sessionName)
-	if !running || !tryDeliverWaitIdleNudge(target, sp, "mail", msg) {
-		if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
-			return err
-		}
-		if running {
-			maybeStartNudgePoller(target)
-		}
-		return nil
-	}
-	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-	return nil
+	return sendMailNotifyWithWorker(target, nil, sp, sender)
 }
 
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender string) error {
@@ -765,27 +715,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, source, message string) bool {
-	if target.sessionTransport() == "acp" {
-		err := sp.Nudge(target.sessionName, runtime.TextContent(message))
-		return err == nil
-	}
-	if target.resolved == nil || target.resolved.Name != "claude" {
-		return false
-	}
-	wp, ok := sp.(runtime.IdleWaitProvider)
-	if !ok {
-		return false
-	}
-	if err := wp.WaitForIdle(context.Background(), target.sessionName, defaultNudgeWaitIdleTimeout); err != nil {
-		return false
-	}
-	if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(formatDirectReminderOutput(source, message))); err != nil {
-		return false
-	}
-	return true
 }
 
 func deliverImmediateNudge(sp runtime.Provider, sessionName string, content []runtime.ContentBlock) error {

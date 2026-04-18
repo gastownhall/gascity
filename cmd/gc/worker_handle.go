@@ -85,8 +85,11 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (*worker.SessionHandle, error) {
-	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
-	info, err := mgr.Get(id)
+	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		return nil, err
 	}
@@ -114,12 +117,16 @@ func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp run
 	applyResolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind, &spec)
 
 	return worker.NewSessionHandle(worker.SessionHandleConfig{
-		Manager: mgr,
+		Manager: newSessionManagerWithConfig(cityPath, store, sp, cfg),
 		Session: spec,
 	})
 }
 
 func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (worker.Handle, error) {
+	return workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, nil)
+}
+
+func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, session.ErrSessionNotFound
@@ -145,6 +152,7 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 		Provider:     sp,
 		SessionName:  target,
 		ProviderName: target,
+		ProcessNames: append([]string(nil), processNames...),
 	})
 }
 
@@ -173,7 +181,11 @@ func workerInterruptSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerObserveSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (worker.LiveObservation, error) {
-	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	return workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, nil)
+}
+
+func workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.LiveObservation, error) {
+	handle, err := workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
 	if err != nil {
 		return worker.LiveObservation{}, err
 	}
@@ -186,6 +198,14 @@ func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp
 		return false, err
 	}
 	return obs.Running, nil
+}
+
+func workerSessionTargetAliveWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (bool, error) {
+	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
+	if err != nil {
+		return false, err
+	}
+	return obs.Alive, nil
 }
 
 func workerSessionTargetAttachedWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
@@ -205,6 +225,30 @@ func workerSessionTargetLastActivityWithConfig(cityPath string, store beads.Stor
 		return time.Time{}, nil
 	}
 	return *obs.LastActivity, nil
+}
+
+func workerSessionTargetPeekWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, lines int, processNames []string) (string, error) {
+	handle, err := workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
+	if err != nil {
+		return "", err
+	}
+	return handle.Peek(context.Background(), lines)
+}
+
+func workerSessionTargetPendingWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (*worker.PendingInteraction, error) {
+	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err != nil {
+		return nil, err
+	}
+	return handle.Pending(context.Background())
+}
+
+func workerRespondSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, response worker.InteractionResponse) error {
+	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err != nil {
+		return err
+	}
+	return handle.Respond(context.Background(), response)
 }
 
 func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string, spec *worker.SessionSpec) {

@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func (s *Server) sessionManager(store beads.Store) *session.Manager {
@@ -17,4 +18,8 @@ func (s *Server) sessionManager(store beads.Store) *session.Manager {
 		}
 		return agentCfg.Session
 	})
+}
+
+func (s *Server) workerSessionCatalog(store beads.Store) (*worker.SessionCatalog, error) {
+	return worker.NewSessionCatalog(s.sessionManager(store))
 }

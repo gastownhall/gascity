@@ -81,6 +81,7 @@ type Info struct {
 // persisted session.
 type RuntimeObservation struct {
 	Running     bool
+	Alive       bool
 	Attached    bool
 	LastActive  time.Time
 	SessionName string
@@ -867,7 +868,7 @@ func (m *Manager) Get(id string) (Info, error) {
 }
 
 // ObserveRuntime reports live provider state for the current session runtime.
-func (m *Manager) ObserveRuntime(id string) (RuntimeObservation, error) {
+func (m *Manager) ObserveRuntime(id string, processNames []string) (RuntimeObservation, error) {
 	info, err := m.Get(id)
 	if err != nil {
 		return RuntimeObservation{}, err
@@ -880,6 +881,7 @@ func (m *Manager) ObserveRuntime(id string) (RuntimeObservation, error) {
 	if !obs.Running {
 		return obs, nil
 	}
+	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
 	obs.Attached = m.sp.IsAttached(info.SessionName)
 	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
 		obs.LastActive = lastActive

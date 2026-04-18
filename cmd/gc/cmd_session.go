@@ -623,20 +623,6 @@ func (p *attachmentCachingProvider) SleepCapability(name string) runtime.Session
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
-	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
-		return ip.Pending(name)
-	}
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-func (p *attachmentCachingProvider) Respond(name string, response runtime.InteractionResponse) error {
-	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
-		return ip.Respond(name, response)
-	}
-	return runtime.ErrInteractionUnsupported
-}
-
 func buildAttachmentCache(sessions []session.Info) map[string]bool {
 	cache := make(map[string]bool)
 	for _, s := range sessions {
@@ -811,10 +797,14 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
+	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Get the session to find its template.
-	info, err := mgr.Get(sessionID)
+	info, err := catalog.Get(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

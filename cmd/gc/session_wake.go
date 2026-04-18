@@ -390,7 +390,11 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 
 		// Check if process exited.
-		if !sp.IsRunning(name) {
+		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, session.ID)
+		if err != nil {
+			running = false
+		}
+		if !running {
 			// Process exited — drain complete.
 			completeDrain(session, store, ds, clk)
 			dt.clearIdleProbe(id)
@@ -489,7 +493,11 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			// Re-probe after stop to confirm process actually exited
 			// before marking metadata as asleep.
-			if !sp.IsRunning(name) {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, session.ID)
+			if err != nil {
+				running = false
+			}
+			if !running {
 				completeDrain(session, store, ds, clk)
 				dt.clearIdleProbe(id)
 				dt.remove(id)

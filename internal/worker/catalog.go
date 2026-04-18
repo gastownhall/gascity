@@ -9,9 +9,10 @@ import (
 )
 
 type (
-	SessionInfo        = sessionpkg.Info
-	SessionListResult  = sessionpkg.ListResult
-	SessionPruneResult = sessionpkg.PruneResult
+	SessionInfo                   = sessionpkg.Info
+	SessionListResult             = sessionpkg.ListResult
+	SessionPruneResult            = sessionpkg.PruneResult
+	SessionSubmissionCapabilities = sessionpkg.SubmissionCapabilities
 )
 
 // SessionCatalog exposes worker-owned session discovery and maintenance
@@ -31,8 +32,20 @@ func (c *SessionCatalog) List(stateFilter, templateFilter string) ([]SessionInfo
 	return c.manager.List(stateFilter, templateFilter)
 }
 
+func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
+	return c.manager.Get(id)
+}
+
 func (c *SessionCatalog) ListFullFromBeads(all []beads.Bead, stateFilter, templateFilter string) *SessionListResult {
 	return c.manager.ListFullFromBeads(all, stateFilter, templateFilter)
+}
+
+func (c *SessionCatalog) SubmissionCapabilities(id string) (SessionSubmissionCapabilities, error) {
+	return c.manager.SubmissionCapabilities(id)
+}
+
+func (c *SessionCatalog) UpdatePresentation(id string, title, alias *string) error {
+	return c.manager.UpdatePresentation(id, title, alias)
 }
 
 func (c *SessionCatalog) PruneBefore(before time.Time) (SessionPruneResult, error) {

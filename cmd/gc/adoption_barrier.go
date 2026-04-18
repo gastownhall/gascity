@@ -136,7 +136,8 @@ func runAdoptionBarrier(
 				isPoolInstance = true
 			}
 		}
-		if !sp.ProcessAlive(sessionName, processHints(cfgAgent)) {
+		alive, err := workerSessionTargetAliveWithConfig("", nil, sp, nil, sessionName, processHints(cfgAgent))
+		if err != nil || !alive {
 			result.Total--
 			continue
 		}

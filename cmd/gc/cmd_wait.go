@@ -661,7 +661,8 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		if err != nil {
 			continue
 		}
-		if !sp.IsRunning(sessionBead.Metadata["session_name"]) {
+		running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, nil, sessionID)
+		if err != nil || !running {
 			continue
 		}
 		nudgeID := waitNudgeID(wait)

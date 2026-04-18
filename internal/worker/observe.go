@@ -12,6 +12,7 @@ import (
 // and CLI read models.
 type LiveObservation struct {
 	Running          bool
+	Alive            bool
 	Suspended        bool
 	Attached         bool
 	LastActivity     *time.Time
@@ -44,12 +45,13 @@ func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if err != nil {
 		return LiveObservation{}, err
 	}
-	runtimeObs, err := h.manager.ObserveRuntime(id)
+	runtimeObs, err := h.manager.ObserveRuntime(id, h.runtimeHints().ProcessNames)
 	if err != nil {
 		return LiveObservation{}, err
 	}
 	obs := LiveObservation{
 		Running:          runtimeObs.Running,
+		Alive:            runtimeObs.Alive,
 		Suspended:        info.State == sessionpkg.StateSuspended,
 		Attached:         runtimeObs.Attached,
 		RuntimeSessionID: info.ID,

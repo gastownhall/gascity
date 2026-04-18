@@ -96,11 +96,10 @@ func pendingInteractionReady(sp runtime.Provider, name string) bool {
 	if sp == nil || name == "" {
 		return false
 	}
-	ip, ok := sp.(runtime.InteractionProvider)
-	if !ok {
-		return false
+	if cached, ok := sp.(*attachmentCachingProvider); ok && cached.Provider != nil {
+		sp = cached.Provider
 	}
-	pending, err := ip.Pending(name)
+	pending, err := workerSessionTargetPendingWithConfig("", nil, sp, nil, name)
 	if err != nil {
 		return false
 	}
