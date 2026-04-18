@@ -1420,6 +1420,65 @@ func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t
 	}
 }
 
+func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:         "alex",
+		BindingName:  "employees",
+		Provider:     "test-agent",
+		StartCommand: "true",
+	}}
+	fs.cfg.NamedSessions = []config.NamedSession{{
+		Name:        "corp--alex",
+		Template:    "alex",
+		BindingName: "employees",
+	}}
+	srv := New(fs)
+
+	req := newPostRequest("/v0/session/employees.corp--alex/messages", strings.NewReader(`{"message":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	id := resp["id"]
+	if id == "" {
+		t.Fatal("response missing session id")
+	}
+	b, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	if got := b.Metadata[apiNamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+	if got := b.Metadata["alias"]; got != "employees.corp--alex" {
+		t.Fatalf("alias = %q, want employees.corp--alex", got)
+	}
+	sessionName := b.Metadata["session_name"]
+	if sessionName == "" {
+		t.Fatal("materialized named session missing session_name")
+	}
+	if !fs.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q should be running after POST /messages", sessionName)
+	}
+	nudgeCount := 0
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Nudge" && call.Name == sessionName && call.Message == "hello" {
+			nudgeCount++
+		}
+	}
+	if nudgeCount != 1 {
+		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
+	}
+}
+
 func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	provider := &cancelStartProvider{Fake: runtime.NewFake()}

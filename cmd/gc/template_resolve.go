@@ -127,23 +127,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 4: Resolve overlay directory.
 	overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, p.cityPath)
 
-	// Step 5: Build copy_files and command with settings args + schema defaults.
+	// Step 5: Build copy_files and command with provider defaults + settings.
 	var copyFiles []runtime.CopyEntry
-	command := resolved.CommandString()
-	// Append schema-derived default args (e.g., --dangerously-skip-permissions
-	// from EffectiveDefaults["permission_mode"] = "unrestricted").
-	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-		command = command + " " + shellquote.Join(defaultArgs)
+	launchCommand, err := config.BuildProviderLaunchCommand(p.cityPath, resolved, nil)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: building provider launch command: %w", qualifiedName, err)
 	}
-	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
-		command = command + " " + sa
-		settingsFile, relDst := claudeSettingsSource(p.cityPath)
-		if settingsFile != "" {
-			copyFiles = append(copyFiles, runtime.CopyEntry{
-				Src: settingsFile, RelDst: relDst,
-				Probed: true, ContentHash: runtime.HashPathContent(settingsFile),
-			})
-		}
+	command := launchCommand.Command
+	if launchCommand.SettingsPath != "" {
+		copyFiles = append(copyFiles, runtime.CopyEntry{
+			Src: launchCommand.SettingsPath, RelDst: launchCommand.SettingsRel,
+			Probed: true, ContentHash: runtime.HashPathContent(launchCommand.SettingsPath),
+		})
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {

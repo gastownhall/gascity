@@ -32,7 +32,7 @@ var (
 
 var (
 	sessionNamePattern  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
-	sessionAliasPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*(/[a-zA-Z0-9][a-zA-Z0-9_-]*)*$`)
+	sessionAliasPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$`)
 	sessionIDPattern    = regexp.MustCompile(`^gc-[0-9]+$`)
 )
 

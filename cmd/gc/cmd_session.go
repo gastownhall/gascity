@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
 
@@ -201,6 +200,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	if err != nil {
 		titleProvider = nil
 	}
+	launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
@@ -218,7 +222,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				if resolved.Kind != "" && resolved.Kind != resolved.Name {
 					kindMeta["provider_kind"] = resolved.Kind
 				}
-				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
+				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, launchCommand.Command, workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
 					ResumeStyle:   resolved.ResumeStyle,
 					ResumeCommand: resolved.ResumeCommand,
@@ -285,7 +289,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
+		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, "", canonicalTemplate, title, launchCommand.Command, workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
 		return createErr
 	})
 	if err != nil {
@@ -789,16 +793,11 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 			return cmd, runtime.Config{WorkDir: info.WorkDir}
 		}
 		resolvedInfo := info
-		// Build command with default args and settings, matching the
-		// reconciler's template_resolve.go command construction.
-		command := resolved.CommandString()
-		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-			command = command + " " + shellquote.Join(defaultArgs)
+		launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, nil)
+		if err != nil {
+			return cmd, runtime.Config{WorkDir: info.WorkDir}
 		}
-		if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
-			command = command + " " + sa
-		}
-		resolvedInfo.Command = command
+		resolvedInfo.Command = launchCommand.Command
 		resolvedInfo.Provider = resolved.Name
 		resolvedInfo.ResumeFlag = resolved.ResumeFlag
 		resolvedInfo.ResumeStyle = resolved.ResumeStyle

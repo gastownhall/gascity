@@ -697,30 +697,15 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 // provider remaps city-root references to /workspace automatically.
 // Returns empty string for non-Claude providers or if no settings file is present.
 func settingsArgs(cityPath, providerName string) string {
-	if providerName != "claude" {
-		return ""
-	}
-	settingsPath, _ := claudeSettingsSource(cityPath)
+	settingsPath, _ := claudeSettingsSource(cityPath, providerName)
 	if settingsPath == "" {
 		return ""
 	}
 	return fmt.Sprintf("--settings %q", settingsPath)
 }
 
-func claudeSettingsSource(cityPath string) (src, rel string) {
-	candidates := []struct {
-		src string
-		rel string
-	}{
-		{src: filepath.Join(cityPath, ".gc", "settings.json"), rel: path.Join(".gc", "settings.json")},
-		{src: citylayout.ClaudeHookFilePath(cityPath), rel: path.Clean(strings.ReplaceAll(citylayout.ClaudeHookFile, string(filepath.Separator), "/"))},
-	}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate.src); err == nil {
-			return candidate.src, candidate.rel
-		}
-	}
-	return "", ""
+func claudeSettingsSource(cityPath, providerName string) (src, rel string) {
+	return config.ProviderSettingsSource(cityPath, providerName)
 }
 
 // stageHookFiles adds hook files installed by hooks.Install() to the
@@ -769,7 +754,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	// cityDir-based hooks: claude (.gc/settings.json).
 	// Skip if settingsArgs already added it.
 	// These are city-root relative, so no relWorkDir prefix needed.
-	settingsAbs, settingsRel := claudeSettingsSource(cityPath)
+	settingsAbs, settingsRel := claudeSettingsSource(cityPath, "claude")
 	if settingsAbs != "" {
 		alreadyStaged := false
 		for _, cf := range copyFiles {
