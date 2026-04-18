@@ -3044,6 +3044,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3072,6 +3086,20 @@
           "next_cursor": {
             "description": "Cursor for the next page of results.",
             "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -3102,6 +3130,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3130,6 +3172,20 @@
           "next_cursor": {
             "description": "Cursor for the next page of results.",
             "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -3160,6 +3216,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3188,6 +3258,20 @@
           "next_cursor": {
             "description": "Cursor for the next page of results.",
             "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -3218,6 +3302,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3246,6 +3344,20 @@
           "next_cursor": {
             "description": "Cursor for the next page of results.",
             "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -3276,6 +3388,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3304,6 +3430,20 @@
           "next_cursor": {
             "description": "Cursor for the next page of results.",
             "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -3334,6 +3474,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3363,6 +3517,20 @@
             "description": "Cursor for the next page of results.",
             "type": "string"
           },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -3391,6 +3559,20 @@
           "next_cursor": {
             "description": "Cursor for the next page of results.",
             "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -4551,12 +4733,6 @@
           "display_name": {
             "type": "string"
           },
-          "effective_defaults": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
           "env": {
             "additionalProperties": {
               "type": "string"
@@ -4565,15 +4741,6 @@
           },
           "name": {
             "type": "string"
-          },
-          "options_schema": {
-            "items": {
-              "$ref": "#/components/schemas/ProviderOptionDTO"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
           },
           "prompt_flag": {
             "type": "string"
@@ -6192,6 +6359,20 @@
             "description": "Number of beads deleted.",
             "format": "int64",
             "type": "integer"
+          },
+          "partial": {
+            "description": "True when one or more teardown steps failed; Closed/Deleted still reflect what succeeded.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from failed teardown steps.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "workflow_id": {
             "description": "Workflow ID.",
@@ -12934,16 +13115,6 @@
               "description": "City name.",
               "minLength": 1,
               "pattern": "\\S",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view.",
-            "explode": false,
-            "in": "query",
-            "name": "view",
-            "schema": {
-              "description": "Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view.",
               "type": "string"
             }
           }

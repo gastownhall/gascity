@@ -7,9 +7,10 @@ package api
 // --- Provider types ---
 
 // ProviderListInput is the Huma input for GET /v0/city/{cityName}/providers.
+// Admin view; the browser-safe projection lives at
+// GET /v0/city/{cityName}/providers/public.
 type ProviderListInput struct {
 	CityScope
-	View string `query:"view" required:"false" doc:"Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view."`
 }
 
 // ProviderPublicListInput is the Huma input for GET

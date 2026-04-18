@@ -1,12 +1,21 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
+)
+
+// errOrderNotFound / errOrderAmbiguous are sentinel errors so callers
+// can dispatch with errors.Is instead of substring-matching error
+// messages.
+var (
+	errOrderNotFound  = errors.New("order not found")
+	errOrderAmbiguous = errors.New("ambiguous order name")
 )
 
 type orderResponse struct {
@@ -45,7 +54,7 @@ func resolveOrder(aa []orders.Order, name string) (*orders.Order, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return nil, fmt.Errorf("order %s not found", name)
+		return nil, fmt.Errorf("%w: %s", errOrderNotFound, name)
 	case 1:
 		return &aa[matches[0]], nil
 	default:
@@ -53,7 +62,7 @@ func resolveOrder(aa []orders.Order, name string) (*orders.Order, error) {
 		for _, idx := range matches {
 			scoped = append(scoped, aa[idx].ScopedName())
 		}
-		return nil, fmt.Errorf("ambiguous order name %q; use scoped name: %s", name, strings.Join(scoped, ", "))
+		return nil, fmt.Errorf("%w %q; use scoped name: %s", errOrderAmbiguous, name, strings.Join(scoped, ", "))
 	}
 }
 

@@ -9,95 +9,34 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// humaHandleProviderList is the Huma-typed handler for GET /v0/providers.
-// Returns providerResponse entries. When view=public, the response contains
-// only the browser-safe fields (OptionsSchema, EffectiveDefaults); when view
-// is unset/admin, the admin-only fields (Command, Args, Env, prompt details)
-// are populated instead. See providerResponse for field details.
-func (s *Server) humaHandleProviderList(_ context.Context, input *ProviderListInput) (*ListOutput[providerResponse], error) {
-	cfg := s.state.Config()
-	builtins := config.BuiltinProviders()
-	builtinOrder := config.BuiltinProviderOrder()
-	isPublic := input.View == "public"
-
-	index := s.latestIndex()
-
-	// Collect all providers: city-level overrides + builtins.
-	seen := make(map[string]bool)
-	var providers []providerResponse
-
-	if isPublic {
-		// City-level providers first (sorted alphabetically).
-		var cityNames []string
-		for name := range cfg.Providers {
-			cityNames = append(cityNames, name)
-		}
-		sort.Strings(cityNames)
-		for _, name := range cityNames {
-			spec := cfg.Providers[name]
-			_, isBuiltin := builtins[name]
-			merged := spec
-			if base, ok := builtins[name]; ok {
-				merged = config.MergeProviderOverBuiltin(base, spec)
-			} else if base, ok := builtins[spec.Command]; ok {
-				merged = config.MergeProviderOverBuiltin(base, spec)
-			}
-			providers = append(providers, providerPublicFromMerged(name, merged, isBuiltin, true))
-			seen[name] = true
-		}
-		// Builtins not overridden by city-level (in canonical order).
-		for _, name := range builtinOrder {
-			if seen[name] {
-				continue
-			}
-			providers = append(providers, providerPublicFromMerged(name, builtins[name], true, false))
-		}
-	} else {
-		// City-level providers first (sorted alphabetically).
-		var cityNames []string
-		for name := range cfg.Providers {
-			cityNames = append(cityNames, name)
-		}
-		sort.Strings(cityNames)
-		for _, name := range cityNames {
-			spec := cfg.Providers[name]
-			_, isBuiltin := builtins[name]
-			providers = append(providers, providerFromSpec(name, spec, isBuiltin, true))
-			seen[name] = true
-		}
-
-		// Builtins not overridden by city-level (in canonical order).
-		for _, name := range builtinOrder {
-			if seen[name] {
-				continue
-			}
-			providers = append(providers, providerFromSpec(name, builtins[name], true, false))
-		}
-	}
-
-	return &ListOutput[providerResponse]{
-		Index: index,
-		Body:  ListBody[providerResponse]{Items: providers, Total: len(providers)},
-	}, nil
+// resolvedProvider is the internal record for one provider resolved
+// against the city config + built-ins. Both the admin list and the
+// public list iterate the same set; only the final DTO mapping differs.
+type resolvedProvider struct {
+	Name      string
+	Spec      config.ProviderSpec
+	Merged    config.ProviderSpec
+	Builtin   bool
+	CityLevel bool
 }
 
-// humaHandleProviderPublicList is the Huma-typed handler for
-// GET /v0/city/{cityName}/providers/public. It returns the browser-safe
-// projection of every provider — city-level first, then built-ins — and
-// never exposes command/args/env or prompt-delivery details.
-func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPublicListInput) (*ProviderPublicListOutput, error) {
+// resolveAllProviders returns every provider resolved from the current
+// city config — city-level overrides first (sorted), then built-ins not
+// already overridden (canonical order).
+func (s *Server) resolveAllProviders() []resolvedProvider {
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 	builtinOrder := config.BuiltinProviderOrder()
-
-	seen := make(map[string]bool)
-	var providers []ProviderPublicResponse
 
 	var cityNames []string
 	for name := range cfg.Providers {
 		cityNames = append(cityNames, name)
 	}
 	sort.Strings(cityNames)
+
+	seen := make(map[string]bool, len(cityNames)+len(builtinOrder))
+	out := make([]resolvedProvider, 0, len(cityNames)+len(builtinOrder))
+
 	for _, name := range cityNames {
 		spec := cfg.Providers[name]
 		_, isBuiltin := builtins[name]
@@ -107,16 +46,56 @@ func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPubl
 		} else if base, ok := builtins[spec.Command]; ok {
 			merged = config.MergeProviderOverBuiltin(base, spec)
 		}
-		providers = append(providers, toProviderPublicResponse(name, merged, isBuiltin, true))
+		out = append(out, resolvedProvider{
+			Name:      name,
+			Spec:      spec,
+			Merged:    merged,
+			Builtin:   isBuiltin,
+			CityLevel: true,
+		})
 		seen[name] = true
 	}
 	for _, name := range builtinOrder {
 		if seen[name] {
 			continue
 		}
-		providers = append(providers, toProviderPublicResponse(name, builtins[name], true, false))
+		spec := builtins[name]
+		out = append(out, resolvedProvider{
+			Name:      name,
+			Spec:      spec,
+			Merged:    spec,
+			Builtin:   true,
+			CityLevel: false,
+		})
 	}
+	return out
+}
 
+// humaHandleProviderList is the Huma-typed handler for
+// GET /v0/city/{cityName}/providers (admin view). The browser-safe view
+// lives at /providers/public.
+func (s *Server) humaHandleProviderList(_ context.Context, _ *ProviderListInput) (*ListOutput[providerResponse], error) {
+	resolved := s.resolveAllProviders()
+	providers := make([]providerResponse, 0, len(resolved))
+	for _, p := range resolved {
+		providers = append(providers, providerFromSpec(p.Name, p.Spec, p.Builtin, p.CityLevel))
+	}
+	return &ListOutput[providerResponse]{
+		Index: s.latestIndex(),
+		Body:  ListBody[providerResponse]{Items: providers, Total: len(providers)},
+	}, nil
+}
+
+// humaHandleProviderPublicList is the Huma-typed handler for
+// GET /v0/city/{cityName}/providers/public. It returns the browser-safe
+// projection of every provider — city-level first, then built-ins — and
+// never exposes command/args/env or prompt-delivery details.
+func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPublicListInput) (*ProviderPublicListOutput, error) {
+	resolved := s.resolveAllProviders()
+	providers := make([]ProviderPublicResponse, 0, len(resolved))
+	for _, p := range resolved {
+		providers = append(providers, toProviderPublicResponse(p.Name, p.Merged, p.Builtin, p.CityLevel))
+	}
 	return &ProviderPublicListOutput{
 		Index: s.latestIndex(),
 		Body:  ProviderPublicListBody{Items: providers, Total: len(providers)},

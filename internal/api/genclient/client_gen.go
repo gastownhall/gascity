@@ -1236,6 +1236,12 @@ type ListBodyAgentPatch struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1247,6 +1253,12 @@ type ListBodyAgentResponse struct {
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
@@ -1260,6 +1272,12 @@ type ListBodyBead struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1271,6 +1289,12 @@ type ListBodyConversationTranscriptRecord struct {
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
@@ -1284,6 +1308,12 @@ type ListBodyEvent struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1295,6 +1325,12 @@ type ListBodyExtmsgAdapterInfo struct {
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
@@ -1308,6 +1344,12 @@ type ListBodyProviderPatch struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1319,6 +1361,12 @@ type ListBodyProviderResponse struct {
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
@@ -1332,6 +1380,12 @@ type ListBodyRigPatch struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1343,6 +1397,12 @@ type ListBodyRigResponse struct {
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
@@ -1356,6 +1416,12 @@ type ListBodySessionBindingRecord struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1368,6 +1434,12 @@ type ListBodySessionResponse struct {
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
@@ -1379,6 +1451,12 @@ type ListBodyStatus struct {
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
@@ -1775,18 +1853,16 @@ type ProviderReadinessResponse struct {
 
 // ProviderResponse defines model for ProviderResponse.
 type ProviderResponse struct {
-	Args              *[]string            `json:"args,omitempty"`
-	Builtin           bool                 `json:"builtin"`
-	CityLevel         bool                 `json:"city_level"`
-	Command           *string              `json:"command,omitempty"`
-	DisplayName       *string              `json:"display_name,omitempty"`
-	EffectiveDefaults *map[string]string   `json:"effective_defaults,omitempty"`
-	Env               *map[string]string   `json:"env,omitempty"`
-	Name              string               `json:"name"`
-	OptionsSchema     *[]ProviderOptionDTO `json:"options_schema,omitempty"`
-	PromptFlag        *string              `json:"prompt_flag,omitempty"`
-	PromptMode        *string              `json:"prompt_mode,omitempty"`
-	ReadyDelayMs      *int64               `json:"ready_delay_ms,omitempty"`
+	Args         *[]string          `json:"args,omitempty"`
+	Builtin      bool               `json:"builtin"`
+	CityLevel    bool               `json:"city_level"`
+	Command      *string            `json:"command,omitempty"`
+	DisplayName  *string            `json:"display_name,omitempty"`
+	Env          *map[string]string `json:"env,omitempty"`
+	Name         string             `json:"name"`
+	PromptFlag   *string            `json:"prompt_flag,omitempty"`
+	PromptMode   *string            `json:"prompt_mode,omitempty"`
+	ReadyDelayMs *int64             `json:"ready_delay_ms,omitempty"`
 }
 
 // ProviderSpecJSON defines model for ProviderSpecJSON.
@@ -2405,6 +2481,12 @@ type WorkflowDeleteResponse struct {
 	// Deleted Number of beads deleted.
 	Deleted int64 `json:"deleted"`
 
+	// Partial True when one or more teardown steps failed; Closed/Deleted still reflect what succeeded.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from failed teardown steps.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
 	// WorkflowId Workflow ID.
 	WorkflowId string `json:"workflow_id"`
 }
@@ -2818,12 +2900,6 @@ type GetV0CityByCityNameProviderReadinessParams struct {
 
 	// Fresh Force fresh probe, bypassing cache.
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
-}
-
-// GetV0CityByCityNameProvidersParams defines parameters for GetV0CityByCityNameProviders.
-type GetV0CityByCityNameProvidersParams struct {
-	// View Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view.
-	View *string `form:"view,omitempty" json:"view,omitempty"`
 }
 
 // GetV0CityByCityNameReadinessParams defines parameters for GetV0CityByCityNameReadiness.
@@ -3769,7 +3845,7 @@ type ClientInterface interface {
 	PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviders request
-	GetV0CityByCityNameProviders(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameProviders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateProviderWithBody request with any body
 	CreateProviderWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -5478,8 +5554,8 @@ func (c *Client) PatchV0CityByCityNameProviderByName(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameProviders(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameProvidersRequest(c.Server, cityName, params)
+func (c *Client) GetV0CityByCityNameProviders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameProvidersRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -11866,7 +11942,7 @@ func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityNa
 }
 
 // NewGetV0CityByCityNameProvidersRequest generates requests for GetV0CityByCityNameProviders
-func NewGetV0CityByCityNameProvidersRequest(server string, cityName string, params *GetV0CityByCityNameProvidersParams) (*http.Request, error) {
+func NewGetV0CityByCityNameProvidersRequest(server string, cityName string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11889,28 +11965,6 @@ func NewGetV0CityByCityNameProvidersRequest(server string, cityName string, para
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.View != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "view", *params.View, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -14522,7 +14576,7 @@ type ClientWithResponsesInterface interface {
 	PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
 
 	// GetV0CityByCityNameProvidersWithResponse request
-	GetV0CityByCityNameProvidersWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersResponse, error)
+	GetV0CityByCityNameProvidersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersResponse, error)
 
 	// CreateProviderWithBodyWithResponse request with any body
 	CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
@@ -19048,8 +19102,8 @@ func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithResponse(ct
 }
 
 // GetV0CityByCityNameProvidersWithResponse request returning *GetV0CityByCityNameProvidersResponse
-func (c *ClientWithResponses) GetV0CityByCityNameProvidersWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersResponse, error) {
-	rsp, err := c.GetV0CityByCityNameProviders(ctx, cityName, params, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameProvidersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersResponse, error) {
+	rsp, err := c.GetV0CityByCityNameProviders(ctx, cityName, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

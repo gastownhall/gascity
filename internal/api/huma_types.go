@@ -62,11 +62,16 @@ type PaginationParam struct {
 // --- Shared output types ---
 
 // ListBody is the JSON body for list responses. It wraps items with total
-// count and optional pagination cursor.
+// count and optional pagination cursor. Partial/PartialErrors signal that
+// the aggregation swept over multiple backends and at least one of them
+// failed — callers then know the list is not authoritative without the
+// endpoint having to return a 5xx.
 type ListBody[T any] struct {
-	Items      []T    `json:"items" doc:"The list of items."`
-	Total      int    `json:"total" doc:"Total number of items matching the query."`
-	NextCursor string `json:"next_cursor,omitempty" doc:"Cursor for the next page of results."`
+	Items         []T      `json:"items" doc:"The list of items."`
+	Total         int      `json:"total" doc:"Total number of items matching the query."`
+	NextCursor    string   `json:"next_cursor,omitempty" doc:"Cursor for the next page of results."`
+	Partial       bool     `json:"partial,omitempty" doc:"True when one or more backends failed and the list is incomplete."`
+	PartialErrors []string `json:"partial_errors,omitempty" doc:"Human-readable errors from backends that failed during aggregation."`
 }
 
 // ListOutput is a generic output type for list endpoints. It sets the

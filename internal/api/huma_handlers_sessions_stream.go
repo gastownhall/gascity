@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
@@ -102,6 +101,3 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 		s.streamSessionPeek(reqCtx, send, info)
 	}
 }
-
-// Keep unused import references for imports needed by specific code paths.
-var _ = http.StatusCreated

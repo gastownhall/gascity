@@ -101,6 +101,25 @@ func (s *Server) resolveSessionWorkDir(agentCfg config.Agent, qualifiedName stri
 	return workDir, nil
 }
 
+// resolveSessionTemplateWithBareNameFallback resolves a session template
+// by name, retrying with the qualified name when the input is a bare
+// agent name that matches exactly one configured agent. Keeps the
+// two-phase lookup out of the handler.
+func (s *Server) resolveSessionTemplateWithBareNameFallback(name string) (*config.ResolvedProvider, string, string, string, error) {
+	resolved, workDir, transport, template, err := s.resolveSessionTemplate(name)
+	if err == nil {
+		return resolved, workDir, transport, template, nil
+	}
+	if !errors.Is(err, errSessionTemplateNotFound) || strings.Contains(name, "/") {
+		return nil, "", "", "", err
+	}
+	agentCfg, ok := findUniqueAgentTemplateByBareName(s.state.Config(), name)
+	if !ok {
+		return nil, "", "", "", err
+	}
+	return s.resolveSessionTemplate(agentCfg.QualifiedName())
+}
+
 func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvider, string, string, string, error) {
 	cfg := s.state.Config()
 	if cfg == nil {

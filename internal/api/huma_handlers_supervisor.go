@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -429,7 +428,3 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	}
 }
 
-// Unused-import fixer: json is only referenced by the cityCreateRequest
-// docs, which is shared with the legacy handler; keep encoding/json
-// imported for future expansion.
-var _ = json.Valid

@@ -50,22 +50,13 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 
 	// Agent track.
-	resolved, workDir, transport, template, err := s.resolveSessionTemplate(name)
+	resolved, workDir, transport, template, err := s.resolveSessionTemplateWithBareNameFallback(name)
 	if err != nil {
-		if errors.Is(err, errSessionTemplateNotFound) && !strings.Contains(name, "/") {
-			if agentCfg, ok := findUniqueAgentTemplateByBareName(s.state.Config(), name); ok {
-				resolved, workDir, transport, template, err = s.resolveSessionTemplate(agentCfg.QualifiedName())
-			}
-		}
-		if err == nil {
-			goto resolvedTemplate
-		}
 		if errors.Is(err, errSessionTemplateNotFound) {
 			return nil, huma.Error404NotFound("agent '" + name + "' not found")
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-resolvedTemplate:
 
 	if len(body.Options) > 0 {
 		if len(resolved.OptionsSchema) == 0 {

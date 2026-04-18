@@ -42,10 +42,15 @@ type convoyCheckResponse struct {
 }
 
 // workflowDeleteResponse is the response for DELETE /v0/workflow/{workflow_id}.
+// Partial/PartialErrors fire when the teardown swept beads but one or
+// more operations (list, close, dep-remove, delete) failed mid-way;
+// clients see exact counts for what succeeded plus the failed steps.
 type workflowDeleteResponse struct {
-	WorkflowID string `json:"workflow_id" doc:"Workflow ID."`
-	Closed     int    `json:"closed" doc:"Number of beads closed."`
-	Deleted    int    `json:"deleted" doc:"Number of beads deleted."`
+	WorkflowID    string   `json:"workflow_id" doc:"Workflow ID."`
+	Closed        int      `json:"closed" doc:"Number of beads closed."`
+	Deleted       int      `json:"deleted" doc:"Number of beads deleted."`
+	Partial       bool     `json:"partial,omitempty" doc:"True when one or more teardown steps failed; Closed/Deleted still reflect what succeeded."`
+	PartialErrors []string `json:"partial_errors,omitempty" doc:"Human-readable errors from failed teardown steps."`
 }
 
 // humaHandleConvoyList is the Huma-typed handler for GET /v0/convoys.
@@ -70,10 +75,12 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
 	var convoys []beads.Bead
+	var pa partialAggregator
 	for _, rigName := range rigNames {
 		store := stores[rigName]
 		list, err := store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
+			pa.record("rig "+rigName, err)
 			continue
 		}
 		convoys = append(convoys, list...)
@@ -91,7 +98,12 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		}
 		return &ListOutput[beads.Bead]{
 			Index: index,
-			Body:  ListBody[beads.Bead]{Items: convoys, Total: total},
+			Body: ListBody[beads.Bead]{
+				Items:         convoys,
+				Total:         total,
+				Partial:       pa.partial(),
+				PartialErrors: pa.messages(),
+			},
 		}, nil
 	}
 
@@ -101,7 +113,13 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	}
 	return &ListOutput[beads.Bead]{
 		Index: index,
-		Body:  ListBody[beads.Bead]{Items: page, Total: total, NextCursor: nextCursor},
+		Body: ListBody[beads.Bead]{
+			Items:         page,
+			Total:         total,
+			NextCursor:    nextCursor,
+			Partial:       pa.partial(),
+			PartialErrors: pa.messages(),
+		},
 	}, nil
 }
 
@@ -533,6 +551,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	closed := 0
 	deleted := 0
 	found := false
+	var pa partialAggregator
 
 	for _, info := range stores {
 		if info.store == nil {
@@ -572,6 +591,8 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		}
 		if root, err := info.store.Get(workflowID); err == nil {
 			addRoot(root)
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			pa.record("store "+info.scopeRef+" get root", err)
 		}
 		if roots, err := info.store.List(beads.ListQuery{
 			Metadata: map[string]string{
@@ -583,6 +604,8 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			for _, root := range roots {
 				addRoot(root)
 			}
+		} else {
+			pa.record("store "+info.scopeRef+" list roots", err)
 		}
 		for _, rootID := range rootIDs {
 			all, err := info.store.List(beads.ListQuery{
@@ -590,6 +613,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 				IncludeClosed: true,
 			})
 			if err != nil {
+				pa.record("store "+info.scopeRef+" list descendants", err)
 				continue
 			}
 			for _, b := range all {
@@ -602,25 +626,38 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		found = true
 
 		// Phase 1: Batch close all open beads.
-		n, _ := info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+		n, closeErr := info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
 		closed += n
+		if closeErr != nil {
+			pa.record("store "+info.scopeRef+" close", closeErr)
+		}
 
 		// Phase 2: Delete if requested.
 		if deleteFromStore {
 			for _, id := range ids {
 				if deps, err := info.store.DepList(id, "down"); err == nil {
 					for _, dep := range deps {
-						_ = info.store.DepRemove(id, dep.DependsOnID)
+						if err := info.store.DepRemove(id, dep.DependsOnID); err != nil {
+							pa.record("store "+info.scopeRef+" dep-remove "+id+"→"+dep.DependsOnID, err)
+						}
 					}
+				} else {
+					pa.record("store "+info.scopeRef+" dep-list down "+id, err)
 				}
 				if deps, err := info.store.DepList(id, "up"); err == nil {
 					for _, dep := range deps {
-						_ = info.store.DepRemove(dep.IssueID, id)
+						if err := info.store.DepRemove(dep.IssueID, id); err != nil {
+							pa.record("store "+info.scopeRef+" dep-remove "+dep.IssueID+"→"+id, err)
+						}
 					}
+				} else {
+					pa.record("store "+info.scopeRef+" dep-list up "+id, err)
 				}
-				if err := info.store.Delete(id); err == nil {
-					deleted++
+				if err := info.store.Delete(id); err != nil {
+					pa.record("store "+info.scopeRef+" delete "+id, err)
+					continue
 				}
+				deleted++
 			}
 		}
 	}
@@ -632,8 +669,10 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	return &struct {
 		Body workflowDeleteResponse
 	}{Body: workflowDeleteResponse{
-		WorkflowID: workflowID,
-		Closed:     closed,
-		Deleted:    deleted,
+		WorkflowID:    workflowID,
+		Closed:        closed,
+		Deleted:       deleted,
+		Partial:       pa.partial(),
+		PartialErrors: pa.messages(),
 	}}, nil
 }

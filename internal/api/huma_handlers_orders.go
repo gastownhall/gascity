@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,7 +41,7 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 }, error) {
 	a, err := resolveOrder(s.state.Orders(), input.Name)
 	if err != nil {
-		if strings.Contains(err.Error(), "ambiguous") {
+		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())
 		}
 		return nil, huma.Error404NotFound(err.Error())
@@ -277,7 +278,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 
 	b, err := store.Get(input.BeadID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, beads.ErrNotFound) {
 			return nil, huma.Error404NotFound("bead not found")
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
@@ -411,7 +412,7 @@ func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, er
 
 	a, err := resolveOrder(s.state.Orders(), name)
 	if err != nil {
-		if strings.Contains(err.Error(), "ambiguous") {
+		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())
 		}
 		return nil, huma.Error404NotFound(err.Error())

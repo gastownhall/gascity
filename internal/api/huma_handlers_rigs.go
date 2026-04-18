@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
-	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -182,8 +182,8 @@ func (s *Server) humaHandleRigRestart(name string) (*RigActionResponse, error) {
 		for _, ea := range expanded {
 			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
 			if err := sp.Stop(sessionName); err != nil {
-				// "not found" / "not running" are benign — agent wasn't running.
-				if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "not running") {
+				// "session gone" is benign — agent wasn't running.
+				if !runtime.IsSessionGone(err) {
 					failed = append(failed, ea.qualifiedName)
 				}
 			} else {

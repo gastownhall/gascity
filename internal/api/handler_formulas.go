@@ -14,7 +14,10 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-var errFormulaNotWorkflow = errors.New("formula is not a workflow")
+var (
+	errFormulaNotWorkflow = errors.New("formula is not a workflow")
+	errFormulaNotFound    = errors.New("formula not found")
+)
 
 // Response types (formulaDetailResponse, formulaSummaryResponse,
 // formulaRunsResponse, and the formulaPreview* / formulaVarDef /
@@ -169,7 +172,7 @@ func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedSco
 
 func buildFormulaDetail(ctx context.Context, name string, paths []string, _ string, vars map[string]string) (*formulaDetailResponse, error) {
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("formula %q not found in search paths", name)
+		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
 	parser := formula.NewParser(paths...)
 	resolved, err := loadResolvedWorkflowFormula(parser, name)

@@ -41,6 +41,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	var all []beads.Bead
 	dedupe := len(assigneeTerms) > 1
 	seen := map[string]bool{}
+	var pa partialAggregator
 	for _, rigName := range rigNames {
 		store := stores[rigName]
 		for _, assignee := range assigneeTerms {
@@ -55,6 +56,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			}
 			list, err := store.List(query)
 			if err != nil {
+				pa.record("rig "+rigName, err)
 				continue
 			}
 			for _, b := range list {
@@ -82,7 +84,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		}
 		return &ListOutput[beads.Bead]{
 			Index: index,
-			Body:  ListBody[beads.Bead]{Items: all, Total: total},
+			Body: ListBody[beads.Bead]{
+				Items:         all,
+				Total:         total,
+				Partial:       pa.partial(),
+				PartialErrors: pa.messages(),
+			},
 		}, nil
 	}
 
@@ -92,7 +99,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	return &ListOutput[beads.Bead]{
 		Index: index,
-		Body:  ListBody[beads.Bead]{Items: page, Total: total, NextCursor: nextCursor},
+		Body: ListBody[beads.Bead]{
+			Items:         page,
+			Total:         total,
+			NextCursor:    nextCursor,
+			Partial:       pa.partial(),
+			PartialErrors: pa.messages(),
+		},
 	}, nil
 }
 
@@ -106,9 +119,11 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
 	var all []beads.Bead
+	var pa partialAggregator
 	for _, rigName := range rigNames {
 		ready, err := stores[rigName].Ready()
 		if err != nil {
+			pa.record("rig "+rigName, err)
 			continue
 		}
 		all = append(all, ready...)
@@ -121,7 +136,12 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	index := s.latestIndex()
 	return &ListOutput[beads.Bead]{
 		Index: index,
-		Body:  ListBody[beads.Bead]{Items: all, Total: len(all)},
+		Body: ListBody[beads.Bead]{
+			Items:         all,
+			Total:         len(all),
+			Partial:       pa.partial(),
+			PartialErrors: pa.messages(),
+		},
 	}, nil
 }
 

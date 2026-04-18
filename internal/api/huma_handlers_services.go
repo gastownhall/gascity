@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"strings"
+	"errors"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -49,7 +49,7 @@ func (s *Server) humaHandleServiceRestart(_ context.Context, input *ServiceResta
 		return nil, huma.Error404NotFound("service " + name + " not found")
 	}
 	if err := reg.Restart(name); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, workspacesvc.ErrServiceNotFound) {
 			return nil, huma.Error404NotFound(err.Error())
 		}
 		return nil, huma.Error500InternalServerError(err.Error())

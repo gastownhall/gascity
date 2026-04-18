@@ -123,7 +123,7 @@ func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDeta
 
 	detail, err := buildFormulaDetail(ctx, name, paths, target, input.vars)
 	if err != nil {
-		if errors.Is(err, errFormulaNotWorkflow) || strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, huma.Error404NotFound(err.Error())
 		}
 		return nil, huma.Error400BadRequest(err.Error())
