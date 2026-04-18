@@ -139,7 +139,7 @@ Gas City follows upstream Gastown's logical topology:
 Upstream references:
 
 - `docs/design/architecture.md` in `gastown`
-- Gastown's `doltserver.go` implementation
+- the upstream Gastown `doltserver` package
 
 ### Aligned with upstream `beads`
 

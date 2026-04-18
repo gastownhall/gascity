@@ -135,6 +135,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var lastActivity *time.Time
+			sessionID := ""
 			if running {
 				si := &sessionInfo{Name: sessionName}
 				if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
@@ -143,10 +144,13 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 				}
 				si.Attached = sp.IsAttached(sessionName)
 				resp.Session = si
+				if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+					sessionID = strings.TrimSpace(id)
+				}
 			}
 
 			// Find active bead by querying bead stores.
-			resp.ActiveBead = s.findActiveBead(ea.qualifiedName, ea.rig)
+			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
 
 			// Compute state enum.
 			quarantined := s.state.IsQuarantined(sessionName)
@@ -256,6 +260,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var lastActivity *time.Time
+	sessionID := ""
 	if running {
 		si := &sessionInfo{Name: sessionName}
 		if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
@@ -264,10 +269,13 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		si.Attached = sp.IsAttached(sessionName)
 		resp.Session = si
+		if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+			sessionID = strings.TrimSpace(id)
+		}
 	}
 
 	// Find active bead by querying bead stores.
-	resp.ActiveBead = s.findActiveBead(name, agentCfg.Dir)
+	resp.ActiveBead = s.findActiveBeadForAssignees(agentCfg.Dir, sessionID, sessionName, name)
 
 	// Compute state enum.
 	quarantined := s.state.IsQuarantined(sessionName)
@@ -346,10 +354,7 @@ type expandedAgent struct {
 // For unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
 func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiSession := maxSess == nil || *maxSess != 1
-
-	if !isMultiSession {
+	if !a.SupportsInstanceExpansion() {
 		return []expandedAgent{{
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
@@ -362,14 +367,13 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 	poolName := a.QualifiedName()
 
 	// Unlimited: discover running instances via session prefix.
-	isUnlimited := maxSess == nil || *maxSess < 0
-	if isUnlimited && sp != nil {
+	if a.HasUnlimitedSessionCapacity() && sp != nil {
 		return discoverUnlimitedPool(a, poolName, cityName, sessTmpl, sp)
 	}
 
 	// Bounded: static enumeration.
 	poolMax := 1
-	if maxSess != nil && *maxSess > 1 {
+	if maxSess := a.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess > 1 {
 		poolMax = *maxSess
 	}
 
@@ -443,11 +447,8 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 			return a, true
 		}
 		// Check multi-session instance members.
-		maxSess := a.EffectiveMaxActiveSessions()
-		isMultiSession := maxSess == nil || *maxSess != 1
-		if isMultiSession && a.Dir == dir {
-			isUnlimited := maxSess == nil || *maxSess < 0
-			if isUnlimited {
+		if a.SupportsInstanceExpansion() && a.Dir == dir {
+			if a.HasUnlimitedSessionCapacity() {
 				// Unlimited: match "{name}-{N}" or "{binding.name}-{N}" where N >= 1.
 				// For V2 agents, try binding-qualified prefix first.
 				prefixes := []string{a.Name + "-"}
@@ -470,9 +471,10 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 				continue
 			}
 			// Bounded: enumerate.
-			poolMax := *maxSess
-			if poolMax <= 0 {
-				poolMax = 1
+			maxSess := a.EffectiveMaxActiveSessions()
+			poolMax := 1
+			if maxSess != nil && *maxSess > 1 {
+				poolMax = *maxSess
 			}
 			for i := 1; i <= poolMax; i++ {
 				memberName := poolInstanceNameForAPI(a.Name, i, a)
@@ -485,14 +487,7 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
-// findActiveBead returns the ID of the first in_progress bead assigned to the
-// given agent. If rig is non-empty, only that rig's store is searched;
-// otherwise all stores are searched. Returns "" if no match.
-//
-// Uses ListByAssignee with limit=1 instead of List() to avoid fetching all
-// beads from every store — a critical performance fix when bead counts are
-// large (e.g., 2200+ beads × 102 agents = ~186 full-list subprocess spawns).
-func (s *Server) findActiveBead(agentName, rig string) string {
+func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
 	if rig != "" {
@@ -503,18 +498,30 @@ func (s *Server) findActiveBead(agentName, rig string) string {
 	if rigNames == nil {
 		rigNames = sortedRigNames(stores)
 	}
-	for _, rn := range rigNames {
-		matches, err := stores[rn].List(beads.ListQuery{
-			Assignee: agentName,
-			Status:   "in_progress",
-			Limit:    1,
-			Sort:     beads.SortCreatedDesc,
-		})
-		if err != nil {
+	seen := make(map[string]bool, len(assignees))
+	var unique []string
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" || seen[assignee] {
 			continue
 		}
-		if len(matches) > 0 {
-			return matches[0].ID
+		seen[assignee] = true
+		unique = append(unique, assignee)
+	}
+	for _, assignee := range unique {
+		for _, rn := range rigNames {
+			matches, err := stores[rn].List(beads.ListQuery{
+				Assignee: assignee,
+				Status:   "in_progress",
+				Limit:    1,
+				Sort:     beads.SortCreatedDesc,
+			})
+			if err != nil {
+				continue
+			}
+			if len(matches) > 0 {
+				return matches[0].ID
+			}
 		}
 	}
 	return ""
@@ -612,7 +619,7 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if sessionFile == "" {
 		return
 	}
-	meta, err := sessionlog.ExtractTailMeta(sessionFile)
+	meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile)
 	if err != nil || meta == nil {
 		return
 	}
@@ -666,9 +673,11 @@ func multiSessionSharesWorkDir(cityPath, cityName, target string, a config.Agent
 		return false
 	}
 
-	maxSess := a.EffectiveMaxActiveSessions()
-	isUnlimited := maxSess == nil || *maxSess < 0
-	if !isUnlimited {
+	if !a.HasUnlimitedSessionCapacity() {
+		maxSess := a.EffectiveMaxActiveSessions()
+		if maxSess == nil {
+			return false
+		}
 		for slot := 1; slot <= *maxSess; slot++ {
 			if workdirutil.ResolveWorkDirPath(cityPath, cityName, poolQualifiedNameForSlot(a, slot), a, rigs) == target {
 				return true
@@ -696,14 +705,11 @@ func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 // isMultiSessionAgent reports whether the agent can have more than one
 // concurrent session. This is the replacement for the removed IsPool() method.
 func isMultiSessionAgent(a config.Agent) bool {
-	maxSess := a.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
+	return a.SupportsInstanceExpansion()
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
+	if !a.SupportsInstanceExpansion() {
 		return base
 	}
 	if slot >= 1 && slot <= len(a.NamepoolNames) {

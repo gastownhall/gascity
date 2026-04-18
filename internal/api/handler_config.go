@@ -79,7 +79,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	agents := make([]configAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		agents = append(agents, configAgentResponse{
-			Name:             a.Name,
+			Name:             a.BindingQualifiedName(),
 			Dir:              a.Dir,
 			Provider:         a.Provider,
 			IsPool:           isMultiSessionAgent(a),
@@ -162,7 +162,7 @@ func (s *Server) handleConfigExplain(w http.ResponseWriter, _ *http.Request) {
 		origin := agentOrigin(a, rawCfg, cfg)
 		agents = append(agents, annotatedAgent{
 			configAgentResponse: configAgentResponse{
-				Name:      a.Name,
+				Name:      a.BindingQualifiedName(),
 				Dir:       a.Dir,
 				Provider:  a.Provider,
 				IsPool:    isMultiSessionAgent(a),

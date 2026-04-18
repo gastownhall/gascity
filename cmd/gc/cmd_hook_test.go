@@ -187,7 +187,7 @@ max = 5
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'pwd=%s\\nargs=%s\\n' \"$PWD\" \"$*\"\n"
+	script := "#!/bin/sh\nprintf 'pwd=%s\nstore_root=%s\nstore_scope=%s\nprefix=%s\nrig=%s\nrig_root=%s\nargs=%s\n' \"$PWD\" \"${GC_STORE_ROOT:-}\" \"${GC_STORE_SCOPE:-}\" \"${GC_BEADS_PREFIX:-}\" \"${GC_RIG:-}\" \"${GC_RIG_ROOT:-}\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +214,21 @@ max = 5
 	out := stdout.String()
 	if !strings.Contains(out, "pwd="+rigDir) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
+	}
+	if !strings.Contains(out, "store_root="+rigDir) {
+		t.Fatalf("stdout = %q, want GC_STORE_ROOT=%q", out, rigDir)
+	}
+	if !strings.Contains(out, "store_scope=rig") {
+		t.Fatalf("stdout = %q, want GC_STORE_SCOPE=rig", out)
+	}
+	if !strings.Contains(out, "prefix=my") {
+		t.Fatalf("stdout = %q, want GC_BEADS_PREFIX=my", out)
+	}
+	if !strings.Contains(out, "rig=myrig") {
+		t.Fatalf("stdout = %q, want GC_RIG=myrig", out)
+	}
+	if !strings.Contains(out, "rig_root="+rigDir) {
+		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
 	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat --json --limit=1") {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -127,6 +128,291 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 	if cs.Config() != cfg2 {
 		t.Error("Config() not updated")
+	}
+}
+
+func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
+	}
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+
+	rigStore := cs.BeadStore("rig1")
+	if rigStore == nil {
+		t.Fatal("BeadStore(rig1) = nil")
+	}
+	cityStore := cs.CityBeadStore()
+	if cityStore == nil {
+		t.Fatal("CityBeadStore() = nil")
+	}
+
+	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	cityList, err := cityStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("city List after rig create: %v", err)
+	}
+	if len(cityList) != 0 {
+		t.Fatalf("city store should stay empty after rig create, got %d bead(s)", len(cityList))
+	}
+
+	if _, err := cityStore.Create(beads.Bead{Title: "city bead", Type: "task"}); err != nil {
+		t.Fatalf("city Create: %v", err)
+	}
+	rigList, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig List after city create: %v", err)
+	}
+	if len(rigList) != 1 || rigList[0].Title != "rig bead" {
+		t.Fatalf("rig store should still contain only its own bead, got %#v", rigList)
+	}
+}
+
+func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
+	}
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+
+	rigStore := cs.BeadStore("rig1")
+	if rigStore == nil {
+		t.Fatal("BeadStore(rig1) = nil")
+	}
+	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc", "beads.json.lock")); err != nil {
+		t.Fatalf("rig lock file missing: %v", err)
+	}
+
+	cityStore := cs.CityBeadStore()
+	if cityStore == nil {
+		t.Fatal("CityBeadStore() = nil")
+	}
+	if _, err := cityStore.Create(beads.Bead{Title: "city bead", Type: "task"}); err != nil {
+		t.Fatalf("city Create: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "beads.json.lock")); err != nil {
+		t.Fatalf("city lock file missing: %v", err)
+	}
+}
+
+func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
+	}
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	rigStore := cs.BeadStore("rig1")
+	if rigStore == nil {
+		t.Fatal("BeadStore(rig1) = nil")
+	}
+	if _, err := rigStore.Create(beads.Bead{Title: "controller-1", Type: "task"}); err != nil {
+		t.Fatalf("controller Create 1: %v", err)
+	}
+
+	otherStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, err := otherStore.Create(beads.Bead{Title: "cli", Type: "task"}); err != nil {
+		t.Fatalf("cli Create: %v", err)
+	}
+	if _, err := rigStore.Create(beads.Bead{Title: "controller-2", Type: "task"}); err != nil {
+		t.Fatalf("controller Create 2: %v", err)
+	}
+
+	reloadedStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig) reload: %v", err)
+	}
+	list, err := reloadedStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("reload List: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("rig store bead count = %d, want 3 after interleaved writes: %#v", len(list), list)
+	}
+	seen := map[string]bool{}
+	for _, bead := range list {
+		seen[bead.Title] = true
+	}
+	for _, want := range []string{"controller-1", "cli", "controller-2"} {
+		if !seen[want] {
+			t.Fatalf("missing bead %q after interleaved writes: %#v", want, list)
+		}
+	}
+}
+
+func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigState(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyCityStore, err := openScopeLocalFileStore(cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStore(city): %v", err)
+	}
+
+	if _, err := legacyCityStore.Create(beads.Bead{Title: "legacy city bead", Type: "task"}); err != nil {
+		t.Fatalf("legacy city Create: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+
+	rigStore := cs.BeadStore("rig1")
+	if rigStore == nil {
+		t.Fatal("BeadStore(rig1) = nil")
+	}
+	list, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig List: %v", err)
+	}
+	if len(list) != 1 || list[0].Title != "legacy city bead" {
+		t.Fatalf("rig store should read legacy shared city data, got %#v", list)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc")); !os.IsNotExist(err) {
+		t.Fatalf("legacy rig open should not create rig .gc state, stat err = %v", err)
+	}
+}
+
+func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigOne := filepath.Join(t.TempDir(), "rig1")
+	rigTwo := filepath.Join(t.TempDir(), "rig2")
+	if err := os.MkdirAll(rigOne, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigTwo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "rig1", Path: rigOne},
+			{Name: "rig2", Path: rigTwo},
+		},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+
+	rigStoreOne := cs.BeadStore("rig1")
+	rigStoreTwo := cs.BeadStore("rig2")
+	if rigStoreOne == nil || rigStoreTwo == nil {
+		t.Fatal("expected both rig stores")
+	}
+	if _, err := rigStoreOne.Create(beads.Bead{Title: "shared bead", Type: "task"}); err != nil {
+		t.Fatalf("rig1 Create: %v", err)
+	}
+	list, err := rigStoreTwo.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig2 List: %v", err)
+	}
+	if len(list) != 1 || list[0].Title != "shared bead" {
+		t.Fatalf("rig2 store should immediately observe shared legacy bead, got %#v", list)
+	}
+	reloadedCityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	cityList, err := reloadedCityStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("city List: %v", err)
+	}
+	if len(cityList) != 1 || cityList[0].Title != "shared bead" {
+		t.Fatalf("city store should contain shared bead after reopen, got %#v", cityList)
+	}
+}
+
+func TestControllerStateOpenRigStoreFileOpenErrorDoesNotFallbackToBd(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "rig1")
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".gc", "beads.json"), []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := &controllerState{cityPath: cityDir}
+	store := cs.openRigStore("file", "rig1", rigDir, "rg")
+	if _, ok := store.(*beads.BdStore); ok {
+		t.Fatalf("openRigStore returned %T, want file-open failure instead of bd fallback", store)
+	}
+	if _, err := store.Create(beads.Bead{Title: "broken", Type: "task"}); err == nil {
+		t.Fatal("Create succeeded, want file-open error")
+	} else if !strings.Contains(err.Error(), "open file rig store") {
+		t.Fatalf("Create error = %v, want file-open failure", err)
 	}
 }
 

@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
@@ -144,29 +143,20 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	provider := beadsProviderFor(cfg)
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
-	// For the "file" provider, all rigs share the same city-level beads.json.
-	var sharedFileStore beads.Store
-	if provider == "file" {
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
+	var sharedLegacyFileStore beads.Store
+	if provider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
+		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
 		if err == nil {
-			sharedFileStore = store
-		} else {
-			// Fall back to bd provider rather than opening duplicate per-rig file stores.
-			fmt.Fprintf(os.Stderr, "api: failed to open shared file store: %v (falling back to bd provider)\n", err)
-			provider = "bd"
+			sharedLegacyFileStore = store
 		}
 	}
 
 	for _, rig := range cfg.Rigs {
-		if sharedFileStore != nil {
-			stores[rig.Name] = sharedFileStore
-		} else {
-			stores[rig.Name] = wrapWithCachingStore(
-				cs.cacheCtx,
-				cs.openRigStore(provider, rig.Path, rig.EffectivePrefix(), rig.Name, cfg),
-				cs.eventProv,
-			)
+		store := sharedLegacyFileStore
+		if store == nil {
+			store = cs.openRigStore(provider, rig.Name, rig.Path, rig.EffectivePrefix())
 		}
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}
 	return stores
 }
@@ -184,29 +174,27 @@ func beadsProviderFor(cfg *config.City) string {
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
-// cfg is the config snapshot that triggered this build — callers must pass it
-// explicitly so hot-reload never reads the stale cs.cfg.
-func (cs *controllerState) openRigStore(provider, rigPath, prefix, rigName string, cfg *config.City) beads.Store {
+func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string) beads.Store {
+	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		env := citylayout.CityRuntimeEnvMap(cs.cityPath)
-		env["GC_BEADS_PREFIX"] = prefix
-		rigPath = filepath.Clean(rigPath)
-		env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
-		env["GC_RIG_ROOT"] = rigPath
-		env["GC_RIG"] = rigName
-		s.SetEnv(env)
+		s.SetEnv(gcExecStoreEnv(cs.cityPath, execStoreTarget{
+			ScopeRoot: scopeRoot,
+			ScopeKind: "rig",
+			Prefix:    prefix,
+			RigName:   rigName,
+		}, provider))
 		return s
 	}
 	switch provider {
 	case "file":
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
+		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 		if err != nil {
-			return bdStoreForRig(rigPath, cs.cityPath, cfg)
+			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForRig(rigPath, cs.cityPath, cfg)
+		return bdStoreForRig(scopeRoot, cs.cityPath, cs.cfg)
 	}
 }
 

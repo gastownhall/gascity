@@ -132,10 +132,11 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 		if err != nil || n < 1 {
 			continue
 		}
-		maxSess := a.EffectiveMaxActiveSessions()
-		isUnlimited := maxSess == nil || *maxSess < 0
-		if !isUnlimited && n > *maxSess {
-			continue
+		if !a.HasUnlimitedSessionCapacity() {
+			maxSess := a.EffectiveMaxActiveSessions()
+			if maxSess == nil || n > *maxSess {
+				continue
+			}
 		}
 		return DeepCopyAgent(&a, a.Name+"-"+suffix, a.Dir), true
 	}
@@ -157,10 +158,11 @@ func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
 	if err != nil || n < 1 {
 		return config.Agent{}, false
 	}
-	maxSess := a.EffectiveMaxActiveSessions()
-	isUnlimited := maxSess == nil || *maxSess < 0
-	if !isUnlimited && n > *maxSess {
-		return config.Agent{}, false
+	if !a.HasUnlimitedSessionCapacity() {
+		maxSess := a.EffectiveMaxActiveSessions()
+		if maxSess == nil || n > *maxSess {
+			return config.Agent{}, false
+		}
 	}
 	return DeepCopyAgent(&a, input, a.Dir), true
 }
@@ -168,14 +170,7 @@ func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
 // IsMultiSessionAgent reports whether a config agent supports multiple
 // concurrent sessions.
 func IsMultiSessionAgent(a *config.Agent) bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return true
-	}
-	maxSess := a.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
+	return a != nil && a.SupportsInstanceExpansion()
 }
 
 // DeepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

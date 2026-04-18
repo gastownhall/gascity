@@ -8,65 +8,10 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/bootstrap"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
-
-func TestSkillsWorkOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"skills", "work"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("gc skills work exited %d: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	if out == "" {
-		t.Fatal("gc skills work produced no output")
-	}
-	// Should contain bd commands.
-	for _, want := range []string{"bd create", "bd list", "bd close", "bd ready"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q", want)
-		}
-	}
-}
-
-func TestSkillsListTopics(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"skills"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("gc skills exited %d: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	for _, topic := range []string{"work", "dispatch", "agents", "rigs", "mail", "city", "dashboard"} {
-		if !strings.Contains(out, topic) {
-			t.Errorf("topic listing missing %q", topic)
-		}
-	}
-}
-
-func TestSkillsUnknownTopic(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"skills", "bogus"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("gc skills bogus should fail")
-	}
-	if !strings.Contains(stderr.String(), "unknown topic") {
-		t.Errorf("stderr = %q, want 'unknown topic'", stderr.String())
-	}
-}
-
-func TestSkillsAllTopicsReadable(t *testing.T) {
-	// Verify every registered topic has a matching embedded file.
-	for _, topic := range skillTopics {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"skills", topic.Arg}, &stdout, &stderr)
-		if code != 0 {
-			t.Errorf("gc skills %s failed: %s", topic.Arg, stderr.String())
-		}
-		if stdout.Len() == 0 {
-			t.Errorf("gc skills %s produced no output", topic.Arg)
-		}
-	}
-}
 
 func TestSkillRejectsTopicMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -159,18 +104,20 @@ func TestSkillListSessionCatalog(t *testing.T) {
 	}
 }
 
-// TestSkillListAgentAttachmentFilter verifies that when an agent declares an
-// explicit skills attachment list, the city catalog is filtered to those
-// names. Agent-local entries remain visible regardless of attachment config.
-func TestSkillListAgentAttachmentFilter(t *testing.T) {
+// TestSkillListAgentShowsFullCityCatalog verifies that an agent-scoped
+// `gc skill list --agent mayor` returns the entire city catalog plus the
+// agent's private skills. Per engdocs/proposals/skill-materialization.md
+// there is no attachment filtering — every agent sees every city skill.
+// The `skills = [...]` tombstone on the agent is accepted but ignored.
+func TestSkillListAgentShowsFullCityCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	// mayor attaches only "attached-skill" from the city catalog; "other-skill"
-	// must be filtered out.
+	// mayor declares an attachment list — this is a v0.15.0 tombstone and
+	// must be ignored; other-skill should still appear in the agent's view.
 	toml := `[workspace]
 name = "test-city"
 
@@ -205,8 +152,64 @@ template = "mayor"
 	if !strings.Contains(out, "private-workflow") {
 		t.Errorf("agent-local private-workflow missing from output:\n%s", out)
 	}
-	if strings.Contains(out, "other-skill") {
-		t.Errorf("other-skill should be filtered out (not attached):\n%s", out)
+	if !strings.Contains(out, "other-skill") {
+		t.Errorf("other-skill must remain visible — no attachment filtering:\n%s", out)
+	}
+}
+
+// TestSkillListIncludesBootstrapCatalog is the Phase 3C regression:
+// `gc skill list` must surface bootstrap implicit-import pack skills
+// (e.g., the `core` catalog) so the listing reflects what the
+// materializer delivers. Without this the user sees only city-pack
+// skills and would think core's gc-<topic> skills have gone missing
+// after upgrading from v0.15.0's stub materializer.
+func TestSkillListIncludesBootstrapCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/city-one/SKILL.md", "city-one")
+
+	// Build a fake GC_HOME with a bootstrap-named implicit import that
+	// resolves to a cache dir with one skill.
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	// Pick the first real bootstrap pack name so the materializer's
+	// name-filter lets this entry through.
+	bootstrapName := bootstrapPackNameForTest(t)
+	source := "github.com/example/" + bootstrapName
+	commit := bootstrapName + "-commit"
+	cacheDir := globalRepoCachePathForTest(gcHome, source, commit)
+	// Config loading follows implicit imports and requires each pack
+	// have a pack.toml; write a minimal one so the test fixture
+	// doesn't crash the city-config loader.
+	writeCatalogFile(t, cacheDir, "pack.toml", "[pack]\nname = \""+bootstrapName+"\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeCatalogFile(t, cacheDir, "skills/"+bootstrapName+"-sample/SKILL.md", "bootstrap skill")
+
+	implicitPath := filepath.Join(gcHome, "implicit-import.toml")
+	implicit := "schema = 1\n\n[imports.\"" + bootstrapName + "\"]\nsource = \"" + source + "\"\nversion = \"0.1.0\"\ncommit = \"" + commit + "\"\n"
+	if err := os.MkdirAll(filepath.Dir(implicitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(implicitPath, []byte(implicit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "city-one") {
+		t.Errorf("city skill missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, bootstrapName+"-sample") {
+		t.Errorf("bootstrap skill missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, bootstrapName) {
+		t.Errorf("bootstrap pack name %q missing from Source column:\n%s", bootstrapName, out)
 	}
 }
 
@@ -219,4 +222,22 @@ func writeCatalogFile(t *testing.T, dir, rel, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
+}
+
+// bootstrapPackNameForTest returns a real bootstrap pack name so tests
+// that need to fabricate an implicit-import entry pass the
+// materializer's bootstrap-name filter.
+func bootstrapPackNameForTest(t *testing.T) string {
+	t.Helper()
+	names := bootstrap.PackNames()
+	if len(names) == 0 {
+		t.Fatal("bootstrap.PackNames() returned no names")
+	}
+	return names[0]
+}
+
+// globalRepoCachePathForTest mirrors config.GlobalRepoCachePath without
+// making the test file import config just for this one call.
+func globalRepoCachePathForTest(gcHome, source, commit string) string {
+	return config.GlobalRepoCachePath(gcHome, source, commit)
 }

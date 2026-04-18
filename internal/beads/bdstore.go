@@ -35,6 +35,7 @@ func ExecCommandRunner() CommandRunner {
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
+		commandName := resolvedCommandName(name)
 		trace := func(status string, err error) {
 			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
 			if path == "" {
@@ -50,12 +51,12 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				msg = err.Error()
 			}
 			fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n", //nolint:errcheck // best-effort trace log
-				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
+				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, commandName, args, msg)
 		}
 		trace("start", nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, commandName, args...)
 		cmd.WaitDelay = 2 * time.Second
 		cmd.Dir = dir
 		if len(env) > 0 {
@@ -84,6 +85,28 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		trace("done", err)
 		return out, err
 	}
+}
+
+// resolvedCommandName prefers a sibling helper binary next to the running gc
+// executable when available. This keeps gc and bd on the same installed
+// toolchain instead of accidentally mixing with an older bd earlier in PATH.
+func resolvedCommandName(name string) string {
+	if name != "bd" {
+		return name
+	}
+	exe, err := os.Executable()
+	if err != nil || strings.TrimSpace(exe) == "" {
+		return name
+	}
+	sibling := filepath.Join(filepath.Dir(exe), name)
+	info, statErr := os.Stat(sibling)
+	if statErr != nil || info.IsDir() {
+		return name
+	}
+	if info.Mode()&0o111 == 0 {
+		return name
+	}
+	return sibling
 }
 
 // PurgeRunnerFunc executes a bd purge command with custom dir and env.
@@ -402,8 +425,8 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if len(b.Needs) > 0 {
 		args = append(args, "--deps", strings.Join(b.Needs, ","))
 	}
-	for _, l := range b.Labels {
-		args = append(args, "--labels", l)
+	if len(b.Labels) > 0 {
+		args = append(args, "--labels", strings.Join(b.Labels, ","))
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
@@ -650,7 +673,7 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")
 	}
-	args = append(args, "--include-infra", "--limit", fmt.Sprintf("%d", limit))
+	args = append(args, "--include-infra", "--include-gates", "--limit", fmt.Sprintf("%d", limit))
 	if query.ParentID != "" {
 		args = append(args, "--parent", query.ParentID)
 	}

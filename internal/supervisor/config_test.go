@@ -118,6 +118,45 @@ func TestRuntimeDirWithXDG(t *testing.T) {
 	}
 }
 
+func TestRuntimeDirUsesIsolatedGCHomeWhenOverrideDiffersFromDefault(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	if got := RuntimeDir(); got != gcHome {
+		t.Fatalf("RuntimeDir() = %q, want isolated GC_HOME %q", got, gcHome)
+	}
+}
+
+func TestRuntimeDirUsesXDGWhenGCHomeMatchesDefaultHome(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	if got := RuntimeDir(); got != "/run/user/1000/gc" {
+		t.Fatalf("RuntimeDir() = %q, want /run/user/1000/gc", got)
+	}
+}
+
+func TestUsesIsolatedGCHomeOverride(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "isolated-home"))
+	if !UsesIsolatedGCHomeOverride() {
+		t.Fatal("UsesIsolatedGCHomeOverride() = false, want true")
+	}
+}
+
+func TestUsesIsolatedGCHomeOverrideFalseForDefaultHome(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	if UsesIsolatedGCHomeOverride() {
+		t.Fatal("UsesIsolatedGCHomeOverride() = true, want false")
+	}
+}
+
 func TestRuntimeDirFallback(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	t.Setenv("GC_HOME", t.TempDir())

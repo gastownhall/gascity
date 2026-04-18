@@ -13,6 +13,9 @@ import (
 const poolManagedMetadataKey = "pool_managed"
 
 func isPoolManagedSessionBead(bead beads.Bead) bool {
+	if isEphemeralSessionBead(bead) {
+		return true
+	}
 	if strings.TrimSpace(bead.Metadata[poolManagedMetadataKey]) == boolMetadata(true) {
 		return true
 	}
@@ -32,6 +35,7 @@ func createPoolSessionBead(
 		"agent_name":           template,
 		"state":                "creating",
 		"pending_create_claim": "true",
+		"session_origin":       "ephemeral",
 		"generation":           "1",
 		"continuation_epoch":   "1",
 		"instance_token":       sessionpkg.NewInstanceToken(),

@@ -9,6 +9,14 @@ title: "Named Configured Sessions"
 | Author(s) | Codex |
 | Issue | N/A |
 | Supersedes | N/A |
+| Superseded by | session-model-unification (partially) |
+
+> Note
+>
+> This document introduced `[[named_session]]`. The accepted follow-on
+> design in [`session-model-unification`](session-model-unification.md)
+> keeps that concept but replaces the remaining pool/non-pool split with
+> one unified session model.
 
 ## Summary
 
@@ -233,9 +241,6 @@ Creation triggers are:
 - controller work detection for the qualified named-session identity
   (`work_query` is evaluated in that identity's stamped runtime context
   and attributed only to that identity)
-- explicit `scale_check` on the backing agent returning demand > 0
-  (evaluated in the named-session pass, not the pool pipeline; falls
-  through to `work_query` on error or zero)
 - dependency wake when another realized session needs this template awake
 
 Once created, the bead persists as the canonical session history record.
@@ -591,9 +596,9 @@ CLI and API session targeting intentionally differ on ambient context:
 - API resolution has no ambient rig shortcut. Bare names only resolve
   when city-unique; otherwise callers must send the fully qualified
   identity or use `template:<qualified-name>`.
-- Dashboard and other API clients should normalize user-selected targets
-  to fully qualified identities before calling GC so rig-scoped templates
-  and aliases are always representable.
+- Mission Control and other API clients should normalize user-selected
+  targets to fully qualified identities before calling GC so rig-scoped
+  templates and aliases are always representable.
 
 Centralized resolution does not mean every command materializes a
 reserved `on_demand` named session. First-reference behavior is

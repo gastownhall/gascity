@@ -41,8 +41,53 @@ All arguments after "gc bd" are forwarded to bd unchanged.`,
 	return cmd
 }
 
+var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) bool {
+	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+	if err != nil {
+		return false
+	}
+	bead, err := store.Get(beadID)
+	return err == nil && strings.TrimSpace(bead.ID) != ""
+}
+
+func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) []string {
+	var overrides map[string]string
+	if target.ScopeKind == "rig" {
+		overrides = bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot)
+	} else {
+		overrides = bdRuntimeEnv(cityPath)
+		overrides["GC_RIG"] = ""
+		overrides["GC_RIG_ROOT"] = ""
+		overrides["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
+	}
+	overrides["GC_STORE_ROOT"] = target.ScopeRoot
+	overrides["GC_STORE_SCOPE"] = target.ScopeKind
+	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	return mergeRuntimeEnv(os.Environ(), overrides)
+}
+
+func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
+	resolved, ok, err := canonicalScopeDoltTarget(cityPath, target.ScopeRoot)
+	if err != nil || !ok || !resolved.External {
+		return
+	}
+	var drift []string
+	if host := strings.TrimSpace(os.Getenv("GC_DOLT_HOST")); host != "" && host != strings.TrimSpace(resolved.Host) {
+		drift = append(drift, fmt.Sprintf("GC_DOLT_HOST=%s (canonical %s)", host, strings.TrimSpace(resolved.Host)))
+	}
+	if port := strings.TrimSpace(os.Getenv("GC_DOLT_PORT")); port != "" && port != strings.TrimSpace(resolved.Port) {
+		drift = append(drift, fmt.Sprintf("GC_DOLT_PORT=%s (canonical %s)", port, strings.TrimSpace(resolved.Port)))
+	}
+	if len(drift) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
+}
+
 func doBd(args []string, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	cityName, rigName, bdArgs := extractBdScopeFlags(args)
+
+	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -53,12 +98,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if !cityUsesBdStoreContract(cityPath) {
+		fmt.Fprintln(stderr, "gc bd: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	// Extract --rig from args (since DisableFlagParsing prevents cobra from
-	// parsing it). The remaining args are forwarded to bd.
-	rigName, bdArgs := extractRigFlag(args)
+	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	dir := resolveBdDir(cfg, cityPath, rigName, bdArgs)
+	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
@@ -67,44 +118,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	cmd := exec.Command(bdPath, bdArgs...)
-	cmd.Dir = dir
+	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Build env: pin BEADS_DIR to the selected store so rig-scoped calls don't
-	// fall back to the city store via gc-beads-bd's GC_CITY_PATH handling.
-	env := removeEnvKey(os.Environ(), "BEADS_DIR")
-	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
-	if dir != cityPath {
-		for _, r := range cfg.Rigs {
-			rp := r.Path
-			if !filepath.IsAbs(rp) {
-				rp = filepath.Join(cityPath, rp)
-			}
-			if samePath(rp, dir) {
-				env = append(env, "GC_RIG="+r.Name, "GC_RIG_ROOT="+dir)
-				if r.DoltHost != "" {
-					env = append(env, "BEADS_DOLT_SERVER_HOST="+r.DoltHost)
-				}
-				if r.DoltPort != "" {
-					env = append(env, "BEADS_DOLT_SERVER_PORT="+r.DoltPort)
-				}
-				break
-			}
-		}
-	} else {
-		env = append(env, "GC_RIG=", "GC_RIG_ROOT=")
-	}
-	// Suppress bd's built-in Dolt auto-start — gc manages the server.
-	env = append(env, "BEADS_DOLT_AUTO_START=0")
-	// Mirror user/password to beads v1.0.0 env var names.
-	if user := os.Getenv("GC_DOLT_USER"); user != "" {
-		env = append(env, "BEADS_DOLT_SERVER_USER="+user)
-	}
-	if pass := os.Getenv("GC_DOLT_PASSWORD"); pass != "" {
-		env = append(env, "BEADS_DOLT_PASSWORD="+pass)
-	}
-	cmd.Env = env
+	cmd.Env = bdCommandEnv(cityPath, cfg, target)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -117,59 +135,116 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// extractRigFlag extracts --rig <name> from the argument list and returns
-// the rig name and remaining args. Also checks the global rigFlag set by
-// cobra's persistent flag parsing (for "gc --rig foo bd list" syntax).
-func extractRigFlag(args []string) (string, []string) {
+func resolveBdCity(cityName string) (string, error) {
+	if strings.TrimSpace(cityName) != "" {
+		return validateCityPath(cityName)
+	}
+	return resolveCity()
+}
+
+// extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
+// argument list and returns the requested city, rig, and remaining bd args.
+// It also falls back to cobra's persistent globals for "gc --city X --rig Y bd".
+func extractBdScopeFlags(args []string) (string, string, []string) {
+	var cityName string
 	var rigName string
 	var rest []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--rig" && i+1 < len(args) {
-			rigName = args[i+1]
-			i++ // skip value
+		switch {
+		case args[i] == "--city" && i+1 < len(args):
+			cityName = args[i+1]
+			i++
 			continue
-		}
-		if strings.HasPrefix(args[i], "--rig=") {
+		case strings.HasPrefix(args[i], "--city="):
+			cityName = strings.TrimPrefix(args[i], "--city=")
+			continue
+		case args[i] == "--rig" && i+1 < len(args):
+			rigName = args[i+1]
+			i++
+			continue
+		case strings.HasPrefix(args[i], "--rig="):
 			rigName = strings.TrimPrefix(args[i], "--rig=")
 			continue
 		}
 		rest = append(rest, args[i])
 	}
-	// Fall back to the global persistent flag if set.
+	if cityName == "" && cityFlag != "" {
+		cityName = cityFlag
+	}
 	if rigName == "" && rigFlag != "" {
 		rigName = rigFlag
 	}
+	return cityName, rigName, rest
+}
+
+// extractRigFlag extracts --rig <name> from the argument list and returns
+// the rig name and remaining args. Also checks the global rigFlag set by
+// cobra's persistent flag parsing (for "gc --rig foo bd list" syntax).
+func extractRigFlag(args []string) (string, []string) {
+	_, rigName, rest := extractBdScopeFlags(args)
 	return rigName, rest
 }
 
-// resolveBdDir determines the working directory for a bd command.
-// Priority: explicit rig name > bead prefix auto-detection > city root.
-func resolveBdDir(cfg *config.City, cityPath, rigName string, args []string) string {
+// resolveBdScopeTarget determines the canonical scope root for a bd command.
+// Priority: explicit rig name > bead prefix auto-detection > enclosing rig > city root.
+func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string) (execStoreTarget, error) {
+	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
-		for _, r := range cfg.Rigs {
-			if strings.EqualFold(r.Name, rigName) {
-				rp := r.Path
-				if !filepath.IsAbs(rp) {
-					rp = filepath.Join(cityPath, rp)
-				}
-				return rp
-			}
+		rig, ok := rigByName(cfg, rigName)
+		if !ok {
+			return execStoreTarget{}, fmt.Errorf("rig %q not found", rigName)
 		}
+		return bdRigScopeTarget(cityPath, rig), nil
 	}
 
-	// Auto-detect from bead IDs in args.
+	// Auto-detect from bead IDs in args, but only accept candidates that
+	// actually exist in the resolved rig store. This keeps hyphenated flag
+	// values and other non-ID args from silently retargeting the command.
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
-		if dir := rigDirForBead(cfg, arg); dir != "" {
-			rp := dir
-			if !filepath.IsAbs(rp) {
-				rp = filepath.Join(cityPath, rp)
+		if rig, ok := bdRigForArg(cfg, arg); ok {
+			target := bdRigScopeTarget(cityPath, rig)
+			if bdBeadExists(cityPath, target, arg) {
+				return target, nil
 			}
-			return rp
 		}
 	}
 
-	return cityPath
+	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
+		return execStoreTarget{}, err
+	} else if ok {
+		return bdRigScopeTarget(cityPath, rig), nil
+	}
+
+	return execStoreTarget{
+		ScopeRoot: resolveStoreScopeRoot(cityPath, cityPath),
+		ScopeKind: "city",
+		Prefix:    config.EffectiveHQPrefix(cfg),
+	}, nil
+}
+
+func bdRigForArg(cfg *config.City, arg string) (config.Rig, bool) {
+	if prefix := beadPrefix(arg); prefix != "" {
+		return findRigByPrefix(cfg, prefix)
+	}
+	return config.Rig{}, false
+}
+
+func bdRigFromCwd(cfg *config.City, cityPath string) (config.Rig, bool, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return config.Rig{}, false, nil
+	}
+	return resolveRigForDir(cfg, cityPath, cwd)
+}
+
+func bdRigScopeTarget(cityPath string, rig config.Rig) execStoreTarget {
+	return execStoreTarget{
+		ScopeRoot: resolveStoreScopeRoot(cityPath, rig.Path),
+		ScopeKind: "rig",
+		Prefix:    rig.EffectivePrefix(),
+		RigName:   rig.Name,
+	}
 }

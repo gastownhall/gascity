@@ -383,18 +383,59 @@ and:
 
 when the asset belongs to one specific agent.
 
-> **First slice:** `skills/` and `agents/<name>/skills/` describe the
-> current-city-pack home for skills in this wave. Imported-pack catalogs
-> are later, and list-only visibility is the first CLI surface. Pack
-> discovery/materialization is tracked in
-> [#669](https://github.com/gastownhall/gascity/issues/669).
->
-> **First slice:** `mcp/` and `agents/<name>/mcp/` describe the
-> current-city-pack home for MCP definitions in this wave. Imported-pack
-> catalogs and provider projection are later, and list-only visibility
-> is the first CLI surface. The provider-agnostic TOML abstraction and
-> projection model are tracked in
-> [#670](https://github.com/gastownhall/gascity/issues/670).
+### Skill materialization (new in v0.15.1)
+
+As of **Gas City 0.15.1**, skills are no longer list-only. Every
+supported-provider agent (`claude`, `codex`, `gemini`, `opencode`) sees
+every city-pack skill **and** every bootstrap implicit-import pack
+skill (e.g. `core`) materialized as symlinks into its provider-specific
+sink before session spawn. No attachment filtering — an agent does not
+declare which skills it wants; it gets the whole catalog plus its own
+`agents/<name>/skills/` directory on top.
+
+**Sink paths** land at the agent's scope root (city-scoped) or rig
+path (rig-scoped):
+
+- Claude agents: `<scope-root>/.claude/skills/<name>`
+- Codex agents: `<scope-root>/.codex/skills/<name>`
+- Gemini agents: `<scope-root>/.gemini/skills/<name>`
+- OpenCode agents: `<scope-root>/.opencode/skills/<name>`
+
+Mixed-provider cities produce sibling sink directories at the same
+scope root. `copilot`, `cursor`, `pi`, and `omp` agents have no sink
+in v0.15.1 and get no materialization.
+
+**Precedence** on name collision:
+
+1. Agent-local (`agents/<name>/skills/<foo>`) wins over shared.
+2. City pack (`skills/<foo>`) wins over bootstrap implicit imports.
+3. Two agents at the same `(scope-root, vendor)` cannot both provide
+   the same agent-local name — `gc start` fails with a
+   skill-collision error; fix by renaming one.
+
+**Lifecycle:** adds, edits, renames, and removals all drain the
+affected agents via content-hash fingerprints. Every supervisor tick
+runs a cleanup + re-materialise pass, so in-place skill edits take
+effect without a full restart cycle. User-placed content at sink
+paths (a regular file or directory you put there yourself) is
+preserved — cleanup only removes symlinks whose targets live under
+known gc-managed catalog roots.
+
+### Removed in v0.15.1 — attachment-list tombstones
+
+The v0.15.0 attachment-list fields — `skills`, `mcp`, `skills_append`,
+`mcp_append`, and the runtime-only `shared_skills` — are **deprecated
+tombstones in v0.15.1**. They still parse so upgrading cities don't
+break, but they are ignored by the materializer (every agent gets
+everything). A one-time warning fires on config load when any of
+these fields is present.
+
+Migrate by deleting them from your `city.toml` / `pack.toml`. Run
+`gc doctor --fix` to strip them automatically. The fields become a
+hard parse error in **v0.16**.
+
+MCP activation (projecting MCP definitions into the agent's provider
+config) is tracked as a follow-up and lands on `main` after v0.15.1.
 
 ## Fragment injection migration
 

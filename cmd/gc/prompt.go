@@ -25,7 +25,7 @@ const (
 type PromptContext struct {
 	CityRoot      string
 	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (pool template) or "mayor" (singleton)
+	TemplateName  string // config name: "polecat" (template) or "mayor" (named backing template)
 	RigName       string
 	RigRoot       string
 	WorkDir       string

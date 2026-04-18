@@ -180,9 +180,10 @@ func runAdoptionBarrier(
 		}
 
 		// Detect pool instances from session name suffix.
-		// Only set pool_slot metadata when the agent is actually a pool agent,
-		// to avoid false positives on singleton agents whose names end in numbers.
-		if slot := parsePoolSlot(sessionName); slot > 0 && isConfigAgent && isMultiSessionCfgAgent(cfgAgent) {
+		// Only set pool_slot metadata when the agent actually supports
+		// instance expansion, to avoid false positives on direct session
+		// names that end in numbers.
+		if slot := parsePoolSlot(sessionName); slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion() {
 			detail.PoolSlot = slot
 			meta["pool_slot"] = strconv.Itoa(slot)
 			if maxSess := cfgAgent.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess >= 0 && slot > *maxSess {
@@ -232,7 +233,7 @@ func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTem
 	baseSessName := sessionName[:len(sessionName)-len(suffix)]
 	// Check each config agent to see if its session name matches the base.
 	for _, a := range agentByQN {
-		if !isMultiSessionCfgAgent(a) {
+		if !a.SupportsInstanceExpansion() {
 			continue
 		}
 		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)

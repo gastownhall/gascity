@@ -64,6 +64,9 @@ func TestCityStatusWithAgents(t *testing.T) {
 	}
 	out := stdout.String()
 
+	if !strings.Contains(out, "/home/user/city") {
+		t.Errorf("stdout missing city path, got:\n%s", out)
+	}
 	if !strings.Contains(out, "Agents:") {
 		t.Errorf("stdout missing 'Agents:', got:\n%s", out)
 	}
@@ -123,9 +126,9 @@ func TestCityStatusPoolExpansion(t *testing.T) {
 	}
 	out := stdout.String()
 
-	// Pool header line.
-	if !strings.Contains(out, "pool (min=1, max=3)") {
-		t.Errorf("stdout missing pool header, got:\n%s", out)
+	// Scaled header line.
+	if !strings.Contains(out, "scaled (min=1, max=3)") {
+		t.Errorf("stdout missing scaled header, got:\n%s", out)
 	}
 	// Instance lines.
 	if !strings.Contains(out, "polecat-1") {
@@ -269,18 +272,15 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 		t.Error("agents[0].pool should be nil for singleton")
 	}
 
-	// Second agent: polecat-1 (pool, not running).
+	// Second agent: polecat-1 (scaled, not running).
 	if status.Agents[1].QualifiedName != "myrig/polecat-1" {
 		t.Errorf("agents[1].qualified_name = %q, want %q", status.Agents[1].QualifiedName, "myrig/polecat-1")
 	}
 	if status.Agents[1].Scope != "rig" {
 		t.Errorf("agents[1].scope = %q, want %q", status.Agents[1].Scope, "rig")
 	}
-	if status.Agents[1].Pool == nil {
-		t.Fatal("agents[1].pool should not be nil")
-	}
-	if status.Agents[1].Pool.Max != 3 {
-		t.Errorf("agents[1].pool.max = %d, want 3", status.Agents[1].Pool.Max)
+	if status.Agents[1].Pool != nil {
+		t.Fatal("agents[1].pool should be nil for scaled session output")
 	}
 
 	// Rigs.

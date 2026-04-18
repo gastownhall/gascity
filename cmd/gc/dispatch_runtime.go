@@ -48,13 +48,15 @@ func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.Graph
 }
 
 // applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City) error {
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	deps := sling.SlingDeps{
-		CityName: cityName,
-		Store:    store,
-		StoreRef: storeRef,
-		Cfg:      cfg,
-		Resolver: cliAgentResolver{},
+		CityName:              cityName,
+		CityPath:              cityPath,
+		Store:                 store,
+		StoreRef:              storeRef,
+		Cfg:                   cfg,
+		Resolver:              cliAgentResolver{},
+		DirectSessionResolver: cliDirectSessionResolver,
 	}
 	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }
@@ -139,12 +141,19 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if err != nil {
 		return err
 	}
-	resolveRigPaths(cityPath, cfg.Rigs)
 	if agentName == "" {
 		agentName = os.Getenv("GC_ALIAS")
 	}
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
+	}
+	if agentName == "" || agentName == strings.TrimSpace(os.Getenv("GC_ALIAS")) || agentName == strings.TrimSpace(os.Getenv("GC_AGENT")) {
+		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		if template != "" && hasSessionContext {
+			agentName = template
+		}
 	}
 	if agentName == "" {
 		agentName = config.ControlDispatcherAgentName
@@ -154,23 +163,19 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return fmt.Errorf("agent %q not found in config", agentName)
 	}
 	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
-	// Build rig-aware subprocess env for work queries (same pattern as
-	// cmdHook) so rig-backed agents read the rig store, not an inherited
-	// city-scoped BEADS_DIR. See issue #514.
-	overrides := hookQueryEnv(cityPath, cfg, &agentCfg)
-	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+	workEnv := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		return drainWorkflowServeWork(agentCfg, workDir, queryEnv, stderr)
+		return drainWorkflowServeWork(agentCfg, workDir, workEnv, stderr)
 	}
-	return runWorkflowServeFollow(agentCfg, workDir, queryEnv, stderr)
+	return runWorkflowServeFollow(agentCfg, workDir, workEnv, stderr)
 }
 
-func drainWorkflowServeWork(agentCfg config.Agent, workDir string, queryEnv []string, stderr io.Writer) error {
+func drainWorkflowServeWork(agentCfg config.Agent, workDir string, workEnv map[string]string, stderr io.Writer) error {
 	processedAny := false
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeQuery(agentCfg.EffectiveWorkQuery()), workDir, queryEnv)
+		queue, err := workflowServeList(workflowServeQuery(agentCfg.EffectiveWorkQuery()), workDir, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			return fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
@@ -220,7 +225,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, workDir string, queryEnv []st
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, workDir string, queryEnv []string, stderr io.Writer) error {
+func runWorkflowServeFollow(agentCfg config.Agent, workDir string, workEnv map[string]string, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -243,7 +248,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, workDir string, queryEnv []st
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
 	for {
-		if err := drainWorkflowServeWork(agentCfg, workDir, queryEnv, stderr); err != nil {
+		if err := drainWorkflowServeWork(agentCfg, workDir, workEnv, stderr); err != nil {
 			return err
 		}
 		if err := waitForRelevantWorkflowWake(eventCh); err != nil {
@@ -311,7 +316,7 @@ func workflowServeQuery(workQuery string) string {
 	return workQuery
 }
 
-func nextWorkflowServeBeads(workQuery, dir string, env []string) ([]hookBead, error) {
+func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
 	if workQuery == "" {
 		return nil, nil
 	}

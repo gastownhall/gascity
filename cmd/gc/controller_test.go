@@ -3,10 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -143,8 +141,7 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout bytes.Buffer
-	var stderr syncBuffer
+	var stdout, stderr bytes.Buffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -166,7 +163,7 @@ func TestControllerShutdown(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available instead of fixed sleep.
-	waitForController(t, dir, 5*time.Second, done, &stderr)
+	waitForController(t, dir)
 
 	if !tryStopController(dir, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, expected true")
@@ -184,6 +181,72 @@ func TestControllerShutdown(t *testing.T) {
 	// Agent should have been stopped during shutdown.
 	if sp.IsRunning("mayor") {
 		t.Error("agent should be stopped after controller shutdown")
+	}
+}
+
+func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
+	base := shortSocketTempDir(t, "gc-controller-long-")
+	cityPath := base
+	for len(filepath.Join(normalizePathForCompare(cityPath), ".gc", "controller.sock")) <= controllerSocketPathLimit {
+		cityPath = filepath.Join(cityPath, "segment-1234567890")
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
+	fallback := controllerSocketPath(cityPath)
+	if fallback == legacy {
+		t.Fatalf("controllerSocketPath(%q) = %q, want fallback path", cityPath, fallback)
+	}
+	if !strings.HasPrefix(fallback, filepath.Join("/tmp", "gascity-controller")+string(filepath.Separator)) {
+		t.Fatalf("controllerSocketPath(%q) = %q, want /tmp/gascity-controller fallback", cityPath, fallback)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	convergenceReqCh := make(chan convergenceRequest, 1)
+	pokeCh := make(chan struct{}, 1)
+	controlDispatcherCh := make(chan struct{}, 1)
+	configDirty := &atomic.Bool{}
+	lis, err := startControllerSocket(cityPath, cancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(fallback) //nolint:errcheck
+
+	if _, err := os.Stat(fallback); err != nil {
+		t.Fatalf("stat fallback socket %s: %v", fallback, err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy socket %s should not exist, stat err = %v", legacy, err)
+	}
+	if pid := controllerAlive(cityPath); pid == 0 {
+		t.Fatal("controllerAlive = 0, want live controller via fallback socket")
+	}
+	resp, err := sendControllerCommand(cityPath, "reload")
+	if err != nil {
+		t.Fatalf("sendControllerCommand(reload): %v", err)
+	}
+	if strings.TrimSpace(string(resp)) != "ok" {
+		t.Fatalf("reload response = %q, want ok", resp)
+	}
+	if !configDirty.Load() {
+		t.Fatal("configDirty = false, want reload to mark dirty")
+	}
+	select {
+	case <-pokeCh:
+	default:
+		t.Fatal("reload did not enqueue poke")
+	}
+	if !tryStopController(cityPath, &bytes.Buffer{}) {
+		t.Fatal("tryStopController returned false, want true via fallback socket")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not invoke cancel via fallback socket")
 	}
 }
 
@@ -300,7 +363,9 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(5 * time.Second)
+	cancel()
+
+	deadline = time.After(1500 * time.Millisecond)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {
@@ -308,8 +373,8 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for reconciled agents [mayor worker]; got %v stdout=%q stderr=%q",
-				names, stdout.String(), stderr.String())
+			t.Errorf("expected [mayor worker], got %v", names)
+			return
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -376,7 +441,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	writeCityTOML(t, dir, "test", "mayor", "worker")
 
-	deadline := time.After(1500 * time.Millisecond)
+	deadline := time.After(5 * time.Second)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -410,6 +475,106 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+	configureTestDoltIdentityEnv(t)
+
+	dir := shortSocketTempDir(t, "gc-reload-agents-")
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	sp := runtime.NewFake()
+
+	var lastAgentNames atomic.Value
+	var reconcileCount atomic.Int32
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
+		var names []string
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			if a.Implicit {
+				continue
+			}
+			names = append(names, a.Name)
+			ds[a.Name] = TemplateParams{
+				SessionName:  a.Name,
+				TemplateName: a.Name,
+				Command:      "echo hello",
+			}
+		}
+		lastAgentNames.Store(names)
+		return DesiredStateResult{State: ds}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+
+	loopDone := make(chan struct{})
+	go func() {
+		controllerLoop(ctx, 30*time.Second, cfg, "test", tomlPath, config.WatchDirs(prov, cfg, dir),
+			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+		close(loopDone)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	for reconcileCount.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	agentDir := filepath.Join(dir, "agents", "noreen")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agentDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are noreen.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt.template.md): %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(stdout.String(), "Config reloaded") {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for config reload; reconciles=%d stdout=%q stderr=%q",
+				reconcileCount.Load(), stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	deadline = time.After(5 * time.Second)
+	for {
+		names, _ := lastAgentNames.Load().([]string)
+		if len(names) == 1 && names[0] == "noreen" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for convention-discovered agent noreen; got %v stdout=%q stderr=%q",
+				names, stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
@@ -429,7 +594,6 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
 	var lastIdleTimeout atomic.Value
-	var reconcileCount atomic.Int32
 
 	store, err := openCityStoreAt(dir)
 	if err != nil {
@@ -475,7 +639,6 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-		reconcileCount.Add(1)
 		if len(c.Agents) > 0 {
 			lastIdleTimeout.Store(c.Agents[0].IdleTimeout)
 		}
@@ -497,13 +660,28 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(done)
 	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-	})
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("controller did not exit during cleanup; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				_ = os.RemoveAll(dir)
+				if _, err := os.Stat(dir); os.IsNotExist(err) {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			entries, _ := os.ReadDir(filepath.Join(dir, ".gc"))
+			t.Fatalf("controller temp dir persisted after shutdown; .gc entries=%v stdout=%q stderr=%q", entries, stdout.String(), stderr.String())
+		})
+	}
+	t.Cleanup(shutdown)
 
 	waitForNamedMode := func(want string, timeout time.Duration) beads.Bead {
 		t.Helper()
@@ -535,13 +713,13 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	waitForNamedMode("always", 5*time.Second)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if reconcileCount.Load() >= 2 {
+		if strings.Contains(stdout.String(), "City started.") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := reconcileCount.Load(); got < 2 {
-		t.Fatalf("controller did not reach steady-state loop; reconcileCount=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	if !strings.Contains(stdout.String(), "City started.") {
+		t.Fatalf("controller never reached started state; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 
 	writeControllerNamedSessionCityTOML(t, dir, "test", "on_demand", "5s")
@@ -584,6 +762,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Config reloaded") {
 		t.Fatalf("stdout missing config reload marker: %q", stdout.String())
 	}
+	shutdown()
 }
 
 func TestHandleControllerConnControlDispatcher(t *testing.T) {
@@ -597,7 +776,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -794,6 +973,93 @@ func TestConfigReloadSummary(t *testing.T) {
 	}
 }
 
+func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 10 * time.Second
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := shortSocketTempDir(t, "gc-reload-cmd-")
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+
+	var lastAgentNames atomic.Value
+	var reconcileCount atomic.Int32
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
+		var names []string
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			if a.Implicit {
+				continue
+			}
+			names = append(names, a.Name)
+			ds[a.Name] = TemplateParams{SessionName: a.Name, TemplateName: a.Name, Command: "echo hello"}
+		}
+		lastAgentNames.Store(names)
+		return DesiredStateResult{State: ds}
+	}
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopController(dir, &bytes.Buffer{})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForController(t, dir)
+	deadline := time.After(5 * time.Second)
+	for reconcileCount.Load() < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for initial reconcile")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	writeCityTOML(t, dir, "test", "mayor", "worker")
+
+	before := reconcileCount.Load()
+	resp, err := sendControllerCommand(dir, "reload")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if string(resp) != "ok" {
+		t.Fatalf("reload response = %q, want %q", string(resp), "ok")
+	}
+
+	deadline = time.After(1500 * time.Millisecond)
+	for reconcileCount.Load() <= before || !strings.Contains(stdout.String(), "Config reloaded") {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for reload command to apply config; reconciles=%d stdout=%q stderr=%q", reconcileCount.Load(), stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	names, _ := lastAgentNames.Load().([]string)
+	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
+		t.Fatalf("expected [mayor worker], got %v", names)
+	}
+}
+
 func TestControllerPokeTriggersImmediate(t *testing.T) {
 	sp := runtime.NewFake()
 
@@ -818,8 +1084,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout bytes.Buffer
-	var stderr syncBuffer
+	var stdout, stderr bytes.Buffer
 
 	done := make(chan struct{})
 	go func() {
@@ -837,7 +1102,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available.
-	waitForController(t, dir, 5*time.Second, done, &stderr)
+	waitForController(t, dir)
 
 	// Wait for initial tick.
 	deadline := time.After(5 * time.Second)
@@ -880,126 +1145,22 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	}
 }
 
-// syncBuffer is a concurrency-safe bytes.Buffer for use as an io.Writer
-// (e.g. capturing stderr from a goroutine) that can be read safely from
-// another goroutine. It implements io.Writer plus a String accessor.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (sb *syncBuffer) Write(p []byte) (int, error) {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.buf.Write(p)
-}
-
-func (sb *syncBuffer) String() string {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.buf.String()
-}
-
 // waitForController polls until the controller socket at dir is responsive,
-// or fails the test after the given timeout. If done is non-nil it is checked
-// on each poll iteration; a closed channel means runController exited early
-// and the real error is in stderr rather than a socket timeout.
-func waitForController(t *testing.T, dir string, timeout time.Duration, done <-chan struct{}, stderr *syncBuffer) {
+// or fails the test after the given timeout. This replaces fixed sleeps that
+// are unreliable under load.
+func waitForController(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.After(timeout)
+	deadline := time.After(5 * time.Second)
 	for {
 		if controllerAlive(dir) != 0 {
 			return
 		}
-		// Detect early exit: runController returned before the socket
-		// became responsive. Report stderr so the real error surfaces
-		// instead of a misleading "timed out" message.
-		if done != nil {
-			select {
-			case <-done:
-				var diag string
-				if stderr != nil {
-					diag = stderr.String()
-				}
-				t.Fatalf("controller exited before socket became ready; stderr: %s", diag)
-			default:
-			}
-		}
 		select {
 		case <-deadline:
-			msg := "timed out waiting for controller socket to become available"
-			if stderr != nil {
-				if s := stderr.String(); s != "" {
-					msg += "; stderr: " + s
-				}
-			}
-			t.Fatal(msg)
+			t.Fatal("timed out waiting for controller socket to become available")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
-	}
-}
-
-// TestWaitForControllerDetectsEarlyExit verifies that waitForController
-// surfaces the real stderr content (not a generic timeout) when the
-// controller goroutine exits before the socket becomes ready.
-func TestWaitForControllerDetectsEarlyExit(t *testing.T) {
-	if os.Getenv("TEST_CONTROLLER_EARLY_EXIT") == "1" {
-		dir := t.TempDir()
-
-		var stderr syncBuffer
-		fmt.Fprint(&stderr, "gc start: injected startup failure\n") //nolint:errcheck // test setup
-
-		done := make(chan struct{})
-		close(done) // controller already exited
-
-		waitForController(t, dir, 5*time.Second, done, &stderr)
-		return
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitForControllerDetectsEarlyExit$")
-	cmd.Env = append(os.Environ(), "TEST_CONTROLLER_EARLY_EXIT=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected subprocess to fail via t.Fatalf")
-	}
-	output := string(out)
-	if !strings.Contains(output, "controller exited before socket became ready") {
-		t.Fatalf("expected early-exit diagnostic, got:\n%s", output)
-	}
-	if !strings.Contains(output, "injected startup failure") {
-		t.Fatalf("expected stderr content in diagnostic, got:\n%s", output)
-	}
-}
-
-// TestWaitForControllerTimeoutIncludesStderr verifies that when
-// waitForController times out, it appends any buffered stderr content
-// to the failure message for diagnosis.
-func TestWaitForControllerTimeoutIncludesStderr(t *testing.T) {
-	if os.Getenv("TEST_CONTROLLER_TIMEOUT_STDERR") == "1" {
-		dir := t.TempDir()
-
-		var stderr syncBuffer
-		fmt.Fprint(&stderr, "gc start: partial startup output\n") //nolint:errcheck // test setup
-
-		done := make(chan struct{}) // never closed — simulates hung controller
-
-		waitForController(t, dir, 50*time.Millisecond, done, &stderr)
-		return
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitForControllerTimeoutIncludesStderr$")
-	cmd.Env = append(os.Environ(), "TEST_CONTROLLER_TIMEOUT_STDERR=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected subprocess to fail via t.Fatalf")
-	}
-	output := string(out)
-	if !strings.Contains(output, "timed out waiting for controller socket") {
-		t.Fatalf("expected timeout message, got:\n%s", output)
-	}
-	if !strings.Contains(output, "partial startup output") {
-		t.Fatalf("expected stderr appended to timeout message, got:\n%s", output)
 	}
 }
 

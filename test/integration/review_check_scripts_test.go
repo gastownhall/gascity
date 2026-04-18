@@ -215,7 +215,7 @@ func updateBeadMetadata(t *testing.T, cityDir, beadID string, pairs ...string) {
 func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	t.Helper()
 
-	env := integrationEnvDolt()
+	env := commandEnvForDir(cityDir, true)
 	env = filterEnvMany(env,
 		"GC_BEAD_ID",
 		"GC_CITY",
@@ -230,10 +230,8 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 		"GC_CITY_PATH="+cityDir,
 		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 	)
-	if data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port")); err == nil {
-		if port := strings.TrimSpace(string(data)); port != "" {
-			env = append(env, "GC_DOLT_PORT="+port)
-		}
+	if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+		env = append(env, "GC_DOLT_PORT="+port)
 	}
 	return env
 }

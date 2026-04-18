@@ -9,8 +9,20 @@
 set -e
 
 : "${GC_DOLT_USER:=root}"
+: "${GC_DOLT_HEALTH_QUERY_TIMEOUT_SEC:=2}"
+: "${GC_DOLT_HEALTH_DB_TIMEOUT_SEC:=3}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/scripts/runtime.sh"
+
+run_with_timeout() {
+  seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${seconds}s" "$@"
+    return $?
+  fi
+  "$@"
+}
 
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
@@ -70,6 +82,7 @@ host="${GC_DOLT_HOST:-127.0.0.1}"
 server_running=false
 server_pid=0
 server_latency=0
+server_probe_status="skipped"
 
 # Find dolt PID by port.
 pid=$(lsof -ti :"$GC_DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
@@ -78,14 +91,21 @@ if [ -n "$pid" ]; then
   server_pid="$pid"
   # Measure query latency.
   start_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
-  conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
-  if [ -n "$GC_DOLT_PASSWORD" ]; then
-    export DOLT_CLI_PASSWORD="$GC_DOLT_PASSWORD"
-  fi
-  if dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
+  if DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
+    run_with_timeout "$GC_DOLT_HEALTH_QUERY_TIMEOUT_SEC" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
+    sql -q "SELECT 1" >/dev/null 2>&1; then
+    server_probe_status="ok"
     end_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
     server_latency=$((end_ms - start_ms))
     [ "$server_latency" -lt 0 ] && server_latency=0
+  else
+    probe_rc=$?
+    if [ "$probe_rc" -eq 124 ]; then
+      server_probe_status="timeout"
+    else
+      server_probe_status="error"
+    fi
   fi
 fi
 
@@ -102,7 +122,19 @@ if [ -d "$data_dir" ] && [ "$server_running" = true ]; then
     name="$(basename "$d")"
     case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
     # Count commits (best-effort).
-    commits=$(cd "$d" && dolt log --oneline 2>/dev/null | wc -l || echo 0)
+    commit_probe_status="ok"
+    if commits=$(run_with_timeout "$GC_DOLT_HEALTH_DB_TIMEOUT_SEC" \
+      sh -c 'cd "$1" && dolt log --oneline 2>/dev/null | wc -l' sh "$d" 2>/dev/null); then
+      :
+    else
+      commit_probe_rc=$?
+      commits=0
+      if [ "$commit_probe_rc" -eq 124 ]; then
+        commit_probe_status="timeout"
+      else
+        commit_probe_status="error"
+      fi
+    fi
     commits=$(echo "$commits" | tr -d '[:space:]')
     # Count open beads (best-effort).
     open_beads=0
@@ -117,7 +149,7 @@ if [ -d "$data_dir" ] && [ "$server_running" = true ]; then
         break
       fi
     done < "$_meta_cache"
-    db_info="$db_info$name|$commits|$open_beads
+    db_info="$db_info$name|$commits|$open_beads|$commit_probe_status
 "
   done
 fi
@@ -200,15 +232,17 @@ if [ "$json_output" = true ]; then
     "running": $server_running,
     "pid": $server_pid,
     "port": $GC_DOLT_PORT,
-    "latency_ms": $server_latency
+    "latency_ms": $server_latency,
+    "probe_status": "$server_probe_status"
   },
   "databases": [
 JSONEOF
   first=true
-  echo "$db_info" | while IFS='|' read -r name commits open_beads; do
+  echo "$db_info" | while IFS='|' read -r name commits open_beads commit_probe_status; do
     [ -z "$name" ] && continue
     if [ "$first" = true ]; then first=false; else echo ","; fi
-    printf '    {"name": "%s", "commits": %s, "open_beads": %s}' "$name" "$commits" "$open_beads"
+    printf '    {"name": "%s", "commits": %s, "open_beads": %s, "commit_probe_status": "%s"}' \
+      "$name" "$commits" "$open_beads" "$commit_probe_status"
   done
   cat <<JSONEOF
 
@@ -240,7 +274,9 @@ fi
 
 # Human-readable output.
 if [ "$server_running" = true ]; then
-  echo "Server: running (PID $server_pid, port $GC_DOLT_PORT, latency ${server_latency}ms)"
+  probe_note=""
+  [ "$server_probe_status" != "ok" ] && probe_note=" [$server_probe_status]"
+  echo "Server: running (PID $server_pid, port $GC_DOLT_PORT, latency ${server_latency}ms)${probe_note}"
 else
   echo "Server: not running"
 fi
@@ -248,9 +284,11 @@ fi
 if [ -n "$db_info" ]; then
   echo ""
   echo "Databases:"
-  echo "$db_info" | while IFS='|' read -r name commits open_beads; do
+  echo "$db_info" | while IFS='|' read -r name commits open_beads commit_probe_status; do
     [ -z "$name" ] && continue
-    echo "  $name: $commits commits, $open_beads open beads"
+    probe_note=""
+    [ "$commit_probe_status" != "ok" ] && probe_note=" [commit probe $commit_probe_status]"
+    echo "  $name: $commits commits, $open_beads open beads${probe_note}"
   done
 fi
 

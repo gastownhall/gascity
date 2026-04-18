@@ -58,6 +58,19 @@ func TestExtractTailMetaBasic(t *testing.T) {
 	}
 }
 
+func TestExtractTailMetaFromSearchPathsRejectsEscapedPath(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "session.jsonl")
+	writeTailJSONL(t, outside, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, outside); err == nil {
+		t.Fatal("ExtractTailMetaFromSearchPaths outside root = nil error, want rejection")
+	}
+}
+
 func TestExtractTailMetaWithCompaction(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")

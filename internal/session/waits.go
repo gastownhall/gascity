@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -21,6 +23,29 @@ const (
 	waitStateExpired  = "expired"
 	waitStateFailed   = "failed"
 )
+
+// WakeConflictError reports a lifecycle state that cannot accept an explicit
+// wake request.
+type WakeConflictError struct {
+	SessionID string
+	State     string
+}
+
+func (e *WakeConflictError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("session %s is %s", e.SessionID, e.State)
+}
+
+// WakeConflictState extracts the conflicting lifecycle state from err.
+func WakeConflictState(err error) (string, bool) {
+	var conflict *WakeConflictError
+	if errors.As(err, &conflict) && conflict != nil {
+		return conflict.State, true
+	}
+	return "", false
+}
 
 // IsWaitTerminalState reports whether a durable wait has reached a terminal lifecycle state.
 func IsWaitTerminalState(state string) bool {
@@ -89,11 +114,64 @@ func WaitNudgeIDs(store beads.Store, sessionID string) ([]string, error) {
 	return ids, nil
 }
 
+// ReassignWaits moves open non-terminal waits from one session bead ID to
+// another during canonical session repair.
+func ReassignWaits(store beads.Store, oldSessionID, newSessionID string) error {
+	if store == nil {
+		return nil
+	}
+	oldSessionID = strings.TrimSpace(oldSessionID)
+	newSessionID = strings.TrimSpace(newSessionID)
+	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
+		return nil
+	}
+	oldLabel := "session:" + oldSessionID
+	newLabel := "session:" + newSessionID
+	waits, err := store.List(beads.ListQuery{Label: oldLabel})
+	if err != nil {
+		return err
+	}
+	for _, wait := range waits {
+		if wait.Status == "closed" {
+			continue
+		}
+		if !IsWaitBead(wait) {
+			continue
+		}
+		if wait.Metadata["session_id"] != oldSessionID {
+			continue
+		}
+		if IsWaitTerminalState(wait.Metadata["state"]) {
+			continue
+		}
+		labels := []string(nil)
+		if !beadHasLabel(wait, newLabel) {
+			labels = []string{newLabel}
+		}
+		if err := store.Update(wait.ID, beads.UpdateOpts{
+			Labels:       labels,
+			RemoveLabels: []string{oldLabel},
+			Metadata:     map[string]string{"session_id": newSessionID},
+		}); err != nil {
+			return fmt.Errorf("reassign wait %s from session %s to %s: %w", wait.ID, oldSessionID, newSessionID, err)
+		}
+	}
+	return nil
+}
+
 // WakeSession clears hold/quarantine state and cancels open waits, returning
 // any queued wait-nudge IDs that should be eagerly withdrawn.
 func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]string, error) {
 	if store == nil || sessionBead.ID == "" {
 		return nil, nil
+	}
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   sessionBead.Status,
+		Metadata: sessionBead.Metadata,
+		Now:      now,
+	})
+	if state, conflict := lifecycleWakeConflictState(view); conflict {
+		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
 	}
 	nudgeIDs, err := WaitNudgeIDs(store, sessionBead.ID)
 	if err != nil {
@@ -102,21 +180,12 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 	if err := CancelWaits(store, sessionBead.ID, now); err != nil {
 		return nil, err
 	}
-	batch := map[string]string{
-		"held_until":        "",
-		"quarantined_until": "",
-		"wait_hold":         "",
-		"sleep_intent":      "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
-	}
-	switch strings.TrimSpace(sessionBead.Metadata["state"]) {
-	case "suspended", "drained":
-		batch["state"] = "asleep"
-	}
-	sr := sessionBead.Metadata["sleep_reason"]
-	if sr == "user-hold" || sr == "wait-hold" || sr == "quarantine" || sr == "context-churn" || sr == "drained" {
-		batch["sleep_reason"] = ""
+	batch := ClearWakeBlockersPatch(State(strings.TrimSpace(sessionBead.Metadata["state"])), sessionBead.Metadata["sleep_reason"])
+	if view.BaseState == BaseStateArchived && view.ContinuityEligible {
+		// RequestWakePatch clears wake blockers before claiming the start.
+		batch = RequestWakePatch(string(WakeCauseExplicit))
+		batch["archived_at"] = ""
+		batch["continuity_eligible"] = "true"
 	}
 	if err := store.SetMetadataBatch(sessionBead.ID, batch); err != nil {
 		return nil, err

@@ -39,7 +39,7 @@ type StatusAgentJSON struct {
 	Scope         string    `json:"scope"`
 	Running       bool      `json:"running"`
 	Suspended     bool      `json:"suspended"`
-	Pool          *PoolJSON `json:"pool"`
+	Pool          *PoolJSON `json:"pool,omitempty"`
 }
 
 // PoolJSON represents pool configuration in JSON output.
@@ -154,13 +154,13 @@ func doCityStatus(
 			suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
 			sp0 := scaleParamsFor(&a)
 
-			if isMultiSessionCfgAgent(&a) {
-				// Multi-session agent — show header then instances.
+			if a.SupportsInstanceExpansion() {
+				// Instance-expanding template — show header then instances.
 				maxDisplay := fmt.Sprintf("max=%d", sp0.Max)
 				if sp0.Max < 0 {
 					maxDisplay = "max=unlimited"
 				}
-				fmt.Fprintf(stdout, "  %-24spool (min=%d, %s)\n", a.QualifiedName(), sp0.Min, maxDisplay) //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stdout, "  %-24sscaled (min=%d, %s)\n", a.QualifiedName(), sp0.Min, maxDisplay) //nolint:errcheck // best-effort stdout
 				for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
 					sn := cliSessionName(cityPath, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
 					status := agentStatusLine(sp, dops, sn, suspended)
@@ -171,7 +171,7 @@ func doCityStatus(
 					}
 				}
 			} else {
-				// Singleton agent.
+				// Non-expanding template.
 				sn := cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 				status := agentStatusLine(sp, dops, sn, suspended)
 				fmt.Fprintf(stdout, "  %-24s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
@@ -181,6 +181,8 @@ func doCityStatus(
 				}
 			}
 		}
+
+		printNamedSessionStatus(stdout, cfg, cityName, cityPath, suspendedRigs)
 
 		// Summary line.
 		fmt.Fprintln(stdout)                                                      //nolint:errcheck // best-effort stdout
@@ -221,6 +223,50 @@ func doCityStatus(
 	return 0
 }
 
+func printNamedSessionStatus(stdout io.Writer, cfg *config.City, cityName, cityPath string, suspendedRigs map[string]bool) {
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return
+	}
+	fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "Named sessions:")
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		identity := ns.QualifiedName()
+		mode := ns.ModeOrDefault()
+		status := "reserved-unmaterialized"
+		if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
+			if mode == "always" && namedSessionBlockedBySuspension(cfg, spec.Agent, suspendedRigs) {
+				status = "degraded blocked"
+			}
+		}
+		if store, err := openCityStoreAt(cityPath); err == nil {
+			if id, err := resolveSessionIDWithConfig(cityPath, cfg, store, identity); err == nil {
+				if bead, getErr := store.Get(id); getErr == nil {
+					if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+						status = state
+					} else {
+						status = "materialized"
+					}
+				}
+			}
+		}
+		fmt.Fprintf(stdout, "  %-24s%s (%s)\n", identity, status, mode) //nolint:errcheck // best-effort stdout
+	}
+}
+
+func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, suspendedRigs map[string]bool) bool {
+	if cfg == nil {
+		return false
+	}
+	if citySuspended(cfg) {
+		return true
+	}
+	if agentCfg == nil {
+		return false
+	}
+	return agentCfg.Suspended || (agentCfg.Dir != "" && suspendedRigs[agentCfg.Dir])
+}
+
 // doCityStatusJSON outputs city status as JSON. Accepts injected providers
 // for testability.
 func doCityStatusJSON(
@@ -258,8 +304,8 @@ func doCityStatusJSON(
 			scope = "rig"
 		}
 
-		if isMultiSessionCfgAgent(&a) {
-			// Multi-session agent — emit each instance.
+		if a.SupportsInstanceExpansion() {
+			// Instance-expanding template — emit each instance.
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				sn := cliSessionName(cityPath, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
@@ -270,7 +316,7 @@ func doCityStatusJSON(
 					Scope:         scope,
 					Running:       running,
 					Suspended:     suspended,
-					Pool:          &PoolJSON{Min: sp0.Min, Max: sp0.Max},
+					Pool:          nil,
 				})
 				totalAgents++
 				if running {
@@ -278,7 +324,7 @@ func doCityStatusJSON(
 				}
 			}
 		} else {
-			// Singleton agent.
+			// Non-expanding template.
 			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			running := sp.IsRunning(sn)
 			agents = append(agents, StatusAgentJSON{

@@ -180,6 +180,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
+		InjectAssignedSkills:    &trueVal,
 		SessionSetup:            []string{"setup-cmd"},
 		SessionSetupScript:      strVal("scripts/setup.sh"),
 		SessionLive:             []string{"live-cmd"},
@@ -230,8 +231,12 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		"SessionLiveAppend":       true,
 		"InstallAgentHooksAppend": true,
 		"InjectFragmentsAppend":   true,
-		"SkillsAppend":            true,
-		"MCPAppend":               true,
+		// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are
+		// parsed but not applied. See engdocs/proposals/skill-materialization.md
+		"Skills":       true,
+		"MCP":          true,
+		"SkillsAppend": true,
+		"MCPAppend":    true,
 	}
 
 	// Check that all non-targeting, non-modifier fields were applied.
@@ -322,6 +327,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
+		InjectAssignedSkills:    &trueVal,
 		SessionSetup:            []string{"setup-cmd"},
 		SessionSetupScript:      strVal("scripts/setup.sh"),
 		SessionLive:             []string{"live-cmd"},
@@ -369,8 +375,12 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		"SessionLiveAppend":       true,
 		"InstallAgentHooksAppend": true,
 		"InjectFragmentsAppend":   true,
-		"SkillsAppend":            true,
-		"MCPAppend":               true,
+		// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are
+		// parsed but not applied. See engdocs/proposals/skill-materialization.md
+		"Skills":       true,
+		"MCP":          true,
+		"SkillsAppend": true,
+		"MCPAppend":    true,
 	}
 
 	av := reflect.ValueOf(agent)

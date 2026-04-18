@@ -278,17 +278,21 @@ func displayProviderName(name string) string {
 	return name
 }
 
-// normalizeBeadsProvider maps the internal managed exec wrapper back to the
-// logical "bd" provider for command-time store selection. Managed sessions set
-// GC_BEADS=exec:.../gc-beads-bd so lifecycle operations stay pinned to the
-// city's Dolt server, but general gc commands still need a CRUD-capable store.
-func normalizeBeadsProvider(provider string) string {
+func configuredBeadsProviderValue(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
+}
+
+func normalizeRawBeadsProvider(cityPath, provider string) string {
 	provider = strings.TrimSpace(provider)
-	if !strings.HasPrefix(provider, "exec:") {
+	if provider == "" || !strings.HasPrefix(provider, "exec:") || execProviderBase(provider) != "gc-beads-bd" || cityPath == "" {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if filepath.Base(script) == "gc-beads-bd" {
+	wrapper := filepath.Join(cityPath, citylayout.SystemBinRoot, "gc-beads-bd")
+	if samePath(script, wrapper) {
 		return "bd"
 	}
 	return provider
@@ -296,19 +300,28 @@ func normalizeBeadsProvider(provider string) string {
 
 // rawBeadsProvider returns the raw bead store provider name from config.
 // Priority: GC_BEADS env var → city.toml [beads].provider → "bd" default.
-// Managed session env may export the internal gc-beads-bd exec wrapper; that
-// value is normalized back to "bd" so command-time CRUD paths don't try to use
-// the lifecycle-only exec protocol as a general beads store.
+// The city-managed lifecycle wrapper normalizes back to "bd" so nested agent
+// sessions do not re-inherit exec:gc-beads-bd for raw data operations.
 func rawBeadsProvider(cityPath string) string {
-	if v := os.Getenv("GC_BEADS"); v != "" {
-		return normalizeBeadsProvider(v)
-	}
-	// Try to read provider from city.toml.
-	cfg, err := loadCityConfig(cityPath)
-	if err == nil && cfg.Beads.Provider != "" {
-		return normalizeBeadsProvider(cfg.Beads.Provider)
+	if provider := configuredBeadsProviderValue(cityPath); provider != "" {
+		return normalizeRawBeadsProvider(cityPath, provider)
 	}
 	return "bd"
+}
+
+func providerUsesBdStoreContract(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" || provider == "bd" {
+		return true
+	}
+	if strings.HasPrefix(provider, "exec:") && execProviderBase(provider) == "gc-beads-bd" {
+		return true
+	}
+	return false
+}
+
+func cityUsesBdStoreContract(cityPath string) bool {
+	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.

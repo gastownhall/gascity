@@ -439,6 +439,7 @@ func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testi
 func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 	cfg := buildMemGraphWorkflowConfig(t)
 	store := beads.NewMemStore()
+	cityPath := t.TempDir()
 	worker, ok := resolveAgentIdentity(cfg, "worker", "")
 	if !ok {
 		t.Fatal("resolveAgentIdentity(worker) failed")
@@ -457,7 +458,14 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 					"gc.formula_contract": "graph.v2",
 				},
 			},
-			{ID: "wf.review", Title: "Review", Type: "task", Assignee: "worker"},
+			{
+				ID:    "wf.review",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "worker",
+				},
+			},
 			{
 				ID:          "wf.review.spec",
 				Title:       "Review spec",
@@ -476,7 +484,7 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 		},
 	}
 
-	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, cfg); err != nil {
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
 		t.Fatalf("applyGraphRouting: %v", err)
 	}
 

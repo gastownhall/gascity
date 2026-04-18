@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestACPConformance(t *testing.T) {
@@ -25,7 +26,16 @@ func TestACPConformance(t *testing.T) {
 		t.Fatalf("building fakeacp: %v", err)
 	}
 
-	dir := filepath.Join(t.TempDir(), "acp-conform")
+	// Unix socket paths are capped at 104 bytes on macOS (vs 108 on
+	// Linux). The default t.TempDir() on Darwin lives under
+	// /var/folders/.../T/ which already eats ~60 chars — a few more
+	// directory levels plus the hashed "s<8hex>.sock" filename puts
+	// us over the limit. testutil.ShortTempDir roots the directory
+	// under /tmp on Darwin to keep the socket path small.
+	dir := filepath.Join(testutil.ShortTempDir(t, "acp-conform"), "acp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %q: %v", dir, err)
+	}
 	p := NewProviderWithDir(dir, Config{})
 	var counter int64
 

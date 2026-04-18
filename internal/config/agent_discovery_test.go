@@ -483,3 +483,38 @@ source = "../mypk"
 		t.Errorf("missing helper.assist; got: %v", found)
 	}
 }
+
+func TestAgentDiscovery_RootCityPackDirectory(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "ada")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, dir, "city.toml", `
+[workspace]
+name = "backstage"
+`)
+	writeTestFile(t, dir, "pack.toml", `
+[pack]
+name = "backstage"
+schema = 2
+`)
+	writeTestFile(t, agentDir, "prompt.template.md", `You are {{ .AgentName }}.`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "ada" {
+			if !strings.HasSuffix(a.PromptTemplate, filepath.Join("agents", "ada", "prompt.template.md")) {
+				t.Fatalf("ada PromptTemplate = %q, want root city-pack agents/ada/prompt.template.md", a.PromptTemplate)
+			}
+			return
+		}
+	}
+	t.Fatalf("ada agent not discovered from root city-pack agents/ directory: %+v", explicit)
+}

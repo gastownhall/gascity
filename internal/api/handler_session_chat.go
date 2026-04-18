@@ -574,15 +574,13 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	writeJSON(w, statusCode, resp)
 }
 
-// persistSessionMeta writes kind, option metadata, and project_id to the session bead.
+// persistSessionMeta writes option metadata and project_id to the session bead.
 func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
 		batch[k] = v
 	}
-	if kind != "" {
-		batch["mc_session_kind"] = kind
-	}
+	_ = kind
 	if projectID != "" {
 		batch["mc_project_id"] = projectID
 	}

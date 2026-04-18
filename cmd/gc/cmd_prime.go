@@ -96,6 +96,16 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
 	}
+	sessionTemplateContext := false
+	if len(args) == 0 {
+		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		if template != "" && hasSessionContext {
+			agentName = template
+			sessionTemplateContext = true
+		}
+	}
 	if len(args) > 0 {
 		agentName = args[0]
 	}
@@ -116,6 +126,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {
 		return 0 // empty output; hooks call this
@@ -157,7 +168,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			}
 		}
 		var ctx PromptContext
-		if ok && (a.PromptTemplate != "" || hookMode) {
+		if ok && (a.PromptTemplate != "" || hookMode || sessionTemplateContext) {
 			ctx = buildPrimeContext(cityPath, &a, cfg.Rigs)
 		}
 		if ok && a.PromptTemplate != "" {
@@ -178,7 +189,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			promptFile := ""
 			if cfg.Daemon.FormulaV2 {
 				promptFile = "prompts/graph-worker.md"
-			} else if isMultiSessionCfgAgent(&a) || isPoolInstance(cfg, a) {
+			} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
 				promptFile = "prompts/pool-worker.md"
 			}
 			if promptFile != "" {
@@ -293,7 +304,7 @@ func persistPrimeHookSessionID(sessionID string) {
 // matches a configured pool agent in the same dir.
 func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	for _, ca := range cfg.Agents {
-		if !isMultiSessionCfgAgent(&ca) {
+		if !ca.SupportsInstanceExpansion() {
 			continue
 		}
 		if ca.Dir != a.Dir {
@@ -320,7 +331,7 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 	}
 	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
 	for _, a := range cfg.Agents {
-		if isMultiSessionCfgAgent(&a) {
+		if a.SupportsInstanceExpansion() {
 			sp := scaleParamsFor(&a)
 			prefix := a.Name + "-"
 			if strings.HasPrefix(name, prefix) {

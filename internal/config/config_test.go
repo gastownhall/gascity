@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -115,31 +116,6 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 }
 
-func TestParseAgentSkillsAndMCP(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "bright-lights"
-
-[[agent]]
-name = "mayor"
-skills = ["code-review", "incident-response"]
-mcp = ["beads-health", "sentry"]
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
-	}
-	if got := cfg.Agents[0].Skills; !reflect.DeepEqual(got, []string{"code-review", "incident-response"}) {
-		t.Fatalf("Agents[0].Skills = %v, want [code-review incident-response]", got)
-	}
-	if got := cfg.Agents[0].MCP; !reflect.DeepEqual(got, []string{"beads-health", "sentry"}) {
-		t.Fatalf("Agents[0].MCP = %v, want [beads-health sentry]", got)
-	}
-}
-
 func TestParseAgentsNoStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -168,8 +144,6 @@ name = "test-city"
 [agents]
 default_sling_formula = "mol-focus-review"
 append_fragments = ["command-glossary"]
-skills = ["skill-a", "skill-b"]
-mcp = ["mcp-a"]
 `)
 	cfg, err := Parse(data)
 	if err != nil {
@@ -180,12 +154,6 @@ mcp = ["mcp-a"]
 	}
 	if !reflect.DeepEqual(cfg.AgentDefaults.AppendFragments, []string{"command-glossary"}) {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want %v", cfg.AgentDefaults.AppendFragments, []string{"command-glossary"})
-	}
-	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"}) {
-		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"})
-	}
-	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"mcp-a"}) {
-		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"mcp-a"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -214,8 +182,6 @@ append_fragments = ["legacy-fragment"]
 [agent_defaults]
 default_sling_formula = "mol-canonical"
 append_fragments = []
-skills = ["city-skill"]
-mcp = ["city-mcp"]
 `)
 	cfg, err := Parse(data)
 	if err != nil {
@@ -226,12 +192,6 @@ mcp = ["city-mcp"]
 	}
 	if len(cfg.AgentDefaults.AppendFragments) != 0 {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want empty canonical override", cfg.AgentDefaults.AppendFragments)
-	}
-	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"city-skill"}) {
-		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"city-skill"})
-	}
-	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"city-mcp"}) {
-		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"city-mcp"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -1323,6 +1283,9 @@ func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/polecat --status=open --type=molecule --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route: %q", got)
+	}
 }
 
 func TestEffectiveSlingQueryFixedAgent(t *testing.T) {
@@ -1373,6 +1336,9 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/dog --status=open --type=molecule --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route with pool name: %q", got)
+	}
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
@@ -1394,6 +1360,9 @@ func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t
 	}
 	if !strings.Contains(got, `workflow-control`) {
 		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
+	}
+	if strings.Contains(got, "--type=molecule") {
+		t.Fatalf("EffectiveWorkQuery() should keep control-dispatcher on the no-molecule path: %q", got)
 	}
 }
 
@@ -1659,17 +1628,30 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 }
 
-func TestIsMultiSession(t *testing.T) {
-	a := Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}
-	maxSess := a.EffectiveMaxActiveSessions()
-	if maxSess == nil || *maxSess == 1 {
-		t.Error("agent with max=5 should be multi-session")
+func TestAgentSessionCapacityHelpers(t *testing.T) {
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(0)}).SupportsGenericEphemeralSessions(); got {
+		t.Fatal("max=0 agent should not support generic ephemeral sessions")
 	}
-
-	b := Agent{Name: "mayor"}
-	maxB := b.EffectiveMaxActiveSessions()
-	if maxB != nil {
-		t.Errorf("agent without scaling should have nil max, got %v", maxB)
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}).SupportsGenericEphemeralSessions(); !got {
+		t.Fatal("max=1 agent should still support generic ephemeral sessions")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}).SupportsInstanceExpansion(); got {
+		t.Fatal("max=1 agent should not require instance expansion")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(5)}).SupportsInstanceExpansion(); !got {
+		t.Fatal("max=5 agent should support instance expansion")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(-1)}).SupportsInstanceExpansion(); !got {
+		t.Fatal("max=-1 agent should support instance expansion")
+	}
+	if got := (&Agent{Name: "worker"}).SupportsInstanceExpansion(); !got {
+		t.Fatal("unbounded agent should support instance expansion")
+	}
+	if got := (&Agent{Name: "worker"}).HasUnlimitedSessionCapacity(); !got {
+		t.Fatal("agent without explicit max should report unlimited capacity")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(5)}).HasUnlimitedSessionCapacity(); got {
+		t.Fatal("bounded agent should not report unlimited capacity")
 	}
 }
 
@@ -3105,9 +3087,7 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 			if tt.agent.Dir == "" {
 				t.Skip("test only applies to rig-scoped agents")
 			}
-			maxSess := tt.agent.EffectiveMaxActiveSessions()
-			isMulti := maxSess == nil || *maxSess != 1
-			if !isMulti {
+			if !tt.agent.SupportsInstanceExpansion() {
 				t.Skip("fixed agents use env vars, not qualified names")
 			}
 
@@ -3538,15 +3518,11 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		Dir:               "myrig",
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
-	cmd := a.EffectiveOnDeath()
-	if !strings.Contains(cmd, "--assignee=myrig/dog") {
-		t.Errorf("EffectiveOnDeath() = %q, want --assignee=myrig/dog", cmd)
-	}
-	if !strings.Contains(cmd, "--status=in_progress") {
-		t.Errorf("EffectiveOnDeath() = %q, want --status=in_progress", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnDeath() = %q, want --unclaim", cmd)
+	got := a.EffectiveOnDeath()
+	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -3563,12 +3539,11 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	cmd := a.EffectiveOnDeath()
-	if !strings.Contains(cmd, "--assignee=mayor") {
-		t.Errorf("EffectiveOnDeath() = %q, want --assignee=mayor", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnDeath() = %q, want --unclaim", cmd)
+	got := a.EffectiveOnDeath()
+	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", "--assignee \"\""} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -3578,15 +3553,11 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		Dir:               "myrig",
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
-	cmd := a.EffectiveOnBoot()
-	if !strings.Contains(cmd, "gc.routed_to=myrig/dog") {
-		t.Errorf("EffectiveOnBoot() = %q, want gc.routed_to=myrig/dog", cmd)
-	}
-	if !strings.Contains(cmd, "--status=in_progress") {
-		t.Errorf("EffectiveOnBoot() = %q, want --status=in_progress", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnBoot() = %q, want --unclaim", cmd)
+	got := a.EffectiveOnBoot()
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -3598,9 +3569,11 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 		PoolName: "myrig/dog",
 	}
-	cmd := a.EffectiveOnBoot()
-	if !strings.Contains(cmd, "gc.routed_to=myrig/dog") {
-		t.Errorf("EffectiveOnBoot() = %q, want gc.routed_to=myrig/dog (from PoolName)", cmd)
+	got := a.EffectiveOnBoot()
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--assignee \"\""} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -3617,12 +3590,11 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	cmd := a.EffectiveOnBoot()
-	if !strings.Contains(cmd, "gc.routed_to=mayor") {
-		t.Errorf("EffectiveOnBoot() = %q, want gc.routed_to=mayor", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnBoot() = %q, want --unclaim", cmd)
+	got := a.EffectiveOnBoot()
+	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--assignee \"\""} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -4096,39 +4068,6 @@ func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
 	t.Fatal("explicit agent 'worker' not found")
 }
 
-func TestAgentDefaultsSharedAttachments_InheritAndPreserveExplicitLists(t *testing.T) {
-	cfg := &City{
-		Agents: []Agent{
-			{
-				Name:         "worker",
-				Skills:       []string{"agent-skill"},
-				MCP:          []string{"agent-mcp"},
-				SharedSkills: []string{"pack-skill"},
-				SharedMCP:    []string{"pack-mcp"},
-			},
-		},
-		AgentDefaults: AgentDefaults{
-			Skills: []string{"city-skill", "pack-skill"},
-			MCP:    []string{"city-mcp", "pack-mcp"},
-		},
-	}
-	ApplyAgentDefaults(cfg)
-
-	got := cfg.Agents[0]
-	if want := []string{"pack-skill", "city-skill"}; !reflect.DeepEqual(got.SharedSkills, want) {
-		t.Fatalf("SharedSkills = %v, want %v", got.SharedSkills, want)
-	}
-	if want := []string{"pack-mcp", "city-mcp"}; !reflect.DeepEqual(got.SharedMCP, want) {
-		t.Fatalf("SharedMCP = %v, want %v", got.SharedMCP, want)
-	}
-	if want := []string{"agent-skill"}; !reflect.DeepEqual(got.Skills, want) {
-		t.Fatalf("Skills = %v, want %v", got.Skills, want)
-	}
-	if want := []string{"agent-mcp"}; !reflect.DeepEqual(got.MCP, want) {
-		t.Fatalf("MCP = %v, want %v", got.MCP, want)
-	}
-}
-
 func TestAgentDefaultsSlingFormula_ExplicitOverrideWins(t *testing.T) {
 	// Explicit agents with their own default_sling_formula should NOT be
 	// overridden by agent_defaults.
@@ -4450,5 +4389,128 @@ scale_check = "echo 5"
 	}
 	if worker.EffectiveScaleCheck() != "echo 5" {
 		t.Errorf("effective scale_check = %q, want %q", worker.EffectiveScaleCheck(), "echo 5")
+	}
+}
+
+// withDeprecationWarningSink swaps the package-level sink for a capturing
+// buffer and returns a restore function. Tests should defer restore() so
+// the sink is restored even if the test fails.
+func withDeprecationWarningSink(t *testing.T) (*bytes.Buffer, func()) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := deprecationWarningSink
+	deprecationWarningSink = &buf
+	return &buf, func() { deprecationWarningSink = prev }
+}
+
+// TestLoadWithIncludes_DeprecatedAttachmentWarning confirms that a config
+// containing the v0.15.0 attachment-list tombstone fields still parses,
+// and that a single deprecation warning is emitted to the sink.
+func TestLoadWithIncludes_DeprecatedAttachmentWarning(t *testing.T) {
+	buf, restore := withDeprecationWarningSink(t)
+	defer restore()
+
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "deprecated-attachments"
+
+[[agent]]
+name = "mayor"
+skills = ["code-review", "incident-response"]
+mcp = ["beads-health"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	// Tombstone fields must still parse into the struct — that is the
+	// backwards-compat contract for v0.15.1.
+	var mayor *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "mayor" {
+			mayor = &cfg.Agents[i]
+			break
+		}
+	}
+	if mayor == nil {
+		t.Fatal("agent 'mayor' not found in loaded config")
+	}
+	if !reflect.DeepEqual(mayor.Skills, []string{"code-review", "incident-response"}) {
+		t.Errorf("mayor.Skills = %v, want tombstone parse-through", mayor.Skills)
+	}
+	if !reflect.DeepEqual(mayor.MCP, []string{"beads-health"}) {
+		t.Errorf("mayor.MCP = %v, want tombstone parse-through", mayor.MCP)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "deprecated as of v0.15.1 and ignored") {
+		t.Fatalf("deprecation warning not emitted, got:\n%s", got)
+	}
+	// Exactly one warning line — the emission is one-per-load.
+	if n := strings.Count(got, "gc: warning:"); n != 1 {
+		t.Errorf("emitted %d warnings, want exactly 1\nstderr:\n%s", n, got)
+	}
+}
+
+// TestLoadWithIncludes_DeprecatedAttachmentWarning_RigPatches confirms
+// that the deprecation warning fires when tombstone attachment-list
+// fields appear under [[rigs.patches]] — the PackV2 successor to
+// [[rigs.overrides]]. Prior to this test, the scan only covered
+// rig.Overrides and would silently miss the rig.RigPatches surface.
+func TestLoadWithIncludes_DeprecatedAttachmentWarning_RigPatches(t *testing.T) {
+	buf, restore := withDeprecationWarningSink(t)
+	defer restore()
+
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "deprecated-in-rig-patches"
+
+[[rigs]]
+name = "main"
+path = "/tmp/main"
+
+[[rigs.patches]]
+name = "polecat"
+skills_append = ["incident-response"]
+`)
+
+	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "deprecated as of v0.15.1 and ignored") {
+		t.Fatalf("rig.patches attachment fields should trigger deprecation warning, got:\n%s", got)
+	}
+	if n := strings.Count(got, "gc: warning:"); n != 1 {
+		t.Errorf("emitted %d warnings, want exactly 1\nstderr:\n%s", n, got)
+	}
+}
+
+// TestLoadWithIncludes_NoAttachmentsSilent confirms that a clean config
+// (no attachment-list tombstone fields) emits no deprecation warning.
+func TestLoadWithIncludes_NoAttachmentsSilent(t *testing.T) {
+	buf, restore := withDeprecationWarningSink(t)
+	defer restore()
+
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "clean-city"
+
+[[agent]]
+name = "mayor"
+`)
+
+	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if got := buf.String(); got != "" {
+		t.Errorf("expected no warning, got:\n%s", got)
 	}
 }

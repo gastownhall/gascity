@@ -55,3 +55,36 @@ func installTestProviderStubs() (string, error) {
 	}
 	return dir, nil
 }
+
+func writeTestGitIdentity(homeDir string) error {
+	gitConfig := filepath.Join(homeDir, ".gitconfig")
+	data := []byte("[user]\n\tname = gc-test\n\temail = gc-test@test.local\n")
+	return os.WriteFile(gitConfig, data, 0o644)
+}
+
+func writeTestDoltIdentity(homeDir string) error {
+	doltDir := filepath.Join(homeDir, ".dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		return err
+	}
+	data := []byte(`{"user.name":"gc-test","user.email":"gc-test@test.local"}`)
+	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), data, 0o644)
+}
+
+func configureTestDoltIdentityEnv(t *testing.T) {
+	t.Helper()
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(test home): %v", err)
+	}
+	if err := writeTestGitIdentity(homeDir); err != nil {
+		t.Fatalf("write test git identity: %v", err)
+	}
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("write test dolt identity: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))
+	t.Setenv("DOLT_ROOT_PATH", homeDir)
+}

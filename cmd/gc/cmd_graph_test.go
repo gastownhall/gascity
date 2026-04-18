@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -369,5 +372,89 @@ func TestGraphNonBlockingDepIgnored(t *testing.T) {
 		if strings.Contains(line, "gc-2") && strings.Contains(line, "blocked") {
 			t.Errorf("gc-2 should not be blocked by non-blocking dep:\n%s", out)
 		}
+	}
+}
+
+func writeGraphFileStoreFixture(t *testing.T, scopeRoot string, items ...beads.Bead) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"seq":   len(items),
+		"beads": items,
+	})
+	if err != nil {
+		t.Fatalf("marshal file store payload: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".gc", "beads.json"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenRigAwareStoreUsesProviderAwareRigStore(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := setupCity(t, "graph-city")
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"graph-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = \"" + rigDir + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	writeGraphFileStoreFixture(t, cityDir, beads.Bead{ID: "gc-1", Title: "city bead", Status: "open", Type: "task"})
+	writeGraphFileStoreFixture(t, rigDir, beads.Bead{ID: "fe-1", Title: "rig bead", Status: "open", Type: "task"})
+
+	setCwd(t, cityDir)
+	var stderr bytes.Buffer
+	store, code := openRigAwareStore([]string{"fe-1"}, &stderr)
+	if code != 0 {
+		t.Fatalf("openRigAwareStore() = %d, stderr = %s", code, stderr.String())
+	}
+	bead, err := store.Get("fe-1")
+	if err != nil {
+		t.Fatalf("store.Get(fe-1): %v", err)
+	}
+	if bead.Title != "rig bead" {
+		t.Fatalf("rig bead title = %q, want %q", bead.Title, "rig bead")
+	}
+}
+
+func TestOpenRigAwareStoreLegacyFileCityUsesSharedCityStore(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := setupCity(t, "graph-city")
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"graph-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = \"" + rigDir + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeGraphFileStoreFixture(t, cityDir, beads.Bead{ID: "fe-1", Title: "legacy shared bead", Status: "open", Type: "task"})
+
+	setCwd(t, cityDir)
+	var stderr bytes.Buffer
+	store, code := openRigAwareStore([]string{"fe-1"}, &stderr)
+	if code != 0 {
+		t.Fatalf("openRigAwareStore() = %d, stderr = %s", code, stderr.String())
+	}
+	bead, err := store.Get("fe-1")
+	if err != nil {
+		t.Fatalf("store.Get(fe-1): %v", err)
+	}
+	if bead.Title != "legacy shared bead" {
+		t.Fatalf("legacy shared bead title = %q, want %q", bead.Title, "legacy shared bead")
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc")); !os.IsNotExist(err) {
+		t.Fatalf("legacy rig open should not create rig .gc state, stat err = %v", err)
 	}
 }

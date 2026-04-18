@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/spf13/cobra"
 )
 
@@ -19,11 +20,19 @@ func newSkillCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd = &cobra.Command{
 		Use:   "skill",
 		Short: "List visible skills",
-		Long: `List visible Pack/City skills for the current city pack.
+		Long: `List skills visible to the current city.
 
-Use "gc skill list" to show discovered skills, optionally scoped to an
-agent or session. The built-in topic/reference viewer now lives under
-"gc skills".`,
+Output includes:
+  - City pack skills (skills/<name>/SKILL.md under the city root)
+  - Bootstrap implicit-import pack skills (e.g. core)
+  - With --agent/--session: that agent's agents/<name>/skills/ catalog
+
+The listing is a diagnostic view of what's *available*. It does not
+collapse precedence, filter to agents whose provider has a vendor
+sink, or predict exactly which entries the materializer will pick on
+name collision. For the materialized set, inspect the
+<scope-root>/.<vendor>/skills/ sink after "gc start" or run
+"gc doctor" to surface collisions.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -85,53 +94,55 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Store, agentName, sessionID string) ([]visibilityEntry, error) {
-	cityEntries := discoverSkillEntries(cityPath, "city")
+	entries := discoverSkillEntries(cityPath, "city")
+	// Per engdocs/proposals/skill-materialization.md: bootstrap implicit-
+	// import pack skills (the `core` catalog) participate in the
+	// materialized skill set. `gc skill list` must surface them so the
+	// listing reflects what the materializer actually delivers.
+	entries = append(entries, discoverBootstrapSkillEntries()...)
 	if strings.TrimSpace(agentName) == "" && strings.TrimSpace(sessionID) == "" {
-		return cityEntries, nil
+		sortVisibilityEntries(entries)
+		return entries, nil
 	}
 	agent, err := resolveVisibilityAgent(cityPath, cfg, store, agentName, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	// When the agent has an explicit attachment config (skills or shared_skills),
-	// filter the city catalog to the attached set. Empty config means the agent
-	// inherits no restriction and the full city catalog remains visible — this
-	// preserves the "catalog discovery" view for unconfigured agents.
-	attached := attachmentSet(agent.Skills, agent.SharedSkills)
-	if len(attached) > 0 {
-		cityEntries = filterEntriesByName(cityEntries, attached)
-	}
-	cityEntries = append(cityEntries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
-	sortVisibilityEntries(cityEntries)
-	return cityEntries, nil
+	// Every agent sees the entire city+bootstrap catalog plus its own
+	// agent-local skills. No attachment filtering.
+	entries = append(entries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
+	sortVisibilityEntries(entries)
+	return entries, nil
 }
 
-func attachmentSet(lists ...[]string) map[string]struct{} {
-	var total int
-	for _, l := range lists {
-		total += len(l)
-	}
-	if total == 0 {
+// discoverBootstrapSkillEntries enumerates skills that come from the
+// bootstrap implicit-import packs (e.g., `core`). Returns an empty
+// slice when no bootstrap pack has a populated skills/ directory or
+// when discovery fails (the listing degrades gracefully — a transient
+// I/O error shouldn't empty the city-pack listing).
+//
+// Each returned entry's Source field is the bootstrap pack name
+// (e.g., "core") so the display distinguishes city-pack skills from
+// bootstrap-pack skills. Path is the absolute filesystem path to the
+// SKILL.md file because bootstrap packs live under the user-global
+// cache, not the city directory — there is no shared relative base.
+func discoverBootstrapSkillEntries() []visibilityEntry {
+	// LoadCityCatalog("") skips the city-pack walk and returns just the
+	// bootstrap implicit-import entries. The full LoadCityCatalog call
+	// also lives in cmd/gc/cmd_internal_materialize_skills.go and
+	// BuildDesiredState; using it here keeps the one-source-of-truth
+	// discovery rule the spec establishes.
+	cat, err := materialize.LoadCityCatalog("")
+	if err != nil {
 		return nil
 	}
-	set := make(map[string]struct{}, total)
-	for _, l := range lists {
-		for _, name := range l {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				set[name] = struct{}{}
-			}
-		}
-	}
-	return set
-}
-
-func filterEntriesByName(entries []visibilityEntry, allowed map[string]struct{}) []visibilityEntry {
-	out := entries[:0:0]
-	for _, e := range entries {
-		if _, ok := allowed[e.Name]; ok {
-			out = append(out, e)
-		}
+	out := make([]visibilityEntry, 0, len(cat.Entries))
+	for _, e := range cat.Entries {
+		out = append(out, visibilityEntry{
+			Name:   e.Name,
+			Source: e.Origin,
+			Path:   filepath.ToSlash(filepath.Join(e.Source, "SKILL.md")),
+		})
 	}
 	return out
 }

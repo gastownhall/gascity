@@ -56,7 +56,6 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	readDoltPort(current.cityPath)
 	store, err := openCityStoreAt(current.cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err)                    //nolint:errcheck // best-effort stderr

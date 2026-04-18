@@ -99,6 +99,9 @@ type SlingDeps struct {
 	Branches BranchResolver // git default branch lookup (nil = skip)
 	Notify   Notifier       // controller/dispatcher wake (nil = skip)
 	Router   BeadRouter     // typed bead routing (nil = use Runner)
+	// DirectSessionResolver optionally materializes direct graph assignee
+	// targets to concrete session bead IDs.
+	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
 }
 
 // SlingResult holds the structured output of a sling operation.
@@ -558,7 +561,7 @@ func TargetType(a *config.Agent) string {
 	if a == nil {
 		return "unknown"
 	}
-	if a.MaxActiveSessions != nil && *a.MaxActiveSessions != 1 {
+	if a.SupportsInstanceExpansion() {
 		return "pool"
 	}
 	return "agent"

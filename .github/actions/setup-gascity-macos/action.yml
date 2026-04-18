@@ -1,0 +1,210 @@
+name: Setup Gas City macOS CI
+description: Install the shared macOS dependencies for Gas City CI jobs on the self-hosted ARM64 runner
+
+inputs:
+  go-version:
+    description: Go version to install. Default matches setup-gascity-ubuntu; bump both together.
+    required: false
+    default: "1.25.8"
+  node-version:
+    description: Node.js version to install
+    required: false
+    default: "22"
+  dolt-version:
+    description: Dolt version to install (without leading v)
+    required: true
+  bd-version:
+    description: Beads release version to install (with leading v)
+    required: true
+  install-claude-cli:
+    description: Whether to install the Claude CLI
+    required: false
+    default: "true"
+  install-system-deps:
+    description: Whether to run brew to install tmux, jq, and flock (set to false when the self-hosted runner already has them)
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify macOS
+      shell: bash
+      run: |
+        if [[ "$(uname)" != "Darwin" ]]; then
+          echo "setup-gascity-macos must run on macOS; uname=$(uname)" >&2
+          exit 1
+        fi
+        arch="$(uname -m)"
+        if [[ "$arch" != "arm64" ]]; then
+          echo "setup-gascity-macos currently targets arm64; got $arch" >&2
+          exit 1
+        fi
+
+    - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      with:
+        # Keep this default in lock-step with setup-gascity-ubuntu —
+        # a split between Mac and Linux toolchains would surface as
+        # false "Mac-only" regressions. Track the same pin both
+        # actions use today; bump them together.
+        go-version: ${{ inputs.go-version }}
+        # self-hosted macstadium runners reuse the same GOPATH across jobs;
+        # actions/setup-go's cache layer is flaky on reused runners, so skip it.
+        cache: false
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install system dependencies (brew)
+      if: ${{ inputs.install-system-deps == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v brew >/dev/null 2>&1; then
+          echo "Homebrew is required on the macOS runner but was not found on PATH" >&2
+          exit 1
+        fi
+        # Bootstrap flock first (relying on Homebrew's internal lock to
+        # serialize any concurrent brew runs). We need flock installed
+        # *before* we take our own lock, otherwise concurrent matrix jobs
+        # on a fresh runner would all race past the missing-flock branch
+        # unguarded — the exact failure Homebrew's "Another active
+        # process" error surfaces as.
+        if ! command -v flock >/dev/null 2>&1; then
+          echo "Bootstrapping flock..."
+          brew install flock
+        fi
+        # Now we can safely lock-guard the remaining installs so parallel
+        # matrix jobs don't interleave brew's output (or worse, corrupt
+        # its caches on an exotic failure).
+        lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
+        mkdir -p "$(dirname "$lock_file")"
+        pkgs=(tmux jq flock)
+        install_missing() {
+          local missing=()
+          for pkg in "${pkgs[@]}"; do
+            if ! brew list --formula "$pkg" >/dev/null 2>&1; then
+              missing+=("$pkg")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Installing missing formulae: ${missing[*]}"
+            brew install "${missing[@]}"
+          else
+            echo "All required formulae already installed: ${pkgs[*]}"
+          fi
+        }
+        (
+          flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
+          install_missing
+        ) 9>"$lock_file"
+        for cmd in tmux jq flock lsof; do
+          command -v "$cmd" >/dev/null 2>&1 || {
+            echo "Required command '$cmd' missing after install" >&2
+            exit 1
+          }
+        done
+
+    - name: Install dolt v${{ inputs.dolt-version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="${{ inputs.dolt-version }}"
+        arch="$(uname -m)"
+        case "$arch" in
+          arm64) platform_tuple=darwin-arm64 ;;
+          x86_64) platform_tuple=darwin-amd64 ;;
+          *)
+            echo "Unsupported macOS arch: $arch" >&2
+            exit 1
+            ;;
+        esac
+        # Pin an install prefix we can write without sudo on a self-hosted
+        # runner. Prefer $RUNNER_TOOL_CACHE when present (persistent across
+        # GitHub Actions jobs) and fall back to $HOME/.local.
+        cache_root="${RUNNER_TOOL_CACHE:-$HOME/.local}"
+        install_root="$cache_root/gascity-dolt/$version/$platform_tuple"
+        bin_dir="$install_root/bin"
+        if [[ ! -x "$bin_dir/dolt" ]]; then
+          echo "Installing dolt $version for $platform_tuple into $install_root"
+          mkdir -p "$install_root"
+          archive="dolt-${platform_tuple}.tar.gz"
+          tmp="$RUNNER_TEMP/dolt-${version}-${platform_tuple}"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          curl -fsSL -o "$tmp/$archive" \
+            "https://github.com/dolthub/dolt/releases/download/v${version}/${archive}"
+          tar -xzf "$tmp/$archive" -C "$tmp"
+          # The tarball root is "dolt-${platform_tuple}" with a bin/ subdir.
+          cp -R "$tmp/dolt-${platform_tuple}/." "$install_root/"
+          rm -rf "$tmp"
+        else
+          echo "Reusing cached dolt $version at $install_root"
+        fi
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        "$bin_dir/dolt" version
+
+    - name: Install released bd v${{ inputs.bd-version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="${{ inputs.bd-version }}"
+        arch="$(uname -m)"
+        case "$arch" in
+          arm64) bd_arch=arm64 ;;
+          x86_64) bd_arch=amd64 ;;
+          *)
+            echo "Unsupported runner architecture: $arch" >&2
+            exit 1
+            ;;
+        esac
+        cache_root="${RUNNER_TOOL_CACHE:-$HOME/.local}"
+        install_root="$cache_root/gascity-bd/${version}/darwin_${bd_arch}"
+        bin_dir="$install_root/bin"
+        if [[ ! -x "$bin_dir/bd" ]]; then
+          echo "Installing bd $version for darwin_${bd_arch} into $install_root"
+          mkdir -p "$bin_dir"
+          archive="beads_${version#v}_darwin_${bd_arch}.tar.gz"
+          tmp="$RUNNER_TEMP/bd-${version}-darwin_${bd_arch}"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          curl -fsSL -o "$tmp/$archive" \
+            "https://github.com/gastownhall/beads/releases/download/${version}/${archive}"
+          # Strip the top-level directory (beads_<version>_darwin_<arch>/)
+          # so `bd` lands directly in $tmp.
+          tar -xzf "$tmp/$archive" -C "$tmp" --strip-components=1
+          install -m 0755 "$tmp/bd" "$bin_dir/bd"
+          rm -rf "$tmp"
+        else
+          echo "Reusing cached bd $version at $install_root"
+        fi
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        "$bin_dir/bd" version
+
+    - name: Install Claude CLI
+      if: ${{ inputs.install-claude-cli == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # setup-node configures an npm prefix that's writable without sudo,
+        # so a plain `npm install -g` works on the self-hosted runner.
+        npm install -g @anthropic-ai/claude-code
+
+    - name: Pin CI git identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Dolt inherits its commit identity from the user's global git config
+        # (see cmd/gc/gc-beads-bd ensure_dolt_identity). The ubuntu-latest
+        # hosted runner ships with user.name/user.email baked in; the
+        # self-hosted macstadium runner does not.
+        #
+        # Force-set a deterministic CI identity unconditionally. Don't log
+        # the resolved value — on a reused runner any preexisting identity
+        # from a prior maintenance session would otherwise leak into the
+        # job log (real maintainer name/email), and a shared writable
+        # `~/.gitconfig` would leave Dolt commit metadata nondeterministic
+        # between runs.
+        git config --global user.name "Gas City CI"
+        git config --global user.email "ci@gascity.local"

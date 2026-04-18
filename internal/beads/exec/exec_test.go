@@ -23,8 +23,15 @@ func writeScript(t *testing.T, dir, content string) string {
 	return path
 }
 
-// allOpsScript returns a script body that handles all bead store operations
-// with simple, predictable responses.
+// storeTargetEnv builds the GC-native store-target env used by exec tests.
+func storeTargetEnv(root string) map[string]string {
+	return map[string]string{
+		"GC_STORE_ROOT":   root,
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "gc",
+	}
+}
+
 func allOpsScript() string {
 	return `
 op="$1"; shift
@@ -183,7 +190,7 @@ func TestCreate_metadataRoundTripsViaConformance(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "mayor",
@@ -239,7 +246,7 @@ func TestUpdate_metadataRoundTripsViaConformance(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "mayor",
@@ -290,7 +297,7 @@ func TestSetMetadata_deduplicatesViaConformance(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "test",
@@ -333,7 +340,7 @@ func TestCreate_metadataWithSpecialCharsRoundTrips(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "agent-session",
@@ -383,7 +390,7 @@ func TestCreate_numericLookingMetadataStaysString(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title: "quarantined-session",
@@ -547,7 +554,7 @@ func TestUpdate_assigneeRoundTripsThroughConformanceScript(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{Title: "reassignable"})
 	if err != nil {
@@ -847,6 +854,101 @@ esac
 
 // --- Conformance suite ---
 
+func TestExecStoreConformanceUsesGCStoreRoot(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storeRoot := t.TempDir()
+	legacyDir := t.TempDir()
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{
+		"GC_STORE_ROOT":   storeRoot,
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "gc",
+		"BEADS_DIR":       legacyDir,
+	})
+
+	created, err := s.Create(beads.Bead{Title: "store-target-probe"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(storeRoot, created.ID+".json")); err != nil {
+		t.Fatalf("storeRoot did not receive bead file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, created.ID+".json")); err == nil {
+		t.Fatalf("legacy BEADS_DIR should be ignored, but %s/%s.json exists", legacyDir, created.ID)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat legacy BEADS_DIR bead file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, ".counter")); err == nil {
+		t.Fatalf("legacy BEADS_DIR should be ignored, but %s/.counter exists", legacyDir)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat legacy BEADS_DIR counter: %v", err)
+	}
+}
+
+func TestRunSanitizesAmbientLegacyAndStoreTargetEnv(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+
+	t.Setenv("BEADS_DIR", "/ambient/.beads")
+	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
+	t.Setenv("GC_STORE_ROOT", "/ambient/root")
+	t.Setenv("GC_STORE_SCOPE", "city")
+	t.Setenv("GC_BEADS_PREFIX", "ambient")
+	t.Setenv("GC_PROVIDER", "ambient-provider")
+
+	script := writeScript(t, dir, `
+case "$1" in
+  create)
+    printf 'BEADS_DIR=%s\nGC_DOLT_HOST=%s\nGC_STORE_ROOT=%s\nGC_STORE_SCOPE=%s\nGC_BEADS_PREFIX=%s\nGC_PROVIDER=%s\nGC_RIG=%s\nGC_RIG_ROOT=%s\n' \
+      "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_PROVIDER:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" > "`+outFile+`"
+    cat >/dev/null
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+	s.SetEnv(map[string]string{
+		"GC_STORE_ROOT":   "/scope/root",
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "fe",
+		"GC_PROVIDER":     "exec:/tmp/spy",
+		"GC_RIG":          "frontend",
+		"GC_RIG_ROOT":     "/scope/root",
+	})
+
+	if _, err := s.Create(beads.Bead{Title: "sanitized"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured env: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"BEADS_DIR=\n",
+		"GC_DOLT_HOST=\n",
+		"GC_STORE_ROOT=/scope/root\n",
+		"GC_STORE_SCOPE=rig\n",
+		"GC_BEADS_PREFIX=fe\n",
+		"GC_PROVIDER=exec:/tmp/spy\n",
+		"GC_RIG=frontend\n",
+		"GC_RIG_ROOT=/scope/root\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("captured env missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestExecStoreConformance(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
@@ -858,7 +960,7 @@ func TestExecStoreConformance(t *testing.T) {
 	beadstest.RunStoreTests(t, func() beads.Store {
 		dir := t.TempDir()
 		s := NewStore(scriptPath)
-		s.SetEnv(map[string]string{"BEADS_DIR": dir})
+		s.SetEnv(storeTargetEnv(dir))
 		return s
 	})
 }
@@ -866,3 +968,36 @@ func TestExecStoreConformance(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ beads.Store = (*Store)(nil)
+
+func TestListForwardsSupportedFilters(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{Assignee: "mayor", Type: "message", Status: "open", Limit: 7})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	for _, want := range []string{"--status=open", "--assignee=mayor", "--type=message", "--limit=7"} {
+		if !strings.Contains(argsText, want) {
+			t.Fatalf("list args missing %q: %s", want, argsText)
+		}
+	}
+}

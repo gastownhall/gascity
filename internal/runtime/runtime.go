@@ -225,7 +225,7 @@ type CopyEntry struct {
 	// ContentHash is a hex-encoded hash of the entry's content at discovery
 	// time. Set for filesystem-probed entries (hook files, skills dirs) so
 	// the config fingerprint is stable when content hasn't changed, even if
-	// the file is recreated (e.g., by materializeSkillStubs on every tick).
+	// the file is recreated on every tick.
 	// Empty for config-derived entries — those use Src/RelDst paths in the
 	// fingerprint instead. When Probed is true but ContentHash is empty
 	// (transient I/O error), the fingerprint uses a stable sentinel rather
@@ -390,7 +390,7 @@ func SyncWorkDirEnv(cfg Config) Config {
 	if cfg.Env != nil && cfg.Env["GC_DIR"] == cfg.WorkDir {
 		return cfg
 	}
-	env := make(map[string]string, len(cfg.Env)+1)
+	env := make(map[string]string, len(cfg.Env))
 	for k, v := range cfg.Env {
 		env[k] = v
 	}

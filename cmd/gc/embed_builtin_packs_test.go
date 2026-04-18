@@ -271,6 +271,26 @@ func TestBuiltinPackIncludes_NonBdProvider(t *testing.T) {
 	}
 }
 
+func TestBuiltinPackIncludes_ExecGcBeadsBdOverrideIncludesBdAndDolt(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
+	includes := builtinPackIncludes(dir)
+	if len(includes) != 3 {
+		t.Fatalf("builtinPackIncludes() = %v, want 3 entries when GC_BEADS=exec:gc-beads-bd", includes)
+	}
+	if got := filepath.Base(includes[1]); got != "bd" {
+		t.Fatalf("includes[1] base = %q, want bd", got)
+	}
+	if got := filepath.Base(includes[2]); got != "dolt" {
+		t.Fatalf("includes[2] base = %q, want dolt", got)
+	}
+}
+
 func TestBuiltinPackIncludes_EnvOverride(t *testing.T) {
 	dir := t.TempDir()
 

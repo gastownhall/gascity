@@ -225,7 +225,6 @@ bead into a sub-workflow at runtime.`,
 			if err != nil {
 				return err
 			}
-			readDoltPort(cityPath)
 			cfg, err := loadCityConfig(cityPath)
 			if err != nil {
 				return err

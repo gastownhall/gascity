@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -65,6 +66,39 @@ func TestFormatDuration(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("formatDuration(%v) = %q, want %q", tt.d, got, tt.want)
 		}
+	}
+}
+
+func TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions(t *testing.T) {
+	cityDir, _ := setupManagedBdWaitTestCity(t)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "managed exec session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+			"template":     "worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "mayor") {
+		t.Fatalf("stdout missing session name %q:\n%s", "mayor", stdout.String())
 	}
 }
 
@@ -387,6 +421,74 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "sleeping-worker",
+			"state":        "asleep",
+			"held_until":   time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "sleeping-worker",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "-" {
+		t.Fatalf("sessionReason = %q, want - after expired hold", reason)
+	}
+}
+
+func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                 "worker",
+			"session_name":             "old-worker",
+			"state":                    "archived",
+			"continuity_eligible":      "false",
+			"configured_named_session": "true",
+			"configured_named_mode":    "always",
+			"pin_awake":                "true",
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateArchived,
+		SessionName: "old-worker",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "-" {
+		t.Fatalf("sessionReason = %q, want - for historical archived bead", reason)
+	}
+}
+
 func TestAttachmentCachingProvider_DelegatesSleepCapability(t *testing.T) {
 	provider := &attachmentAwareProvider{
 		Fake:            runtime.NewFake(),
@@ -449,6 +551,36 @@ func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
 	}
 	if got := sessionNewAliasOwner(cfg, &cfg.Agents[1]); got != "" {
 		t.Fatalf("sessionNewAliasOwner(worker) = %q, want empty", got)
+	}
+}
+
+func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No sessions found") {
+		t.Fatalf("stdout = %q, want JSON only", stdout.String())
+	}
+	var got []session.Info
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not a JSON session array: %v; stdout=%q", err, stdout.String())
+	}
+	if got == nil {
+		t.Fatalf("sessions JSON = nil, want empty array; stdout=%q", stdout.String())
+	}
+	if len(got) != 0 {
+		t.Fatalf("sessions = %d, want 0; stdout=%q", len(got), stdout.String())
 	}
 }
 

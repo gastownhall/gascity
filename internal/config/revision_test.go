@@ -134,6 +134,25 @@ name = "worker-v2"
 	}
 }
 
+func TestRevision_IncludesConventionDiscoveredCityAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+	writeFile(t, dir, "agents/mayor/prompt.template.md", "first prompt\n")
+
+	prov := &Provenance{
+		Sources: []string{filepath.Join(dir, "city.toml")},
+	}
+
+	h1 := Revision(fsys.OSFS{}, prov, &City{}, dir)
+	writeFile(t, dir, "agents/mayor/prompt.template.md", "second prompt\n")
+	h2 := Revision(fsys.OSFS{}, prov, &City{}, dir)
+	if h1 == h2 {
+		t.Error("hash should change when convention-discovered city agent files change")
+	}
+}
+
 func TestWatchDirs_ConfigOnly(t *testing.T) {
 	dir := t.TempDir()
 	prov := &Provenance{
@@ -218,6 +237,37 @@ func TestWatchDirs_WithCityPack(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("city pack dir not in watch list: %v", dirs)
+	}
+}
+
+func TestWatchDirs_IncludesConventionDiscoveryRoots(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "agents/mayor/prompt.template.md", "prompt\n")
+	writeFile(t, dir, "commands/reload/run.sh", "#!/bin/sh\n")
+	writeFile(t, dir, "doctor/runtime/run.sh", "#!/bin/sh\n")
+
+	prov := &Provenance{
+		Sources: []string{filepath.Join(dir, "city.toml")},
+	}
+
+	dirs := WatchDirs(prov, &City{}, dir)
+	sort.Strings(dirs)
+
+	for _, want := range []string{
+		filepath.Join(dir, "agents"),
+		filepath.Join(dir, "commands"),
+		filepath.Join(dir, "doctor"),
+	} {
+		found := false
+		for _, got := range dirs {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("watch dirs = %v, want %q present", dirs, want)
+		}
 	}
 }
 

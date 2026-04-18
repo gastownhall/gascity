@@ -71,7 +71,14 @@ func TestGCSweepSessionBeads_ClosesOrphans(t *testing.T) {
 func TestGCSweepSessionBeads_KeepsBlockedAssigned(t *testing.T) {
 	store := beads.NewMemStore()
 
-	sess, _ := store.Create(beads.Bead{Title: "session", Type: "session"})
+	sess, _ := store.Create(beads.Bead{
+		Title:  "session",
+		Type:   "session",
+		Status: "open",
+		Metadata: map[string]string{
+			"state": "active",
+		},
+	})
 
 	// Work bead is open (blocked) but assigned to this session.
 	blocked, _ := store.Create(beads.Bead{
@@ -88,6 +95,13 @@ func TestGCSweepSessionBeads_KeepsBlockedAssigned(t *testing.T) {
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (blocked work keeps session alive)", len(closed))
+	}
+	got, err := store.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active when sweep skips close", got.Metadata["state"])
 	}
 }
 
@@ -221,5 +235,95 @@ func TestReleaseOrphanedPoolAssignments_KeepsOpenSessionOwnership(t *testing.T) 
 	}
 	if got.Assignee != "worker-live" {
 		t.Fatalf("assignee = %q, want worker-live", got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ReopensStaleDirectAssigneeForNamedBackedTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "stale direct-session work",
+		Assignee: "mc-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "reviewer",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+		ResolvedWorkspaceName: "test-city",
+	}
+
+	released := releaseOrphanedPoolAssignments(store, cfg, nil, []beads.Bead{work})
+	if len(released) != 1 || released[0] != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_PreservesCanonicalNamedIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "named owner work",
+		Assignee: "reviewer",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "reviewer",
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+		ResolvedWorkspaceName: "test-city",
+	}
+
+	released := releaseOrphanedPoolAssignments(store, cfg, nil, []beads.Bead{work})
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "reviewer" {
+		t.Fatalf("assignee = %q, want reviewer", got.Assignee)
 	}
 }

@@ -145,7 +145,7 @@ func TestComputePoolDesiredStates_MinRespectsMax(t *testing.T) {
 	}
 }
 
-func TestComputePoolDesiredStates_SkipsSingletonAgents(t *testing.T) {
+func TestComputePoolDesiredStates_MaxOneTemplatesStillParticipateInDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{
 			Name:              "worker",
@@ -161,8 +161,14 @@ func TestComputePoolDesiredStates_SkipsSingletonAgents(t *testing.T) {
 
 	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
 
-	if len(result) != 0 {
-		t.Fatalf("len(result) = %d, want 0 for singleton agent demand", len(result))
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1 for max=1 demand", len(result))
+	}
+	if len(result[0].Requests) != 1 {
+		t.Fatalf("len(requests) = %d, want 1", len(result[0].Requests))
+	}
+	if result[0].Template != "worker" {
+		t.Fatalf("template = %q, want worker", result[0].Template)
 	}
 }
 

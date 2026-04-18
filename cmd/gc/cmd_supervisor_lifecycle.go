@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -21,6 +23,14 @@ var (
 	ensureSupervisorRunningHook = ensureSupervisorRunning
 	reloadSupervisorHook        = reloadSupervisor
 	supervisorAliveHook         = supervisorAlive
+	supervisorReadyTimeout      = 15 * time.Second
+	supervisorReadyPollInterval = 100 * time.Millisecond
+	supervisorSystemctlRun      = func(args ...string) error {
+		return exec.Command("systemctl", args...).Run()
+	}
+	supervisorSystemctlActive = func(service string) bool {
+		return exec.Command("systemctl", "--user", "is-active", "--quiet", service).Run() == nil
+	}
 )
 
 func newSupervisorRunCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -47,6 +57,10 @@ func doSupervisorRun(stdout, stderr io.Writer) int {
 }
 
 func doSupervisorStart(stdout, stderr io.Writer) int {
+	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
@@ -89,13 +103,13 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(supervisorReadyTimeout)
 	for time.Now().Before(deadline) {
-		if pid := supervisorAlive(); pid != 0 {
+		if pid := supervisorAliveHook(); pid != 0 {
 			fmt.Fprintf(stdout, "Supervisor started (PID %d)\n", pid) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(supervisorReadyPollInterval)
 	}
 
 	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; see %s\n", logPath) //nolint:errcheck // best-effort stderr
@@ -103,6 +117,10 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
+	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
 	if doSupervisorInstall(stdout, stderr) != 0 {
@@ -112,20 +130,49 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		// Fall back to bare start if install fails (e.g., unsupported OS).
 		return doSupervisorStart(stdout, stderr)
 	}
-	if supervisorAlive() != 0 {
+	if supervisorAliveHook() != 0 {
 		return 0
 	}
 	return waitForSupervisorReady(stderr)
 }
 
-// waitForSupervisorReady polls supervisorAlive with a 5s timeout.
-func waitForSupervisorReady(stderr io.Writer) int {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if supervisorAlive() != 0 {
+func platformSupervisorHomeOverrideError() (string, bool) {
+	switch goruntime.GOOS {
+	case "darwin", "linux":
+	default:
+		return "", false
+	}
+	envHome, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(envHome) == "" {
+		return "", false
+	}
+	lookup, err := osuser.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		return "", false
+	}
+	if filepath.Clean(envHome) == filepath.Clean(lookup.HomeDir) {
+		return "", false
+	}
+	return fmt.Sprintf("HOME override %q differs from the user home %q; platform supervisor requires the real HOME. Keep HOME unchanged and use GC_HOME for isolated runs", envHome, lookup.HomeDir), true
+}
+
+func waitForSupervisorPID() int {
+	deadline := time.Now().Add(supervisorReadyTimeout)
+	for {
+		if pid := supervisorAliveHook(); pid != 0 {
+			return pid
+		}
+		if !time.Now().Before(deadline) {
 			return 0
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(supervisorReadyPollInterval)
+	}
+}
+
+// waitForSupervisorReady polls supervisorAlive until the configured timeout.
+func waitForSupervisorReady(stderr io.Writer) int {
+	if waitForSupervisorPID() != 0 {
+		return 0
 	}
 	fmt.Fprintf(stderr, "gc: supervisor did not become ready; see %s\n", supervisorLogPath()) //nolint:errcheck // best-effort stderr
 	return 1
@@ -204,6 +251,10 @@ starts on login.`,
 }
 
 func doSupervisorInstall(stdout, stderr io.Writer) int {
+	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+		fmt.Fprintf(stderr, "gc supervisor install: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	data, err := buildSupervisorServiceData()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -259,11 +310,12 @@ func supervisorLogPath() string {
 }
 
 type supervisorServiceData struct {
-	GCPath   string
-	LogPath  string
-	GCHome   string
-	SafeName string
-	Path     string
+	GCPath        string
+	LogPath       string
+	GCHome        string
+	XDGRuntimeDir string
+	SafeName      string
+	Path          string
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
@@ -273,12 +325,17 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	}
 	homeDir, _ := os.UserHomeDir()
 	home := supervisor.DefaultHome()
+	xdgRuntimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR"))
+	if supervisor.UsesIsolatedGCHomeOverride() {
+		xdgRuntimeDir = ""
+	}
 	return &supervisorServiceData{
-		GCPath:   gcPath,
-		LogPath:  supervisorLogPath(),
-		GCHome:   home,
-		SafeName: sanitizeServiceName(filepath.Base(home)),
-		Path:     searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		GCPath:        gcPath,
+		LogPath:       supervisorLogPath(),
+		GCHome:        home,
+		XDGRuntimeDir: xdgRuntimeDir,
+		SafeName:      sanitizeServiceName(filepath.Base(home)),
+		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 	}, nil
 }
 
@@ -318,6 +375,10 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <dict>
         <key>GC_HOME</key>
         <string>{{xmlesc .GCHome}}</string>
+        {{if .XDGRuntimeDir}}
+        <key>XDG_RUNTIME_DIR</key>
+        <string>{{xmlesc .XDGRuntimeDir}}</string>
+        {{end}}
         <key>PATH</key>
         <string>{{xmlesc .Path}}</string>
     </dict>
@@ -336,7 +397,8 @@ RestartSec=5s
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"
-Environment=PATH="{{.Path}}"
+{{if .XDGRuntimeDir}}Environment=XDG_RUNTIME_DIR="{{.XDGRuntimeDir}}"
+{{end}}Environment=PATH="{{.Path}}"
 
 [Install]
 WantedBy=default.target
@@ -420,6 +482,8 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	existing, _ := os.ReadFile(path)
+	contentChanged := string(existing) != content
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: writing unit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -428,9 +492,23 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	for _, args := range [][]string{
 		{"--user", "daemon-reload"},
 		{"--user", "enable", "gascity-supervisor.service"},
-		{"--user", "start", "gascity-supervisor.service"},
 	} {
-		if err := exec.Command("systemctl", args...).Run(); err != nil {
+		if err := supervisorSystemctlRun(args...); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	service := "gascity-supervisor.service"
+	if contentChanged && supervisorSystemctlActive(service) {
+		args := []string{"--user", "restart", service}
+		if err := supervisorSystemctlRun(args...); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else if !supervisorSystemctlActive(service) {
+		args := []string{"--user", "start", service}
+		if err := supervisorSystemctlRun(args...); err != nil {
 			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

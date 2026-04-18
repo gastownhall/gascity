@@ -21,8 +21,8 @@
 #   GC_K8S_NAMESPACE   - K8s namespace (default: gc)
 #   GC_K8S_CONTEXT     - kubectl context (default: current)
 #   GC_K8S_IMAGE       - Container image (required for ensure-ready)
-#   GC_K8S_DOLT_HOST   - Dolt service DNS (default: dolt.gc.svc.cluster.local)
-#   GC_K8S_DOLT_PORT   - Dolt service port (default: 3307)
+#   GC_K8S_DOLT_HOST   - Deprecated Dolt service DNS compatibility fallback (default: dolt.gc.svc.cluster.local)
+#   GC_K8S_DOLT_PORT   - Deprecated Dolt service port compatibility fallback (default: 3307)
 #   GC_K8S_IMAGE_PULL_SECRET - imagePullSecrets name (optional, omitted if empty)
 #   GC_K8S_CUSTOM_TYPES      - custom bead types CSV (optional, e.g. "session,molecule")
 #
@@ -42,8 +42,8 @@ shift
 
 NS="${GC_K8S_NAMESPACE:-gc}"
 IMAGE="${GC_K8S_IMAGE:-}"
-DOLT_HOST="${GC_K8S_DOLT_HOST:-dolt.gc.svc.cluster.local}"
-DOLT_PORT="${GC_K8S_DOLT_PORT:-3307}"
+DOLT_HOST="${GC_DOLT_HOST:-${GC_K8S_DOLT_HOST:-dolt.gc.svc.cluster.local}}"
+DOLT_PORT="${GC_DOLT_PORT:-${GC_K8S_DOLT_PORT:-3307}}"
 IMAGE_PULL_SECRET="${GC_K8S_IMAGE_PULL_SECRET:-}"
 CUSTOM_TYPES="${GC_K8S_CUSTOM_TYPES:-}"
 
@@ -58,27 +58,78 @@ KUBECTL+=(-n "$NS")
 
 # --- Helpers ---
 
-# run_bd executes bd inside the beads runner pod.
+scope_root_arg_or_env() {
+  local fallback="${1:-}"
+  if [ -n "${GC_STORE_ROOT:-}" ]; then
+    printf '%s\n' "$GC_STORE_ROOT"
+    return 0
+  fi
+  if [ -n "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+runner_workdir_for_scope() {
+  local scope_root="$1"
+  local city_root="${GC_CITY_PATH:-${GC_CITY:-}}"
+  local rel=""
+
+  if [ -z "$scope_root" ]; then
+    printf '%s\n' "/workspace"
+    return 0
+  fi
+  if [ "$scope_root" = "/workspace" ] || [ "${scope_root#/workspace/}" != "$scope_root" ]; then
+    printf '%s\n' "$scope_root"
+    return 0
+  fi
+  if [ -n "$city_root" ]; then
+    if [ "$scope_root" = "$city_root" ]; then
+      printf '%s\n' "/workspace"
+      return 0
+    fi
+    case "$scope_root" in
+      "$city_root"/*)
+        rel=${scope_root#"$city_root"/}
+        printf '%s\n' "/workspace/$rel"
+        return 0
+        ;;
+    esac
+  fi
+  echo "store root $scope_root is outside city root ${city_root:-<unset>}" >&2
+  return 1
+}
+
+# run_bd executes bd inside the beads runner pod for the projected store root.
 # When GC_BEADS_PREFIX is set, the prefix switch and bd command run in a
 # single kubectl exec to avoid interleave from concurrent invocations.
 run_bd() {
-  local want="${GC_BEADS_PREFIX:-}"
+  local scope_root workdir want
+  scope_root=$(scope_root_arg_or_env "")
+  workdir=$(runner_workdir_for_scope "$scope_root") || return 1
+  want="${GC_BEADS_PREFIX:-}"
   if [ -n "$want" ]; then
     "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
-      'bd config set issue_prefix "$1" >/dev/null 2>&1 && bd "${@:2}"' -- "$want" "$@"
+      'workdir="$1"; prefix="$2"; shift 2; mkdir -p "$workdir" && cd "$workdir" && bd config set issue_prefix "$prefix" >/dev/null 2>&1 && bd "$@"' -- "$workdir" "$want" "$@"
   else
-    "${KUBECTL[@]}" exec "$POD_NAME" -- bd "$@"
+    "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
+      'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && bd "$@"' -- "$workdir" "$@"
   fi
 }
 
 # run_bd_stdin executes bd inside the beads runner pod with stdin piped through.
 run_bd_stdin() {
-  local want="${GC_BEADS_PREFIX:-}"
+  local scope_root workdir want
+  scope_root=$(scope_root_arg_or_env "")
+  workdir=$(runner_workdir_for_scope "$scope_root") || return 1
+  want="${GC_BEADS_PREFIX:-}"
   if [ -n "$want" ]; then
     "${KUBECTL[@]}" exec -i "$POD_NAME" -- sh -c \
-      'bd config set issue_prefix "$1" >/dev/null 2>&1 && bd "${@:2}"' -- "$want" "$@"
+      'workdir="$1"; prefix="$2"; shift 2; mkdir -p "$workdir" && cd "$workdir" && bd config set issue_prefix "$prefix" >/dev/null 2>&1 && bd "$@"' -- "$workdir" "$want" "$@"
   else
-    "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"
+    "${KUBECTL[@]}" exec -i "$POD_NAME" -- sh -c \
+      'workdir="$1"; shift; mkdir -p "$workdir" && cd "$workdir" && bd "$@"' -- "$workdir" "$@"
   fi
 }
 
@@ -173,8 +224,6 @@ case "$op" in
       --arg pod "$POD_NAME" \
       --arg ns "$NS" \
       --arg image "$IMAGE" \
-      --arg dolt_host "$DOLT_HOST" \
-      --arg dolt_port "$DOLT_PORT" \
       --arg pull_secret "$IMAGE_PULL_SECRET" \
       '{
         apiVersion: "v1",
@@ -207,10 +256,6 @@ case "$op" in
             workingDir: "/workspace",
             command: ["/bin/sh", "-c"],
             args: ["mkdir -p /workspace && git init --quiet 2>/dev/null; exec tail -f /dev/null"],
-            env: [
-              {name: "GC_DOLT_HOST", value: $dolt_host},
-              {name: "GC_DOLT_PORT", value: $dolt_port}
-            ],
             resources: {
               requests: {cpu: "100m", memory: "128Mi"},
               limits: {cpu: "500m", memory: "512Mi"}
@@ -228,17 +273,6 @@ case "$op" in
       exit 1
     fi
 
-    # 5. Initialize beads if not already done.
-    if ! "${KUBECTL[@]}" exec "$POD_NAME" -- test -f /workspace/.beads/metadata.json 2>/dev/null; then
-      run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
-        -p gc --skip-hooks >/dev/null 2>&1
-      run_bd config set issue_prefix gc >/dev/null 2>&1
-      if [ -n "$CUSTOM_TYPES" ]; then
-        run_bd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1
-      fi
-      custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
-      run_bd config set types.custom "$custom_types" >/dev/null 2>&1
-    fi
     ;;
 
   stop|shutdown)
@@ -246,18 +280,24 @@ case "$op" in
     ;;
 
   init)
-    # dir=$1 (ignored — beads runner has fixed workdir)
+    if [ -n "${GC_DOLT_HOST:-}" ] && [ -z "${GC_DOLT_PORT:-}" ]; then
+      echo "init: requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set" >&2
+      exit 1
+    fi
+    dir="${1:?init: missing dir}"
     prefix="${2:?init: missing prefix}"
+    scope_root=$(scope_root_arg_or_env "$dir")
     # Idempotent: bd init may fail if database already exists on the dolt
-    # server. That's fine — just ensure the prefix is set correctly.
-    run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
+    # server. That's fine — just ensure the prefix and custom types are set
+    # for the scope-local workspace root.
+    GC_STORE_ROOT="$scope_root" run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
       -p "$prefix" --skip-hooks >/dev/null 2>&1 || true
-    run_bd config set issue_prefix "$prefix" >/dev/null 2>&1 || true
+    GC_STORE_ROOT="$scope_root" run_bd config set issue_prefix "$prefix" >/dev/null 2>&1 || true
     # Register custom bead types required by Gas City (mirrors gc-beads-bd
     # and doctor.RequiredCustomTypes). Without this, bd rejects creates for
     # types like "session" that aren't in the default set.
     custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
-    run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
+    GC_STORE_ROOT="$scope_root" run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
     ;;
 
   config-set)

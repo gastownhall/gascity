@@ -460,7 +460,7 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 	}
 }
 
-func TestResolveSessionLogWorkDirByClosedHistoricalAlias(t *testing.T) {
+func TestResolveSessionLogWorkDirDoesNotUseClosedHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -473,12 +473,8 @@ func TestResolveSessionLogWorkDirByClosedHistoricalAlias(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	got, ok := resolveSessionLogContext("", nil, store, "mayor")
-	if !ok {
-		t.Fatal("resolveSessionLogContext() = not found, want found")
-	}
-	if got.workDir != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
+	if got, ok := resolveSessionLogContext("", nil, store, "mayor"); ok {
+		t.Fatalf("resolveSessionLogContext() = %+v, want not found for historical alias", got)
 	}
 }
 
@@ -506,7 +502,7 @@ func TestResolveConfiguredSessionLogContext_ByExactSingletonAlias(t *testing.T) 
 	}
 }
 
-func TestResolveConfiguredSessionLogContext_ByCityUniqueBareNamedSession(t *testing.T) {
+func TestResolveConfiguredSessionLogContext_RejectsBareRigScopedNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "repos", "demo")
 	cfg := &config.City{
@@ -521,12 +517,8 @@ func TestResolveConfiguredSessionLogContext_ByCityUniqueBareNamedSession(t *test
 		}},
 	}
 
-	got, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "witness")
-	if !ok {
-		t.Fatal("resolveConfiguredSessionLogContext() = not found, want found")
-	}
-	if got != rigPath {
-		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", got, rigPath)
+	if got, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "witness"); ok {
+		t.Fatalf("resolveConfiguredSessionLogContext() = %q, want not found without qualified target", got)
 	}
 }
 
@@ -556,11 +548,11 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	})
 	_ = store.Close(b.ID)
 
-	got, ok := resolveSessionLogContext(cityPath, cfg, store, "witness")
+	got, ok := resolveSessionLogContext(cityPath, cfg, store, "demo/witness")
 	if ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for reserved named target", got)
 	}
-	configuredWorkDir, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "witness")
+	configuredWorkDir, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "demo/witness")
 	if !ok {
 		t.Fatal("resolveConfiguredSessionLogContext() = not found, want configured fallback")
 	}

@@ -52,8 +52,7 @@ gc [flags]
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
 | [gc skill](#gc-skill) | List visible skills |
-| [gc skills](#gc-skills) | Show command reference for a topic |
-| [gc sling](#gc-sling) | Route work to an agent or pool |
+| [gc sling](#gc-sling) | Route work to a session config or agent |
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
 | [gc stop](#gc-stop) | Stop all agent sessions in the city |
@@ -86,8 +85,8 @@ gc agent
 Add a new agent scaffold under agents/&lt;name&gt;/.
 
 Creates agents/&lt;name&gt;/prompt.template.md and, when needed,
-agents/&lt;name&gt;/agent.toml. This is the Pack/City v2 path and does not
-append [[agent]] blocks to city.toml.
+agents/&lt;name&gt;/agent.toml. These files live in the city directory and do
+not append [[agent]] blocks to city.toml.
 
 Use --prompt-template to copy prompt content from an existing file into
 the canonical prompt.template.md location. Use --dir to record a rig or
@@ -164,7 +163,7 @@ gc bd --rig my-project list
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for health checking and diagnostics.
+Subcommands for topology operations, health checking, and diagnostics.
 
 ```
 gc beads
@@ -172,7 +171,52 @@ gc beads
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
+
+## gc beads city
+
+Manage the canonical city endpoint topology for bd-backed beads stores.
+
+Use use-managed to make the city GC-managed again. Use use-external to pin the
+city to an external Dolt endpoint and rewrite inherited rig mirrors.
+
+```
+gc beads city
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
+| [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city use-external
+
+Set the city endpoint to an external Dolt server
+
+```
+gc beads city use-external [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--adopt-unverified` | bool |  | record the endpoint without live validation |
+| `--dry-run` | bool |  | show the canonical changes without writing files |
+| `--host` | string |  | external Dolt host |
+| `--port` | string |  | external Dolt port |
+| `--user` | string |  | external Dolt user |
+
+## gc beads city use-managed
+
+Set the city endpoint to GC-managed
+
+```
+gc beads city use-managed [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | show the canonical changes without writing files |
 
 ## gc beads health
 
@@ -544,7 +588,7 @@ Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store via bd delete --force.
+also remove them from the store after closing.
 
 ```
 gc convoy delete <convoy-id> [flags]
@@ -983,11 +1027,10 @@ gc import upgrade [name]
 Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
-provider. Creates the .gc/ runtime directory, a transitional Pack/City v2
-scaffold (pack.toml, city.toml, convention directories, and .template.md
-prompt templates), and writes the default formulas. Use --provider to create
-the default mayor city non-interactively, or --file to initialize from an
-existing TOML config file.
+provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
+the standard top-level directories, and .template.md prompt templates, then
+writes the default formulas. Use --provider to create the default mayor city
+non-interactively, or --file to initialize from an existing TOML config file.
 
 ```
 gc init [path] [flags]
@@ -1261,7 +1304,7 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/<name>.toml files. Each order pairs a gate
+Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.
@@ -1415,12 +1458,20 @@ gc prime [agent-name] [flags]
 Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
+Use --name to set the registration name; this also persists workspace.name
+in city.toml so later registrations stay aligned. When --name is omitted,
+workspace.name is used if present, otherwise [pack].name is used and
+backfilled into workspace.name.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 
 ```
-gc register [path]
+gc register [path] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--name` | string |  | machine-local alias for this city registration |
 
 ## gc restart
 
@@ -1466,6 +1517,7 @@ gc rig
 | [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
 | [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
+| [gc rig set-endpoint](#gc-rig-set-endpoint) | Set the canonical endpoint ownership for a rig |
 | [gc rig status](#gc-rig-status) | Show rig status and agent running state |
 | [gc rig suspend](#gc-rig-suspend) | Suspend a rig (reconciler will skip its agents) |
 
@@ -1588,6 +1640,38 @@ The reconciler will start the rig's agents on its next tick.
 ```
 gc rig resume [name]
 ```
+
+## gc rig set-endpoint
+
+Set the canonical endpoint ownership for a rig.
+
+Use --inherit to make a rig derive its endpoint from the current city
+topology. Use --external to pin the rig to its own external Dolt endpoint.
+
+This command owns the rig's canonical .beads/config.yaml topology state.
+
+```
+gc rig set-endpoint <rig> [flags]
+```
+
+**Example:**
+
+```
+gc rig set-endpoint frontend --inherit
+  gc rig set-endpoint frontend --external --host db.example.com --port 3307
+  gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
+  gc rig set-endpoint frontend --inherit --dry-run
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--adopt-unverified` | bool |  | record the endpoint without live validation |
+| `--dry-run` | bool |  | show the canonical changes without writing files |
+| `--external` | bool |  | set an explicit external endpoint for the rig |
+| `--host` | string |  | external Dolt host |
+| `--inherit` | bool |  | inherit the city endpoint |
+| `--port` | string |  | external Dolt port |
+| `--user` | string |  | external Dolt user |
 
 ## gc rig status
 
@@ -1756,13 +1840,15 @@ gc session
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
 | [gc session nudge](#gc-session-nudge) | Send a text message to a running session |
 | [gc session peek](#gc-session-peek) | View session output without attaching |
+| [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
+| [gc session unpin](#gc-session-unpin) | Remove a session awake pin |
 | [gc session wait](#gc-session-wait) | Register a dependency wait for a session |
-| [gc session wake](#gc-session-wake) | Wake a session (clear hold and quarantine) |
+| [gc session wake](#gc-session-wake) | Wake a session (request start and clear holds) |
 
 ## gc session attach
 
@@ -1904,6 +1990,18 @@ gc session peek <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--lines` | int | `50` | number of lines to capture |
 
+## gc session pin
+
+Keep a session awake by setting its durable pin override.
+
+Pinning does not clear suspend holds or other hard blockers. If the target is
+a configured named session that has not been materialized yet, pin creates its
+canonical bead so the reconciler can start it when unblocked.
+
+```
+gc session pin <session-id-or-alias>
+```
+
 ## gc session prune
 
 Close suspended sessions older than a given age. Only suspended
@@ -1980,6 +2078,17 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 gc session suspend <session-id-or-alias>
 ```
 
+## gc session unpin
+
+Remove only the durable pin override from a session.
+
+Unpinning does not force an immediate stop. The reconciler will apply the
+normal wake/sleep rules on its next pass.
+
+```
+gc session unpin <session-id-or-alias>
+```
+
 ## gc session wait
 
 Register a dependency wait for a session
@@ -1997,7 +2106,7 @@ gc session wait [session-id-or-alias] [flags]
 
 ## gc session wake
 
-Release a user hold and/or crash-loop quarantine on a session.
+Request wake for a session and release user hold or crash-loop quarantine metadata.
 
 After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
@@ -2018,11 +2127,19 @@ gc session wake gc-42
 
 ## gc skill
 
-List visible Pack/City skills for the current city pack.
+List skills visible to the current city.
 
-Use "gc skill list" to show discovered skills, optionally scoped to an
-agent or session. The built-in topic/reference viewer now lives under
-"gc skills".
+Output includes:
+  - City pack skills (skills/&lt;name&gt;/SKILL.md under the city root)
+  - Bootstrap implicit-import pack skills (e.g. core)
+  - With --agent/--session: that agent's agents/&lt;name&gt;/skills/ catalog
+
+The listing is a diagnostic view of what's *available*. It does not
+collapse precedence, filter to agents whose provider has a vendor
+sink, or predict exactly which entries the materializer will pick on
+name collision. For the materialized set, inspect the
+&lt;scope-root&gt;/.&lt;vendor&gt;/skills/ sink after "gc start" or run
+"gc doctor" to surface collisions.
 
 ```
 gc skill
@@ -2045,28 +2162,9 @@ gc skill list [flags]
 | `--agent` | string |  | show the effective skill view for this agent |
 | `--session` | string |  | show the effective skill view for this session |
 
-## gc skills
-
-Show curated command reference for a Gas City topic.
-
-Without arguments, lists available topics. With a topic name,
-prints the full command reference for that topic.
-
-```
-gc skills [topic]
-```
-
-**Example:**
-
-```
-gc skills work       # beads command reference
-  gc skills dispatch   # sling and formula reference
-  gc skills            # list all topics
-```
-
 ## gc sling
 
-Route a bead to an agent or pool using the target's sling_query.
+Route a bead to a session config or agent using the target's sling_query.
 
 The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or

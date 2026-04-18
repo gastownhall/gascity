@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -269,6 +270,45 @@ func TestAgentGet(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp.Name != "myrig/worker" {
 		t.Errorf("Name = %q, want %q", resp.Name, "myrig/worker")
+	}
+}
+
+func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	work, err := state.stores["myrig"].Create(beads.Bead{
+		Title: "active work",
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := state.stores["myrig"].Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	srv := New(state)
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp.ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want %q", got, work.ID)
 	}
 }
 

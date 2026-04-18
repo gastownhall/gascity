@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -49,8 +50,8 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var scopeRef string
 	cmd := &cobra.Command{
 		Use:   "sling [target] <bead-or-formula-or-text>",
-		Short: "Route work to an agent or pool",
-		Long: `Route a bead to an agent or pool using the target's sling_query.
+		Short: "Route work to a session config or agent",
+		Long: `Route a bead to a session config or agent using the target's sling_query.
 
 The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or
@@ -250,31 +251,26 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		cityName = filepath.Base(cityPath)
 	}
 
-	// Determine which beads store to use. Priority:
-	// 1. Bead's prefix → rig directory (the bead lives in that rig's store)
-	// 2. Target agent's rig directory (mol operations create in the agent's store)
-	// 3. City path (fallback for city-scoped agents)
-	storeDir := cityPath
-	if bp := sling.BeadPrefix(beadOrFormula); bp != "" {
-		if rig, found := findRigByPrefix(cfg, bp); found {
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(cityPath, rigPath)
-			}
-			storeDir = rigPath
-		}
+	storeDir := resolveSlingStoreRoot(cfg, cityPath, beadOrFormula, a)
+	store, err := openStoreAtForCity(storeDir, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: opening store %s: %v\n", storeDir, err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	if samePath(storeDir, cityPath) {
-		if rd := rigDirForAgent(cfg, a); rd != "" {
-			storeDir = rd
-		}
-	}
-	storeEnv := bdRuntimeEnv(cityPath)
-	if !samePath(storeDir, cityPath) {
-		storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
-	}
-	store := beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnv(storeEnv))
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
+	storeEnv := map[string]string{}
+	switch provider := rawBeadsProvider(cityPath); {
+	case provider == "file":
+		// Built-in routing now goes through beads.Store; custom queries own any
+		// provider-specific shell environment when they opt out of that path.
+	case strings.HasPrefix(provider, "exec:"):
+		// Explicit custom sling_query commands own their env for exec providers.
+	default:
+		storeEnv = bdRuntimeEnv(cityPath)
+		if !samePath(storeDir, cityPath) {
+			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+		}
+	}
 
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
@@ -337,6 +333,10 @@ func findRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 	return sling.FindRigByPrefix(cfg, prefix)
 }
 
+func beadPrefix(beadID string) string {
+	return sling.BeadPrefix(beadID)
+}
+
 func rigDirForBead(cfg *config.City, beadID string) string {
 	return sling.RigDirForBead(cfg, beadID)
 }
@@ -346,7 +346,26 @@ func rigDirForAgent(cfg *config.City, a config.Agent) string {
 }
 
 func slingDirForBead(cfg *config.City, cityPath, beadID string) string {
-	return sling.SlingDirForBead(cfg, cityPath, beadID)
+	if dir := rigDirForBead(cfg, beadID); dir != "" {
+		return resolveStoreScopeRoot(cityPath, dir)
+	}
+	return resolveStoreScopeRoot(cityPath, cityPath)
+}
+
+func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a config.Agent) string {
+	storeDir := resolveStoreScopeRoot(cityPath, cityPath)
+	if cfg == nil {
+		return storeDir
+	}
+	if bp := beadPrefix(beadOrFormula); bp != "" {
+		if rig, found := findRigByPrefix(cfg, bp); found {
+			return resolveStoreScopeRoot(cityPath, rig.Path)
+		}
+	}
+	if rd := rigDirForAgent(cfg, a); rd != "" {
+		return resolveStoreScopeRoot(cityPath, rd)
+	}
+	return storeDir
 }
 
 // populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
@@ -354,6 +373,29 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Resolver = cliAgentResolver{}
 	deps.Branches = cliBranchResolver{}
 	deps.Notify = &cliNotifier{}
+	deps.DirectSessionResolver = cliDirectSessionResolver
+	deps.Router = cliBeadRouter{deps: deps}
+}
+
+func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
+	if cfg == nil {
+		return "", false, nil
+	}
+	if cityName == "" {
+		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	}
+	spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, spec.Identity)
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 // cliAgentResolver implements sling.AgentResolver using the CLI's
@@ -382,6 +424,33 @@ func (cliNotifier) PokeControlDispatch(cityPath string) {
 	_ = slingPokeControlDispatcher(cityPath)
 }
 
+type cliBeadRouter struct {
+	deps *slingDeps
+}
+
+func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
+	if r.deps == nil {
+		return fmt.Errorf("sling router: missing dependencies")
+	}
+	if r.deps.Cfg != nil {
+		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+			if r.deps.Runner == nil {
+				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			slingCmd := buildSlingCommand(agentCfg.EffectiveSlingQuery(), req.BeadID)
+			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
+			return err
+		}
+	}
+	if r.deps.Store == nil {
+		return fmt.Errorf("built-in sling routing requires a store")
+	}
+	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
+		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	return nil
+}
+
 // printSlingWarnings prints only warnings from a SlingResult to stderr.
 // Called before error handling so warnings are visible even on failure.
 func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
@@ -389,7 +458,7 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 		fmt.Fprintf(stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", result.Target) //nolint:errcheck
 	}
 	if result.PoolEmpty {
-		fmt.Fprintf(stderr, "warning: pool %q has max=0 — bead routed but no instances to claim it\n", result.Target) //nolint:errcheck
+		fmt.Fprintf(stderr, "warning: session config %q has max_active_sessions=0 — bead routed but no sessions can claim it\n", result.Target) //nolint:errcheck
 	}
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
@@ -678,15 +747,7 @@ func beadMetadataTarget(store beads.Store, beadID string) string {
 }
 
 func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
-	if deps.Cfg != nil {
-		if dir := rigDirForBead(deps.Cfg, beadID); dir != "" {
-			return dir
-		}
-		if dir := rigDirForAgent(deps.Cfg, a); dir != "" {
-			return dir
-		}
-	}
-	return deps.CityPath
+	return resolveSlingStoreRoot(deps.Cfg, deps.CityPath, beadID, a)
 }
 
 func slingFormulaUsesBaseBranch(formula string) bool {
@@ -741,7 +802,7 @@ func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) 
 	return routeVars
 }
 
-func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City) error {
+func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, routedTo, sessionName string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("workflow recipe is nil")
 	}
@@ -780,27 +841,15 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 		} else {
 			step.Metadata = maps.Clone(step.Metadata)
 		}
-		if rootStoreRef != "" {
-			step.Metadata["gc.root_store_ref"] = rootStoreRef
-		}
 		if step.IsRoot {
 			step.Metadata["gc.run_target"] = routedTo
-			if sourceBeadID != "" {
-				step.Metadata["gc.source_bead_id"] = sourceBeadID
-			}
-			if scopeKind != "" {
-				step.Metadata["gc.scope_kind"] = scopeKind
-			}
-			if scopeRef != "" {
-				step.Metadata["gc.scope_ref"] = scopeRef
-			}
 			continue
 		}
 		switch step.Metadata["gc.kind"] {
 		case "workflow", "scope", "spec":
 			continue
 		}
-		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cfg)
+		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
@@ -841,11 +890,16 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 // graphRouteBinding is an alias for sling.GraphRouteBinding.
 type graphRouteBinding = sling.GraphRouteBinding
 
-func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
-	return resolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, nil, fallback, rigContext, store, cityName, cfg)
+type graphStepTarget struct {
+	value        string
+	fromAssignee bool
 }
 
-func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, routeVars map[string]string, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+	return resolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, nil, fallback, rigContext, store, cityName, cityPath, cfg)
+}
+
+func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, routeVars map[string]string, fallback graphRouteBinding, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	if aliased, ok := stepAlias[stepID]; ok {
 		stepID = aliased
 	}
@@ -863,12 +917,12 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	defer delete(resolving, stepID)
 
 	target := graphStepRouteTarget(step, routeVars)
-	if target == "" {
+	if target.value == "" {
 		switch step.Metadata["gc.kind"] {
 		case "scope-check":
-			target = strings.TrimSpace(step.Metadata["gc.control_for"])
-			if target != "" {
-				binding, err := resolveGraphStepBindingWithVars(target, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
+			controlTarget := strings.TrimSpace(step.Metadata["gc.control_for"])
+			if controlTarget != "" {
+				binding, err := resolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -876,9 +930,9 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 				return binding, nil
 			}
 		case "fanout":
-			target = strings.TrimSpace(step.Metadata["gc.control_for"])
-			if target != "" {
-				binding, err := resolveGraphStepBindingWithVars(target, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
+			controlTarget := strings.TrimSpace(step.Metadata["gc.control_for"])
+			if controlTarget != "" {
+				binding, err := resolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -907,7 +961,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 				subjectID = depsByStep[step.ID][0]
 			}
 			if subjectID != "" {
-				binding, err := resolveGraphStepBindingWithVars(subjectID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
+				binding, err := resolveGraphStepBindingWithVars(subjectID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -921,7 +975,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 				if depID == "" {
 					continue
 				}
-				binding, err := resolveGraphStepBindingWithVars(depID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
+				binding, err := resolveGraphStepBindingWithVars(depID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -946,12 +1000,23 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if cfg == nil {
 		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", stepID)
 	}
-	agentCfg, ok := resolveAgentIdentity(cfg, target, rigContext)
+	if target.fromAssignee {
+		binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cityPath, cfg, target.value, rigContext)
+		if err != nil {
+			return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
+		}
+		if ok {
+			cache[stepID] = binding
+			return binding, nil
+		}
+		return graphRouteBinding{}, fmt.Errorf("step %s: assignee target %q did not resolve to a concrete session; use gc.run_target for config routing", stepID, target.value)
+	}
+	agentCfg, ok := resolveAgentIdentity(cfg, target.value, rigContext)
 	if !ok {
-		return graphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target)
+		return graphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target.value)
 	}
 	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
-	if isMultiSessionCfgAgent(&agentCfg) {
+	if agentCfg.SupportsInstanceExpansion() {
 		binding.MetadataOnly = true
 		cache[stepID] = binding
 		return binding, nil
@@ -965,18 +1030,65 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	return binding, nil
 }
 
-func graphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]string) string {
+func graphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]string) graphStepTarget {
 	if step == nil {
-		return ""
+		return graphStepTarget{}
 	}
 	target := strings.TrimSpace(formula.Substitute(step.Assignee, routeVars))
 	if target != "" {
-		return target
+		return graphStepTarget{value: target, fromAssignee: true}
 	}
 	if step.Metadata == nil {
-		return ""
+		return graphStepTarget{}
 	}
-	return strings.TrimSpace(formula.Substitute(step.Metadata["gc.run_target"], routeVars))
+	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata["gc.run_target"], routeVars))}
+}
+
+func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (graphRouteBinding, bool, error) {
+	target = strings.TrimSpace(target)
+	if store == nil || target == "" {
+		return graphRouteBinding{}, false, nil
+	}
+	if cfg == nil {
+		id, err := session.ResolveSessionID(store, target)
+		if err != nil {
+			return graphRouteBinding{}, false, nil
+		}
+		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+			return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+		}
+		return graphRouteBinding{}, false, nil
+	}
+	if cityName == "" {
+		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	}
+	spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
+	if err != nil {
+		return graphRouteBinding{}, false, err
+	}
+	if !ok {
+		// Exact session bead IDs are unambiguous and must win even when they
+		// collide with a config target name.
+		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+				return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			}
+		}
+		if _, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
+			return graphRouteBinding{}, false, nil
+		}
+		if id, err := session.ResolveSessionID(store, target); err == nil {
+			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+				return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			}
+		}
+		return graphRouteBinding{}, false, nil
+	}
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, spec.Identity)
+	if err != nil {
+		return graphRouteBinding{}, false, err
+	}
+	return graphRouteBinding{DirectSessionID: id}, true, nil
 }
 
 func graphRouteRigContext(route string) string {
@@ -993,7 +1105,7 @@ func graphRouteRigContext(route string) string {
 
 // targetType returns "pool" or "agent" for telemetry attributes.
 func targetType(a *config.Agent) string {
-	if isMultiSessionCfgAgent(a) {
+	if a.SupportsInstanceExpansion() {
 		return "pool"
 	}
 	return "agent"
@@ -1011,6 +1123,10 @@ func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResul
 	return sling.CheckBeadState(q, beadID, a, deps)
 }
 
+// doSlingNudge sends a nudge to the target agent after routing.
+// For multi-session configs, nudges the first running instance. If the target is not
+// running, pokes the controller to trigger an immediate reconciler tick
+// so WakeWork can wake the session without waiting for the next patrol.
 func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	sp runtime.Provider, store beads.Store, stdout, stderr io.Writer,
 ) {
@@ -1021,7 +1137,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		return
 	}
 
-	if isMultiSessionCfgAgent(a) {
+	if a.SupportsInstanceExpansion() {
 		// Find a running multi-session instance to nudge.
 		sp0 := scaleParamsFor(a)
 		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
@@ -1037,11 +1153,11 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				return
 			}
 		}
-		// No running pool member — poke controller for immediate wake.
+		// No running config session — poke controller for immediate wake.
 		if err := pokeController(cityPath); err != nil {
-			fmt.Fprintf(stderr, "No running pool members for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
-			fmt.Fprintf(stdout, "No running pool members for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
+			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		}
 		return
 	}
@@ -1062,6 +1178,17 @@ func pokeController(cityPath string) error {
 		return nil
 	}
 	// Fall back to supervisor reload.
+	return pokeSupervisor()
+}
+
+// reloadControllerConfig asks the controller to reload config immediately.
+// If the per-city controller socket doesn't exist (supervisor model), falls
+// back to sending "reload" to the supervisor socket.
+func reloadControllerConfig(cityPath string) error {
+	_, err := sendControllerCommand(cityPath, "reload")
+	if err == nil {
+		return nil
+	}
 	return pokeSupervisor()
 }
 
@@ -1224,8 +1351,8 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {
-			if isMultiSessionCfgAgent(&a) {
-				w("  This labels the bead for pool \"" + a.QualifiedName() + "\".")
+			if a.SupportsInstanceExpansion() {
+				w("  This routes the bead to session config \"" + a.QualifiedName() + "\".")
 			} else {
 				w("  This assigns the bead to \"" + a.QualifiedName() + "\".")
 			}
@@ -1329,23 +1456,22 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 // printTarget prints the Target section for dry-run output.
 func printTarget(w func(string), a config.Agent) {
 	w("Target:")
-	if isMultiSessionCfgAgent(&a) {
+	if a.SupportsInstanceExpansion() {
 		sp := scaleParamsFor(&a)
 		maxDisplay := fmt.Sprintf("max=%d", sp.Max)
 		if sp.Max < 0 {
 			maxDisplay = "max=unlimited"
 		}
-		w(fmt.Sprintf("  Pool:        %s (min=%d %s)", a.QualifiedName(), sp.Min, maxDisplay))
+		w(fmt.Sprintf("  Session config: %s (min=%d %s)", a.QualifiedName(), sp.Min, maxDisplay))
 	} else {
-		w("  Agent:       " + a.QualifiedName() + " (fixed agent)")
+		w("  Agent:       " + a.QualifiedName() + " (non-expanding template)")
 	}
 	sq := a.EffectiveSlingQuery()
 	w("  Sling query: " + sq)
 	if !isCustomSlingQuery(a) {
-		if isMultiSessionCfgAgent(&a) {
-			w("               Pool agents share a work queue via labels instead of")
-			w("               direct assignment. Any idle pool member can claim work")
-			w("               labeled for its pool.")
+		if a.SupportsInstanceExpansion() {
+			w("               Multi-session configs share a routed work queue via gc.routed_to.")
+			w("               Any eligible session for that config can claim routed work.")
 		} else {
 			w("               A sling query is the shell command that routes work.")
 			w("               {} is replaced with the bead ID at dispatch time.")

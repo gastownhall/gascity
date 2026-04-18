@@ -87,12 +87,9 @@ func listVisibleMcpEntries(cityPath string, cfg *config.City, store beads.Store,
 	if err != nil {
 		return nil, err
 	}
-	// When the agent has an explicit attachment config (mcp or shared_mcp),
-	// filter the city catalog to the attached set. See listVisibleSkillEntries.
-	attached := attachmentSet(agent.MCP, agent.SharedMCP)
-	if len(attached) > 0 {
-		cityEntries = filterEntriesByName(cityEntries, attached)
-	}
+	// Per engdocs/proposals/skill-materialization.md: every agent sees the
+	// entire city catalog plus its own agent-local MCP. No attachment
+	// filtering.
 	cityEntries = append(cityEntries, discoverAgentMcpEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
 	sortVisibilityEntries(cityEntries)
 	return cityEntries, nil

@@ -59,36 +59,48 @@ func WorkflowExecutionRoute(bead beads.Bead) string {
 
 // ApplyGraphRouting delegates to graphroute with sling deps adapted.
 func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City, deps SlingDeps) error {
-	gdeps := graphroute.Deps{}
+	gdeps := graphroute.Deps{CityPath: deps.CityPath}
 	if deps.Resolver != nil {
 		gdeps.Resolver = deps.Resolver
+	}
+	if deps.DirectSessionResolver != nil {
+		gdeps.DirectSessionResolver = deps.DirectSessionResolver
 	}
 	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, gdeps)
 }
 
 // ControlDispatcherBinding delegates to graphroute with sling deps adapted.
 func ControlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string, deps SlingDeps) (GraphRouteBinding, error) {
-	gdeps := graphroute.Deps{}
+	gdeps := graphroute.Deps{CityPath: deps.CityPath}
 	if deps.Resolver != nil {
 		gdeps.Resolver = deps.Resolver
+	}
+	if deps.DirectSessionResolver != nil {
+		gdeps.DirectSessionResolver = deps.DirectSessionResolver
 	}
 	return graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, gdeps)
 }
 
 // ResolveGraphStepBindingWithVars delegates to graphroute.
 func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]GraphRouteBinding, resolving map[string]bool, routeVars map[string]string, fallback GraphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City, deps SlingDeps) (GraphRouteBinding, error) {
-	gdeps := graphroute.Deps{}
+	gdeps := graphroute.Deps{CityPath: deps.CityPath}
 	if deps.Resolver != nil {
 		gdeps.Resolver = deps.Resolver
+	}
+	if deps.DirectSessionResolver != nil {
+		gdeps.DirectSessionResolver = deps.DirectSessionResolver
 	}
 	return graphroute.ResolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg, gdeps)
 }
 
 // DecorateGraphWorkflowRecipe delegates to graphroute.
 func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City, deps SlingDeps) error {
-	gdeps := graphroute.Deps{}
+	gdeps := graphroute.Deps{CityPath: deps.CityPath}
 	if deps.Resolver != nil {
 		gdeps.Resolver = deps.Resolver
+	}
+	if deps.DirectSessionResolver != nil {
+		gdeps.DirectSessionResolver = deps.DirectSessionResolver
 	}
 	return graphroute.DecorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName, store, cityName, cfg, gdeps)
 }

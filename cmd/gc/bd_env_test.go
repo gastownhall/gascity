@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,6 +14,23 @@ import (
 )
 
 // ── Dolt config wiring tests (issue 011) ──────────────────────────────
+
+func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+
+	cityPath := t.TempDir()
+	env := cityRuntimeProcessEnv(cityPath)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GC_DOLT=") {
+			t.Fatalf("cityRuntimeProcessEnv leaked ambient GC_DOLT control var: %q", entry)
+		}
+	}
+}
 
 func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
@@ -61,6 +80,603 @@ func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
 		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q (should mirror external env)", got, "3307")
+	}
+}
+
+func TestManagedLocalDoltHostRecognizesIPv6LoopbackAndWildcard(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want bool
+	}{
+		{"", true},
+		{"127.0.0.1", true},
+		{"localhost", true},
+		{"0.0.0.0", true},
+		{"::1", true},
+		{"::", true},
+		{"db.example.com", false},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := managedLocalDoltHost(tc.host); got != tc.want {
+				t.Fatalf("managedLocalDoltHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolvedRuntimeCityDoltTargetIgnoresIPv6LocalEnvOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	for _, host := range []string{"::1", "::"} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("GC_DOLT_HOST", host)
+			cityPath := t.TempDir()
+			target, ok, err := resolvedRuntimeCityDoltTarget(cityPath, false)
+			if err != nil {
+				t.Fatalf("resolvedRuntimeCityDoltTarget() error = %v", err)
+			}
+			if ok {
+				t.Fatalf("resolvedRuntimeCityDoltTarget() = %+v, want no external fallback for local host %q", target, host)
+			}
+		})
+	}
+}
+
+func TestBdRuntimeEnvUsesCanonicalExternalUser(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: agent
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "db.example.com")
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "3307")
+	}
+	if got := env["GC_DOLT_USER"]; got != "agent" {
+		t.Fatalf("GC_DOLT_USER = %q, want %q", got, "agent")
+	}
+	if got := env["BEADS_DOLT_SERVER_USER"]; got != "agent" {
+		t.Fatalf("BEADS_DOLT_SERVER_USER = %q, want %q", got, "agent")
+	}
+}
+
+func TestBdRuntimeEnvDoesNotUseStalePortFileWithoutManagedRuntimeState(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	t.Setenv("GC_DOLT_USER", "")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }() //nolint:errcheck // test cleanup
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte(strings.TrimPrefix(ln.Addr().String(), "127.0.0.1:")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_PORT"]; got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty without managed runtime state", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty without managed runtime state", got)
+	}
+}
+
+func TestBdRuntimeEnvInvalidCanonicalConfigDoesNotFallbackToCompatRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for invalid canonical config", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty for invalid canonical config", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for invalid canonical config", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty for invalid canonical config", got)
+	}
+}
+
+func TestCityRuntimeProcessEnvInvalidCanonicalConfigDoesNotFallbackToCompatRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	entries := cityRuntimeProcessEnv(cityPath)
+	got := map[string]string{}
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["GC_DOLT_HOST"] != "" || got["GC_DOLT_PORT"] != "" {
+		t.Fatalf("cityRuntimeProcessEnv leaked fallback target: %#v", got)
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "" || got["BEADS_DOLT_SERVER_PORT"] != "" {
+		t.Fatalf("cityRuntimeProcessEnv leaked fallback beads target: %#v", got)
+	}
+}
+
+func TestBdRuntimeEnvInvalidCityExplicitOriginDoesNotFallbackToCompatRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: invalid-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for invalid city origin", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty for invalid city origin", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for invalid city origin", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty for invalid city origin", got)
+	}
+}
+
+func TestBdRuntimeEnvInvalidManagedCityConfigDoesNotProjectTrackedEndpoint(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: stale-db.example.com
+dolt.port: 3307
+dolt.user: stale-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for stale managed-city endpoint", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty for stale managed-city endpoint", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "" {
+		t.Fatalf("GC_DOLT_USER = %q, want empty for stale managed-city endpoint", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for stale managed-city endpoint", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty for stale managed-city endpoint", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_USER"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_USER = %q, want empty for stale managed-city endpoint", got)
+	}
+}
+
+func TestBdRuntimeEnvPrefersCanonicalExternalConfigOverCompatRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	t.Setenv("GC_DOLT_USER", "")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want canonical host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want canonical port", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want canonical user", got)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "BEADS_DOLT_SERVER_HOST"} {
+		if strings.Contains(env[key], "compat-db.example.com") {
+			t.Fatalf("%s should ignore compat host, env = %#v", key, env)
+		}
+	}
+}
+
+func TestBdRuntimeEnvIgnoresAmbientHostPortOverrideOverCanonicalConfig(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "override-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "5511")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want canonical host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want canonical port", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want canonical user", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want canonical host", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want canonical port", got)
+	}
+}
+
+func TestSessionDoltEnvFallsBackToCompatCityRegistrationWhenCityConfigLacksEndpointAuthority(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := sessionDoltEnv(cityPath, "", nil)
+	if got := env["GC_DOLT_HOST"]; got != "compat-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want compat host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want compat port", got)
+	}
+}
+
+func TestSessionDoltEnvInheritsCompatCityTargetWhenRigConfigLacksEndpointAuthority(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir}})
+	if got := env["GC_DOLT_HOST"]; got != "compat-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want inherited compat host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want inherited compat port", got)
+	}
+}
+
+func TestSessionDoltEnvFallsBackToCompatRigOverrideWhenRigConfigLacksEndpointAuthority(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir, DoltHost: "rig-db.example.com", DoltPort: "3308"}})
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want explicit rig compat host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3308" {
+		t.Fatalf("GC_DOLT_PORT = %q, want explicit rig compat port", got)
+	}
+}
+
+func TestSessionDoltEnvUsesCanonicalRigUser(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: rig-db.example.com
+dolt.port: 3308
+dolt.user: rig-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir}})
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3308" {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "3308")
+	}
+	if got := env["GC_DOLT_USER"]; got != "rig-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want %q", got, "rig-user")
+	}
+	if got := env["BEADS_DOLT_SERVER_USER"]; got != "rig-user" {
+		t.Fatalf("BEADS_DOLT_SERVER_USER = %q, want %q", got, "rig-user")
+	}
+}
+
+func TestSessionDoltEnvPrefersCanonicalCityConfigOverCompatRegistration(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := sessionDoltEnv(cityPath, "", nil)
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want canonical host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want canonical port", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want canonical user", got)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "BEADS_DOLT_SERVER_HOST"} {
+		if strings.Contains(env[key], "compat-db.example.com") {
+			t.Fatalf("%s should ignore compat host, env = %#v", key, env)
+		}
+	}
+}
+
+func TestSessionDoltEnvIgnoresAmbientHostPortOverrideOverCanonicalConfig(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "override-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "5511")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, "", nil)
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want canonical host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want canonical port", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want canonical user", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want canonical host", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want canonical port", got)
+	}
+}
+
+func TestSessionDoltEnvPrefersInheritedCanonicalRigConfigOverCompatRigOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: stale-db.example.com
+dolt.port: 5507
+dolt.user: stale-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir, DoltHost: "compat-rig-db.example.com", DoltPort: "6608"}})
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want inherited canonical host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want inherited canonical port", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want inherited canonical user", got)
+	}
+	for _, forbidden := range []string{"compat-rig-db.example.com", "6608", "stale-db.example.com", "5507", "stale-user"} {
+		for key, value := range env {
+			if strings.Contains(value, forbidden) {
+				t.Fatalf("%s should ignore non-canonical inherited value %q, env = %#v", key, forbidden, env)
+			}
+		}
 	}
 }
 
@@ -134,6 +750,185 @@ func TestCityRuntimeProcessEnvIncludesDoltHost(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeProcessEnvIncludesCanonicalExternalHostForExecGcBeadsBd(t *testing.T) {
+	t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := cityRuntimeProcessEnv(cityPath)
+	got := map[string]string{}
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	want := map[string]string{
+		"GC_DOLT_HOST":           "city-db.example.com",
+		"GC_DOLT_PORT":           "3307",
+		"GC_DOLT_USER":           "canonical-user",
+		"GC_DOLT_PASSWORD":       "city-pass",
+		"BEADS_DOLT_SERVER_HOST": "city-db.example.com",
+		"BEADS_DOLT_SERVER_PORT": "3307",
+		"BEADS_DOLT_SERVER_USER": "canonical-user",
+		"BEADS_DOLT_PASSWORD":    "city-pass",
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("%s = %q, want %q (env=%#v)", key, got[key], wantValue, got)
+		}
+	}
+}
+
+func TestBdRuntimeEnvFallsBackToCompatRegistrationWhenCityConfigLacksEndpointAuthority(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	t.Setenv("GC_DOLT_USER", "")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_HOST"]; got != "compat-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want compat host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want compat port", got)
+	}
+}
+
+func TestCityRuntimeProcessEnvFallsBackToCompatRegistrationWhenCityConfigLacksEndpointAuthority(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	t.Setenv("GC_DOLT_USER", "")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := cityRuntimeProcessEnv(cityPath)
+	got := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["GC_DOLT_HOST"] != "compat-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want compat host", got["GC_DOLT_HOST"])
+	}
+	if got["GC_DOLT_PORT"] != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want compat port", got["GC_DOLT_PORT"])
+	}
+}
+
+func TestCityRuntimeProcessEnvPrefersCanonicalExternalConfigOverCompatRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	t.Setenv("GC_DOLT_USER", "")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := cityRuntimeProcessEnv(cityPath)
+	got := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["GC_DOLT_HOST"] != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want canonical host", got["GC_DOLT_HOST"])
+	}
+	if got["GC_DOLT_PORT"] != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want canonical port", got["GC_DOLT_PORT"])
+	}
+	if got["GC_DOLT_USER"] != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want canonical user", got["GC_DOLT_USER"])
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "canonical-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want canonical host", got["BEADS_DOLT_SERVER_HOST"])
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "3307" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want canonical port", got["BEADS_DOLT_SERVER_PORT"])
+	}
+	if got["BEADS_DOLT_SERVER_USER"] != "canonical-user" {
+		t.Fatalf("BEADS_DOLT_SERVER_USER = %q, want canonical user", got["BEADS_DOLT_SERVER_USER"])
+	}
+}
+
 func TestMergeRuntimeEnvIncludesDoltHost(t *testing.T) {
 	parent := []string{
 		"BEADS_DOLT_SERVER_HOST=old-beads-host",
@@ -199,24 +994,34 @@ func TestBdRuntimeEnvLocalHostNoHostKey(t *testing.T) {
 	}
 }
 
-func TestOpenStoreAtForCityUsesExplicitCityForExternalRig(t *testing.T) {
+func TestOpenStoreAtForCityUsesScopeLocalFileStore(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	externalRig := filepath.Join(t.TempDir(), "test-external")
-	if err := os.MkdirAll(externalRig, 0o755); err != nil {
+	rigDir := filepath.Join(t.TempDir(), "test-external")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("GC_BEADS", "file")
-
-	store, err := openStoreAtForCity(externalRig, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity: %v", err)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
 	}
-	created, err := store.Create(beads.Bead{Title: "external rig bead", Type: "task"})
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
 	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -224,8 +1029,92 @@ func TestOpenStoreAtForCityUsesExplicitCityForExternalRig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	if _, err := cityStore.Get(created.ID); err != nil {
-		t.Fatalf("city store should see created bead %s: %v", created.ID, err)
+	cityList, err := cityStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("city List after rig create: %v", err)
+	}
+	if len(cityList) != 0 {
+		t.Fatalf("city store should stay empty after rig create, got %d bead(s)", len(cityList))
+	}
+
+	if _, err := cityStore.Create(beads.Bead{Title: "city bead", Type: "task"}); err != nil {
+		t.Fatalf("city Create: %v", err)
+	}
+	rigList, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig List after city create: %v", err)
+	}
+	if len(rigList) != 1 || rigList[0].Title != "rig bead" {
+		t.Fatalf("rig store should still contain only its own bead, got %#v", rigList)
+	}
+}
+
+func TestOpenStoreAtForCityLegacyEmptyFileCityDoesNotFailOrCreateRigState(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(t.TempDir(), "legacy-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	rigList, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig List: %v", err)
+	}
+	if len(rigList) != 0 {
+		t.Fatalf("empty legacy file city should list zero beads, got %#v", rigList)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc")); !os.IsNotExist(err) {
+		t.Fatalf("legacy empty rig open should not create rig .gc state, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "beads.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy empty city open should not create beads.json, stat err = %v", err)
+	}
+}
+
+func TestOpenStoreAtForCityPreservesLegacySharedFileStoreWithoutCreatingRigState(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(t.TempDir(), "legacy-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+
+	legacyCityStore, err := openScopeLocalFileStore(cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStore(city): %v", err)
+	}
+	if _, err := legacyCityStore.Create(beads.Bead{Title: "legacy city bead", Type: "task"}); err != nil {
+		t.Fatalf("legacy city Create: %v", err)
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	rigList, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig List: %v", err)
+	}
+	if len(rigList) != 1 || rigList[0].Title != "legacy city bead" {
+		t.Fatalf("rig store should read legacy shared city data, got %#v", rigList)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".gc")); !os.IsNotExist(err) {
+		t.Fatalf("legacy rig open should not create rig .gc state, stat err = %v", err)
 	}
 }
 
@@ -314,131 +1203,205 @@ func TestBdCommandRunnerForCityPinsCityStoreEnv(t *testing.T) {
 	}
 }
 
-// BUG: PR #201 — bdStoreForRig() does not exist. All bd operations use
-// bdStoreForCity() which returns a store rooted at the city level, not the
-// rig level. For rig-scoped bead IDs, the city-level store cannot resolve
-// them because it looks in the city's .beads directory, not the rig's.
-//
-// This test demonstrates that:
-// 1. bdStoreForRig is needed but does not exist (only bdStoreForCity exists)
-// 2. bdRuntimeEnv sets BEADS_DIR to the city's .beads, not a rig's
-// 3. bdCommandRunnerForCity always pins BEADS_DIR to cityDir/.beads
-func TestBdStoreForRig_DoesNotExist(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+func TestBdCommandRunnerForCityClearsAmbientDoltEnvWhenManagedRuntimeUnavailable(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_DOLT_USER", "ambient-user")
+	t.Setenv("GC_DOLT_PASSWORD", "ambient-pass")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.invalid")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-user")
+	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-pass")
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create a rig directory — a separate repository outside the city.
-	rigDir := filepath.Join(t.TempDir(), "my-rig")
-	if err := os.MkdirAll(rigDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// bdRuntimeEnv always sets BEADS_DIR to cityDir/.beads.
-	// A rig-scoped agent needs BEADS_DIR=rigDir/.beads, but no
-	// bdStoreForRig() exists to produce that.
-	env := bdRuntimeEnv(cityDir)
-	beadsDir := env["BEADS_DIR"]
-	wantCityBeads := filepath.Join(cityDir, ".beads")
-	if beadsDir != wantCityBeads {
-		t.Errorf("BEADS_DIR = %q, want %q (city-level)", beadsDir, wantCityBeads)
-	}
-	rigBeadsDir := filepath.Join(rigDir, ".beads")
-	if beadsDir == rigBeadsDir {
-		t.Error("BEADS_DIR unexpectedly points to rig — bdStoreForRig may have been added")
-	}
-
-	// bdCommandRunnerForCity pins BEADS_DIR to the RUNNER's dir arg (not the
-	// rig). This is the command runner used by bdStoreForCity. It always
-	// constructs env with cityDir context, never rig-specific context.
 	runner := bdCommandRunnerForCity(cityDir)
-
-	// Run a command in the rig directory to see what BEADS_DIR is set to.
-	out, err := runner(rigDir, "sh", "-c", `printf '%s' "$BEADS_DIR"`)
+	out, err := runner(cityDir, "sh", "-c", `printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$GC_DOLT_PASSWORD" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT" "$BEADS_DOLT_SERVER_USER" "$BEADS_DOLT_PASSWORD"`)
 	if err != nil {
-		t.Fatalf("runner: %v", err)
+		t.Fatal(err)
 	}
 
-	// BEADS_DIR is pinned to rigDir/.beads (the runner overrides per-call dir),
-	// but GC_RIG and GC_RIG_ROOT are always empty — no rig context is injected.
-	gotBeadsDir := string(out)
-	wantRunnerBeads := filepath.Join(rigDir, ".beads")
-	if gotBeadsDir != wantRunnerBeads {
-		t.Errorf("runner BEADS_DIR = %q, want %q", gotBeadsDir, wantRunnerBeads)
+	lines := strings.Split(string(out), "\n")
+	if len(lines) != 9 {
+		t.Fatalf("lines = %q, want 9 lines including trailing newline", string(out))
 	}
-
-	// Verify GC_RIG is empty — the runner does not know which rig it serves.
-	rigOut, err := runner(rigDir, "sh", "-c", `printf '%s' "$GC_RIG"`)
-	if err != nil {
-		t.Fatalf("runner: %v", err)
-	}
-	if string(rigOut) != "" {
-		t.Errorf("GC_RIG = %q, want empty (no rig context in bdCommandRunnerForCity)", string(rigOut))
-	}
-
-	// PR #201 adds bdStoreForRig which opens a store at the rig directory
-	// with rig-level Dolt config. Verify it returns a store pointed at the
-	// rig path, not the city path. Also verify bdRuntimeEnvForRig injects
-	// rig-level Dolt host/port when configured.
-	cfg := &config.City{
-		Rigs: []config.Rig{{
-			Name:     "myrig",
-			Path:     rigDir,
-			DoltHost: "rig-host",
-			DoltPort: "3307",
-		}},
-	}
-
-	// bdRuntimeEnvForRig should inject rig-level Dolt config.
-	rigEnv := bdRuntimeEnvForRig(cityDir, cfg, rigDir)
-	if rigEnv["BEADS_DOLT_SERVER_HOST"] != "rig-host" {
-		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want %q", rigEnv["BEADS_DOLT_SERVER_HOST"], "rig-host")
-	}
-	if rigEnv["BEADS_DOLT_SERVER_PORT"] != "3307" {
-		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q", rigEnv["BEADS_DOLT_SERVER_PORT"], "3307")
-	}
-	if got := rigEnv["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
-		t.Errorf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
-	}
-	if got := rigEnv["GC_RIG"]; got != "myrig" {
-		t.Errorf("GC_RIG = %q, want %q", got, "myrig")
-	}
-	if got := rigEnv["GC_RIG_ROOT"]; got != rigDir {
-		t.Errorf("GC_RIG_ROOT = %q, want %q", got, rigDir)
+	for i, name := range []string{
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	} {
+		if lines[i] != "" {
+			t.Fatalf("%s = %q, want empty when managed runtime is unavailable", name, lines[i])
+		}
 	}
 }
 
-func TestBdRuntimeEnvForRigUsesManagedRigPort(t *testing.T) {
+// This test exercises the shared bd opener path for a rig-scoped store.
+// It verifies that the opener and runner pick up the rig's canonical
+// Dolt target instead of falling back to the city-scoped opener.
+func TestOpenStoreAtForCityUsesRigScopedDoltConfigWithoutProcessEnvSync(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
 	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: city-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: myrig
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "bd-env.txt")
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+{
+  printf 'GC_DOLT_HOST=%s\n' "${GC_DOLT_HOST:-}"
+  printf 'GC_DOLT_PORT=%s\n' "${GC_DOLT_PORT:-}"
+  printf 'BEADS_DOLT_SERVER_HOST=%s\n' "${BEADS_DOLT_SERVER_HOST:-}"
+  printf 'BEADS_DOLT_SERVER_PORT=%s\n' "${BEADS_DOLT_SERVER_PORT:-}"
+  printf 'BEADS_DIR=%s\n' "${BEADS_DIR:-}"
+  printf 'GC_RIG_ROOT=%s\n' "${GC_RIG_ROOT:-}"
+} > "${CAPTURE_PATH}"
+exit 0
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-city.example.com")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+
+	store, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	bdStore, ok := store.(*beads.BdStore)
+	if !ok {
+		t.Fatalf("openStoreAtForCity returned %T, want *beads.BdStore", store)
+	}
+	if err := bdStore.Init("myrig", "", ""); err != nil {
+		t.Fatalf("bd store init: %v", err)
+	}
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["GC_DOLT_HOST"] != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got["GC_DOLT_HOST"], "rig-db.example.com")
+	}
+	if got["GC_DOLT_PORT"] != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got["GC_DOLT_PORT"], "3307")
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "rig-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q", got["BEADS_DOLT_SERVER_HOST"], "rig-db.example.com")
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "3307" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got["BEADS_DOLT_SERVER_PORT"], "3307")
+	}
+	if got["BEADS_DIR"] != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(rigDir, ".beads"))
+	}
+	if got["GC_RIG_ROOT"] != rigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want %q", got["GC_RIG_ROOT"], rigDir)
+	}
+}
+
+func TestBdRuntimeEnvForRigUsesCanonicalManagedRigTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }() //nolint:errcheck // test cleanup
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: "2026-04-02T08:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	rigDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-
-	portFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
-	if err := os.WriteFile(portFile, []byte("31364"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("31364"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Make the advertised port reachable so currentDoltPort accepts it.
-	ln, err := net.Listen("tcp", "127.0.0.1:31364")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	env := bdRuntimeEnvForRig(cityDir, &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}, rigDir)
+	wantPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	if got := env["GC_DOLT_PORT"]; got != wantPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
-	defer ln.Close() //nolint:errcheck // test cleanup
-
-	env := bdRuntimeEnvForRig(cityDir, &config.City{}, rigDir)
-	if got := env["GC_DOLT_PORT"]; got != "31364" {
-		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "31364")
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, wantPort)
 	}
-	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "31364" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, "31364")
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for managed target", got)
 	}
-	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
-		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for managed target", got)
 	}
 }
 
@@ -455,7 +1418,7 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close() //nolint:errcheck // test cleanup
+	defer func() { _ = ln.Close() }() //nolint:errcheck // test cleanup
 
 	if err := writeDoltState(cityDir, doltRuntimeState{
 		Running:   true,
@@ -485,6 +1448,233 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	}
 }
 
+func TestBdRuntimeEnvForRigInvalidCanonicalConfigDoesNotFallbackToCompatRegistration(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.port: 3308
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnvForRig(cityDir, &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for invalid canonical rig config", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty for invalid canonical rig config", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for invalid canonical rig config", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty for invalid canonical rig config", got)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	}
+}
+
+func TestBdRuntimeEnvForRigInheritedManagedCityConfigDoesNotProjectTrackedEndpoint(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: "2026-04-02T08:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: stale-rig-db.example.com
+dolt.port: 5507
+dolt.user: stale-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnvForRig(cityDir, &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "" {
+		t.Fatalf("GC_DOLT_HOST = %q, want empty for stale inherited managed-city endpoint", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "" {
+		t.Fatalf("GC_DOLT_PORT = %q, want empty for stale inherited managed-city endpoint", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "" {
+		t.Fatalf("GC_DOLT_USER = %q, want empty for stale inherited managed-city endpoint", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for stale inherited managed-city endpoint", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want empty for stale inherited managed-city endpoint", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_USER"]; got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_USER = %q, want empty for stale inherited managed-city endpoint", got)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	}
+}
+
+func TestBdRuntimeEnvForRigInheritsCompatCityTargetWhenRigConfigLacksEndpointAuthority(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := bdRuntimeEnvForRig(cityPath, &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "compat-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want inherited compat host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want inherited compat port", got)
+	}
+}
+
+func TestBdRuntimeEnvForRigInheritsResolvedCityTargetWhenAuthoritativeRigUsesInheritedCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "compat-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnvForRig(cityPath, &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "compat-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want inherited resolved city host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want inherited resolved city port", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "compat-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want inherited resolved city host", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "4406" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want inherited resolved city port", got)
+	}
+}
+
+func TestBdRuntimeEnvForRigPrefersInheritedCanonicalRigConfigOverCompatRigOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: stale-db.example.com
+dolt.port: 5507
+dolt.user: stale-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnvForRig(cityPath, &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir, DoltHost: "compat-rig-db.example.com", DoltPort: "6608"}}}, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want inherited canonical host", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want inherited canonical port", got)
+	}
+	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want inherited canonical user", got)
+	}
+	for _, forbidden := range []string{"compat-rig-db.example.com", "6608", "stale-db.example.com", "5507", "stale-user"} {
+		for key, value := range env {
+			if strings.Contains(value, forbidden) {
+				t.Fatalf("%s should ignore non-canonical inherited value %q, env = %#v", key, forbidden, env)
+			}
+		}
+	}
+}
+
 func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
@@ -498,7 +1688,7 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close() //nolint:errcheck // test cleanup
+	defer func() { _ = ln.Close() }() //nolint:errcheck // test cleanup
 
 	if err := writeDoltState(cityDir, doltRuntimeState{
 		Running:   true,
@@ -669,5 +1859,459 @@ func TestCityForStoreDirFallsBackToDirWhenNoCityFound(t *testing.T) {
 	got := cityForStoreDir(noCity)
 	if canonicalTestPath(got) != canonicalTestPath(noCity) {
 		t.Errorf("cityForStoreDir(%q) = %q, want same dir as fallback", noCity, got)
+	}
+}
+
+func TestBdRuntimeEnvUsesStoreLocalBeadsEnvPassword(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_PASSWORD"]; got != "city-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "city-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "city-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "city-secret")
+	}
+}
+
+func TestBdRuntimeEnvPrefersProcessPasswordOverStoreAndCredentials(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "override-secret")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[db.example.com:3307]\npassword=credentials-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_PASSWORD"]; got != "override-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "override-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "override-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "override-secret")
+	}
+	if got := env["BEADS_CREDENTIALS_FILE"]; got != credentialsPath {
+		t.Fatalf("BEADS_CREDENTIALS_FILE = %q, want %q", got, credentialsPath)
+	}
+}
+
+func TestBdRuntimeEnvUsesCredentialsFilePasswordWhenStoreSecretMissing(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[db.example.com:3307]\npassword=credentials-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	env := bdRuntimeEnv(cityPath)
+	if got := env["GC_DOLT_PASSWORD"]; got != "credentials-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "credentials-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "credentials-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "credentials-secret")
+	}
+	if got := env["BEADS_CREDENTIALS_FILE"]; got != credentialsPath {
+		t.Fatalf("BEADS_CREDENTIALS_FILE = %q, want %q", got, credentialsPath)
+	}
+}
+
+func TestSessionDoltEnvInheritedRigUsesCityStorePassword(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir}})
+	if got := env["GC_DOLT_PASSWORD"]; got != "city-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "city-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "city-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "city-secret")
+	}
+}
+
+func TestSessionDoltEnvExplicitRigUsesRigStorePassword(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: rig-db.example.com
+dolt.port: 3308
+dolt.user: rig-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir}})
+	if got := env["GC_DOLT_PASSWORD"]; got != "rig-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "rig-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "rig-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "rig-secret")
+	}
+}
+
+func TestCityRuntimeProcessEnvForwardsBeadsCredentialsFile(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credentialsPath, []byte("[db.example.com:3307]\npassword=credentials-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	entries := cityRuntimeProcessEnv(cityPath)
+	got := map[string]string{}
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["BEADS_CREDENTIALS_FILE"] != credentialsPath {
+		t.Fatalf("BEADS_CREDENTIALS_FILE = %q, want %q", got["BEADS_CREDENTIALS_FILE"], credentialsPath)
+	}
+	if got["GC_DOLT_PASSWORD"] != "credentials-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got["GC_DOLT_PASSWORD"], "credentials-secret")
+	}
+	if got["BEADS_DOLT_PASSWORD"] != "credentials-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got["BEADS_DOLT_PASSWORD"], "credentials-secret")
+	}
+}
+
+func TestSessionDoltEnvCompatCityFallbackUsesCityStorePassword(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	env := sessionDoltEnv(cityPath, "", nil)
+	if got := env["GC_DOLT_PASSWORD"]; got != "city-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "city-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "city-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "city-secret")
+	}
+}
+
+func TestSessionDoltEnvCompatRigOverrideUsesRigStorePassword(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := sessionDoltEnv(cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir, DoltHost: "rig-db.example.com", DoltPort: "3308"}})
+	if got := env["GC_DOLT_PASSWORD"]; got != "rig-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", got, "rig-secret")
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "rig-secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want %q", got, "rig-secret")
+	}
+}
+
+func TestBdTransportRetryableErrorDoesNotTreatCommandTimeoutAsTransportFailure(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": ""}
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	if bdTransportRetryableError(cityPath, cityPath, env, fmt.Errorf("timed out after 120s")) {
+		t.Fatal("timed out after 120s should not be treated as transport-retryable")
+	}
+}
+
+func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	port := "3307"
+	attempts := 0
+	recoverCalls := 0
+	seenPorts := make([]string, 0, 2)
+
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		copied := map[string]string{}
+		for key, value := range env {
+			copied[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			seenPorts = append(seenPorts, copied["GC_DOLT_PORT"])
+			if attempts == 1 {
+				return nil, fmt.Errorf("server unreachable at 127.0.0.1:%s", copied["GC_DOLT_PORT"])
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		port = "3308"
+		return nil
+	}
+
+	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
+		return map[string]string{
+			"GC_DOLT_PORT": port,
+		}
+	})
+
+	out, err := runner(t.TempDir(), "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("runner output = %q, want %q", out, "ok")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if recoverCalls != 1 {
+		t.Fatalf("recoverCalls = %d, want 1", recoverCalls)
+	}
+	if len(seenPorts) != 2 {
+		t.Fatalf("seenPorts = %v, want 2 attempts", seenPorts)
+	}
+	if seenPorts[0] != "3307" || seenPorts[1] != "3308" {
+		t.Fatalf("seenPorts = %v, want [3307 3308]", seenPorts)
+	}
+}
+
+func TestBdCommandRunnerWithManagedRetrySkipsRecoveryForLoopbackExternalEndpoint(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: 127.0.0.1
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	attempts := 0
+	recoverCalls := 0
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			return nil, fmt.Errorf("server unreachable at 127.0.0.1:%s", env["GC_DOLT_PORT"])
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
+	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return map[string]string{
+			"GC_DOLT_HOST": "127.0.0.1",
+			"GC_DOLT_PORT": "3307",
+		}
+	})
+
+	_, err := runner(cityPath, "bd", "list", "--json")
+	if err == nil || !strings.Contains(err.Error(), "server unreachable") {
+		t.Fatalf("runner error = %v, want transport failure", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if recoverCalls != 0 {
+		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
 	}
 }

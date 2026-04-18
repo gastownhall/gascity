@@ -251,23 +251,22 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 	var lastStatus string
 	for {
 		running, status, known := supervisorCityRunningHook(cityPath)
-		if known {
-			if running == wantRunning {
-				return nil
-			}
-			if !wantRunning {
-				return fmt.Errorf("city is still running under supervisor")
-			}
+		switch {
+		case known && running == wantRunning:
+			return nil
+		case known && !wantRunning:
+			return fmt.Errorf("city is still running under supervisor")
+		case known && wantRunning && status == "init_failed":
 			// If the supervisor reports an init failure, surface the
 			// error immediately instead of polling until timeout.
-			if wantRunning && status == "init_failed" {
-				if errMsg := supervisorCityError(cityPath); errMsg != "" {
-					return fmt.Errorf("city failed to start: %s", errMsg)
-				}
-				return fmt.Errorf("city failed to start under supervisor")
+			if errMsg := supervisorCityError(cityPath); errMsg != "" {
+				return fmt.Errorf("city failed to start: %s", errMsg)
 			}
-		} else if !wantRunning {
+			return fmt.Errorf("city failed to start under supervisor")
+		case !known && !wantRunning:
 			return nil
+		case !known && supervisorAliveHook() == 0:
+			return fmt.Errorf("supervisor stopped before city became ready")
 		}
 		if stdout != nil && status != "" && status != lastStatus {
 			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout

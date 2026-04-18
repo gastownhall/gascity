@@ -171,6 +171,75 @@ func TestEnsureBootstrapEmbedsImportPackRuntimeFiles(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapEmbedsCorePackSkills(t *testing.T) {
+	old := BootstrapPacks
+	BootstrapPacks = []Entry{{
+		Name:     "core",
+		Source:   "github.com/gastownhall/gc-core",
+		Version:  "0.1.0",
+		AssetDir: "packs/core",
+	}}
+	t.Cleanup(func() { BootstrapPacks = old })
+
+	gcHome := t.TempDir()
+	if err := EnsureBootstrap(gcHome); err != nil {
+		t.Fatalf("EnsureBootstrap: %v", err)
+	}
+
+	entries, err := readImplicitFile(filepath.Join(gcHome, "implicit-import.toml"))
+	if err != nil {
+		t.Fatalf("readImplicitFile: %v", err)
+	}
+	entry, ok := entries["core"]
+	if !ok {
+		t.Fatalf("core entry missing from implicit-import.toml: %v", entries)
+	}
+	cacheDir := config.GlobalRepoCachePath(gcHome, entry.Source, entry.Commit)
+
+	wantSkills := []string{
+		"gc-agents",
+		"gc-city",
+		"gc-dashboard",
+		"gc-dispatch",
+		"gc-mail",
+		"gc-rigs",
+		"gc-work",
+	}
+	for _, name := range wantSkills {
+		skillPath := filepath.Join(cacheDir, "skills", name, "SKILL.md")
+		if _, err := os.Stat(skillPath); err != nil {
+			t.Fatalf("embedded core skill %s missing from cache: %v", name, err)
+		}
+	}
+
+	workSkill, err := os.ReadFile(filepath.Join(cacheDir, "skills", "gc-work", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("reading gc-work SKILL.md: %v", err)
+	}
+	text := string(workSkill)
+	wantFrontmatter := []string{
+		"---\n",
+		"name: gc-work\n",
+		"description: Finding, creating, claiming, and closing work items (beads)\n",
+	}
+	for _, needle := range wantFrontmatter {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("gc-work SKILL.md missing frontmatter %q:\n%s", needle, text)
+		}
+	}
+	if !strings.HasPrefix(text, "---\n") {
+		t.Fatalf("gc-work SKILL.md should start with frontmatter delimiter, got:\n%s", text)
+	}
+
+	packToml, err := os.ReadFile(filepath.Join(cacheDir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading core pack.toml: %v", err)
+	}
+	if !strings.Contains(string(packToml), `name = "core"`) {
+		t.Fatalf("core pack.toml missing name:\n%s", packToml)
+	}
+}
+
 func TestEnsureBootstrapAllowsConcurrentCallers(t *testing.T) {
 	assetsRoot := t.TempDir()
 	writeBootstrapPackAsset(t, assetsRoot, "packs/import", `

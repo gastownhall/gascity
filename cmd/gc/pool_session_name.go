@@ -3,6 +3,7 @@ package main
 import (
 	"path"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -21,32 +22,14 @@ func PoolSessionName(template, beadID string) string {
 // assigned work beads (all assigned beads are closed). Returns the IDs
 // of session beads that were closed.
 func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBeads []beads.Bead) []string {
-	// Index work beads by assignee.
-	assigneeHasWork := make(map[string]bool)
-	for _, wb := range allWorkBeads {
-		if wb.Status == "closed" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee != "" {
-			assigneeHasWork[assignee] = true
-		}
-	}
+	assigneeHasWork := buildAssignedWorkIndex(allWorkBeads)
 
 	var closed []string
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		// Check if any non-closed work bead is assigned to this session
-		// via any identifier: bead ID, session name, or named identity (alias).
-		if sessionHasAssignedWork(sb, assigneeHasWork) {
-			continue
-		}
-		if err := store.SetMetadata(sb.ID, "state", "gc_swept"); err != nil {
-			continue
-		}
-		if err := store.Close(sb.ID); err != nil {
+		if !closeSessionBeadIfUnassigned(store, sb, assigneeHasWork, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, sb.ID)
@@ -101,7 +84,10 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !isMultiSessionCfgAgent(agentCfg) {
+		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		if assigneePreservesNamedSessionRoute(cfg, template, assignee) {
 			continue
 		}
 		if _, ok := seen[wb.ID]; ok {
@@ -118,6 +104,17 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, wb.ID)
 	}
 	return released
+}
+
+func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee string) bool {
+	if cfg == nil {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, cfg.EffectiveCityName(), assignee)
+	if !ok {
+		return false
+	}
+	return namedSessionBackingTemplate(spec) == template
 }
 
 // sessionHasAssignedWork checks whether any work bead is assigned to this

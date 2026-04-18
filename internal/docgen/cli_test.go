@@ -2,6 +2,8 @@ package docgen
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -238,5 +240,22 @@ func TestRenderCLIMarkdown_ZeroDefaultOmitted(t *testing.T) {
 	// Non-zero default should appear.
 	if !strings.Contains(md, "`json`") {
 		t.Error("non-zero default 'json' should appear")
+	}
+}
+
+func TestWriteCLIMarkdown_TrimsExtraBlankEOF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cli.md")
+	if err := WriteCLIMarkdown(path, testTree()); err != nil {
+		t.Fatalf("WriteCLIMarkdown: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.HasSuffix(string(data), "\n") {
+		t.Fatalf("generated markdown missing final newline")
+	}
+	if strings.HasSuffix(string(data), "\n\n") {
+		t.Fatalf("generated markdown has extra blank line at EOF")
 	}
 }

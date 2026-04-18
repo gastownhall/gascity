@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestIsCompiledGraphWorkflow(t *testing.T) {
@@ -158,6 +159,70 @@ func TestResolveGraphStepBinding_CycleDetection(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cycle") {
 		t.Errorf("error = %q, want cycle mention", err.Error())
+	}
+}
+
+func TestResolveGraphStepBinding_AssigneeTemplateTargetRejected(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Assignee: "worker",
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err == nil {
+		t.Fatal("ResolveGraphStepBinding unexpectedly succeeded for template assignee")
+	}
+	if !strings.Contains(err.Error(), "use gc.run_target for config routing") {
+		t.Fatalf("ResolveGraphStepBinding error = %q, want gc.run_target guidance", err)
+	}
+}
+
+func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-frontend-worker",
+			"alias":        "frontend/worker-live",
+			"template":     "frontend/worker",
+			"state":        "active",
+		},
+	}}, nil)
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Assignee: "worker",
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", store, cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
+	}
+	if binding.DirectSessionID != "worker" {
+		t.Fatalf("DirectSessionID = %q, want worker", binding.DirectSessionID)
 	}
 }
 

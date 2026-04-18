@@ -36,6 +36,34 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type failNthMetadataBatchStore struct {
+	*beads.MemStore
+	failOn int
+	calls  int
+}
+
+func (s *failNthMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.calls++
+	if s.calls == s.failOn {
+		return errors.New("batch failed")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+type injectPendingCreateAfterClearStore struct {
+	*beads.MemStore
+}
+
+func (s *injectPendingCreateAfterClearStore) SetMetadata(id, key, value string) error {
+	if err := s.MemStore.SetMetadata(id, key, value); err != nil {
+		return err
+	}
+	if key == "pending_create_claim" && value == "" {
+		return s.MemStore.SetMetadata(id, key, "true")
+	}
+	return nil
+}
+
 type gatedStartProvider struct {
 	*runtime.Fake
 	mu            sync.Mutex
@@ -443,7 +471,7 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 }
 
-func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
+func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -469,7 +497,7 @@ func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := "in_progress"
-	assignee := "frontend/worker"
+	assignee := session.ID
 	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
 		t.Fatal(err)
 	}
@@ -869,6 +897,112 @@ func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T)
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	tp := TemplateParams{
+		Command:      "echo ready",
+		SessionName:  "sky",
+		TemplateName: "helper",
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"template":              "helper",
+			"state":                 "asleep",
+			"generation":            "1",
+			"instance_token":        "old-token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("sky", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	if err := sp.SetMeta("sky", "GC_DRAIN", "manual"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		[]startCandidate{{session: &bead, tp: tp, order: 0}},
+		&config.City{Agents: []config.Agent{{Name: "helper"}}},
+		map[string]TemplateParams{"sky": tp},
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after metadata batch retry", woken)
+	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("provider start should have succeeded before metadata retry")
+	}
+	if ack, _ := sp.GetMeta("sky", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared after provider start", ack)
+	}
+	if drain, _ := sp.GetMeta("sky", "GC_DRAIN"); drain != "manual" {
+		t.Fatalf("GC_DRAIN = %q, want explicit drain preserved", drain)
+	}
+}
+
+func TestCommitStartResult_DoesNotClearFreshPendingCreateClaimInHashBatch(t *testing.T) {
+	store := &injectPendingCreateAfterClearStore{MemStore: beads.NewMemStore()}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &bead,
+				tp: TemplateParams{
+					SessionName:  "sky",
+					TemplateName: "helper",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC),
+	}
+
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, events.Discard, 0, ioDiscard{}, ioDiscard{})
+	if !ok {
+		t.Fatal("commitStartResult returned false for successful start")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want fresh claim preserved by hash batch", got.Metadata["pending_create_claim"])
 	}
 }
 
@@ -1966,10 +2100,12 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 
 	expected := templateParamsToConfig(tp)
-	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithAlias(
+	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithSessionContext(
 		bead.ID,
 		tp.SessionName,
 		tp.Alias,
+		bead.Metadata["template"],
+		bead.Metadata["session_origin"],
 		generation,
 		continuationEpoch,
 		bead.Metadata["instance_token"],

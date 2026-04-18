@@ -267,6 +267,12 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	if !strings.Contains(configText, "issue_prefix: test") {
 		t.Fatalf("deferred config missing issue_prefix:\n%s", configText)
 	}
+	if !strings.Contains(configText, "gc.endpoint_origin: managed_city") {
+		t.Fatalf("deferred config missing managed origin:\n%s", configText)
+	}
+	if !strings.Contains(configText, "gc.endpoint_status: verified") {
+		t.Fatalf("deferred config missing endpoint status:\n%s", configText)
+	}
 	if !strings.Contains(configText, "dolt.auto-start: false") {
 		t.Fatalf("deferred config missing dolt.auto-start guard:\n%s", configText)
 	}
@@ -276,9 +282,14 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 		t.Fatalf("read deferred metadata: %v", err)
 	}
 	metaText := string(metaData)
-	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "test"`} {
+	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "hq"`} {
 		if !strings.Contains(metaText, needle) {
 			t.Fatalf("deferred metadata missing %s:\n%s", needle, metaText)
+		}
+	}
+	for _, forbidden := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+		if strings.Contains(metaText, forbidden) {
+			t.Fatalf("deferred metadata should scrub deprecated key %s:\n%s", forbidden, metaText)
 		}
 	}
 }
@@ -322,7 +333,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 func TestSeedDeferredManagedBeadsUsesExplicitDoltDatabase(t *testing.T) {
 	dir := t.TempDir()
 
-	seedDeferredManagedBeads(dir, "gc", "gascity")
+	seedDeferredManagedBeads(dir, dir, "gc", "gascity")
 
 	configData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
 	if err != nil {
@@ -330,6 +341,9 @@ func TestSeedDeferredManagedBeadsUsesExplicitDoltDatabase(t *testing.T) {
 	}
 	if got := string(configData); !strings.Contains(got, "issue_prefix: gc") {
 		t.Fatalf("config should keep the bead prefix, got:\n%s", got)
+	}
+	if got := string(configData); !strings.Contains(got, "gc.endpoint_origin: managed_city") {
+		t.Fatalf("config should set managed origin, got:\n%s", got)
 	}
 
 	metaData, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
@@ -340,6 +354,338 @@ func TestSeedDeferredManagedBeadsUsesExplicitDoltDatabase(t *testing.T) {
 	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "gascity"`} {
 		if !strings.Contains(metaText, needle) {
 			t.Fatalf("metadata missing %s:\n%s", needle, metaText)
+		}
+	}
+	for _, forbidden := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+		if strings.Contains(metaText, forbidden) {
+			t.Fatalf("metadata should scrub deprecated key %s:\n%s", forbidden, metaText)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsNormalizesMalformedExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue-prefix: stale\ndolt.auto-start: true\ndolt_server_port: 3307\n: not yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(dir, dir, "gc", "hq")
+
+	configData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"issue_prefix: gc",
+		"issue-prefix: gc",
+		"dolt.auto-start: false",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		": not yaml",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q after malformed deferred normalization:\n%s", needle, cfg)
+		}
+	}
+	if strings.Contains(cfg, "dolt_server_port") {
+		t.Fatalf("config should scrub deprecated port key after malformed deferred normalization:\n%s", cfg)
+	}
+}
+
+func TestSeedDeferredManagedBeadsTreatsSymlinkedCityRootAsManaged(t *testing.T) {
+	root := t.TempDir()
+	cityDir := filepath.Join(root, "city")
+	cityLink := filepath.Join(root, "city-link")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cityDir, cityLink); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	seedDeferredManagedBeads(cityLink, cityDir, "gc", "hq")
+
+	configData, err := os.ReadFile(filepath.Join(cityDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if got := string(configData); !strings.Contains(got, "gc.endpoint_origin: managed_city") {
+		t.Fatalf("config should keep managed origin for symlinked city root, got:\n%s", got)
+	}
+}
+
+func TestSeedDeferredManagedBeadsIgnoresEnvOnlyExternalOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "3307")
+
+	seedDeferredManagedBeads(dir, dir, "gc", "hq")
+
+	configData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+	for _, forbidden := range []string{"env-db.example.com", "dolt.host:", "dolt.port:"} {
+		if strings.Contains(cfg, forbidden) {
+			t.Fatalf("config should not persist env-only endpoint %q:\n%s", forbidden, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsPreservesLegacyExternalCityUser(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
+dolt.host: legacy-db.example.com
+dolt.port: 3307
+dolt.user: city-user
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(cityDir, cityDir, "gc", "hq")
+
+	configData, err := os.ReadFile(filepath.Join(cityDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: unverified",
+		"dolt.host: legacy-db.example.com",
+		"dolt.port: 3307",
+		"dolt.user: city-user",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsInheritsVerifiedExternalCityStatusForRig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: db.example.com
+dolt.port: 3307
+dolt.user: city-user
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(cityDir, rigDir, "fe", "fe")
+
+	configData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read rig config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: inherited_city",
+		"gc.endpoint_status: verified",
+		"dolt.host: db.example.com",
+		"dolt.port: 3307",
+		"dolt.user: city-user",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsUsesRegisteredExternalCityTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "db.example.com", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
+	seedDeferredManagedBeads(cityDir, cityDir, "gc", "hq")
+
+	configData, err := os.ReadFile(filepath.Join(cityDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: unverified",
+		"dolt.host: db.example.com",
+		"dolt.port: 3307",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsUsesCompatCityExternalBeforeStartup(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := `[workspace]
+name = "test-city"
+prefix = "gc"
+
+[dolt]
+host = "compat-db.example.com"
+port = 3307
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(cityDir, cityDir, "gc", "hq")
+
+	configData, err := os.ReadFile(filepath.Join(cityDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: unverified",
+		"dolt.host: compat-db.example.com",
+		"dolt.port: 3307",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsUsesCompatInheritedRigEndpointBeforeStartup(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+prefix = "gc"
+
+[dolt]
+host = "compat-db.example.com"
+port = 3307
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(cityDir, rigDir, "fe", "fe")
+
+	configData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read rig config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: inherited_city",
+		"gc.endpoint_status: unverified",
+		"dolt.host: compat-db.example.com",
+		"dolt.port: 3307",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsUsesCompatExplicitRigEndpointBeforeStartup(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+prefix = "gc"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "rig-db.example.com"
+dolt_port = "4407"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(cityDir, rigDir, "fe", "fe")
+
+	configData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read rig config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: unverified",
+		"dolt.host: rig-db.example.com",
+		"dolt.port: 4407",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
+		}
+	}
+}
+
+func TestSeedDeferredManagedBeadsPreservesExplicitRigConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4406
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seedDeferredManagedBeads(cityDir, rigDir, "fe", "fe")
+
+	configData, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, needle := range []string{
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: verified",
+		"dolt.host: rig-db.example.com",
+		"dolt.port: 4406",
+	} {
+		if !strings.Contains(cfg, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, cfg)
 		}
 	}
 }
@@ -353,7 +699,7 @@ func TestSeedDeferredManagedBeadsPreservesExistingDoltDatabaseWhenCanonicalUnkno
 		t.Fatal(err)
 	}
 
-	seedDeferredManagedBeads(dir, "gc", "")
+	seedDeferredManagedBeads(dir, dir, "gc", "")
 
 	metaData, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
 	if err != nil {
@@ -376,7 +722,7 @@ func TestSeedDeferredManagedBeadsPreservesExistingDoltDatabaseWhenCanonicalUnkno
 func TestSeedDeferredManagedBeadsCreatesDirWith0700(t *testing.T) {
 	dir := t.TempDir()
 
-	seedDeferredManagedBeads(dir, "gc", "test")
+	seedDeferredManagedBeads(dir, dir, "gc", "test")
 
 	info, err := os.Stat(filepath.Join(dir, ".beads"))
 	if err != nil {
@@ -402,7 +748,7 @@ func TestSeedDeferredManagedBeadsTightensExistingDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seedDeferredManagedBeads(dir, "gc", "test")
+	seedDeferredManagedBeads(dir, dir, "gc", "test")
 
 	info, err := os.Stat(beadsDir)
 	if err != nil {

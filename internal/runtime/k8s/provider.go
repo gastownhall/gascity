@@ -27,18 +27,20 @@ var _ runtime.Provider = (*Provider)(nil)
 // Eliminates subprocess overhead by making direct API calls over reused
 // HTTP/2 connections. Pod manifests are compatible with gc-session-k8s.
 type Provider struct {
-	ops             k8sOps
-	namespace       string
-	image           string
-	k8sContext      string
-	cpuRequest      string
-	memRequest      string
-	cpuLimit        string
-	memLimit        string
-	serviceAccount  string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked        bool          // skip staging + init container for prebaked images
-	postStartSettle time.Duration // settle time before post-start liveness check
-	stderr          io.Writer     // warning output (default os.Stderr)
+	ops                k8sOps
+	namespace          string
+	image              string
+	k8sContext         string
+	managedServiceHost string
+	managedServicePort string
+	cpuRequest         string
+	memRequest         string
+	cpuLimit           string
+	memLimit           string
+	serviceAccount     string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked           bool          // skip staging + init container for prebaked images
+	postStartSettle    time.Duration // settle time before post-start liveness check
+	stderr             io.Writer     // warning output (default os.Stderr)
 }
 
 // NewProvider creates a K8s session provider.
@@ -49,6 +51,11 @@ type Provider struct {
 //   - GC_K8S_SERVICE_ACCOUNT — pod service account name (default: namespace default)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
 //   - GC_K8S_CPU_LIMIT, GC_K8S_MEM_LIMIT — resource limits
+//
+// The in-cluster Dolt service alias defaults to the provider defaults
+// (dolt.gc.svc.cluster.local:3307). Pods receive projected GC_DOLT_* env;
+// GC_K8S_DOLT_* remains a deprecated compatibility input for the provider-
+// managed in-cluster alias only.
 //
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
@@ -67,37 +74,46 @@ func NewProvider() (*Provider, error) {
 		return nil, fmt.Errorf("creating K8s clientset: %w", err)
 	}
 
+	managedServiceHost, managedServicePort, err := managedServiceAlias()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Provider{
 		ops: &realK8sOps{
 			clientset:  clientset,
 			restConfig: restConfig,
 			namespace:  namespace,
 		},
-		namespace:       namespace,
-		image:           image,
-		k8sContext:      k8sContext,
-		cpuRequest:      envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
-		memRequest:      envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
-		cpuLimit:        envOrDefault("GC_K8S_CPU_LIMIT", "2"),
-		memLimit:        envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
-		serviceAccount:  os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
-		prebaked:        os.Getenv("GC_K8S_PREBAKED") == "true",
-		postStartSettle: 3 * time.Second,
-		stderr:          os.Stderr,
+		namespace:          namespace,
+		image:              image,
+		k8sContext:         k8sContext,
+		managedServiceHost: managedServiceHost,
+		managedServicePort: managedServicePort,
+		cpuRequest:         envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
+		memRequest:         envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
+		cpuLimit:           envOrDefault("GC_K8S_CPU_LIMIT", "2"),
+		memLimit:           envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
+		serviceAccount:     os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
+		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
+		postStartSettle:    3 * time.Second,
+		stderr:             os.Stderr,
 	}, nil
 }
 
 // newProviderWithOps creates a provider with a custom k8sOps (for testing).
 func newProviderWithOps(ops k8sOps) *Provider {
 	return &Provider{
-		ops:        ops,
-		namespace:  "test-ns",
-		image:      "test-image:latest",
-		cpuRequest: "500m",
-		memRequest: "1Gi",
-		cpuLimit:   "2",
-		memLimit:   "4Gi",
-		stderr:     io.Discard,
+		ops:                ops,
+		namespace:          "test-ns",
+		image:              "test-image:latest",
+		managedServiceHost: podManagedDoltHost,
+		managedServicePort: podManagedDoltPort,
+		cpuRequest:         "500m",
+		memRequest:         "1Gi",
+		cpuLimit:           "2",
+		memLimit:           "4Gi",
+		stderr:             io.Discard,
 	}
 }
 
@@ -185,15 +201,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	// Initialize .beads/ in the pod (runs in both prebaked and non-prebaked paths).
-	// Resolve pod-side working directory.
-	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
-	}
-	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir); err != nil {
+	// Ensure .beads/ inside the pod. This remains warning-only so older staged
+	// or prebaked workspaces can self-heal instead of failing session startup.
+	podWorkDir := projectedPodWorkDir(cfg)
+	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
 		fmt.Fprintf(p.stderr, "gc: warning: initBeadsInPod for %s: %v\n", podName, err) //nolint:errcheck
 	}
 
@@ -675,8 +686,8 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 		return err
 	}
 	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
-	// start a local Dolt server. In K8s, the in-cluster Dolt service is
-	// configured by initBeadsInPod which runs after this function.
+	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
+	// connection target through env; they do not rewrite canonical .beads files.
 	_, err := ops.execInPod(ctx, podName, "agent",
 		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
 	if err != nil {
@@ -688,53 +699,28 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	return nil
 }
 
-// initBeadsInPod runs bd init --server inside the pod when Dolt env vars are
-// present. This eliminates the need for every agent script to include bd init
-// boilerplate. Runs in both prebaked and non-prebaked paths.
-func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, workDir string) error {
-	// Determine Dolt host: prefer GC_K8S_DOLT_HOST, fall back to GC_DOLT_HOST,
-	// then default K8s service address.
-	doltHost := cfg.Env["GC_K8S_DOLT_HOST"]
-	if doltHost == "" {
-		doltHost = cfg.Env["GC_DOLT_HOST"]
+// initBeadsInPod ensures the pod workspace has usable .beads state. It keeps
+// the older warning-only self-heal behavior for prebaked or older staged
+// workspaces by patching existing metadata and bootstrapping missing state.
+func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, workDir, managedServiceHost, managedServicePort string) error {
+	projected, err := projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)
+	if err != nil {
+		return err
 	}
-	if doltHost == "" {
-		doltHost = "dolt.gc.svc.cluster.local"
+	if len(projected) == 0 {
+		return nil
 	}
-	doltPort := cfg.Env["GC_K8S_DOLT_PORT"]
-	if doltPort == "" {
-		doltPort = cfg.Env["GC_DOLT_PORT"]
-	}
-	if doltPort == "" {
-		doltPort = os.Getenv("GC_DOLT_PORT")
-	}
-	if doltPort == "" {
-		doltPort = "3307"
+	doltHost := projected["GC_DOLT_HOST"]
+	doltPort := projected["GC_DOLT_PORT"]
+	storeRoot := projectedPodStoreRoot(cfg, workDir)
+	prefix := strings.TrimSpace(cfg.Env["GC_BEADS_PREFIX"])
+	if prefix == "" {
+		return fmt.Errorf("missing projected GC_BEADS_PREFIX")
 	}
 
-	// Derive rig prefix from rig directory name: split on hyphens, first letter
-	// of each part (e.g., "demo-repo" → "dr"). Same algorithm as gc-controller-k8s
-	// and mock scripts.
-	rigName := workDir
-	if i := strings.LastIndex(rigName, "/"); i >= 0 {
-		rigName = rigName[i+1:]
-	}
-	var prefix strings.Builder
-	for _, part := range strings.Split(rigName, "-") {
-		if len(part) > 0 {
-			prefix.WriteByte(part[0])
-		}
-	}
-
-	// Patch the host-side Dolt address in the beads metadata to point at the
-	// in-cluster service. This preserves the correct database name from the
-	// host config while fixing the server address for the pod.
-	//
-	// Build the patch JSON in Go and base64-encode it to avoid shell injection
-	// from environment variables containing shell metacharacters.
 	portNum, err := strconv.Atoi(doltPort)
 	if err != nil {
-		return fmt.Errorf("invalid GC_K8S_DOLT_PORT %q: %w", doltPort, err)
+		return fmt.Errorf("invalid projected GC_DOLT_PORT %q: %w", doltPort, err)
 	}
 	patchJSON, err := json.Marshal(map[string]any{
 		"dolt_server_host": doltHost,
@@ -744,41 +730,54 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 		return fmt.Errorf("marshaling beads patch: %w", err)
 	}
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
-	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix.String()))
-	workDirB64 := base64.StdEncoding.EncodeToString([]byte(workDir))
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
+	storeRootB64 := base64.StdEncoding.EncodeToString([]byte(storeRoot))
 
-	// The shell command decodes the base64 values, so no user-controlled
-	// content is ever interpreted as shell syntax.
-	//
-	// project_id is dropped from the staged metadata because the controller's
-	// project_id is wrong for the agent pod — the staged copy carries the
-	// controller's identity but the pod talks to the in-cluster Dolt server,
-	// where bd will rediscover the correct project_id. Leaving it in place
-	// causes bd to fail with PROJECT IDENTITY MISMATCH on first use.
 	patchCmd := fmt.Sprintf(
 		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
 			`if [ -f .beads/metadata.json ]; then `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.argv[1]); m.update(p); `+
-			`m.pop('project_id', None); `+
+			`p=json.loads(sys.argv[1]); m.update(p); m.pop('project_id', None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.stdin.read()); m.update(p); `+
-			`m.pop('project_id', None); `+
+			`p=json.loads(sys.stdin.read()); m.update(p); m.pop('project_id', None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
 			`else PREFIX=$(echo '%s' | base64 -d) && `+
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
 			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
 			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		workDirB64, patchB64, prefixB64,
+		storeRootB64, patchB64, prefixB64,
 		base64.StdEncoding.EncodeToString([]byte(doltHost)),
 		base64.StdEncoding.EncodeToString([]byte(doltPort)),
 	)
-	_, err = ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", patchCmd}, nil)
+	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", patchCmd}, nil)
 	return err
+}
+
+// verifyBeadsInPod confirms that canonical tracked .beads files are already
+// present in the mounted workspace for bd-backed sessions. It intentionally
+// does not create or rewrite .beads state inside the pod.
+//
+//nolint:unparam // tests exercise this helper through the canonical managed service constants.
+func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, storeRoot, managedServiceHost, managedServicePort string) error {
+	projected, err := projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)
+	if err != nil {
+		return err
+	}
+	if len(projected) == 0 {
+		return nil
+	}
+	_, err = ops.execInPod(ctx, podName, "agent", []string{
+		"sh", "-c",
+		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml`,
+		"sh", storeRoot,
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("canonical .beads files missing or unreadable at %s: %w", storeRoot, err)
+	}
+	return nil
 }
 
 func buildRESTConfig(k8sContext string) (*rest.Config, error) {
@@ -794,6 +793,19 @@ func buildRESTConfig(k8sContext string) (*rest.Config, error) {
 		overrides.CurrentContext = k8sContext
 	}
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+}
+
+func managedServiceAlias() (string, string, error) {
+	host := strings.TrimSpace(os.Getenv("GC_K8S_DOLT_HOST"))
+	port := strings.TrimSpace(os.Getenv("GC_K8S_DOLT_PORT"))
+	switch {
+	case host == "" && port == "":
+		return podManagedDoltHost, podManagedDoltPort, nil
+	case host == "" || port == "":
+		return "", "", fmt.Errorf("requires both GC_K8S_DOLT_HOST and GC_K8S_DOLT_PORT when either is set")
+	default:
+		return host, port, nil
+	}
 }
 
 func envOrDefault(key, def string) string {

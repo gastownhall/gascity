@@ -20,7 +20,7 @@ bd list --assignee="$GC_SESSION_NAME" --status=in_progress --json
 # Step 2: If nothing in-progress, check for assigned ready work
 bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
 
-# Step 3: If still nothing, check pool queue (pool agents only)
+# Step 3: If still nothing, check the routed queue (multi-session configs only)
 gc hook
 ```
 
@@ -86,8 +86,8 @@ fi
 ```
 
 This ensures the reconciler does not spawn a fresh session for work that
-prefers your live context. Pre-assigned beads are invisible to other pool
-instances (`--unassigned` filtering).
+prefers your live context. Pre-assigned beads are invisible to other sessions
+for the same config (`--unassigned` filtering).
 
 ## Polling Before Drain
 

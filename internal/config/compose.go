@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -257,6 +258,22 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		return nil, nil, implicitErr
 	}
 	if len(implicitImports) > 0 {
+		// v0.15.1 collision gate: if a user's [imports.<name>] would
+		// silently shadow a **bootstrap** implicit-import pack, hard-stop
+		// with a diagnostic. Non-bootstrap implicit imports retain the
+		// pre-v0.15.1 "explicit wins over implicit" contract and are
+		// shadowed silently (see docs/packv2/doc-packman.md). See
+		// engdocs/proposals/skill-materialization.md — "Name-collision
+		// with a user-declared [imports.core]".
+		bootstrapNames := bootstrapImportNames(implicitImports)
+		if collisions := collidesWithImplicitImports(root.Imports, bootstrapNames); len(collisions) > 0 {
+			names := strings.Join(collisions, ", ")
+			return nil, nil, fmt.Errorf(
+				"gc: city pack declares [imports.%s] which shadows the bootstrap implicit import(s) with the same name; rename one side",
+				names,
+			)
+		}
+
 		if root.Imports == nil {
 			root.Imports = make(map[string]Import)
 		}
@@ -375,7 +392,138 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		root.Daemon.FormulaV2 = true
 	}
 
+	// v0.15.1: emit a one-time deprecation warning if the loaded config
+	// still populates the v0.15.0 attachment-list tombstone fields. The
+	// fields still parse (TOML won't error) but are ignored by the new
+	// materializer.
+	WarnDeprecatedAttachmentFields(root)
+
+	// v0.15.1: enrich every agent with its convention-discovered
+	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
+	// DiscoverPackAgents only does this for agents it creates — it skips
+	// names already present in pack.toml [[agent]] or city.toml
+	// [[agent]] entries, so those agents leave the discovery pass with
+	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
+	// disk. The materializer and collision validator both key off
+	// SkillsDir, so that gap silently loses agent-local skills for every
+	// explicitly-declared agent. Populate the fields here so the
+	// convention works uniformly.
+	populateAgentLocalAssetDirs(fs, root, cityRoot)
+
 	return root, prov, nil
+}
+
+// populateAgentLocalAssetDirs fills Agent.SkillsDir and Agent.MCPDir for
+// every agent whose convention path exists on disk but wasn't already
+// set by DiscoverPackAgents (e.g., because the agent was explicitly
+// declared in pack.toml or city.toml and therefore skipped by the
+// convention-discovery pass). Agents whose field is already set keep
+// it — so a pack that already carried SkillsDir via discovery isn't
+// overwritten.
+func populateAgentLocalAssetDirs(fs fsys.FS, root *City, cityRoot string) {
+	if root == nil {
+		return
+	}
+	for i := range root.Agents {
+		a := &root.Agents[i]
+		base := a.SourceDir
+		if base == "" {
+			base = cityRoot
+		}
+		if a.SkillsDir == "" {
+			skillsDir := filepath.Join(base, "agents", a.Name, "skills")
+			if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
+				a.SkillsDir = skillsDir
+			}
+		}
+		if a.MCPDir == "" {
+			mcpDir := filepath.Join(base, "agents", a.Name, "mcp")
+			if info, err := fs.Stat(mcpDir); err == nil && info.IsDir() {
+				a.MCPDir = mcpDir
+			}
+		}
+	}
+}
+
+// collidesWithImplicitImports reports which bootstrap implicit-import
+// names are shadowed by an explicit [imports.<name>] entry on the loaded
+// city. Returns colliding names in sorted order; an empty slice means
+// no collision.
+//
+// This mirrors internal/bootstrap.CollidesWithBootstrapPack but stays in
+// the config package to avoid an import cycle (bootstrap already imports
+// config). The two callers agree on the predicate: any user-declared
+// binding name equal to an implicit-import binding name is a collision.
+//
+// Only bootstrap-managed implicit import names should be passed in
+// here — user-added implicit imports retain the pre-v0.15.1 "explicit
+// wins over implicit" contract and are not subject to the hard stop.
+// Callers must pre-filter the name set via bootstrapImportNames.
+func collidesWithImplicitImports(userImports map[string]Import, implicitNames []string) []string {
+	if len(userImports) == 0 || len(implicitNames) == 0 {
+		return nil
+	}
+	var collisions []string
+	seen := make(map[string]struct{}, len(implicitNames))
+	for _, name := range implicitNames {
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		if _, exists := userImports[name]; exists {
+			collisions = append(collisions, name)
+		}
+	}
+	sort.Strings(collisions)
+	return collisions
+}
+
+// bootstrapManagedImportNames lists the implicit-import binding names
+// that are managed by the gc binary's bootstrap pack mechanism (see
+// internal/bootstrap/bootstrap.go:BootstrapPacks). This list must stay
+// in sync with that slice — a Go unit test
+// (TestBootstrapManagedNames_MatchesBootstrapPacks in
+// internal/bootstrap) asserts the two agree by calling
+// BootstrapManagedImportNames() and comparing to BootstrapPackNames().
+//
+// Only these names participate in the v0.15.1 hard-stop collision gate.
+// User-added implicit imports (e.g. custom entries that a user wrote
+// into ~/.gc/implicit-import.toml by hand) retain the pre-v0.15.1
+// "explicit wins over implicit" contract and are shadowed silently.
+var bootstrapManagedImportNames = []string{"import", "registry", "core"}
+
+// BootstrapManagedImportNames returns a copy of the bootstrap-managed
+// implicit-import binding names recognized by the composer's collision
+// gate. Exported so the bootstrap package's sync test can assert the
+// two lists agree.
+func BootstrapManagedImportNames() []string {
+	out := make([]string, len(bootstrapManagedImportNames))
+	copy(out, bootstrapManagedImportNames)
+	return out
+}
+
+// bootstrapImportNames filters the caller-supplied implicit-import map
+// down to the subset of names that are bootstrap-managed. Used by the
+// compose-time collision gate so we only hard-stop on names the gc
+// binary owns.
+func bootstrapImportNames(implicit map[string]ImplicitImport) []string {
+	if len(implicit) == 0 {
+		return nil
+	}
+	managed := make(map[string]struct{}, len(bootstrapManagedImportNames))
+	for _, name := range bootstrapManagedImportNames {
+		managed[name] = struct{}{}
+	}
+	var names []string
+	for name := range implicit {
+		if _, ok := managed[name]; ok {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // validateCityRequirements checks that all city-scoped pack requirements

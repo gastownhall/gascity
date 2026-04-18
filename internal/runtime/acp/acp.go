@@ -643,15 +643,24 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 }
 
 func (p *Provider) metaPath(name, key string) string {
-	return filepath.Join(p.dir, name+".meta."+key)
+	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
 }
 
 // cleanupMeta removes all sidecar meta files for the named session.
 func (p *Provider) cleanupMeta(name string) {
-	matches, _ := filepath.Glob(filepath.Join(p.dir, name+".meta.*"))
+	matches, _ := filepath.Glob(filepath.Join(p.dir, metaFilePrefix(name)+".meta.*"))
 	for _, m := range matches {
 		os.Remove(m) //nolint:errcheck
 	}
+}
+
+func metaFilePrefix(name string) string {
+	return "m" + metaFileKey(name)
+}
+
+func metaFileKey(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 // --- Unix socket helpers (same as subprocess) ---

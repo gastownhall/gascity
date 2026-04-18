@@ -89,12 +89,12 @@ Agent defines a configured agent in the city.
 | `on_death` | string |  |  | OnDeath is a shell command run when a session dies unexpectedly. |
 | `namepool` | string |  |  | Namepool is the path to a plain text file with one name per line. When set, sessions use names from the file as display aliases. |
 | `work_query` | string |  |  | WorkQuery is the shell command to find available work for this agent. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. If unset, Gas City uses a three-tier default query:   1. in_progress work assigned to this session/alias (crash recovery)   2. ready work assigned to this session/alias (pre-assigned work)   3. ready unassigned work with gc.routed_to=&lt;qualified-name&gt; When the controller probes for demand without session context, only the routed_to tier applies. Override to integrate with external task systems. |
-| `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this agent/pool. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for all agents: "bd update &#123;&#125; --set-metadata gc.routed_to=&lt;qualified-name&gt;". Routing is metadata-based; sling stamps the target template and the reconciler/scale_check paths decide when sessions are created. Pool agents must set both sling_query and work_query, or neither. |
+| `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this session config. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for all agents: "bd update &#123;&#125; --set-metadata gc.routed_to=&lt;qualified-name&gt;". Routing is metadata-based; sling stamps the target template and the reconciler/scale_check paths decide when sessions are created. Custom sling_query and work_query can be overridden independently. |
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides workspace-level install_agent_hooks for this agent. When set, replaces (not adds to) the workspace default. |
-| `skills` | []string |  |  | Skills lists shared skills attached to this agent by name. |
-| `mcp` | []string |  |  | MCP lists shared MCP definitions attached to this agent by name. |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. Set to true when hooks are manually installed (e.g., merged into the project's own hook config) and auto-installation via install_agent_hooks is not desired. When true, the agent is treated as hook-enabled for startup behavior: no prime instruction in beacon and no delayed nudge. Interacts with install_agent_hooks — set this instead when hooks are pre-installed. |
 | `session_setup` | []string |  |  | SessionSetup is a list of shell commands run after session creation. Each command is a template string supporting placeholders: &#123;&#123;.Session&#125;&#125;, &#123;&#123;.Agent&#125;&#125;, &#123;&#123;.AgentBase&#125;&#125;, &#123;&#123;.Rig&#125;&#125;, &#123;&#123;.RigRoot&#125;&#125;, &#123;&#123;.CityRoot&#125;&#125;, &#123;&#123;.CityName&#125;&#125;, &#123;&#123;.WorkDir&#125;&#125;. Commands run in gc's process (not inside the agent session) via sh -c. |
 | `session_setup_script` | string |  |  | SessionSetupScript is the path to a script run after session_setup commands. Relative paths resolve against the city directory. The script receives context via environment variables (GC_SESSION plus existing GC_* vars). |
@@ -102,6 +102,7 @@ Agent defines a configured agent in the city.
 | `overlay_dir` | string |  |  | OverlayDir is a directory whose contents are recursively copied (additive) into the agent's working directory at startup. Existing files are not overwritten. Relative paths resolve against the declaring config file's directory (pack-safe). |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula is the formula name automatically applied via --on when beads are slung to this agent, unless --no-formula is set. Example: "mol-polecat-work" |
 | `inject_fragments` | []string |  |  | InjectFragments lists named template fragments to append to this agent's rendered prompt. Fragments come from shared template directories across all loaded packs. Each name must match a &#123;&#123; define "name" &#125;&#125; block. |
+| `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialisation vs which are the city-wide set.  Pointer tri-state:   nil  → inherit: inject when the agent has a vendor sink   *true  → explicitly inject (equivalent to the default)   *false → disable; the template is responsible for rendering            any skill guidance itself  See engdocs/proposals/skill-materialization.md. |
 | `attach` | boolean |  |  | Attach controls whether the agent's session supports interactive attachment (e.g., tmux attach). When false, the agent can use a lighter runtime (subprocess instead of tmux). Defaults to true. |
 | `fallback` | boolean |  |  | Fallback marks this agent as a fallback definition. During pack composition, a non-fallback agent with the same name wins silently. When two fallbacks collide, the first loaded (depth-first) wins. |
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
@@ -116,12 +117,12 @@ AgentDefaults provides city-level agent defaults declared via [agent_defaults] i
 |-------|------|----------|---------|-------------|
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
 | `wake_mode` | string |  |  | WakeMode is the parsed/composed default wake mode ("resume" or "fresh"), but it is not yet auto-applied at runtime. Enum: `resume`, `fresh` |
-| `default_sling_formula` | string |  |  | DefaultSlingFormula is the city-level default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit pool agents are seeded with "mol-do-work" elsewhere when no explicit default is set. |
+| `default_sling_formula` | string |  |  | DefaultSlingFormula is the city-level default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit multi-session configs are seeded with "mol-do-work" elsewhere when no explicit default is set. |
 | `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a city-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
 | `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a city-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
 | `append_fragments` | []string |  |  | AppendFragments lists named template fragments to auto-append to .template.md prompts after rendering. Legacy .md.tmpl prompts are still supported during the transition; plain .md remains inert. V2 migration convenience — replaces global_fragments/inject_fragments for city-wide defaults. |
-| `skills` | []string |  |  | Skills lists shared skills attached by name to agents through [agent_defaults].skills. |
-| `mcp` | []string |  |  | MCP lists shared MCP definitions attached by name to agents through [agent_defaults].mcp. |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
 
 ## AgentOverride
 
@@ -134,7 +135,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `work_dir` | string |  |  | WorkDir overrides the agent's working directory without changing its qualified identity or rig association. |
 | `scope` | string |  |  | Scope overrides the agent's scope ("city" or "rig"). |
 | `suspended` | boolean |  |  | Suspended sets the agent's suspended state. |
-| `pool` | PoolOverride |  |  | Pool overrides pool configuration fields. |
+| `pool` | PoolOverride |  |  | Pool overrides legacy [pool] fields that map to session scaling. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables. |
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove. |
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
@@ -146,9 +147,10 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
-| `skills` | []string |  |  | Skills overrides the agent's attached shared skills list. |
-| `mcp` | []string |  |  | MCP overrides the agent's attached shared MCP list. |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
+| `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills overrides Agent.InjectAssignedSkills (see that field for semantics). |
 | `session_setup` | []string |  |  | SessionSetup overrides the agent's session_setup commands. |
 | `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the city directory. |
 | `session_live` | []string |  |  | SessionLive overrides the agent's session_live commands. |
@@ -159,8 +161,8 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `session_setup_append` | []string |  |  | SessionSetupAppend appends commands to the agent's session_setup list. |
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
 | `install_agent_hooks_append` | []string |  |  | InstallAgentHooksAppend appends to the agent's install_agent_hooks list. |
-| `skills_append` | []string |  |  | SkillsAppend appends to the agent's attached shared skills list. |
-| `mcp_append` | []string |  |  | MCPAppend appends to the agent's attached shared MCP list. |
+| `skills_append` | []string |  |  | SkillsAppend is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `mcp_append` | []string |  |  | MCPAppend is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
@@ -182,7 +184,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `work_dir` | string |  |  | WorkDir overrides the agent's session working directory. |
 | `scope` | string |  |  | Scope overrides the agent's scope ("city" or "rig"). |
 | `suspended` | boolean |  |  | Suspended overrides the agent's suspended state. |
-| `pool` | PoolOverride |  |  | Pool overrides pool configuration fields. |
+| `pool` | PoolOverride |  |  | Pool overrides legacy [pool] fields that map to session scaling. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables. |
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove after merging. |
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
@@ -194,11 +196,12 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h"). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
-| `skills` | []string |  |  | Skills overrides the agent's attached shared skills list. |
-| `mcp` | []string |  |  | MCP overrides the agent's attached shared MCP list. |
-| `skills_append` | []string |  |  | SkillsAppend appends to the agent's attached shared skills list. |
-| `mcp_append` | []string |  |  | MCPAppend appends to the agent's attached shared MCP list. |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `skills_append` | []string |  |  | SkillsAppend is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `mcp_append` | []string |  |  | MCPAppend is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
+| `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills overrides per-agent appendix injection (see Agent.InjectAssignedSkills). |
 | `session_setup` | []string |  |  | SessionSetup overrides the agent's session_setup commands. |
 | `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the city directory. |
 | `session_live` | []string |  |  | SessionLive overrides the agent's session_live commands. |
@@ -328,6 +331,7 @@ NamedSession defines a canonical persistent session backed by an agent template.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `name` | string |  |  | Name is the configured public session identity. When omitted, Template remains the compatibility identity. |
 | `template` | string | **yes** |  | Template is the referenced agent template name. |
 | `scope` | string |  |  | Scope defines where this named session is instantiated in pack expansion: "city" (one per city) or "rig" (one per rig). Enum: `city`, `rig` |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
@@ -357,7 +361,7 @@ OrderOverride modifies a scanned order's scheduling fields.
 | `schedule` | string |  |  | Schedule overrides the cron expression. |
 | `check` | string |  |  | Check overrides the condition gate check command. |
 | `on` | string |  |  | On overrides the event gate event type. |
-| `pool` | string |  |  | Pool overrides the target agent/pool. |
+| `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
 
 ## OrdersConfig
@@ -392,13 +396,13 @@ Patches holds all patch blocks from composition.
 
 ## PoolOverride
 
-PoolOverride modifies pool configuration fields.
+PoolOverride modifies legacy [pool] fields that map to session scaling.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `min` | integer |  |  | Min overrides pool minimum instances. |
-| `max` | integer |  |  | Max overrides pool maximum instances. 0 means the pool is disabled. |
-| `check` | string |  |  | Check overrides the pool check command. |
+| `min` | integer |  |  | Min overrides the minimum number of sessions. |
+| `max` | integer |  |  | Max overrides the maximum number of sessions. 0 means no sessions can claim routed work. |
+| `check` | string |  |  | Check overrides the session scale check command. |
 | `drain_timeout` | string |  |  | DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h"). |
 | `on_death` | string |  |  | OnDeath overrides the on_death command. |
 | `on_boot` | string |  |  | OnBoot overrides the on_boot command. |

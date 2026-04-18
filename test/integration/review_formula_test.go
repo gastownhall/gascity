@@ -31,7 +31,7 @@ default = "false"
 [[template]]
 id = "{target}.review-claude"
 title = "Code review: Claude"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = "Claude review lane."
 
 [template.retry]
@@ -41,7 +41,7 @@ on_exhausted = "hard_fail"
 [[template]]
 id = "{target}.review-codex"
 title = "Code review: Codex"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = "Codex review lane."
 
 [template.retry]
@@ -51,7 +51,7 @@ on_exhausted = "hard_fail"
 [[template]]
 id = "{target}.review-gemini"
 title = "Code review: Gemini"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 condition = "!{{skip_gemini}}"
 description = """
 Optional Gemini lane. If unavailable or rate limited, close the attempt as a
@@ -67,7 +67,7 @@ on_exhausted = "soft_fail"
 id = "{target}.synthesize"
 title = "Synthesize review findings"
 needs = ["{target}.review-claude", "{target}.review-codex", "{target}.review-gemini"]
-assignee = "worker"
+metadata = { "gc.run_target" = "worker" }
 description = "Merge available reviewer outputs."
 
 [template.retry]
@@ -92,7 +92,7 @@ default = "false"
 [[template]]
 id = "{target}.persona-gen-claude"
 title = "Generate personas: Claude"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = "Claude persona generation lane."
 
 [template.retry]
@@ -102,7 +102,7 @@ on_exhausted = "hard_fail"
 [[template]]
 id = "{target}.persona-gen-codex"
 title = "Generate personas: Codex"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = "Codex persona generation lane."
 
 [template.retry]
@@ -112,7 +112,7 @@ on_exhausted = "hard_fail"
 [[template]]
 id = "{target}.persona-gen-gemini"
 title = "Generate personas: Gemini"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 condition = "!{{skip_gemini}}"
 description = "Optional Gemini persona generation lane."
 
@@ -124,7 +124,7 @@ on_exhausted = "soft_fail"
 id = "{target}.persona-synthesis"
 title = "Synthesize personas"
 needs = ["{target}.persona-gen-claude", "{target}.persona-gen-codex", "{target}.persona-gen-gemini"]
-assignee = "worker"
+metadata = { "gc.run_target" = "worker" }
 description = "Merge persona suggestions."
 
 [template.retry]
@@ -135,7 +135,7 @@ on_exhausted = "hard_fail"
 id = "{target}.persona-reviews-claude"
 title = "Persona reviews: Claude"
 needs = ["{target}.persona-synthesis"]
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = "Claude persona review batch."
 
 [template.retry]
@@ -146,7 +146,7 @@ on_exhausted = "hard_fail"
 id = "{target}.persona-reviews-codex"
 title = "Persona reviews: Codex"
 needs = ["{target}.persona-synthesis"]
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = "Codex persona review batch."
 
 [template.retry]
@@ -157,7 +157,7 @@ on_exhausted = "hard_fail"
 id = "{target}.persona-reviews-gemini"
 title = "Persona reviews: Gemini"
 needs = ["{target}.persona-synthesis"]
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 condition = "!{{skip_gemini}}"
 description = "Optional Gemini persona review batch."
 
@@ -169,7 +169,7 @@ on_exhausted = "soft_fail"
 id = "{target}.review-synthesis"
 title = "Synthesize design review"
 needs = ["{target}.persona-reviews-claude", "{target}.persona-reviews-codex", "{target}.persona-reviews-gemini"]
-assignee = "worker"
+metadata = { "gc.run_target" = "worker" }
 description = "Merge design review findings."
 
 [template.retry]
@@ -728,7 +728,7 @@ version = 2
 [[steps]]
 id = "review"
 title = "Single pooled retry step"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 description = """
 Exercise pooled retry behavior on a single durable step.
 """
@@ -792,6 +792,7 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityToml := fmt.Sprintf(
 		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
+			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
 			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\n",
 		cityName, startCommand, startCommand,
 	)
@@ -816,6 +817,16 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 		unregisterCityCommandEnv(cityDir)
 		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck
 		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			_ = os.RemoveAll(cityDir)
+			if _, err := os.Stat(cityDir); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		beadsEntries, _ := os.ReadDir(filepath.Join(cityDir, ".beads"))
+		t.Fatalf("review formula city cleanup did not quiesce; .beads entries=%v", beadsEntries)
 	})
 
 	return cityDir

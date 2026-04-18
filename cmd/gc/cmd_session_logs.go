@@ -158,7 +158,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	if spec, ok, _ := findNamedSessionSpecForTarget(cfg, cityName, nil, identifier); ok && spec.Agent != nil {
+	if spec, ok, _ := findNamedSessionSpecForTarget(cfg, cityName, identifier); ok && spec.Agent != nil {
 		workDir, err := resolveWorkDir(cityPath, cfg, spec.Agent)
 		if err != nil || strings.TrimSpace(workDir) == "" {
 			return "", false
@@ -167,7 +167,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	}
 	for i := range cfg.Agents {
 		agentCfg := cfg.Agents[i]
-		if isMultiSessionCfgAgent(&agentCfg) || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
+		if agentCfg.SupportsInstanceExpansion() || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
 			continue
 		}
 		workDir, err := resolveWorkDir(cityPath, cfg, &agentCfg)

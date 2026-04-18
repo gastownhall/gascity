@@ -24,6 +24,7 @@ type Fake struct {
 	PeekOutput           map[string]string            // session → canned peek output
 	Activity             map[string]time.Time         // session → last activity time
 	StartErrors          map[string]error             // per-session Start errors for testing
+	StopErrors           map[string]error             // per-session Stop errors for testing
 	PendingInteractions  map[string]*PendingInteraction
 	Responses            map[string][]InteractionResponse
 	SleepCapabilityValue SessionSleepCapability
@@ -59,6 +60,7 @@ func NewFake() *Fake {
 		Zombies:              make(map[string]bool),
 		Attached:             make(map[string]bool),
 		StartErrors:          make(map[string]error),
+		StopErrors:           make(map[string]error),
 		PendingInteractions:  make(map[string]*PendingInteraction),
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
@@ -77,6 +79,7 @@ func NewFailFake() *Fake {
 		Zombies:              make(map[string]bool),
 		Attached:             make(map[string]bool),
 		StartErrors:          make(map[string]error),
+		StopErrors:           make(map[string]error),
 		PendingInteractions:  make(map[string]*PendingInteraction),
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
@@ -113,6 +116,9 @@ func (f *Fake) Stop(name string) error {
 	f.Calls = append(f.Calls, Call{Method: "Stop", Name: name})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.StopErrors[name]; ok {
+		return err
 	}
 	delete(f.sessions, name)
 	return nil

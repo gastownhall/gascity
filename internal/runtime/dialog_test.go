@@ -225,6 +225,7 @@ func TestContainsPromptIndicator(t *testing.T) {
 		{name: "percent prompt", content: "zsh %", want: true},
 		{name: "angle prompt", content: "claude >", want: true},
 		{name: "powerline prompt", content: "dir \u276f", want: true},
+		{name: "claude nbsp prompt", content: "❯\u00a0", want: true},
 		{name: "empty content", content: "", want: false},
 		{name: "no prompt", content: "loading...", want: false},
 		{name: "blank lines only", content: "\n\n", want: false},
@@ -261,6 +262,29 @@ func TestExitsEarlyOnPrompt(t *testing.T) {
 	}
 	if len(sent) != 0 {
 		t.Fatalf("sent keys = %v, want none (prompt detected)", sent)
+	}
+}
+
+func TestExitsEarlyOnClaudeNBSPPrompt(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			return "❯\u00a0", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none (NBSP prompt detected)", sent)
 	}
 }
 

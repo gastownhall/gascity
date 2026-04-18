@@ -30,7 +30,7 @@ type AgentPatch struct {
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
-	// Pool overrides pool configuration fields.
+	// Pool overrides legacy [pool] fields that map to session scaling.
 	Pool *PoolOverride `toml:"pool,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
@@ -56,16 +56,33 @@ type AgentPatch struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
-	// Skills overrides the agent's attached shared skills list.
+	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	Skills []string `toml:"skills,omitempty"`
-	// MCP overrides the agent's attached shared MCP list.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	MCP []string `toml:"mcp,omitempty"`
-	// SkillsAppend appends to the agent's attached shared skills list.
+	// SkillsAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	SkillsAppend []string `toml:"skills_append,omitempty"`
-	// MCPAppend appends to the agent's attached shared MCP list.
+	// MCPAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
+	// InjectAssignedSkills overrides per-agent appendix injection
+	// (see Agent.InjectAssignedSkills).
+	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
@@ -124,13 +141,13 @@ type NamedSessionPatch struct {
 	Mode *string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
 }
 
-// PoolOverride modifies pool configuration fields. Nil fields are not changed.
+// PoolOverride modifies legacy [pool] fields that map to session scaling. Nil fields are not changed.
 type PoolOverride struct {
-	// Min overrides pool minimum instances.
+	// Min overrides the minimum number of sessions.
 	Min *int `toml:"min,omitempty" jsonschema:"minimum=0"`
-	// Max overrides pool maximum instances. 0 means the pool is disabled.
+	// Max overrides the maximum number of sessions. 0 means no sessions can claim routed work.
 	Max *int `toml:"max,omitempty" jsonschema:"minimum=0"`
-	// Check overrides the pool check command.
+	// Check overrides the session scale check command.
 	Check *string `toml:"check,omitempty"`
 	// DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h").
 	DrainTimeout *string `toml:"drain_timeout,omitempty"`
@@ -298,20 +315,11 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if len(p.InstallAgentHooksAppend) > 0 {
 		a.InstallAgentHooks = append(a.InstallAgentHooks, p.InstallAgentHooksAppend...)
 	}
-	if len(p.Skills) > 0 {
-		a.Skills = append([]string(nil), p.Skills...)
-	}
-	if len(p.SkillsAppend) > 0 {
-		a.Skills = append(a.Skills, p.SkillsAppend...)
-	}
-	if len(p.MCP) > 0 {
-		a.MCP = append([]string(nil), p.MCP...)
-	}
-	if len(p.MCPAppend) > 0 {
-		a.MCP = append(a.MCP, p.MCPAppend...)
-	}
 	if p.HooksInstalled != nil {
 		a.HooksInstalled = p.HooksInstalled
+	}
+	if p.InjectAssignedSkills != nil {
+		a.InjectAssignedSkills = p.InjectAssignedSkills
 	}
 	if len(p.SessionSetup) > 0 {
 		a.SessionSetup = append([]string(nil), p.SessionSetup...)

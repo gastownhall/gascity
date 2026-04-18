@@ -1269,6 +1269,7 @@ func deepCopyAgents(in []Agent) []Agent {
 		out[i].ReadyDelayMs = copyIntPtr(in[i].ReadyDelayMs)
 		out[i].EmitsPermissionWarning = copyBoolPtr(in[i].EmitsPermissionWarning)
 		out[i].HooksInstalled = copyBoolPtr(in[i].HooksInstalled)
+		out[i].InjectAssignedSkills = copyBoolPtr(in[i].InjectAssignedSkills)
 		out[i].DefaultSlingFormula = copyStringPtr(in[i].DefaultSlingFormula)
 		out[i].Attach = copyBoolPtr(in[i].Attach)
 	}
@@ -1812,20 +1813,11 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if len(ov.InstallAgentHooksAppend) > 0 {
 		a.InstallAgentHooks = append(a.InstallAgentHooks, ov.InstallAgentHooksAppend...)
 	}
-	if len(ov.Skills) > 0 {
-		a.Skills = append([]string(nil), ov.Skills...)
-	}
-	if len(ov.SkillsAppend) > 0 {
-		a.Skills = append(a.Skills, ov.SkillsAppend...)
-	}
-	if len(ov.MCP) > 0 {
-		a.MCP = append([]string(nil), ov.MCP...)
-	}
-	if len(ov.MCPAppend) > 0 {
-		a.MCP = append(a.MCP, ov.MCPAppend...)
-	}
 	if ov.HooksInstalled != nil {
 		a.HooksInstalled = ov.HooksInstalled
+	}
+	if ov.InjectAssignedSkills != nil {
+		a.InjectAssignedSkills = ov.InjectAssignedSkills
 	}
 	if len(ov.SessionSetup) > 0 {
 		a.SessionSetup = append([]string(nil), ov.SessionSetup...)

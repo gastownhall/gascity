@@ -229,6 +229,23 @@ func TestConfigureTestscriptEnvDefaultsSetsMissingValues(t *testing.T) {
 	}
 }
 
+func TestDoInitFileProviderBootstrapsScopedLayout(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !fileStoreUsesScopedRoots(cityPath) {
+		t.Fatal("expected scoped file-store layout marker after gc init")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "beads.json")); err != nil {
+		t.Fatalf("expected city file store bootstrap, stat err = %v", err)
+	}
+}
+
 func TestConfigureTestscriptEnvDefaultsPreservesOverrides(t *testing.T) {
 	t.Setenv("GC_SESSION", "fail")
 	t.Setenv("GC_BEADS", "exec:/tmp/custom-beads")
@@ -533,6 +550,37 @@ func TestResolveCityFlag(t *testing.T) {
 		}
 		if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
+		}
+	})
+
+	t.Run("rig_from_cwd_dir_uses_redirected_worktree", func(t *testing.T) {
+		cityDir := t.TempDir()
+		rigDir := filepath.Join(cityDir, "frontend")
+		workDir := filepath.Join(cityDir, ".gc", "worktrees", "frontend", "polecat-1")
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(workDir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workDir, ".beads", "redirect"), []byte(filepath.Join(rigDir, ".beads")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := rigFromCwdDir(cityDir, workDir); got != "frontend" {
+			t.Fatalf("rigFromCwdDir() = %q, want %q", got, "frontend")
 		}
 	})
 

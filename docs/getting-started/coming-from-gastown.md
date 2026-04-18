@@ -49,10 +49,10 @@ can be expressed in.
 | Mayor, deacon, witness, refinery, polecat, crew, dog | Configured agents | Gas City has no baked-in role names in Go. These are pack conventions, not SDK primitives. |
 | Plugin | Order | An exec order runs shell directly with no agent session. A formula order instantiates agent work. If you were thinking "plugin that runs a command", start with an exec order. |
 | Convoy | Convoy bead plus sling/formulas | Convoys are still bead-backed work grouping, but there is no special convoy runtime layer you have to use to get orchestration. |
-| Dog | Usually an order first, sometimes a pool agent | In Gas Town, dogs are named infrastructure helpers. In Gas City, a lot of that work is cleaner as exec orders because no LLM session is needed. |
+| Dog | Usually an order first, sometimes a scalable session config | In Gas Town, dogs are named infrastructure helpers. In Gas City, a lot of that work is cleaner as exec orders because no LLM session is needed. |
 | Deacon watchdog logic | Controller and supervisor | Health patrol, order dispatch, wisp GC, and reconciliation are controller concerns, not role-agent responsibilities. |
-| Witness lifecycle logic | Pack behavior built on waits, formulas, pool config, and controller wake/sleep | The SDK gives you the mechanisms. A pack decides whether to model a witness role at all. |
-| Crew and polecats as hard types | Persistent agents and pool agents | "Crew" and "polecat" are operating styles. Gas City only knows agent config and pool behavior. |
+| Witness lifecycle logic | Pack behavior built on waits, formulas, session scale config, and controller wake/sleep | The SDK gives you the mechanisms. A pack decides whether to model a witness role at all. |
+| Crew and polecats as hard types | Persistent sessions and scalable session configs | "Crew" and "polecat" are operating styles. Gas City only knows agent config and session behavior. |
 | Directory tree under `~/gt` | `dir` for identity scope and `work_dir` for session cwd | Do not encode architecture into paths. Keep identity in config and metadata. Use `work_dir` only when a role really needs filesystem isolation. |
 | Role-specific startup files and local settings dirs | Prompt templates, overlays, provider hooks, `pre_start`, `session_setup`, `gc prime` | Startup shaping is explicit and provider-aware instead of being mostly inferred from where a role lives on disk. |
 | Path-derived identity | Explicit agent identity, rig scope, env, bead metadata | Avoid porting code or prompts that assume cwd implies who the agent is. |
@@ -85,7 +85,7 @@ pack. Packs are for reusable defaults. Your local city config is for:
 - including the Gastown pack
 - adding named crew agents
 - changing providers
-- overriding pool sizes
+- overriding session scale sizes
 - tweaking prompts, hooks, overlays, and timeouts for your own city
 
 Reach for a pack edit when the change should become the new reusable default
@@ -126,7 +126,7 @@ In Gas Town, these feel like first-class worker types. In Gas City, they are
 best thought of as conventions:
 
 - **crew**: persistent named agents you expect humans to reason about
-- **polecats**: pooled or transient agents, often with dedicated worktrees
+- **polecats**: scalable or transient sessions, often with dedicated worktrees
 
 That distinction is real and useful, but the SDK does not force it. A pack can
 adopt the convention, relax it, or replace it.
@@ -140,7 +140,7 @@ Gas City, the controller is the canonical owner of infrastructure operations
 like:
 
 - reconcile desired sessions to running sessions
-- pool scaling
+- session scaling
 - order evaluation
 - health patrol
 - wisp garbage collection
@@ -200,7 +200,7 @@ Ask this first:
 If yes, prefer the order. That gives you trigger logic, history, and controller
 ownership without burning an agent slot.
 
-Reach for a dog-like pool agent only if the task truly needs a long-lived
+Reach for a dog-like scalable session config only if the task truly needs a long-lived
 session, rich interactive context, or repeated agent judgment.
 
 ### "I need a witness-like lifecycle manager"
@@ -247,7 +247,7 @@ path = "/path/to/myproject"
 includes = ["packs/gastown"]
 ```
 
-### Increase or shrink the polecat pool
+### Increase or shrink scalable polecat sessions
 
 This is the cleanest answer to "I want more or fewer polecats for this rig."
 
@@ -277,7 +277,7 @@ agent = "polecat"
 provider = "codex"
 ```
 
-You can combine that with pool overrides, env, prompt changes, or hook changes
+You can combine that with session scale overrides, env, prompt changes, or hook changes
 on the same override block.
 
 ### Change a city-scoped Gastown agent
@@ -418,7 +418,7 @@ Two rules help a lot:
 | `gt mayor` | Gastown pack `mayor` agent plus `gc session attach mayor` / `gc status` | Managed as a configured agent, not a baked-in command family. |
 | `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, controller behavior | In Gas City, much of what deacon did lives in the controller/supervisor. |
 | `gt boot` | Gastown pack `boot` agent | Same pattern as other role agents. |
-| `gt dog` | usually `gc order`, sometimes a pooled agent in `city.toml` | Dog-like helpers are often better modeled as exec orders. |
+| `gt dog` | usually `gc order`, sometimes a scalable session config in `city.toml` | Dog-like helpers are often better modeled as exec orders. |
 | `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class SDK concept. |
 | `gt callbacks` | no direct equivalent | Callback behavior is folded into runtime, hooks, waits, and orders. |
 | `gt cycle` | no direct generic command | Closest equivalents are tmux bindings or pack-specific session UX. |

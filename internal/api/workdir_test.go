@@ -120,7 +120,7 @@ func TestResolveSessionTemplateUsesQualifiedNameForWorkDirTemplates(t *testing.T
 	state.cfg.Agents[0].WorkDir = ".gc/worktrees/{{.Agent}}"
 	srv := New(state)
 
-	_, workDir, _, _, err := srv.resolveSessionTemplate("worker")
+	_, workDir, _, _, err := srv.resolveSessionTemplate("myrig/worker")
 	if err != nil {
 		t.Fatalf("resolveSessionTemplate: %v", err)
 	}

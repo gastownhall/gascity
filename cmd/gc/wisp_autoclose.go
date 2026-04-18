@@ -33,14 +33,19 @@ func newWispAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // doWispAutoclose is the CLI entry point for wisp autoclose.
-// It creates a cwd-rooted BdStore (matching the bd process that invoked
-// the hook) and delegates to the testable core.
+// It resolves the current store through the provider-aware resolver using the
+// projected store-root environment and delegates to the testable core.
 func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return
 	}
-	store := bdStoreForDir(cwd)
+	storeRoot := convoyAutocloseStoreRoot(cwd)
+	cityPath := cityForStoreDir(storeRoot)
+	store, err := openStoreAtForCity(storeRoot, cityPath)
+	if err != nil {
+		return
+	}
 	doWispAutocloseWith(store, beadID, stdout)
 }
 

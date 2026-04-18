@@ -52,14 +52,25 @@ func ReadImplicitImports() (map[string]ImplicitImport, string, error) {
 }
 
 func implicitImportPath() string {
-	home := implicitGCHome()
+	home := ImplicitGCHome()
 	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, "implicit-import.toml")
 }
 
-func implicitGCHome() string {
+// ImplicitGCHome returns the user-global GC_HOME directory used to
+// resolve implicit-import bookkeeping and bootstrap pack caches.
+//
+// Resolution order: GC_HOME env var → user home/.gc → tmp fallback.
+// Returns "" under `go test` to keep unit tests hermetic unless the
+// caller opts in by setting GC_HOME explicitly.
+//
+// Callers outside this package should treat the return value as
+// authoritative — every gc.tooling subsystem (bootstrap, materializer,
+// implicit imports) must agree on the same path or they will resolve
+// to different cache directories.
+func ImplicitGCHome() string {
 	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
 		return v
 	}
@@ -77,7 +88,7 @@ func implicitGCHome() string {
 func resolveImplicitImport(imp ImplicitImport) Import {
 	source := imp.Source
 	if imp.Commit != "" {
-		if home := implicitGCHome(); home != "" {
+		if home := ImplicitGCHome(); home != "" {
 			source = GlobalRepoCachePath(home, imp.Source, imp.Commit)
 		}
 	}

@@ -506,6 +506,25 @@ func TestFindSessionFileNotFound(t *testing.T) {
 	}
 }
 
+func TestFindSessionFileByIDRejectsTraversalSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/home/user/myproject"
+	slugDir := filepath.Join(base, ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "escape.jsonl"), []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFileByID([]string{base}, workDir, "../escape"); got != "" {
+		t.Fatalf("FindSessionFileByID traversal = %q, want empty", got)
+	}
+	if got := FindSessionFileByID([]string{base}, workDir, `nested\escape`); got != "" {
+		t.Fatalf("FindSessionFileByID backslash traversal = %q, want empty", got)
+	}
+}
+
 func TestProjectSlug(t *testing.T) {
 	tests := []struct {
 		path string
