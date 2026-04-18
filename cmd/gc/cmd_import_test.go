@@ -252,6 +252,9 @@ install_agent_hooks = ["claude"]
 			t.Fatalf("pack.toml missing %q:\n%s", want, text)
 		}
 	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		t.Fatalf("expected alias warning, got stderr %q", stderr.String())
+	}
 }
 
 func TestDoImportAddMergesLegacyAgentsDefaultsWhenCanonicalAlsoPresent(t *testing.T) {
@@ -332,6 +335,71 @@ install_agent_hooks = ["claude"]
 	}
 	if !strings.Contains(stderr.String(), "both [agent_defaults] and [agents] are present in pack.toml") {
 		t.Fatalf("expected mixed-table warning, got stderr %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "preserved unsupported [agent_defaults] keys in pack.toml: provider, scope, install_agent_hooks") {
+		t.Fatalf("expected unsupported-keys warning, got stderr %q", stderr.String())
+	}
+}
+
+func TestDoImportAddPreservesUnsupportedZeroValueAgentDefaultsKeys(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = ""
+scope = ""
+install_agent_hooks = []
+`)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`[agent_defaults]`,
+		`provider = ""`,
+		`scope = ""`,
+		`install_agent_hooks = []`,
+		`[imports.tools]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pack.toml missing %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		t.Fatalf("expected alias warning, got stderr %q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "preserved unsupported [agent_defaults] keys in pack.toml: provider, scope, install_agent_hooks") {
 		t.Fatalf("expected unsupported-keys warning, got stderr %q", stderr.String())

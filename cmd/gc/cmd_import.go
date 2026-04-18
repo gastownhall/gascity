@@ -32,17 +32,17 @@ var (
 const cityPackSchema = 1
 
 type cityPackAgentDefaults struct {
-	Model               string   `toml:"model,omitempty"`
-	WakeMode            string   `toml:"wake_mode,omitempty"`
-	DefaultSlingFormula string   `toml:"default_sling_formula,omitempty"`
-	AllowOverlay        []string `toml:"allow_overlay,omitempty"`
-	AllowEnvOverride    []string `toml:"allow_env_override,omitempty"`
-	AppendFragments     []string `toml:"append_fragments,omitempty"`
-	Skills              []string `toml:"skills,omitempty"`
-	MCP                 []string `toml:"mcp,omitempty"`
-	Provider            string   `toml:"provider,omitempty"`
-	Scope               string   `toml:"scope,omitempty"`
-	InstallAgentHooks   []string `toml:"install_agent_hooks,omitempty"`
+	Model               string    `toml:"model,omitempty"`
+	WakeMode            string    `toml:"wake_mode,omitempty"`
+	DefaultSlingFormula string    `toml:"default_sling_formula,omitempty"`
+	AllowOverlay        []string  `toml:"allow_overlay,omitempty"`
+	AllowEnvOverride    []string  `toml:"allow_env_override,omitempty"`
+	AppendFragments     []string  `toml:"append_fragments,omitempty"`
+	Skills              []string  `toml:"skills,omitempty"`
+	MCP                 []string  `toml:"mcp,omitempty"`
+	Provider            *string   `toml:"provider,omitempty"`
+	Scope               *string   `toml:"scope,omitempty"`
+	InstallAgentHooks   *[]string `toml:"install_agent_hooks,omitempty"`
 }
 
 type cityPackManifest struct {
@@ -59,18 +59,19 @@ type cityPackManifest struct {
 	Doctor                     []config.PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands                   []config.PackCommandEntry      `toml:"commands,omitempty"`
 	Global                     config.PackGlobal              `toml:"global,omitempty"`
+	HadAgentsDefaultsAlias     bool                           `toml:"-"`
 	HadBothAgentDefaultsTables bool                           `toml:"-"`
 }
 
 func (d cityPackAgentDefaults) unsupportedKeys() []string {
 	var keys []string
-	if d.Provider != "" {
+	if d.Provider != nil {
 		keys = append(keys, "provider")
 	}
-	if d.Scope != "" {
+	if d.Scope != nil {
 		keys = append(keys, "scope")
 	}
-	if len(d.InstallAgentHooks) > 0 {
+	if d.InstallAgentHooks != nil {
 		keys = append(keys, "install_agent_hooks")
 	}
 	return keys
@@ -79,6 +80,9 @@ func (d cityPackAgentDefaults) unsupportedKeys() []string {
 func warnPreservedUnsupportedPackAgentDefaults(stderr io.Writer, manifest *cityPackManifest) {
 	if stderr == nil || manifest == nil {
 		return
+	}
+	if manifest.HadAgentsDefaultsAlias {
+		fmt.Fprintln(stderr, "gc import: [agents] is a deprecated compatibility alias for [agent_defaults]; rewriting pack.toml to canonical [agent_defaults]") //nolint:errcheck
 	}
 	if manifest.HadBothAgentDefaultsTables {
 		fmt.Fprintln(stderr, "gc import: both [agent_defaults] and [agents] are present in pack.toml; canonical [agent_defaults] wins for overlapping keys") //nolint:errcheck
@@ -116,14 +120,31 @@ func mergeCityPackAgentDefaultsPreferCanonical(dst *cityPackAgentDefaults, src c
 		dst.MCP = append([]string(nil), src.MCP...)
 	}
 	if !meta.IsDefined("agent_defaults", "provider") {
-		dst.Provider = src.Provider
+		dst.Provider = copyStringPointer(src.Provider)
 	}
 	if !meta.IsDefined("agent_defaults", "scope") {
-		dst.Scope = src.Scope
+		dst.Scope = copyStringPointer(src.Scope)
 	}
 	if !meta.IsDefined("agent_defaults", "install_agent_hooks") {
-		dst.InstallAgentHooks = append([]string(nil), src.InstallAgentHooks...)
+		dst.InstallAgentHooks = copyStringSlicePointer(src.InstallAgentHooks)
 	}
+}
+
+func copyStringPointer(in *string) *string {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func copyStringSlicePointer(in *[]string) *[]string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(*in))
+	copy(out, *in)
+	return &out
 }
 
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -674,6 +695,7 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 }
 
 func normalizeCityPackManifestAgentDefaultsAlias(manifest *cityPackManifest, meta toml.MetaData) {
+	manifest.HadAgentsDefaultsAlias = meta.IsDefined("agents")
 	if meta.IsDefined("agent_defaults") {
 		if meta.IsDefined("agents") {
 			manifest.HadBothAgentDefaultsTables = true
