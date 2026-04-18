@@ -1153,6 +1153,7 @@ The shared corpus includes:
 - tool-using task
 - multi-turn workflow
 - explicit continuation proof task after restart
+- explicit fresh-session negative-control proof after reset
 - interrupt/recover/continue behavior
 
 Tasks should prefer machine-checkable success criteria:

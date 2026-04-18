@@ -20,7 +20,17 @@ type countingWakeMetadataStore struct {
 }
 
 func makeWakeBead(id string, meta map[string]string) beads.Bead {
-	return beads.Bead{ID: id, Metadata: meta}
+	cloned := make(map[string]string, len(meta)+2)
+	for k, v := range meta {
+		cloned[k] = v
+	}
+	if cloned["provider"] == "" {
+		cloned["provider"] = "claude"
+	}
+	if cloned["work_dir"] == "" {
+		cloned["work_dir"] = "/tmp/gc-session-test"
+	}
+	return beads.Bead{ID: id, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: cloned}
 }
 
 func (s *countingWakeMetadataStore) SetMetadata(id, key, value string) error {
@@ -506,10 +516,14 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
 			"generation":   "3",
 			"state":        "active",
 		},
@@ -550,10 +564,14 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
 			"generation":   "3",
 		},
 	})
@@ -596,10 +614,14 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
 			"generation":   "3",
 		},
 	})
@@ -755,10 +777,14 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 	_ = sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "new-token")
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":   "test-session",
 			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
 			"generation":     "3",
 			"instance_token": "old-token", // stale token
 		},

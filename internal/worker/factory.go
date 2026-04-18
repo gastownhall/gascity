@@ -79,6 +79,12 @@ func (f *Factory) DiscoverTranscript(provider, workDir, gcSessionID string) stri
 	return f.Adapter().DiscoverTranscript(provider, workDir, gcSessionID)
 }
 
+// DiscoverWorkDirTranscript resolves the best provider-specific transcript for
+// a workdir without requiring a stable session identifier.
+func (f *Factory) DiscoverWorkDirTranscript(provider, workDir string) string {
+	return f.Adapter().DiscoverWorkDirTranscript(provider, workDir)
+}
+
 // TailMeta reads model/context metadata from a discovered transcript path.
 func (f *Factory) TailMeta(path string) (*TranscriptTailMeta, error) {
 	return f.Adapter().TailMeta(path)

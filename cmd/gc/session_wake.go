@@ -515,13 +515,16 @@ func advanceSessionDrainsWithSessionsTraced(
 // completeDrain writes drain-complete metadata to the bead.
 func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock) {
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
-	if err := store.SetMetadataBatch(session.ID, batch); err == nil {
-		if session.Metadata == nil {
-			session.Metadata = make(map[string]string)
+	if store != nil {
+		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+			return
 		}
-		for k, v := range batch {
-			session.Metadata[k] = v
-		}
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	for k, v := range batch {
+		session.Metadata[k] = v
 	}
 }
 

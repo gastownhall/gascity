@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // DesiredStateResult bundles the desired session state with the scale_check
@@ -210,10 +211,32 @@ func buildDesiredStateWithSessionBeads(
 			// but generic scale_check/min demand for the backing template still
 			// creates ephemeral capacity through the pool pipeline.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
+			pendingPools = append(pendingPools, poolEvalWork{
+				agentIdx: i,
+				sp:       sp,
+				poolDir:  poolDir,
+				env:      controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i]),
+			})
 			continue
 		}
 
+		if sp.Max == 1 && !isMultiSessionCfgAgent(&cfg.Agents[i]) {
+			// Fixed agent.
+			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
+			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
+				continue
+			}
+
+			fpExtra := buildFingerprintExtra(&cfg.Agents[i])
+			tp, err := resolveTemplatePrepared(bp, &cfg.Agents[i], cfg.Agents[i].QualifiedName(), fpExtra)
+			if err != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: %v (skipping)\n", err) //nolint:errcheck
+				continue
+			}
+			installAgentSideEffects(bp, &cfg.Agents[i], tp, stderr)
+			desired[tp.SessionName] = tp
+			continue
+		}
 		rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
 			continue
@@ -275,7 +298,7 @@ func buildDesiredStateWithSessionBeads(
 				qualifiedInstance := cfg.Agents[pw.agentIdx].QualifiedInstanceName(name)
 				instanceAgent := deepCopyAgent(&cfg.Agents[pw.agentIdx], name, cfg.Agents[pw.agentIdx].Dir)
 				fpExtra := buildFingerprintExtra(&instanceAgent)
-				tp, err := resolveTemplate(bp, &instanceAgent, qualifiedInstance, fpExtra)
+				tp, err := resolveTemplatePrepared(bp, &instanceAgent, qualifiedInstance, fpExtra)
 				if err != nil {
 					fmt.Fprintf(stderr, "buildDesiredState: pool instance %q: %v (skipping)\n", qualifiedInstance, err) //nolint:errcheck
 					continue
@@ -363,7 +386,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		fpExtra := buildFingerprintExtra(spec.Agent)
-		tp, err := resolveTemplate(bp, spec.Agent, identity, fpExtra)
+		tp, err := resolveTemplatePrepared(bp, spec.Agent, identity, fpExtra)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: named session %q: %v (skipping)\n", identity, err) //nolint:errcheck
 			continue
@@ -788,7 +811,7 @@ func ensureDependencyOnlyTemplate(
 		qualifiedInstance := cfgAgent.QualifiedInstanceName(name)
 		instanceAgent := deepCopyAgent(cfgAgent, name, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
-		tp, err := resolveTemplate(bp, &instanceAgent, qualifiedInstance, fpExtra)
+		tp, err := resolveTemplatePrepared(bp, &instanceAgent, qualifiedInstance, fpExtra)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedInstance, err) //nolint:errcheck
 			return
@@ -904,7 +927,7 @@ func resolveTemplateForSessionBead(
 ) (TemplateParams, error) {
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: sessionBead.Metadata["session_name"]}
-	return resolveTemplate(&local, cfgAgent, qualifiedName, fpExtra)
+	return resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
 }
 
 func claimPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
@@ -1053,16 +1076,40 @@ func namedSessionAllowsControllerWorkQuery(cityPath string, cfg *config.City, sp
 	return configuredRigName(cityPath, spec.Agent, cfg.Rigs) != ""
 }
 
-// installAgentSideEffects performs idempotent side effects for a resolved
-// agent: hook installation and ACP route registration. Called from
-// buildDesiredState on every tick; safe to repeat.
-func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	// Install provider hooks (idempotent filesystem side effect).
+// prepareTemplateResolution installs any hook-backed files that must exist
+// before resolveTemplate fingerprints CopyFiles. This keeps generated hook
+// files from looking like config drift on the next reconcile tick.
+func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, stderr io.Writer) {
+	if bp == nil || cfgAgent == nil {
+		return
+	}
 	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
-		if hErr := hooks.Install(bp.fs, bp.cityPath, tp.WorkDir, ih); hErr != nil {
-			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
+		workDir, err := workdirutil.ResolveWorkDirPathStrict(bp.cityPath, bp.cityName, qualifiedName, *cfgAgent, bp.rigs)
+		if err != nil {
+			return
+		}
+		workDir, err = resolveAgentDir(bp.cityPath, workDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck
+			return
+		}
+		if hErr := hooks.Install(bp.fs, bp.cityPath, workDir, ih); hErr != nil {
+			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
 		}
 	}
+}
+
+func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {
+	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+}
+
+// installAgentSideEffects performs post-resolution side effects that depend on
+// the fully resolved template. Called from buildDesiredState on every tick;
+// safe to repeat.
+func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
+	_ = cfgAgent
+	_ = stderr
 	// Register ACP route on the auto provider for dynamic sessions.
 	if tp.IsACP {
 		if autoSP, ok := bp.sp.(*sessionauto.Provider); ok {

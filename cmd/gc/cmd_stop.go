@@ -58,8 +58,6 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	store, _ := openCityStoreAt(cityPath)
-	markCityStopSessionSleepReason(store, stderr)
 
 	if handled, code := unregisterCityFromSupervisor(cityPath, stdout, stderr, "gc stop"); handled {
 		if code != 0 {
@@ -71,6 +69,9 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 	}
+
+	store, _ := openCityStoreAt(cityPath)
+	markCityStopSessionSleepReason(store, stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopController(cityPath, stdout) {

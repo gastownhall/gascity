@@ -22,6 +22,10 @@ const staleKeyDetectDelay = 2 * time.Second
 
 const waitIdleNudgeTimeout = 30 * time.Second
 
+// ErrStateSync reports that the runtime reached the requested lifecycle
+// boundary but persisting the corresponding bead metadata failed.
+var ErrStateSync = errors.New("session state sync failed")
+
 // stripResumeFlag removes the resume flag and session key from a command
 // string, returning a command suitable for a fresh start.
 func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
@@ -282,10 +286,95 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		m.persistTransport(id, b.Metadata["provider"], transport)
 	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
-		if started {
+		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
 		return err
+	}
+	return nil
+}
+
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	transport, _ := m.transportForBead(b, sessName)
+	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	if m.sp.IsRunning(sessName) {
+		return nil
+	}
+	if resumeCommand == "" {
+		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+	}
+
+	cfg := hints
+	cfg.Command = resumeCommand
+	if cfg.WorkDir == "" {
+		cfg.WorkDir = b.Metadata["work_dir"]
+	}
+	generation, err := strconv.Atoi(b.Metadata["generation"])
+	if err != nil || generation <= 0 {
+		generation = DefaultGeneration
+	}
+	continuationEpoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
+	if err != nil || continuationEpoch <= 0 {
+		continuationEpoch = DefaultContinuationEpoch
+	}
+	instanceToken := b.Metadata["instance_token"]
+	if instanceToken == "" {
+		instanceToken = NewInstanceToken()
+		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
+			return fmt.Errorf("storing instance token: %w", err)
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string)
+		}
+		b.Metadata["instance_token"] = instanceToken
+	}
+	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
+		id,
+		sessName,
+		strings.TrimSpace(b.Metadata["alias"]),
+		strings.TrimSpace(b.Metadata["template"]),
+		strings.TrimSpace(b.Metadata["session_origin"]),
+		generation,
+		continuationEpoch,
+		instanceToken,
+	))
+	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	} else if gcProvider := strings.TrimSpace(b.Metadata["provider"]); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	}
+	cfg = runtime.SyncWorkDirEnv(cfg)
+	started := false
+	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if err != nil {
+				return err
+			}
+			started = retried
+		} else if errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName) {
+			return err
+		} else {
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("resuming session: %w", err)
+		}
+	} else {
+		started = true
+	}
+	if started && b.Metadata["session_key"] != "" {
+		if err := sleepWithContext(ctx, staleKeyDetectDelay); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -307,7 +396,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 		return nil
 	}
 	if err := m.store.SetMetadataBatch(id, batch); err != nil {
-		return fmt.Errorf("updating session state: %w", err)
+		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
 	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
@@ -524,6 +613,20 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 			return err
 		}
 		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+	})
+}
+
+// StartRuntimeOnly brings the runtime live for a bead-backed session without
+// mutating persisted lifecycle metadata. Legacy reconciler callers use this
+// bridge while they still own commit/rollback bookkeeping above the worker
+// boundary.
+func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		return m.ensureRunningRuntimeOnly(ctx, id, b, sessName, resumeCommand, hints)
 	})
 }
 

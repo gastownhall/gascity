@@ -46,6 +46,7 @@ func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParam
 
 func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp TemplateParams, cfg runtime.Config) workertest.Result {
 	evidence := phase2ConfigEvidence(tc, tp, cfg)
+	hookStartup := tp.HookEnabled && tp.ResolvedProvider != nil && tp.ResolvedProvider.SupportsHooks
 	switch {
 	case cfg.Command != tp.Command:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
@@ -53,9 +54,12 @@ func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp Templat
 	case cfg.WorkDir != tp.WorkDir:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.WorkDir = %q, want %q", cfg.WorkDir, tp.WorkDir)).WithEvidence(evidence)
-	case cfg.PromptSuffix == "":
+	case !hookStartup && cfg.PromptSuffix == "":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			"cfg.PromptSuffix = empty, want beacon prompt materialized").WithEvidence(evidence)
+	case hookStartup && cfg.PromptSuffix != "":
+		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
+			fmt.Sprintf("cfg.PromptSuffix = %q, want empty when startup prompt is delivered via hooks", cfg.PromptSuffix)).WithEvidence(evidence)
 	case cfg.PromptFlag != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.PromptFlag = %q, want empty for arg-mode provider", cfg.PromptFlag)).WithEvidence(evidence)
@@ -114,6 +118,9 @@ func initialMessageFirstStartResult(tc phase2ProviderCase, prepared *preparedSta
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
 	}
 	want := "Base worker prompt\n\n---\n\nUser message:\nDo the first task."
+	if prepared != nil && prepared.candidate.tp.HookEnabled && prepared.candidate.tp.ResolvedProvider != nil && prepared.candidate.tp.ResolvedProvider.SupportsHooks {
+		want = "Do the first task."
+	}
 	switch {
 	case got != want:
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
@@ -133,10 +140,14 @@ func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) 
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
 	}
+	want := "Base worker prompt"
+	if prepared != nil && prepared.candidate.tp.HookEnabled && prepared.candidate.tp.ResolvedProvider != nil && prepared.candidate.tp.ResolvedProvider.SupportsHooks {
+		want = ""
+	}
 	switch {
-	case got != "Base worker prompt":
+	case got != want:
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("PromptSuffix payload = %q, want %q", got, "Base worker prompt")).WithEvidence(evidence)
+			fmt.Sprintf("PromptSuffix payload = %q, want %q", got, want)).WithEvidence(evidence)
 	case strings.Contains(got, "Do the first task."):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptSuffix payload = %q, want no replayed initial message", got)).WithEvidence(evidence)

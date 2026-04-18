@@ -53,6 +53,40 @@ func buildDepsMap(cfg *config.City) map[string][]string {
 	return deps
 }
 
+func freshRestartSessionKey(tp TemplateParams, meta map[string]string) (string, bool) {
+	if tp.ResolvedProvider != nil {
+		if strings.TrimSpace(tp.ResolvedProvider.SessionIDFlag) != "" {
+			newKey, err := sessionpkg.GenerateSessionKey()
+			if err != nil {
+				return "", false
+			}
+			return newKey, true
+		}
+		if strings.TrimSpace(tp.ResolvedProvider.ResumeFlag) != "" ||
+			strings.TrimSpace(tp.ResolvedProvider.ResumeCommand) != "" ||
+			strings.TrimSpace(tp.ResolvedProvider.ResumeStyle) != "" {
+			return "", true
+		}
+	}
+	if strings.TrimSpace(meta["session_id_flag"]) != "" {
+		newKey, err := sessionpkg.GenerateSessionKey()
+		if err != nil {
+			return "", false
+		}
+		return newKey, true
+	}
+	if strings.TrimSpace(meta["resume_flag"]) != "" ||
+		strings.TrimSpace(meta["resume_command"]) != "" ||
+		strings.TrimSpace(meta["resume_style"]) != "" {
+		return "", true
+	}
+	newKey, err := sessionpkg.GenerateSessionKey()
+	if err != nil {
+		return "", false
+	}
+	return newKey, true
+}
+
 // allDependenciesAliveForTemplate checks that all template dependencies of a
 // resolved logical template have at least one alive instance. Uses the
 // runtime.Provider directly instead of agent types for liveness checks.
@@ -530,16 +564,19 @@ func reconcileSessionBeadsTraced(
 				if tmuxRequested && dops != nil {
 					_ = dops.clearRestartRequested(name)
 				}
-				// Rotate session_key so the next start gets a fresh
-				// conversation. Clearing started_config_hash forces
-				// firstStart=true in resolveSessionCommand. Clearing
-				// last_woke_at masks the intentional death from crash
-				// and churn trackers (both check last_woke_at first).
-				newSessionKey := ""
-				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-					newSessionKey = newKey
-				}
+				// Providers that can inject a fresh session ID get a
+				// rotated key here so the next wake starts a brand-new
+				// conversation. Providers without SessionIDFlag must
+				// clear any stored key and wake fresh without resume.
+				// Clearing started_config_hash forces firstStart=true in
+				// resolveSessionCommand. Clearing last_woke_at masks the
+				// intentional death from crash and churn trackers (both
+				// check last_woke_at first).
+				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
 				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				if hasCapability && newSessionKey == "" {
+					batch["session_key"] = ""
+				}
 				_ = store.SetMetadataBatch(session.ID, batch)
 				if session.Metadata == nil {
 					session.Metadata = make(map[string]string, len(batch))

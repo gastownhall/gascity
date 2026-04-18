@@ -67,6 +67,12 @@ func (a SessionLogAdapter) DiscoverTranscript(provider, workDir, gcSessionID str
 	return workertranscript.DiscoverPath(a.SearchPaths, provider, workDir, gcSessionID)
 }
 
+// DiscoverWorkDirTranscript resolves the best provider-specific transcript for
+// a workdir without requiring a stable session identifier.
+func (a SessionLogAdapter) DiscoverWorkDirTranscript(provider, workDir string) string {
+	return workertranscript.DiscoverPath(a.SearchPaths, provider, workDir, "")
+}
+
 // TailMeta reads model/context metadata from a discovered transcript path.
 func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 	return sessionlog.ExtractTailMetaFromSearchPaths(a.SearchPaths, path)

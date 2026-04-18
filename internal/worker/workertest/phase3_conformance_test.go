@@ -10,6 +10,7 @@ func TestPhase3Catalog(t *testing.T) {
 		RequirementInferenceMultiTurnWorkflow,
 		RequirementInferenceTranscript,
 		RequirementInferenceContinuation,
+		RequirementInferenceFreshReset,
 		RequirementInferenceInterruptRecoverContinue,
 	}
 

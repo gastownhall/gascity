@@ -70,6 +70,13 @@ func (p *delayedSessionExistsProvider) GetMeta(name, key string) (string, error)
 	return p.Fake.GetMeta(name, key)
 }
 
+func (p *delayedSessionExistsProvider) ProcessAlive(name string, processNames []string) bool {
+	if p.hiddenRunning[name] {
+		return true
+	}
+	return p.Fake.ProcessAlive(name, processNames)
+}
+
 type lateSuccessStartProvider struct {
 	*runtime.Fake
 	startErr error
@@ -1807,6 +1814,8 @@ func TestReconcileSessionBeads_RollsBackAdHocCreateOnRuntimeCollision(t *testing
 			"session_name_explicit": "true",
 			"pending_create_claim":  "true",
 			"template":              "helper",
+			"provider":              "claude",
+			"work_dir":              t.TempDir(),
 			"state":                 "creating",
 			"generation":            "1",
 			"continuation_epoch":    "1",
@@ -1873,6 +1882,8 @@ func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *t
 			"session_name_explicit": "true",
 			"pending_create_claim":  "true",
 			"template":              "helper",
+			"provider":              "claude",
+			"work_dir":              t.TempDir(),
 			"state":                 "creating",
 			"generation":            "1",
 			"continuation_epoch":    "1",
