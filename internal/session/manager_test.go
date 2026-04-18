@@ -16,6 +16,14 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+// newAutoWithACP is a test helper that creates an auto.Provider with
+// ACP backend registered, matching the pre-refactor two-arg constructor.
+func newAutoWithACP(defaultSP, acpSP runtime.Provider) *sessionauto.Provider {
+	p := sessionauto.New(defaultSP)
+	p.AddBackend("acp", acpSP)
+	return p
+}
+
 type startOverrideProvider struct {
 	*runtime.Fake
 	startErr error
@@ -422,7 +430,7 @@ func TestCreateNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := newAutoWithACP(defaultSP, acpSP)
 	mgr := NewManager(store, autoSP)
 
 	if err := acpSP.Start(context.Background(), "sky", runtime.Config{}); err != nil {
@@ -495,7 +503,7 @@ func TestCreateRoutesACPSessionsThroughAutoProvider(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+	mgr := NewManager(store, newAutoWithACP(defaultSP, acpSP))
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "acp chat", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1856,7 +1864,7 @@ func TestSendResumesSuspendedACPSessionOnACPBackend(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+	mgr := NewManager(store, newAutoWithACP(defaultSP, acpSP))
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1892,7 +1900,7 @@ func TestSendReRoutesActiveACPSessionBeforeNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := newAutoWithACP(defaultSP, acpSP)
 	mgr := NewManager(store, autoSP)
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
@@ -1925,7 +1933,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := newAutoWithACP(defaultSP, acpSP)
 
 	legacy, err := store.Create(beads.Bead{
 		Title: "legacy acp",
@@ -1990,7 +1998,7 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := newAutoWithACP(defaultSP, acpSP)
 
 	legacy, err := store.Create(beads.Bead{
 		Title: "legacy acp",

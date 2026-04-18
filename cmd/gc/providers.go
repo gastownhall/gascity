@@ -164,7 +164,7 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 }
 
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
-	if ctx.cityPath == "" || ctx.providerName == "acp" || !hasACPAgents(ctx.agents) {
+	if ctx.cityPath == "" || len(agentSessionOverrides(ctx.agents, ctx.providerName)) == 0 {
 		return nil
 	}
 	store, err := openSessionProviderStore(ctx.cityPath)
@@ -184,42 +184,70 @@ func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *ses
 		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
 		os.Exit(1)
 	}
-	// If the city-level provider is not ACP but some agents need ACP,
-	// wrap in an auto provider that routes per-session.
-	// NOTE: agents comes from loadCityConfig which applies pack overrides,
-	// so the Session field from overrides is already resolved here.
-	if ctx.providerName != "acp" && hasACPAgents(ctx.agents) {
-		acpSP, acpErr := newSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
-		if acpErr != nil {
-			fmt.Fprintf(os.Stderr, "acp provider: %v\n", acpErr) //nolint:errcheck // best-effort stderr
+	// If any agents override the session provider, wrap in an auto
+	// provider that routes per-session to the appropriate backend.
+	overrides := agentSessionOverrides(ctx.agents, ctx.providerName)
+	if len(overrides) == 0 {
+		return sp
+	}
+	autoSP := sessionauto.New(sp)
+	for providerName := range overrides {
+		backendSP, backendErr := newSessionProviderByName(providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+		if backendErr != nil {
+			fmt.Fprintf(os.Stderr, "%s provider: %v\n", providerName, backendErr) //nolint:errcheck // best-effort stderr
 			os.Exit(1)
 		}
-		autoSP := sessionauto.New(sp, acpSP)
-		for _, sessName := range configuredACPSessionNames(sessionBeads, ctx.cityName, ctx.sessionTemplate, ctx.agents) {
-			autoSP.RouteACP(sessName)
-		}
-		return autoSP
+		autoSP.AddBackend(providerName, backendSP)
 	}
-	return sp
-}
-
-// hasACPAgents reports whether any agent in the config uses session = "acp".
-func hasACPAgents(agents []config.Agent) bool {
-	for _, a := range agents {
-		if a.Session == "acp" {
-			return true
+	for _, sessName := range configuredOverrideSessionNames(sessionBeads, ctx.cityName, ctx.sessionTemplate, ctx.agents, ctx.providerName) {
+		if routeErr := autoSP.Route(sessName.sessionName, sessName.providerKey); routeErr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", routeErr) //nolint:errcheck // best-effort stderr
+			os.Exit(1)
 		}
 	}
-	return false
+	return autoSP
 }
 
-// configuredACPSessionNames resolves the runtime session names for ACP-backed
-// agents using a single session-bead snapshot. When the snapshot is unavailable
-// or bead lookup fails, it falls back to the legacy deterministic name.
-func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionTemplate string, agents []config.Agent) []string {
-	names := make([]string, 0, len(agents))
+// canonicalProviderName normalizes the implicit "tmux" default so that
+// cityDefault="" and a.Session="tmux" compare as equal.
+func canonicalProviderName(name string) string {
+	if name == "" {
+		return "tmux"
+	}
+	return name
+}
+
+// agentSessionOverrides collects unique per-agent session provider names
+// that differ from the city default. Empty Session values and values
+// equivalent to cityDefault (after canonicalization) are omitted.
+func agentSessionOverrides(agents []config.Agent, cityDefault string) map[string]bool {
+	def := canonicalProviderName(cityDefault)
+	overrides := make(map[string]bool)
 	for _, a := range agents {
-		if a.Session != "acp" {
+		if a.Session == "" {
+			continue
+		}
+		if canonicalProviderName(a.Session) == def {
+			continue
+		}
+		overrides[a.Session] = true
+	}
+	return overrides
+}
+
+type sessionRoute struct {
+	sessionName string
+	providerKey string
+}
+
+// configuredOverrideSessionNames resolves the runtime session names for agents
+// with session provider overrides that differ from cityDefault. Returns
+// (sessionName, providerKey) pairs.
+func configuredOverrideSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionTemplate string, agents []config.Agent, cityDefault string) []sessionRoute {
+	def := canonicalProviderName(cityDefault)
+	routes := make([]sessionRoute, 0, len(agents))
+	for _, a := range agents {
+		if a.Session == "" || canonicalProviderName(a.Session) == def {
 			continue
 		}
 		sessName := agent.SessionNameFor(cityName, a.QualifiedName(), sessionTemplate)
@@ -228,7 +256,19 @@ func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionT
 				sessName = beadName
 			}
 		}
-		names = append(names, sessName)
+		routes = append(routes, sessionRoute{sessionName: sessName, providerKey: a.Session})
+	}
+	return routes
+}
+
+// configuredACPSessionNames resolves the runtime session names for ACP-backed
+// agents. Backward-compatible convenience wrapper.
+func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionTemplate string, agents []config.Agent, cityDefault string) []string {
+	names := make([]string, 0, len(agents))
+	for _, r := range configuredOverrideSessionNames(snapshot, cityName, sessionTemplate, agents, cityDefault) {
+		if r.providerKey == "acp" {
+			names = append(names, r.sessionName)
+		}
 	}
 	return names
 }

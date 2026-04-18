@@ -13,7 +13,8 @@ var _ runtime.Provider = (*Provider)(nil)
 func TestRouteDefaultAndACP(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
 	// Unregistered session routes to default.
 	if got := p.route("agent-a"); got != defaultSP {
@@ -21,7 +22,9 @@ func TestRouteDefaultAndACP(t *testing.T) {
 	}
 
 	// Register as ACP.
-	p.RouteACP("agent-b")
+	if err := p.RouteACP("agent-b"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
+	}
 	if got := p.route("agent-b"); got != acpSP {
 		t.Fatal("registered session should route to ACP")
 	}
@@ -33,9 +36,12 @@ func TestRouteDefaultAndACP(t *testing.T) {
 func TestUnroute(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
-	p.RouteACP("agent-x")
+	if err := p.RouteACP("agent-x"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
+	}
 	if got := p.route("agent-x"); got != acpSP {
 		t.Fatal("should route to ACP after registration")
 	}
@@ -46,18 +52,57 @@ func TestUnroute(t *testing.T) {
 	}
 }
 
-func TestAttachReturnsErrorForACP(t *testing.T) {
+func TestRouteToExecProvider(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	headlessSP := runtime.NewFake()
+	p := New(defaultSP)
+	p.AddBackend("exec:scripts/gc-session-docker-headless", headlessSP)
+
+	if err := p.Route("worker-1", "exec:scripts/gc-session-docker-headless"); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got := p.route("worker-1"); got != headlessSP {
+		t.Fatal("worker-1 should route to headless provider")
+	}
+	if got := p.route("mayor"); got != defaultSP {
+		t.Fatal("mayor should route to default provider")
+	}
+}
+
+func TestMultipleBackends(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	headlessSP := runtime.NewFake()
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
+	p.AddBackend("exec:headless", headlessSP)
 
-	p.RouteACP("headless-agent")
-	err := p.Attach("headless-agent")
-	if err == nil {
-		t.Fatal("Attach on ACP session should return error")
+	if err := p.RouteACP("acp-agent"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
 	}
-	if want := `agent "headless-agent" uses ACP transport (no terminal to attach to)`; err.Error() != want {
-		t.Errorf("Attach error = %q, want %q", err.Error(), want)
+	if err := p.Route("headless-agent", "exec:headless"); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	if got := p.route("acp-agent"); got != acpSP {
+		t.Fatal("acp-agent should route to ACP")
+	}
+	if got := p.route("headless-agent"); got != headlessSP {
+		t.Fatal("headless-agent should route to headless")
+	}
+	if got := p.route("default-agent"); got != defaultSP {
+		t.Fatal("default-agent should route to default")
+	}
+}
+
+func TestAttachDelegatesToRoutedBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	headlessSP := runtime.NewFake()
+	p := New(defaultSP)
+	p.AddBackend("exec:headless", headlessSP)
+
+	if err := p.Route("headless-agent", "exec:headless"); err != nil {
+		t.Fatalf("Route: %v", err)
 	}
 
 	// Default sessions with an existing session should not error.
@@ -67,87 +112,66 @@ func TestAttachReturnsErrorForACP(t *testing.T) {
 	}
 }
 
-func TestListRunningMergesBothBackends(t *testing.T) {
+func TestListRunningMergesAllBackends(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	headlessSP := runtime.NewFake()
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
+	p.AddBackend("exec:headless", headlessSP)
 
 	// Start sessions on each backend.
 	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
 	_ = acpSP.Start(context.Background(), "acp-1", runtime.Config{})
+	_ = headlessSP.Start(context.Background(), "headless-1", runtime.Config{})
 
 	names, err := p.ListRunning("")
 	if err != nil {
 		t.Fatalf("ListRunning: %v", err)
 	}
-	if len(names) != 2 {
-		t.Fatalf("ListRunning returned %d names, want 2: %v", len(names), names)
+	if len(names) != 3 {
+		t.Fatalf("ListRunning returned %d names, want 3: %v", len(names), names)
 	}
 	found := map[string]bool{}
 	for _, n := range names {
 		found[n] = true
 	}
-	if !found["default-1"] || !found["acp-1"] {
-		t.Errorf("ListRunning = %v, want default-1 and acp-1", names)
+	if !found["default-1"] || !found["acp-1"] || !found["headless-1"] {
+		t.Errorf("ListRunning = %v, want default-1, acp-1, and headless-1", names)
 	}
 }
 
-func TestStopPreservesRouteOnBothFail(t *testing.T) {
-	defaultSP := runtime.NewFailFake() // both backends fail
-	acpSP := runtime.NewFailFake()
-	p := New(defaultSP, acpSP)
-
-	p.RouteACP("agent-fail")
-	err := p.Stop("agent-fail")
-	if err == nil {
-		t.Fatal("Stop should return error when both backends fail")
-	}
-
-	// Route should be preserved since Stop failed on both.
-	if got := p.route("agent-fail"); got != acpSP {
-		t.Fatal("route should be preserved when Stop fails on both backends")
-	}
-}
-
-func TestListRunningPartialError(t *testing.T) {
-	defaultSP := runtime.NewFake()
-	acpSP := runtime.NewFailFake() // ListRunning returns error
-	p := New(defaultSP, acpSP)
-
-	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
-
-	names, err := p.ListRunning("")
-	if err == nil {
-		t.Fatal("ListRunning should return error when one backend fails")
-	}
-	// Should still return partial results from the working backend.
-	if len(names) != 1 || names[0] != "default-1" {
-		t.Errorf("ListRunning partial = %v, want [default-1]", names)
-	}
-}
-
-func TestListRunningBothFail(t *testing.T) {
+func TestStopPreservesRouteOnAllFail(t *testing.T) {
 	defaultSP := runtime.NewFailFake()
 	acpSP := runtime.NewFailFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
-	names, err := p.ListRunning("")
-	if err == nil {
-		t.Fatal("ListRunning should return error when both backends fail")
+	if err := p.RouteACP("agent-fail"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
 	}
-	if names != nil {
-		t.Errorf("ListRunning both fail = %v, want nil", names)
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return error when all backends fail")
+	}
+
+	// Route should be preserved since Stop failed on all.
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when Stop fails on all backends")
 	}
 }
 
 func TestIsRunningFallsThrough(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
 	// Start on default backend but register route as ACP (simulates stale route).
 	_ = defaultSP.Start(context.Background(), "stale-agent", runtime.Config{})
-	p.RouteACP("stale-agent")
+	if err := p.RouteACP("stale-agent"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
+	}
 
 	// ACP says not running → should fall through to default → true.
 	if !p.IsRunning("stale-agent") {
@@ -164,7 +188,8 @@ func TestIsRunningFallsThrough(t *testing.T) {
 func TestStopFallsThrough(t *testing.T) {
 	defaultSP := runtime.NewFailFake() // Stop always fails (simulates "not found")
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
 	// Start on ACP but don't register route (simulates lost route after restart).
 	_ = acpSP.Start(context.Background(), "orphan", runtime.Config{})
@@ -181,9 +206,12 @@ func TestStopFallsThrough(t *testing.T) {
 func TestStopCleansUpRoute(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
-	p.RouteACP("agent-z")
+	if err := p.RouteACP("agent-z"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
+	}
 	_ = acpSP.Start(context.Background(), "agent-z", runtime.Config{})
 
 	if err := p.Stop("agent-z"); err != nil {
@@ -199,9 +227,12 @@ func TestStopCleansUpRoute(t *testing.T) {
 func TestPendingAndRespondDelegateToRoutedBackend(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
-	p.RouteACP("interactive-agent")
+	if err := p.RouteACP("interactive-agent"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
+	}
 	_ = acpSP.Start(context.Background(), "interactive-agent", runtime.Config{})
 	acpSP.SetPendingInteraction("interactive-agent", &runtime.PendingInteraction{RequestID: "req-1"})
 
@@ -223,13 +254,42 @@ func TestPendingAndRespondDelegateToRoutedBackend(t *testing.T) {
 func TestPendingUnsupportedWhenBackendLacksInteractionSupport(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := &runtimeNoInteractionProvider{Provider: runtime.NewFake()}
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP)
+	p.AddBackend("acp", acpSP)
 
-	p.RouteACP("plain-agent")
+	if err := p.RouteACP("plain-agent"); err != nil {
+		t.Fatalf("RouteACP: %v", err)
+	}
 
 	_, err := p.Pending("plain-agent")
 	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
+	}
+}
+
+func TestRouteRejectsUnregisteredBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	p := New(defaultSP)
+
+	// Route to a key that has no registered backend returns an error
+	// (caught at registration time rather than silently misrouting).
+	if err := p.Route("orphan-agent", "nonexistent-provider"); err == nil {
+		t.Fatal("Route should error for unregistered backend key")
+	}
+
+	// No route entry was recorded, so lookup falls back to default.
+	if got := p.route("orphan-agent"); got != defaultSP {
+		t.Fatal("lookup should fall back to default when no route was recorded")
+	}
+}
+
+func TestRouteACPErrorsWhenACPBackendMissing(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	p := New(defaultSP)
+
+	// No AddBackend("acp", ...) — RouteACP must surface the misconfiguration.
+	if err := p.RouteACP("agent-a"); err == nil {
+		t.Fatal("RouteACP should error when acp backend not registered")
 	}
 }
 
