@@ -153,32 +153,52 @@ func (SessionStreamCommonEvent) Schema(r huma.Registry) *huma.Schema {
 	return &huma.Schema{Ref: schemaRefPrefix + name}
 }
 
-// Schema registers and references the SessionRawMessageFrame union
-// schema. Implements huma.SchemaProvider.
+// sessionFrameVariants enumerates the known provider-native frame
+// shapes. Each type is forcibly registered in components.schemas so
+// downstream clients can reference the individual shapes by name — but
+// the SessionRawMessageFrame schema itself stays honestly opaque: the
+// supervisor forwards whatever JSON the provider wrote, so a oneOf
+// here would claim a closed-set contract we do not keep.
+var sessionFrameVariants = []any{
+	CodexRawEntry{},
+	CodexEventMsg{},
+	CodexResponseItem{},
+	GeminiThought{},
+	GeminiToolCall{},
+	sessionlog.Entry{},
+	sessionlog.MessageContent{},
+	sessionlog.ContentBlock{},
+	sessionlog.CompactMeta{},
+}
+
+// Schema registers and references the SessionRawMessageFrame schema.
+// Implements huma.SchemaProvider.
+//
+// The Go value is marshaled verbatim from whatever the provider wrote
+// to its session log, so the published schema is an open object:
+// additionalProperties stays true, properties is empty. Consumers
+// dispatch on the SSE event name (or, for the transcript GET response,
+// on session provider metadata) and then narrow to one of the named
+// per-provider frame shapes this file exports.
 func (SessionRawMessageFrame) Schema(r huma.Registry) *huma.Schema {
 	const name = "SessionRawMessageFrame"
 	if _, ok := r.Map()[name]; !ok {
-		variants := []reflect.Type{
-			reflect.TypeOf(CodexRawEntry{}),
-			reflect.TypeOf(CodexEventMsg{}),
-			reflect.TypeOf(CodexResponseItem{}),
-			reflect.TypeOf(GeminiThought{}),
-			reflect.TypeOf(GeminiToolCall{}),
-			reflect.TypeOf(sessionlog.Entry{}),
-			reflect.TypeOf(sessionlog.MessageContent{}),
-			reflect.TypeOf(sessionlog.ContentBlock{}),
-			reflect.TypeOf(sessionlog.CompactMeta{}),
+		// Register each known variant type in components.schemas so
+		// downstream consumers can import them by name. The variants
+		// are not referenced from SessionRawMessageFrame itself —
+		// including them in a oneOf without a discriminator would
+		// force code generators to guess, and the wire contract does
+		// not actually constrain the shape.
+		for _, v := range sessionFrameVariants {
+			t := reflect.TypeOf(v)
+			_ = r.Schema(t, true, t.Name())
 		}
-		oneOf := make([]*huma.Schema, len(variants))
-		for i, t := range variants {
-			// Force each variant into the registry so it gets a stable
-			// components.schemas entry, then reference it here.
-			oneOf[i] = r.Schema(t, true, t.Name())
-		}
+		trueVal := true
 		r.Map()[name] = &huma.Schema{
-			Title:       "Session raw transcript frame",
-			Description: "Provider-native transcript frame. The shape is whatever the provider wrote to its session log; the oneOf covers the currently recognized shapes.",
-			OneOf:       oneOf,
+			Title:                "Session raw transcript frame",
+			Description:          "Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific. Dispatch on the SSE event name (or on session provider metadata for the transcript GET endpoint) and narrow to one of the named per-provider frame types (CodexRawEntry, CodexEventMsg, CodexResponseItem, GeminiThought, GeminiToolCall, Entry, MessageContent, ContentBlock, CompactMeta).",
+			Type:                 huma.TypeObject,
+			AdditionalProperties: &trueVal,
 		}
 	}
 	return &huma.Schema{Ref: schemaRefPrefix + name}

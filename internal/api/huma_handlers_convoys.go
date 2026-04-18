@@ -233,6 +233,8 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 }
 
 // humaHandleConvoyAdd is the Huma-typed handler for POST /v0/convoy/{id}/add.
+// Applies each parent-link update one at a time; on first failure, rolls
+// back previously-applied updates so the convoy never ends up half-added.
 func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (*OKResponse, error) {
 	id := input.ID
 	stores := s.state.BeadStores()
@@ -248,17 +250,24 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		if b.Type != "convoy" {
 			return nil, huma.Error400BadRequest("bead " + id + " is not a convoy")
 		}
-		// Pre-validate all items exist before linking.
+		// Pre-validate all items exist and capture their previous parent
+		// so rollback can restore it if one of the Updates later fails.
+		prevParent := make(map[string]string, len(input.Body.Items))
 		for _, itemID := range input.Body.Items {
-			if _, err := store.Get(itemID); err != nil {
+			item, err := store.Get(itemID)
+			if err != nil {
 				return nil, storeError(err)
 			}
+			prevParent[itemID] = item.ParentID
 		}
+		applied := make([]string, 0, len(input.Body.Items))
 		for _, itemID := range input.Body.Items {
 			pid := id
 			if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
+				rollbackConvoyMembership(store, applied, prevParent, "convoy.add")
 				return nil, huma.Error500InternalServerError("failed to link item " + itemID + ": " + err.Error())
 			}
+			applied = append(applied, itemID)
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "updated"
@@ -296,18 +305,42 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 				return nil, huma.Error400BadRequest("item " + itemID + " does not belong to convoy " + id)
 			}
 		}
-		// Unlink items by clearing their ParentID.
+		// Unlink items by clearing their ParentID. Same rollback shape
+		// as ConvoyAdd: record the old parent per item so a mid-loop
+		// failure can restore the convoy to its pre-call state.
+		prevParent := make(map[string]string, len(input.Body.Items))
+		for _, itemID := range input.Body.Items {
+			prevParent[itemID] = id
+		}
+		applied := make([]string, 0, len(input.Body.Items))
 		empty := ""
 		for _, itemID := range input.Body.Items {
 			if err := store.Update(itemID, beads.UpdateOpts{ParentID: &empty}); err != nil {
+				rollbackConvoyMembership(store, applied, prevParent, "convoy.remove")
 				return nil, huma.Error500InternalServerError("failed to unlink item " + itemID + ": " + err.Error())
 			}
+			applied = append(applied, itemID)
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "updated"
 		return resp, nil
 	}
 	return nil, huma.Error404NotFound("convoy " + id + " not found")
+}
+
+// rollbackConvoyMembership reverses a series of ParentID updates. If a
+// rollback Update itself fails, the inconsistent state is logged — an
+// operator-visible signal that a reconciler or follow-up delete is
+// needed. Best-effort: walks applied in reverse so later-applied items
+// are restored first.
+func rollbackConvoyMembership(store beads.Store, applied []string, prevParent map[string]string, op string) {
+	for i := len(applied) - 1; i >= 0; i-- {
+		itemID := applied[i]
+		prev := prevParent[itemID]
+		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &prev}); err != nil {
+			log.Printf("gc api: %s rollback failed for item %s (→ %q): %v", op, itemID, prev, err)
+		}
+	}
 }
 
 // humaHandleConvoyCheck is the Huma-typed handler for GET /v0/convoy/{id}/check.

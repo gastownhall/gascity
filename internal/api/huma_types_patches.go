@@ -28,10 +28,7 @@ type AgentPatchGetQualifiedInput struct {
 
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentPatchGetQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // AgentPatchSetInput is the Huma input for PUT /v0/city/{cityName}/patches/agents.
@@ -64,10 +61,7 @@ type AgentPatchDeleteQualifiedInput struct {
 
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentPatchDeleteQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // RigPatchListInput is the Huma input for GET /v0/city/{cityName}/patches/rigs.

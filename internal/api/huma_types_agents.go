@@ -4,6 +4,20 @@ package api
 // group. Split out of the original huma_types.go; mirrors the layout
 // of huma_handlers_agents.go.
 
+// joinAgentQualifiedName returns the canonical rig-qualified agent name
+// from dir + base components. Shared by every qualified agent input
+// type so the join logic lives in one place — embedding a mixin with
+// path-tagged fields turns out to be invisible to the spec (Huma
+// doesn't recurse into embedded path params the way it does for
+// headers/queries), so the explicit Dir+Base fields stay on each input
+// and this helper absorbs the duplication.
+func joinAgentQualifiedName(dir, base string) string {
+	if dir == "" {
+		return base
+	}
+	return dir + "/" + base
+}
+
 // --- Agent types ---
 
 // AgentListInput is the Huma input for GET /v0/city/{cityName}/agents.
@@ -35,10 +49,7 @@ type AgentGetQualifiedInput struct {
 
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentGetQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // AgentCreateInput is the Huma input for POST /v0/city/{cityName}/agents.
@@ -78,10 +89,7 @@ type AgentUpdateQualifiedInput struct {
 
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentUpdateQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // AgentDeleteInput is the Huma input for DELETE /v0/city/{cityName}/agent/{base}.
@@ -100,10 +108,7 @@ type AgentDeleteQualifiedInput struct {
 
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentDeleteQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // AgentActionInput is the Huma input for
@@ -126,10 +131,7 @@ type AgentActionQualifiedInput struct {
 
 // QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentActionQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // --- Agent output types ---
@@ -151,12 +153,9 @@ type AgentOutputQualifiedInput struct {
 	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
 }
 
-// QualifiedName returns the full qualified agent name from dir/base components.
+// QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentOutputQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 
 // AgentOutputStreamInput is the Huma input for GET /v0/city/{cityName}/agent/{base}/output/stream.
@@ -172,11 +171,8 @@ type AgentOutputStreamQualifiedInput struct {
 	Base string `path:"base" doc:"Agent base name."`
 }
 
-// QualifiedName returns the full qualified agent name from dir/base components.
+// QualifiedName joins dir and base into a canonical agent name.
 func (i *AgentOutputStreamQualifiedInput) QualifiedName() string {
-	if i.Dir == "" {
-		return i.Base
-	}
-	return i.Dir + "/" + i.Base
+	return joinAgentQualifiedName(i.Dir, i.Base)
 }
 

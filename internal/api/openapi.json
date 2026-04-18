@@ -5402,37 +5402,10 @@
         "type": "object"
       },
       "SessionRawMessageFrame": {
-        "description": "Provider-native transcript frame. The shape is whatever the provider wrote to its session log; the oneOf covers the currently recognized shapes.",
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/CodexRawEntry"
-          },
-          {
-            "$ref": "#/components/schemas/CodexEventMsg"
-          },
-          {
-            "$ref": "#/components/schemas/CodexResponseItem"
-          },
-          {
-            "$ref": "#/components/schemas/GeminiThought"
-          },
-          {
-            "$ref": "#/components/schemas/GeminiToolCall"
-          },
-          {
-            "$ref": "#/components/schemas/Entry"
-          },
-          {
-            "$ref": "#/components/schemas/MessageContent"
-          },
-          {
-            "$ref": "#/components/schemas/ContentBlock"
-          },
-          {
-            "$ref": "#/components/schemas/CompactMeta"
-          }
-        ],
-        "title": "Session raw transcript frame"
+        "additionalProperties": true,
+        "description": "Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific. Dispatch on the SSE event name (or on session provider metadata for the transcript GET endpoint) and narrow to one of the named per-provider frame types (CodexRawEntry, CodexEventMsg, CodexResponseItem, GeminiThought, GeminiToolCall, Entry, MessageContent, ContentBlock, CompactMeta).",
+        "title": "Session raw transcript frame",
+        "type": "object"
       },
       "SessionRenameInputBody": {
         "additionalProperties": false,

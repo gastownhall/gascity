@@ -523,49 +523,6 @@ type CityPatchInputBody struct {
 	Suspended *bool `json:"suspended,omitempty"`
 }
 
-// CodexEventMsg defines model for CodexEventMsg.
-type CodexEventMsg struct {
-	// Message Message text for user_message/agent_message entries.
-	Message *string `json:"message,omitempty"`
-
-	// Text Text for agent_reasoning entries.
-	Text *string `json:"text,omitempty"`
-
-	// Type user_message, agent_message, agent_reasoning, token_count.
-	Type string `json:"type"`
-}
-
-// CodexRawEntry defines model for CodexRawEntry.
-type CodexRawEntry struct {
-	Payload   interface{} `json:"payload"`
-	Timestamp string      `json:"timestamp"`
-	Type      string      `json:"type"`
-}
-
-// CodexResponseItem defines model for CodexResponseItem.
-type CodexResponseItem struct {
-	CallId  *string             `json:"call_id,omitempty"`
-	Content *[]CodexTextContent `json:"content,omitempty"`
-	Name    *string             `json:"name,omitempty"`
-	Output  *string             `json:"output,omitempty"`
-	Role    *string             `json:"role,omitempty"`
-	Summary *[]CodexTextContent `json:"summary,omitempty"`
-
-	// Type message, reasoning, function_call, function_call_output.
-	Type string `json:"type"`
-}
-
-// CodexTextContent defines model for CodexTextContent.
-type CodexTextContent struct {
-	Text string `json:"text"`
-}
-
-// CompactMeta defines model for CompactMeta.
-type CompactMeta struct {
-	PreTokens int64  `json:"preTokens"`
-	Trigger   string `json:"trigger"`
-}
-
 // ConfigAgentResponse defines model for ConfigAgentResponse.
 type ConfigAgentResponse struct {
 	Dir       *string `json:"dir,omitempty"`
@@ -624,18 +581,6 @@ type ConfigValidateOutputBody struct {
 
 	// Warnings Validation warnings.
 	Warnings *[]string `json:"warnings"`
-}
-
-// ContentBlock defines model for ContentBlock.
-type ContentBlock struct {
-	Content   interface{} `json:"content,omitempty"`
-	Id        *string     `json:"id,omitempty"`
-	Input     interface{} `json:"input,omitempty"`
-	IsError   *bool       `json:"is_error,omitempty"`
-	Name      *string     `json:"name,omitempty"`
-	Text      *string     `json:"text,omitempty"`
-	ToolUseId *string     `json:"tool_use_id,omitempty"`
-	Type      string      `json:"type"`
 }
 
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
@@ -772,21 +717,6 @@ type Dep struct {
 	DependsOnId string `json:"depends_on_id"`
 	IssueId     string `json:"issue_id"`
 	Type        string `json:"type"`
-}
-
-// Entry defines model for Entry.
-type Entry struct {
-	CompactMetadata   *CompactMeta `json:"compactMetadata,omitempty"`
-	IsCompactSummary  *bool        `json:"isCompactSummary,omitempty"`
-	LogicalParentUuid *string      `json:"logicalParentUuid,omitempty"`
-	Message           interface{}  `json:"message"`
-	ParentUuid        string       `json:"parentUuid"`
-	SessionId         *string      `json:"sessionId,omitempty"`
-	Subtype           string       `json:"subtype"`
-	Timestamp         time.Time    `json:"timestamp"`
-	ToolUseID         *string      `json:"toolUseID,omitempty"`
-	Type              string       `json:"type"`
-	Uuid              string       `json:"uuid"`
 }
 
 // ErrorDetail defines model for ErrorDetail.
@@ -1146,36 +1076,6 @@ type FormulaVarDefResponse struct {
 	Type        string      `json:"type"`
 }
 
-// GeminiFunctionResponse defines model for GeminiFunctionResponse.
-type GeminiFunctionResponse struct {
-	Id       string                       `json:"id"`
-	Response GeminiFunctionResponseOutput `json:"response"`
-}
-
-// GeminiFunctionResponseOutput defines model for GeminiFunctionResponseOutput.
-type GeminiFunctionResponseOutput struct {
-	Output string `json:"output"`
-}
-
-// GeminiThought defines model for GeminiThought.
-type GeminiThought struct {
-	Description string `json:"description"`
-	Subject     string `json:"subject"`
-}
-
-// GeminiToolCall defines model for GeminiToolCall.
-type GeminiToolCall struct {
-	Args   interface{}                  `json:"args"`
-	Id     string                       `json:"id"`
-	Name   string                       `json:"name"`
-	Result *[]GeminiToolCallResultEntry `json:"result"`
-}
-
-// GeminiToolCallResultEntry defines model for GeminiToolCallResultEntry.
-type GeminiToolCallResultEntry struct {
-	FunctionResponse GeminiFunctionResponse `json:"functionResponse"`
-}
-
 // GitStatus defines model for GitStatus.
 type GitStatus struct {
 	Ahead        int64  `json:"ahead"`
@@ -1521,12 +1421,6 @@ type Message struct {
 	Subject   string    `json:"subject"`
 	ThreadId  *string   `json:"thread_id,omitempty"`
 	To        string    `json:"to"`
-}
-
-// MessageContent defines model for MessageContent.
-type MessageContent struct {
-	Content interface{} `json:"content"`
-	Role    string      `json:"role"`
 }
 
 // MonitorFeedItemResponse defines model for MonitorFeedItemResponse.
@@ -2123,10 +2017,8 @@ type SessionPendingResponse struct {
 	Supported bool                `json:"supported"`
 }
 
-// SessionRawMessageFrame Provider-native transcript frame. The shape is whatever the provider wrote to its session log; the oneOf covers the currently recognized shapes.
-type SessionRawMessageFrame struct {
-	union json.RawMessage
-}
+// SessionRawMessageFrame Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific. Dispatch on the SSE event name (or on session provider metadata for the transcript GET endpoint) and narrow to one of the named per-provider frame types (CodexRawEntry, CodexEventMsg, CodexResponseItem, GeminiThought, GeminiToolCall, Entry, MessageContent, ContentBlock, CompactMeta).
+type SessionRawMessageFrame map[string]interface{}
 
 // SessionRenameInputBody defines model for SessionRenameInputBody.
 type SessionRenameInputBody struct {
@@ -3174,250 +3066,6 @@ type CreateSessionJSONRequestBody = SessionCreateBody
 
 // PostV0CityByCityNameSlingJSONRequestBody defines body for PostV0CityByCityNameSling for application/json ContentType.
 type PostV0CityByCityNameSlingJSONRequestBody = SlingInputBody
-
-// AsCodexRawEntry returns the union data inside the SessionRawMessageFrame as a CodexRawEntry
-func (t SessionRawMessageFrame) AsCodexRawEntry() (CodexRawEntry, error) {
-	var body CodexRawEntry
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromCodexRawEntry overwrites any union data inside the SessionRawMessageFrame as the provided CodexRawEntry
-func (t *SessionRawMessageFrame) FromCodexRawEntry(v CodexRawEntry) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeCodexRawEntry performs a merge with any union data inside the SessionRawMessageFrame, using the provided CodexRawEntry
-func (t *SessionRawMessageFrame) MergeCodexRawEntry(v CodexRawEntry) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsCodexEventMsg returns the union data inside the SessionRawMessageFrame as a CodexEventMsg
-func (t SessionRawMessageFrame) AsCodexEventMsg() (CodexEventMsg, error) {
-	var body CodexEventMsg
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromCodexEventMsg overwrites any union data inside the SessionRawMessageFrame as the provided CodexEventMsg
-func (t *SessionRawMessageFrame) FromCodexEventMsg(v CodexEventMsg) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeCodexEventMsg performs a merge with any union data inside the SessionRawMessageFrame, using the provided CodexEventMsg
-func (t *SessionRawMessageFrame) MergeCodexEventMsg(v CodexEventMsg) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsCodexResponseItem returns the union data inside the SessionRawMessageFrame as a CodexResponseItem
-func (t SessionRawMessageFrame) AsCodexResponseItem() (CodexResponseItem, error) {
-	var body CodexResponseItem
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromCodexResponseItem overwrites any union data inside the SessionRawMessageFrame as the provided CodexResponseItem
-func (t *SessionRawMessageFrame) FromCodexResponseItem(v CodexResponseItem) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeCodexResponseItem performs a merge with any union data inside the SessionRawMessageFrame, using the provided CodexResponseItem
-func (t *SessionRawMessageFrame) MergeCodexResponseItem(v CodexResponseItem) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsGeminiThought returns the union data inside the SessionRawMessageFrame as a GeminiThought
-func (t SessionRawMessageFrame) AsGeminiThought() (GeminiThought, error) {
-	var body GeminiThought
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromGeminiThought overwrites any union data inside the SessionRawMessageFrame as the provided GeminiThought
-func (t *SessionRawMessageFrame) FromGeminiThought(v GeminiThought) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeGeminiThought performs a merge with any union data inside the SessionRawMessageFrame, using the provided GeminiThought
-func (t *SessionRawMessageFrame) MergeGeminiThought(v GeminiThought) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsGeminiToolCall returns the union data inside the SessionRawMessageFrame as a GeminiToolCall
-func (t SessionRawMessageFrame) AsGeminiToolCall() (GeminiToolCall, error) {
-	var body GeminiToolCall
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromGeminiToolCall overwrites any union data inside the SessionRawMessageFrame as the provided GeminiToolCall
-func (t *SessionRawMessageFrame) FromGeminiToolCall(v GeminiToolCall) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeGeminiToolCall performs a merge with any union data inside the SessionRawMessageFrame, using the provided GeminiToolCall
-func (t *SessionRawMessageFrame) MergeGeminiToolCall(v GeminiToolCall) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsEntry returns the union data inside the SessionRawMessageFrame as a Entry
-func (t SessionRawMessageFrame) AsEntry() (Entry, error) {
-	var body Entry
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromEntry overwrites any union data inside the SessionRawMessageFrame as the provided Entry
-func (t *SessionRawMessageFrame) FromEntry(v Entry) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeEntry performs a merge with any union data inside the SessionRawMessageFrame, using the provided Entry
-func (t *SessionRawMessageFrame) MergeEntry(v Entry) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsMessageContent returns the union data inside the SessionRawMessageFrame as a MessageContent
-func (t SessionRawMessageFrame) AsMessageContent() (MessageContent, error) {
-	var body MessageContent
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromMessageContent overwrites any union data inside the SessionRawMessageFrame as the provided MessageContent
-func (t *SessionRawMessageFrame) FromMessageContent(v MessageContent) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeMessageContent performs a merge with any union data inside the SessionRawMessageFrame, using the provided MessageContent
-func (t *SessionRawMessageFrame) MergeMessageContent(v MessageContent) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsContentBlock returns the union data inside the SessionRawMessageFrame as a ContentBlock
-func (t SessionRawMessageFrame) AsContentBlock() (ContentBlock, error) {
-	var body ContentBlock
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromContentBlock overwrites any union data inside the SessionRawMessageFrame as the provided ContentBlock
-func (t *SessionRawMessageFrame) FromContentBlock(v ContentBlock) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeContentBlock performs a merge with any union data inside the SessionRawMessageFrame, using the provided ContentBlock
-func (t *SessionRawMessageFrame) MergeContentBlock(v ContentBlock) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsCompactMeta returns the union data inside the SessionRawMessageFrame as a CompactMeta
-func (t SessionRawMessageFrame) AsCompactMeta() (CompactMeta, error) {
-	var body CompactMeta
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromCompactMeta overwrites any union data inside the SessionRawMessageFrame as the provided CompactMeta
-func (t *SessionRawMessageFrame) FromCompactMeta(v CompactMeta) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeCompactMeta performs a merge with any union data inside the SessionRawMessageFrame, using the provided CompactMeta
-func (t *SessionRawMessageFrame) MergeCompactMeta(v CompactMeta) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-func (t SessionRawMessageFrame) MarshalJSON() ([]byte, error) {
-	b, err := t.union.MarshalJSON()
-	return b, err
-}
-
-func (t *SessionRawMessageFrame) UnmarshalJSON(b []byte) error {
-	err := t.union.UnmarshalJSON(b)
-	return err
-}
 
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
