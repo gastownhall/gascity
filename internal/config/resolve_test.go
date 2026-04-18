@@ -492,6 +492,108 @@ func TestLookupProviderCityOverride(t *testing.T) {
 	}
 }
 
+// TestLookupProviderBaseChainIntegration verifies the full path from
+// lookupProvider through the chain walker: a wrapper provider with
+// base = "builtin:codex" must come back with inherited PermissionModes
+// and OptionsSchema from the built-in codex. This test would have
+// caught the bug where the runtime launch command for codex-mini was
+// missing --dangerously-bypass-approvals-and-sandbox because
+// lookupProvider ignored the Base field.
+func TestLookupProviderBaseChainIntegration(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:          &b,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--", "-m", "gpt-5.3"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+	}
+	spec, err := lookupProvider("codex-mini", city, lookPathAll)
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	// Leaf-level overrides preserved.
+	if spec.Command != "aimux" {
+		t.Errorf("Command = %q, want aimux (leaf override)", spec.Command)
+	}
+	// Inherited from built-in codex: PermissionModes must contain the
+	// unrestricted key that maps to --dangerously-bypass flag.
+	if spec.PermissionModes == nil {
+		t.Fatal("PermissionModes is nil — built-in codex inheritance did not propagate via lookupProvider")
+	}
+	want := "--dangerously-bypass-approvals-and-sandbox"
+	if got := spec.PermissionModes["unrestricted"]; got != want {
+		t.Errorf("PermissionModes[\"unrestricted\"] = %q, want %q", got, want)
+	}
+	// Inherited OptionsSchema: must contain permission_mode with choices
+	// including unrestricted → FlagArgs [--dangerously-bypass-approvals-and-sandbox].
+	found := false
+	for _, opt := range spec.OptionsSchema {
+		if opt.Key != "permission_mode" {
+			continue
+		}
+		for _, c := range opt.Choices {
+			if c.Value == "unrestricted" {
+				if len(c.FlagArgs) == 0 || c.FlagArgs[0] != want {
+					t.Errorf("permission_mode unrestricted FlagArgs = %v, want %v", c.FlagArgs, []string{want})
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("OptionsSchema did not inherit permission_mode.unrestricted from built-in codex")
+	}
+	// Inherited scalars.
+	if spec.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want arg (inherited)", spec.PromptMode)
+	}
+	if spec.ReadyDelayMs != 3000 {
+		t.Errorf("ReadyDelayMs = %d, want 3000 (inherited)", spec.ReadyDelayMs)
+	}
+}
+
+// TestResolveProviderBaseChainEmitsDangerousBypass verifies that a
+// wrapped codex provider with base = "builtin:codex" produces a
+// ResolvedProvider whose ResolveDefaultArgs() includes
+// --dangerously-bypass-approvals-and-sandbox. This is the end-to-end
+// launch-command invariant for the aimux-codex fix.
+func TestResolveProviderBaseChainEmitsDangerousBypass(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:          &b,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--", "-m", "gpt-5.3"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-mini", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if resolved.BuiltinAncestor != "codex" {
+		t.Errorf("BuiltinAncestor = %q, want codex", resolved.BuiltinAncestor)
+	}
+	if len(resolved.OptionsSchema) == 0 {
+		t.Fatal("OptionsSchema empty — built-in inheritance did not reach ResolvedProvider")
+	}
+	args := resolved.ResolveDefaultArgs()
+	want := "--dangerously-bypass-approvals-and-sandbox"
+	found := false
+	for _, a := range args {
+		if a == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ResolveDefaultArgs() = %v, missing %q — session would hang on first sandboxed command", args, want)
+	}
+}
+
 func TestLookupProviderUnknown(t *testing.T) {
 	_, err := lookupProvider("vim", nil, lookPathAll)
 	if err == nil {
