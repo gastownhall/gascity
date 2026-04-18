@@ -77,8 +77,7 @@ reality and is a bug to fix.
 
 No `json.Marshal` or `json.Unmarshal` in any HTTP or SSE code path that
 touches bytes owned by our API contract. No `json.NewEncoder` /
-`json.NewDecoder` writing or reading wire bodies. No
-`MarshalJSON` / `UnmarshalJSON` on wire types. Huma owns every byte
+`json.NewDecoder` writing or reading wire bodies. Huma owns every byte
 that enters or leaves the socket for a typed operation.
 
 Edge cases that are NOT wire:
@@ -90,6 +89,20 @@ Edge cases that are NOT wire:
   provider auth files like `~/.codex/auth.json`).
 - Internal event-bus `[]byte` payloads between in-process emitters and
   consumers (but see Principle 7 — these become typed at the wire).
+
+Custom `MarshalJSON` / `UnmarshalJSON` on wire types are forbidden
+with two narrow, documented exceptions:
+
+- **`SessionRawMessageFrame`** (Principle 6's third-party provider
+  frame hatch) — forwards arbitrary JSON the provider wrote.
+- **`EventPayloadUnion`** (`internal/api/convoy_event_stream.go`) —
+  the wire wrapper around `events.Payload` that makes the payload
+  field a named `oneOf` component in the spec while preserving
+  Go-side type safety. Its `MarshalJSON` emits the concrete variant
+  directly (so the wire sees `{"rig":...}` rather than a wrapper
+  object); its Schema method registers and refs the named component.
+  Both are required to get typed oneOf wire emission past the
+  limitations of current Go OpenAPI codegen (see Principle 7).
 
 ### 5. Typed structs for every shape knowable at compile time
 
@@ -126,28 +139,45 @@ opacify our own shapes that happen to be nested near them.
 
 ### 7. Every event type has a typed wire payload
 
-Both `/v0/events/stream` and `/v0/city/{cityName}/events/stream` emit
-a discriminated union of per-event-type variants. Each variant has a
-`type` const pinned to one event-type string and a `payload` $ref to
-the registered payload schema for that type. Consumers generate
-compile-time exhaustive switches over the full event catalog; there
-is no opaque `payload: {}` anywhere on the wire.
+Every surface that emits events — the SSE streams
+(`/v0/events/stream`, `/v0/city/{cityName}/events/stream`) and the
+list endpoints (`GET /v0/events`, `GET /v0/city/{cityName}/events`)
+— describes its `payload` field as a named `oneOf` union schema
+covering every registered `events.Payload` shape. There is no opaque
+`payload: {}` anywhere on the wire. The spec enumerates the full
+catalog of possible payload shapes; generated clients get a typed
+union rather than an interface-to-anything.
 
 The internal event bus (`internal/events`) stores payloads as
 `[]byte` so it stays domain-agnostic. That is fine inside the bus.
 The event-payload registry (`internal/events/payload.go`) holds the
 event-type → Go-type mapping: emitters take values of the sealed
-`events.Payload` interface, and the SSE projection calls
+`events.Payload` interface, and the wire projection calls
 `events.DecodePayload` to turn bus bytes back into typed Go values
-before wire emission.
+before emission.
 
-Every constant in `events.KnownEventTypes` must have a registered
-payload. Events that carry no structured data register `events.NoPayload`
-— a typed empty struct that still produces a named schema variant so
-the wire stays uniform across event types. `TestEveryKnownEventTypeHasRegisteredPayload`
-fails CI if a new constant is added without registration; that's how
-the registry discipline stays load-bearing rather than
-best-effort.
+**Discrimination design.** The envelope itself carries a plain
+`type: string` field; the `payload` field is the discriminated
+`oneOf` union. Consumers switch on `type` and narrow `payload`
+explicitly (e.g. `if event.type === "mail.sent") (event.payload as
+MailEventPayload)`). We would prefer envelope-level discrimination —
+each event-type constant pinned as a `type` const in its own
+envelope variant, with OpenAPI 3.1 discriminators giving consumers
+automatic narrowing — but no current Go OpenAPI client generator
+produces a workable Go type from envelope-level `oneOf`
+(oapi-codegen collapses the envelope to a `json.RawMessage` wrapper
+that loses all field access; ogen drops SSE endpoints entirely). The
+payload-level-union design is the current ceiling given the tooling;
+every payload variant is still fully typed on the wire, so consumer
+code stays compile-time checked against the full shape catalog.
+
+**Registry coverage.** Every constant in `events.KnownEventTypes`
+must have a registered payload. Events that carry no structured data
+register `events.NoPayload` — a typed empty struct that still
+produces a named schema variant so the wire stays uniform across
+event types. `TestEveryKnownEventTypeHasRegisteredPayload` fails CI
+if a new constant is added without registration; that's how the
+registry discipline stays load-bearing rather than best-effort.
 
 ### 8. Error responses are typed too
 
@@ -298,15 +328,25 @@ change based on what our two in-tree consumers need.
 
 ## Known gaps against these principles
 
-None open. Every principle holds end-to-end including the
-events-stream wire schema — both `/v0/events/stream` and
-`/v0/city/{cityName}/events/stream` now emit a discriminated-union
-of 36 typed variants (one per `events.KnownEventTypes` entry), each
-with a `type` const and a `payload` $ref to the registered payload
-schema. Consumers generate compile-time-checked switches by event
-type across the full catalog. The registry-coverage test
+None open. Every principle holds end-to-end including the events
+surface — both SSE streams (`/v0/events/stream`,
+`/v0/city/{cityName}/events/stream`) and list endpoints
+(`GET /v0/events`, `GET /v0/city/{cityName}/events`) emit typed
+`payload` fields as a named `oneOf` union over every registered
+`events.Payload` shape. `event.Event` and `event.TaggedEvent` (the
+bus-internal types with opaque payload bytes) are no longer wire
+types — the handlers convert to `WireEvent` / `WireTaggedEvent`
+before returning. The registry-coverage test
 (`event_payloads_coverage_test.go`) fails CI if a new event-type
 constant is added without registering a payload.
+
+**Tooling ceiling, not a plan gap.** Envelope-level `oneOf`
+discrimination (each event-type constant as a `type` const on its
+own envelope variant) would give consumers automatic discriminator
+narrowing, but no current Go OpenAPI client generator renders that
+design into usable Go types — see the note under Principle 7 and
+`cmd/gen-client/main.go` for the details. If a generator lands that
+fixes this, revisit.
 
 ## Consumer alignment (ongoing)
 

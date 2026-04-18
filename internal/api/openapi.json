@@ -1794,40 +1794,6 @@
         },
         "type": "object"
       },
-      "Event": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {},
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor"
-        ],
-        "type": "object"
-      },
       "EventEmitOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -3087,49 +3053,6 @@
         ],
         "type": "object"
       },
-      "ListBodyEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "items": {
-            "description": "The list of items.",
-            "items": {
-              "$ref": "#/components/schemas/Event"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "next_cursor": {
-            "description": "Cursor for the next page of results.",
-            "type": "string"
-          },
-          "partial": {
-            "description": "True when one or more backends failed and the list is incomplete.",
-            "type": "boolean"
-          },
-          "partial_errors": {
-            "description": "Human-readable errors from backends that failed during aggregation.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "total": {
-            "description": "Total number of items matching the query.",
-            "format": "int64",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "items",
-          "total"
-        ],
-        "type": "object"
-      },
       "ListBodyExtmsgAdapterInfo": {
         "additionalProperties": false,
         "properties": {
@@ -3438,6 +3361,49 @@
             "description": "The list of items.",
             "items": {
               "$ref": "#/components/schemas/Status"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "description": "Total number of items matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ListBodyWireEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of items.",
+            "items": {
+              "$ref": "#/components/schemas/WireEvent"
             },
             "type": [
               "array",
@@ -6058,7 +6024,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/TaggedEvent"
+              "$ref": "#/components/schemas/WireTaggedEvent"
             },
             "type": [
               "array",
@@ -6143,44 +6109,6 @@
         ],
         "type": "object"
       },
-      "TaggedEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {},
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "city",
-          "seq",
-          "type",
-          "ts",
-          "actor"
-        ],
-        "type": "object"
-      },
       "TaggedEventStreamEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -6254,6 +6182,82 @@
         "required": [
           "session_id",
           "count"
+        ],
+        "type": "object"
+      },
+      "WireEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EventPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "WireTaggedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EventPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city",
+          "seq",
+          "type",
+          "ts",
+          "actor"
         ],
         "type": "object"
       },
@@ -9421,7 +9425,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyEvent"
+                  "$ref": "#/components/schemas/ListBodyWireEvent"
                 }
               }
             },

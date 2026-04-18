@@ -11,7 +11,7 @@ import (
 )
 
 // humaHandleEventList is the Huma-typed handler for GET /v0/events.
-func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput) (*ListOutput[events.Event], error) {
+func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput) (*ListOutput[WireEvent], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
@@ -19,9 +19,9 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 
 	ep := s.state.EventProvider()
 	if ep == nil {
-		return &ListOutput[events.Event]{
+		return &ListOutput[WireEvent]{
 			Index: 0,
-			Body:  ListBody[events.Event]{Items: []events.Event{}, Total: 0},
+			Body:  ListBody[WireEvent]{Items: []WireEvent{}, Total: 0},
 		}, nil
 	}
 
@@ -39,8 +39,10 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	if evts == nil {
-		evts = []events.Event{}
+
+	wires := make([]WireEvent, 0, len(evts))
+	for _, e := range evts {
+		wires = append(wires, toWireEvent(e))
 	}
 
 	index := s.latestIndex()
@@ -55,22 +57,22 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 			Offset: decodeCursor(input.Cursor),
 			Limit:  limit,
 		}
-		page, total, nextCursor := paginate(evts, pp)
+		page, total, nextCursor := paginate(wires, pp)
 		if page == nil {
-			page = []events.Event{}
+			page = []WireEvent{}
 		}
-		return &ListOutput[events.Event]{
+		return &ListOutput[WireEvent]{
 			Index: index,
-			Body:  ListBody[events.Event]{Items: page, Total: total, NextCursor: nextCursor},
+			Body:  ListBody[WireEvent]{Items: page, Total: total, NextCursor: nextCursor},
 		}, nil
 	}
 
-	if limit < len(evts) {
-		evts = evts[:limit]
+	if limit < len(wires) {
+		wires = wires[:limit]
 	}
-	return &ListOutput[events.Event]{
+	return &ListOutput[WireEvent]{
 		Index: index,
-		Body:  ListBody[events.Event]{Items: evts, Total: len(evts)},
+		Body:  ListBody[WireEvent]{Items: wires, Total: len(wires)},
 	}, nil
 }
 

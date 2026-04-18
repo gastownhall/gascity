@@ -395,9 +395,9 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	return streamCityEvents(ctx, client, scope.cityName, resumeSeq, typeFilter, payloadMatch, true, stdout, stderr)
 }
 
-func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]genclient.Event, string, error) {
+func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]genclient.WireEvent, string, error) {
 	limit := int64(500)
-	var all []genclient.Event
+	var all []genclient.WireEvent
 	var cursor *string
 	index := "0"
 
@@ -457,7 +457,7 @@ func fetchCityHeadIndex(ctx context.Context, client *genclient.ClientWithRespons
 	return index, nil
 }
 
-func fetchSupervisorEvents(ctx context.Context, client *genclient.ClientWithResponses, typeFilter, sinceFlag string) ([]genclient.TaggedEvent, error) {
+func fetchSupervisorEvents(ctx context.Context, client *genclient.ClientWithResponses, typeFilter, sinceFlag string) ([]genclient.WireTaggedEvent, error) {
 	params := &genclient.GetV0EventsParams{}
 	if strings.TrimSpace(typeFilter) != "" {
 		params.Type = &typeFilter
@@ -473,7 +473,7 @@ func fetchSupervisorEvents(ctx context.Context, client *genclient.ClientWithResp
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
-		return []genclient.TaggedEvent{}, nil
+		return []genclient.WireTaggedEvent{}, nil
 	}
 	return *resp.JSON200.Items, nil
 }
@@ -504,14 +504,14 @@ func eventsListError(statusCode int, problem *genclient.ErrorModel) error {
 
 func printJSONLines(items any, stdout, stderr io.Writer) int {
 	switch typed := items.(type) {
-	case []genclient.Event:
+	case []genclient.WireEvent:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
 				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
 				return 1
 			}
 		}
-	case []genclient.TaggedEvent:
+	case []genclient.WireTaggedEvent:
 		for _, item := range typed {
 			if err := writeJSONLValue(stdout, item); err != nil {
 				fmt.Fprintf(stderr, "gc events: marshal: %v\n", err) //nolint:errcheck
@@ -550,11 +550,11 @@ func writeJSONLValue(stdout io.Writer, value any) error {
 	return err
 }
 
-func filterCityEvents(items []genclient.Event, afterSeq uint64, typeFilter string, payloadMatch map[string][]string) []genclient.Event {
+func filterCityEvents(items []genclient.WireEvent, afterSeq uint64, typeFilter string, payloadMatch map[string][]string) []genclient.WireEvent {
 	if len(items) == 0 {
-		return []genclient.Event{}
+		return []genclient.WireEvent{}
 	}
-	out := make([]genclient.Event, 0, len(items))
+	out := make([]genclient.WireEvent, 0, len(items))
 	for _, item := range items {
 		if uint64(item.Seq) <= afterSeq {
 			continue
@@ -570,11 +570,11 @@ func filterCityEvents(items []genclient.Event, afterSeq uint64, typeFilter strin
 	return out
 }
 
-func filterSupervisorEvents(items []genclient.TaggedEvent, typeFilter string, payloadMatch map[string][]string) []genclient.TaggedEvent {
+func filterSupervisorEvents(items []genclient.WireTaggedEvent, typeFilter string, payloadMatch map[string][]string) []genclient.WireTaggedEvent {
 	if len(items) == 0 {
-		return []genclient.TaggedEvent{}
+		return []genclient.WireTaggedEvent{}
 	}
-	out := make([]genclient.TaggedEvent, 0, len(items))
+	out := make([]genclient.WireTaggedEvent, 0, len(items))
 	for _, item := range items {
 		if typeFilter != "" && item.Type != typeFilter {
 			continue
@@ -587,9 +587,9 @@ func filterSupervisorEvents(items []genclient.TaggedEvent, typeFilter string, pa
 	return out
 }
 
-func filterSupervisorEventsAfterCursor(items []genclient.TaggedEvent, cursor, typeFilter string, payloadMatch map[string][]string) []genclient.TaggedEvent {
+func filterSupervisorEventsAfterCursor(items []genclient.WireTaggedEvent, cursor, typeFilter string, payloadMatch map[string][]string) []genclient.WireTaggedEvent {
 	cursors := events.ParseCursor(cursor)
-	out := make([]genclient.TaggedEvent, 0, len(items))
+	out := make([]genclient.WireTaggedEvent, 0, len(items))
 	for _, item := range items {
 		if uint64(item.Seq) <= cursors[item.City] {
 			continue
@@ -808,7 +808,7 @@ func (d *sseDecoder) Next() (sseFrame, error) {
 	return sseFrame{}, io.EOF
 }
 
-func supervisorCursorFor(items []genclient.TaggedEvent) string {
+func supervisorCursorFor(items []genclient.WireTaggedEvent) string {
 	if len(items) == 0 {
 		return ""
 	}
@@ -821,13 +821,18 @@ func supervisorCursorFor(items []genclient.TaggedEvent) string {
 	return events.FormatCursor(cursors)
 }
 
-func cityEnvelopesFor(items []genclient.Event) []genclient.EventStreamEnvelope {
+// cityEnvelopesFor wraps list-endpoint WireEvents into stream-shape
+// envelopes so `gc events --list` and `gc events --follow` produce
+// identical JSONL output. The only structural difference between the
+// two shapes is the optional Workflow projection that the stream
+// attaches to bead events; list results omit it.
+func cityEnvelopesFor(items []genclient.WireEvent) []genclient.EventStreamEnvelope {
 	out := make([]genclient.EventStreamEnvelope, 0, len(items))
 	for _, item := range items {
 		out = append(out, genclient.EventStreamEnvelope{
 			Actor:   item.Actor,
 			Message: item.Message,
-			Payload: toEventPayload(item.Payload),
+			Payload: item.Payload,
 			Seq:     item.Seq,
 			Subject: item.Subject,
 			Ts:      item.Ts,
@@ -837,14 +842,16 @@ func cityEnvelopesFor(items []genclient.Event) []genclient.EventStreamEnvelope {
 	return out
 }
 
-func taggedEnvelopesFor(items []genclient.TaggedEvent) []genclient.TaggedEventStreamEnvelope {
+// taggedEnvelopesFor is the supervisor-scope analog of cityEnvelopesFor,
+// preserving the City tag for the aggregated events stream.
+func taggedEnvelopesFor(items []genclient.WireTaggedEvent) []genclient.TaggedEventStreamEnvelope {
 	out := make([]genclient.TaggedEventStreamEnvelope, 0, len(items))
 	for _, item := range items {
 		out = append(out, genclient.TaggedEventStreamEnvelope{
 			Actor:   item.Actor,
 			City:    item.City,
 			Message: item.Message,
-			Payload: toEventPayload(item.Payload),
+			Payload: item.Payload,
 			Seq:     item.Seq,
 			Subject: item.Subject,
 			Ts:      item.Ts,
@@ -852,30 +859,6 @@ func taggedEnvelopesFor(items []genclient.TaggedEvent) []genclient.TaggedEventSt
 		})
 	}
 	return out
-}
-
-// toEventPayload converts the list-endpoint's interface{} payload
-// into the stream envelope's *EventPayload union. The list and stream
-// endpoints use different generated types for the payload — list's
-// Event has `interface{}` (the list endpoint's response schema still
-// refs events.Event's bus-internal shape), stream's
-// EventStreamEnvelope has a typed oneOf union. This bridge
-// re-marshals and unmarshals through the union's JSON methods so the
-// JSONL output from `gc events` has one stable shape whether the
-// source was list or stream. Returns nil if the input is nil.
-func toEventPayload(v interface{}) *genclient.EventPayload {
-	if v == nil {
-		return nil
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	p := &genclient.EventPayload{}
-	if err := p.UnmarshalJSON(b); err != nil {
-		return nil
-	}
-	return p
 }
 
 func derefString(value *string) string {

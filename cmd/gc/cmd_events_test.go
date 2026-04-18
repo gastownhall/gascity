@@ -17,14 +17,14 @@ import (
 )
 
 func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
-	items := []genclient.Event{
+	items := []genclient.WireEvent{
 		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 		{Actor: "gc", Seq: 2, Subject: stringPtr("mayor"), Ts: time.Unix(1700000010, 0).UTC(), Type: "session.woke"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "2")
-			writeJSONResponse(t, w, genclient.ListBodyEvent{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
 		},
 	})
 	defer server.Close()
@@ -39,9 +39,9 @@ func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d JSONL lines, want 2; output=%q", len(lines), stdout.String())
 	}
-	var got []genclient.Event
+	var got []genclient.WireEvent
 	for _, line := range lines {
-		var item genclient.Event
+		var item genclient.WireEvent
 		if err := json.Unmarshal([]byte(line), &item); err != nil {
 			t.Fatalf("unmarshal line: %v; line=%q", err, line)
 		}
@@ -53,7 +53,7 @@ func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
 }
 
 func TestDoEventsSupervisorDefaultUsesTaggedJSONLItems(t *testing.T) {
-	items := []genclient.TaggedEvent{
+	items := []genclient.WireTaggedEvent{
 		{Actor: "human", City: "alpha", Seq: 3, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
@@ -69,7 +69,7 @@ func TestDoEventsSupervisorDefaultUsesTaggedJSONLItems(t *testing.T) {
 		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	var got genclient.TaggedEvent
+	var got genclient.WireTaggedEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
@@ -82,8 +82,8 @@ func TestDoEventsSeqCityUsesIndexHeader(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "7")
-			items := []genclient.Event{}
-			writeJSONResponse(t, w, genclient.ListBodyEvent{Items: &items, Total: 0})
+			items := []genclient.WireEvent{}
+			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: 0})
 		},
 	})
 	defer server.Close()
@@ -99,7 +99,7 @@ func TestDoEventsSeqCityUsesIndexHeader(t *testing.T) {
 }
 
 func TestDoEventsSeqSupervisorPrintsCompositeCursor(t *testing.T) {
-	items := []genclient.TaggedEvent{
+	items := []genclient.WireTaggedEvent{
 		{Actor: "human", City: "beta", Seq: 9, Ts: time.Unix(1700000001, 0).UTC(), Type: "mail.sent"},
 		{Actor: "human", City: "alpha", Seq: 4, Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 	}
@@ -121,14 +121,14 @@ func TestDoEventsSeqSupervisorPrintsCompositeCursor(t *testing.T) {
 }
 
 func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
-	items := []genclient.Event{
+	items := []genclient.WireEvent{
 		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 		{Actor: "human", Message: stringPtr("hello"), Seq: 2, Subject: stringPtr("gc-2"), Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent"},
 	}
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "2")
-			writeJSONResponse(t, w, genclient.ListBodyEvent{Items: &items, Total: int64(len(items))})
+			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
 		},
 	})
 	defer server.Close()
@@ -153,7 +153,7 @@ func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
 }
 
 func TestDoEventsWatchSupervisorBufferedReplayUsesTaggedEnvelopeSchema(t *testing.T) {
-	items := []genclient.TaggedEvent{
+	items := []genclient.WireTaggedEvent{
 		{Actor: "human", City: "alpha", Seq: 2, Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
 		{Actor: "gc", City: "beta", Seq: 5, Ts: time.Unix(1700000010, 0).UTC(), Type: "session.woke"},
 	}
@@ -187,8 +187,8 @@ func TestDoEventsWatchTimesOutWithoutMatch(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "3")
-			items := []genclient.Event{}
-			writeJSONResponse(t, w, genclient.ListBodyEvent{Items: &items, Total: 0})
+			items := []genclient.WireEvent{}
+			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: 0})
 		},
 		cityStream: func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")

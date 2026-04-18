@@ -104,8 +104,8 @@ type SupervisorEventListInput struct {
 // SupervisorEventListOutput is the response for GET /v0/events (supervisor scope).
 type SupervisorEventListOutput struct {
 	Body struct {
-		Items []events.TaggedEvent `json:"items"`
-		Total int                  `json:"total"`
+		Items []WireTaggedEvent `json:"items"`
+		Total int               `json:"total"`
 	}
 }
 
@@ -345,12 +345,13 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 	if err != nil {
 		return nil, huma.Error500InternalServerError("internal: " + err.Error())
 	}
-	if evts == nil {
-		evts = []events.TaggedEvent{}
+	wires := make([]WireTaggedEvent, 0, len(evts))
+	for _, e := range evts {
+		wires = append(wires, toWireTaggedEvent(e))
 	}
 	out := &SupervisorEventListOutput{}
-	out.Body.Items = evts
-	out.Body.Total = len(evts)
+	out.Body.Items = wires
+	out.Body.Total = len(wires)
 	return out, nil
 }
 

@@ -41,6 +41,67 @@ type WorkflowAttemptSummary struct {
 	MaxAttempts   int `json:"max_attempts,omitempty"`
 }
 
+// WireEvent is the list-endpoint wire shape for a single event,
+// emitted by GET /v0/city/{cityName}/events. Same envelope fields as
+// eventStreamEnvelope minus the SSE-specific Workflow projection.
+// Payload is decoded via the events registry into a typed variant so
+// the list endpoint's wire schema matches the stream endpoint's
+// instead of falling back to opaque bytes.
+type WireEvent struct {
+	Seq     uint64            `json:"seq"`
+	Type    string            `json:"type"`
+	Ts      time.Time         `json:"ts"`
+	Actor   string            `json:"actor"`
+	Subject string            `json:"subject,omitempty"`
+	Message string            `json:"message,omitempty"`
+	Payload EventPayloadUnion `json:"payload,omitempty"`
+}
+
+// WireTaggedEvent is the supervisor-scope list wire shape for
+// GET /v0/events, carrying the City the event originated from.
+type WireTaggedEvent struct {
+	WireEvent
+	City string `json:"city"`
+}
+
+// toWireEvent decodes the bus's opaque Payload into the registered
+// typed variant and returns the list-endpoint wire shape.
+// Unregistered event types fall through with a nil payload and a
+// skip-log; the registry-coverage test makes that path unreachable in
+// practice (Principle 7).
+func toWireEvent(e events.Event) WireEvent {
+	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
+	if err != nil || !registered {
+		return WireEvent{
+			Seq:     e.Seq,
+			Type:    e.Type,
+			Ts:      e.Ts,
+			Actor:   e.Actor,
+			Subject: e.Subject,
+			Message: e.Message,
+		}
+	}
+	payload, _ := decoded.(events.Payload)
+	return WireEvent{
+		Seq:     e.Seq,
+		Type:    e.Type,
+		Ts:      e.Ts,
+		Actor:   e.Actor,
+		Subject: e.Subject,
+		Message: e.Message,
+		Payload: EventPayloadUnion{Value: payload},
+	}
+}
+
+// toWireTaggedEvent is the supervisor-scope analog of toWireEvent,
+// preserving the City tag the multiplexer attached to the event.
+func toWireTaggedEvent(te events.TaggedEvent) WireTaggedEvent {
+	return WireTaggedEvent{
+		WireEvent: toWireEvent(te.Event),
+		City:      te.City,
+	}
+}
+
 // eventStreamEnvelope is the wire shape emitted on
 // /v0/city/{cityName}/events/stream. The envelope is a single named
 // schema so generated Go and TS clients have a concrete type to work

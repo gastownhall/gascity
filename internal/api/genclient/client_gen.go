@@ -770,17 +770,6 @@ type ErrorModel struct {
 	Type *string `json:"type,omitempty"`
 }
 
-// Event defines model for Event.
-type Event struct {
-	Actor   string      `json:"actor"`
-	Message *string     `json:"message,omitempty"`
-	Payload interface{} `json:"payload,omitempty"`
-	Seq     int64       `json:"seq"`
-	Subject *string     `json:"subject,omitempty"`
-	Ts      time.Time   `json:"ts"`
-	Type    string      `json:"type"`
-}
-
 // EventEmitOutputBody defines model for EventEmitOutputBody.
 type EventEmitOutputBody struct {
 	// Status Operation result.
@@ -1243,24 +1232,6 @@ type ListBodyConversationTranscriptRecord struct {
 	Total int64 `json:"total"`
 }
 
-// ListBodyEvent defines model for ListBodyEvent.
-type ListBodyEvent struct {
-	// Items The list of items.
-	Items *[]Event `json:"items"`
-
-	// NextCursor Cursor for the next page of results.
-	NextCursor *string `json:"next_cursor,omitempty"`
-
-	// Partial True when one or more backends failed and the list is incomplete.
-	Partial *bool `json:"partial,omitempty"`
-
-	// PartialErrors Human-readable errors from backends that failed during aggregation.
-	PartialErrors *[]string `json:"partial_errors,omitempty"`
-
-	// Total Total number of items matching the query.
-	Total int64 `json:"total"`
-}
-
 // ListBodyExtmsgAdapterInfo defines model for ListBodyExtmsgAdapterInfo.
 type ListBodyExtmsgAdapterInfo struct {
 	// Items The list of items.
@@ -1391,6 +1362,24 @@ type ListBodySessionResponse struct {
 type ListBodyStatus struct {
 	// Items The list of items.
 	Items *[]Status `json:"items"`
+
+	// NextCursor Cursor for the next page of results.
+	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
+	// Total Total number of items matching the query.
+	Total int64 `json:"total"`
+}
+
+// ListBodyWireEvent defines model for ListBodyWireEvent.
+type ListBodyWireEvent struct {
+	// Items The list of items.
+	Items *[]WireEvent `json:"items"`
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
@@ -2369,8 +2358,8 @@ type SupervisorCitiesOutputBody struct {
 
 // SupervisorEventListOutputBody defines model for SupervisorEventListOutputBody.
 type SupervisorEventListOutputBody struct {
-	Items *[]TaggedEvent `json:"items"`
-	Total int64          `json:"total"`
+	Items *[]WireTaggedEvent `json:"items"`
+	Total int64              `json:"total"`
 }
 
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.
@@ -2404,18 +2393,6 @@ type SupervisorStartup struct {
 	Ready bool `json:"ready"`
 }
 
-// TaggedEvent defines model for TaggedEvent.
-type TaggedEvent struct {
-	Actor   string      `json:"actor"`
-	City    string      `json:"city"`
-	Message *string     `json:"message,omitempty"`
-	Payload interface{} `json:"payload,omitempty"`
-	Seq     int64       `json:"seq"`
-	Subject *string     `json:"subject,omitempty"`
-	Ts      time.Time   `json:"ts"`
-	Type    string      `json:"type"`
-}
-
 // TaggedEventStreamEnvelope defines model for TaggedEventStreamEnvelope.
 type TaggedEventStreamEnvelope struct {
 	Actor    string                   `json:"actor"`
@@ -2439,6 +2416,29 @@ type TranscriptProvenance string
 type UnboundEventPayload struct {
 	Count     int64  `json:"count"`
 	SessionId string `json:"session_id"`
+}
+
+// WireEvent defines model for WireEvent.
+type WireEvent struct {
+	Actor   string        `json:"actor"`
+	Message *string       `json:"message,omitempty"`
+	Payload *EventPayload `json:"payload,omitempty"`
+	Seq     int64         `json:"seq"`
+	Subject *string       `json:"subject,omitempty"`
+	Ts      time.Time     `json:"ts"`
+	Type    string        `json:"type"`
+}
+
+// WireTaggedEvent defines model for WireTaggedEvent.
+type WireTaggedEvent struct {
+	Actor   string        `json:"actor"`
+	City    string        `json:"city"`
+	Message *string       `json:"message,omitempty"`
+	Payload *EventPayload `json:"payload,omitempty"`
+	Seq     int64         `json:"seq"`
+	Subject *string       `json:"subject,omitempty"`
+	Ts      time.Time     `json:"ts"`
+	Type    string        `json:"type"`
 }
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
@@ -15669,7 +15669,7 @@ func (r CreateConvoyResponse) StatusCode() int {
 type GetV0CityByCityNameEventsResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *ListBodyEvent
+	JSON200                       *ListBodyWireEvent
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -20908,7 +20908,7 @@ func ParseGetV0CityByCityNameEventsResponse(rsp *http.Response) (*GetV0CityByCit
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ListBodyEvent
+		var dest ListBodyWireEvent
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
