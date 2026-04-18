@@ -393,16 +393,29 @@ func buildPreparedStart(
 		}
 		session.Metadata["instance_token"] = instanceToken
 	}
-	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithSessionContext(
+	beadAlias := strings.TrimSpace(session.Metadata["alias"])
+	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
 		session.ID,
 		candidate.name(),
-		strings.TrimSpace(session.Metadata["alias"]),
+		beadAlias,
 		strings.TrimSpace(session.Metadata["template"]),
 		strings.TrimSpace(session.Metadata["session_origin"]),
 		generation,
 		continuationEpoch,
 		instanceToken,
-	))
+	)
+	// When the bead has no alias but the template assigned a non-empty
+	// GC_ALIAS (e.g. pool workers via setTemplateEnvIdentity), don't let
+	// mergeEnv's override-wins semantics clobber it with the runtime's
+	// empty value. Leaving GC_ALIAS="" when the template has no alias is
+	// preserved on purpose: the tmux runtime translates empty entries
+	// into "env -u <key>" to scrub inherited env from the tmux server.
+	if beadAlias == "" {
+		if tplAlias, ok := agentCfg.Env["GC_ALIAS"]; ok && tplAlias != "" {
+			delete(runtimeEnv, "GC_ALIAS")
+		}
+	}
+	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
 	if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
