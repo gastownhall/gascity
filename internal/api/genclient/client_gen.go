@@ -198,6 +198,12 @@ type AdapterCapabilities struct {
 	SupportsChildConversations bool  `json:"SupportsChildConversations"`
 }
 
+// AdapterEventPayload defines model for AdapterEventPayload.
+type AdapterEventPayload struct {
+	AccountId string `json:"account_id"`
+	Provider  string `json:"provider"`
+}
+
 // AgentCreateInputBody defines model for AgentCreateInputBody.
 type AgentCreateInputBody struct {
 	// Dir Working directory (rig name).
@@ -430,6 +436,11 @@ type BeadDepsResponse struct {
 	Children *[]Bead `json:"children"`
 }
 
+// BeadEventPayload defines model for BeadEventPayload.
+type BeadEventPayload struct {
+	Bead Bead `json:"bead"`
+}
+
 // BeadGraphResponse defines model for BeadGraphResponse.
 type BeadGraphResponse struct {
 	Beads *[]Bead                `json:"beads"`
@@ -469,6 +480,13 @@ type BeadUpdateBody struct {
 
 // BindingStatus Lifecycle state of a session binding.
 type BindingStatus string
+
+// BoundEventPayload defines model for BoundEventPayload.
+type BoundEventPayload struct {
+	ConversationId string `json:"conversation_id"`
+	Provider       string `json:"provider"`
+	SessionId      string `json:"session_id"`
+}
 
 // CityCreateRequest defines model for CityCreateRequest.
 type CityCreateRequest struct {
@@ -784,18 +802,6 @@ type EventEmitRequest struct {
 	Type string `json:"type"`
 }
 
-// EventStreamEnvelope defines model for EventStreamEnvelope.
-type EventStreamEnvelope struct {
-	Actor    string                   `json:"actor"`
-	Message  *string                  `json:"message,omitempty"`
-	Payload  interface{}              `json:"payload,omitempty"`
-	Seq      int64                    `json:"seq"`
-	Subject  *string                  `json:"subject,omitempty"`
-	Ts       time.Time                `json:"ts"`
-	Type     string                   `json:"type"`
-	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
 // ExtMsgAdapterRegisterInputBody defines model for ExtMsgAdapterRegisterInputBody.
 type ExtMsgAdapterRegisterInputBody struct {
 	// AccountId Account ID.
@@ -1096,6 +1102,13 @@ type GitStatus struct {
 	Clean        bool   `json:"clean"`
 }
 
+// GroupCreatedEventPayload defines model for GroupCreatedEventPayload.
+type GroupCreatedEventPayload struct {
+	ConversationId string `json:"conversation_id"`
+	Mode           string `json:"mode"`
+	Provider       string `json:"provider"`
+}
+
 // GroupRouteDecision defines model for GroupRouteDecision.
 type GroupRouteDecision struct {
 	Match           string `json:"Match"`
@@ -1122,6 +1135,14 @@ type HealthOutputBody struct {
 type HeartbeatEvent struct {
 	// Timestamp ISO 8601 timestamp when the heartbeat was sent.
 	Timestamp string `json:"timestamp"`
+}
+
+// InboundEventPayload defines model for InboundEventPayload.
+type InboundEventPayload struct {
+	Actor          string `json:"actor"`
+	ConversationId string `json:"conversation_id"`
+	Provider       string `json:"provider"`
+	TargetSession  string `json:"target_session"`
 }
 
 // InboundResult defines model for InboundResult.
@@ -1379,6 +1400,12 @@ type MailCountOutputBody struct {
 	Unread int64 `json:"unread"`
 }
 
+// MailEventPayload defines model for MailEventPayload.
+type MailEventPayload struct {
+	Message *Message `json:"message,omitempty"`
+	Rig     string   `json:"rig"`
+}
+
 // MailListBody defines model for MailListBody.
 type MailListBody struct {
 	// Items The list of messages.
@@ -1457,6 +1484,9 @@ type MonitorFeedItemResponse struct {
 	UpdatedAt          string  `json:"updated_at"`
 	WorkflowId         *string `json:"workflow_id,omitempty"`
 }
+
+// NoPayload defines model for NoPayload.
+type NoPayload = map[string]interface{}
 
 // OKResponseBody defines model for OKResponseBody.
 type OKResponseBody struct {
@@ -1559,6 +1589,14 @@ type OrdersFeedBody struct {
 	Items         *[]MonitorFeedItemResponse `json:"items"`
 	Partial       bool                       `json:"partial"`
 	PartialErrors *[]string                  `json:"partial_errors,omitempty"`
+}
+
+// OutboundEventPayload defines model for OutboundEventPayload.
+type OutboundEventPayload struct {
+	ConversationId string `json:"conversation_id"`
+	MessageId      string `json:"message_id"`
+	Provider       string `json:"provider"`
+	Session        string `json:"session"`
 }
 
 // OutboundResult defines model for OutboundResult.
@@ -2361,24 +2399,17 @@ type TaggedEvent struct {
 	Type    string      `json:"type"`
 }
 
-// TaggedEventStreamEnvelope defines model for TaggedEventStreamEnvelope.
-type TaggedEventStreamEnvelope struct {
-	Actor    string                   `json:"actor"`
-	City     string                   `json:"city"`
-	Message  *string                  `json:"message,omitempty"`
-	Payload  interface{}              `json:"payload,omitempty"`
-	Seq      int64                    `json:"seq"`
-	Subject  *string                  `json:"subject,omitempty"`
-	Ts       time.Time                `json:"ts"`
-	Type     string                   `json:"type"`
-	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
 // TranscriptMessageKind Direction of a transcript entry.
 type TranscriptMessageKind string
 
 // TranscriptProvenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
 type TranscriptProvenance string
+
+// UnboundEventPayload defines model for UnboundEventPayload.
+type UnboundEventPayload struct {
+	Count     int64  `json:"count"`
+	SessionId string `json:"session_id"`
+}
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
 type WorkflowAttemptSummary struct {

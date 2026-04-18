@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -146,9 +147,17 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 			if r.err != nil {
 				return
 			}
-			envelope := eventStreamEnvelope{
-				Event:    r.event,
-				Workflow: projectWorkflowEvent(s.state, r.event),
+			envelope, decodeErr := wireEventFrom(r.event, projectWorkflowEvent(s.state, r.event))
+			if decodeErr != nil {
+				// Strict registry policy (Principle 7): any event type
+				// without a registered payload is a programming error.
+				// Skip the emission so the client's connection isn't
+				// poisoned with an invalid variant, and log for
+				// diagnosis; the registry-coverage test in
+				// event_payloads_coverage_test.go prevents this at CI.
+				log.Printf("api: events-stream skip %s seq=%d: %v", r.event.Type, r.event.Seq, decodeErr)
+				readNext()
+				continue
 			}
 			if err := send(sse.Message{ID: int(r.event.Seq), Data: envelope}); err != nil {
 				return

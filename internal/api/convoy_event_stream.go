@@ -2,9 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -37,14 +41,145 @@ type WorkflowAttemptSummary struct {
 	MaxAttempts   int `json:"max_attempts,omitempty"`
 }
 
+// eventStreamEnvelope is the wire shape emitted on
+// /v0/city/{cityName}/events/stream. Unlike events.Event (the bus's
+// internal storage shape, which keeps Payload as opaque bytes), the
+// Payload field here is a typed variant decoded via the events
+// registry so consumers receive a discriminated-union wire schema
+// they can switch on `type` against.
 type eventStreamEnvelope struct {
-	events.Event
+	Seq      uint64                   `json:"seq"`
+	Type     string                   `json:"type"`
+	Ts       time.Time                `json:"ts"`
+	Actor    string                   `json:"actor"`
+	Subject  string                   `json:"subject,omitempty"`
+	Message  string                   `json:"message,omitempty"`
+	Payload  events.Payload           `json:"payload,omitempty"`
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
 }
 
+// Schema emits a oneOf over every registered event-type variant so
+// the OpenAPI spec describes the discriminated union consumers receive
+// on /v0/city/{cityName}/events/stream. Each variant has a `type`
+// const matching one of events.KnownEventTypes and a `payload` $ref
+// to the corresponding payload schema (Principle 7).
+func (eventStreamEnvelope) Schema(r huma.Registry) *huma.Schema {
+	return eventVariantsSchema(r, false)
+}
+
+// taggedEventStreamEnvelope is the supervisor-scope wire shape for
+// /v0/events/stream. Structurally identical to eventStreamEnvelope
+// plus a City field identifying which city emitted the event.
 type taggedEventStreamEnvelope struct {
-	events.TaggedEvent
+	Seq      uint64                   `json:"seq"`
+	Type     string                   `json:"type"`
+	Ts       time.Time                `json:"ts"`
+	Actor    string                   `json:"actor"`
+	Subject  string                   `json:"subject,omitempty"`
+	Message  string                   `json:"message,omitempty"`
+	Payload  events.Payload           `json:"payload,omitempty"`
+	City     string                   `json:"city"`
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
+}
+
+// Schema emits the same oneOf discrimination as eventStreamEnvelope,
+// with an added City property on every variant.
+func (taggedEventStreamEnvelope) Schema(r huma.Registry) *huma.Schema {
+	return eventVariantsSchema(r, true)
+}
+
+// eventVariantsSchema builds a oneOf of per-event-type schema variants.
+// Each variant has a `type: const <eventType>` property and a
+// `payload: $ref <payloadSchema>` property, plus the envelope fields.
+// tagged=true adds the City property required on supervisor-scope
+// events. Variants are emitted in sorted order so the spec is stable
+// across regenerations.
+func eventVariantsSchema(r huma.Registry, tagged bool) *huma.Schema {
+	payloads := events.RegisteredPayloadTypes()
+	names := make([]string, 0, len(payloads))
+	for name := range payloads {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	variants := make([]*huma.Schema, 0, len(names))
+	for _, eventType := range names {
+		sample := payloads[eventType]
+		payloadType := reflect.TypeOf(sample)
+		payloadSchema := r.Schema(payloadType, true, payloadType.Name())
+
+		props := map[string]*huma.Schema{
+			"seq":     {Type: huma.TypeInteger, Format: "int64"},
+			"type":    {Type: huma.TypeString, Enum: []any{eventType}},
+			"ts":      {Type: huma.TypeString, Format: "date-time"},
+			"actor":   {Type: huma.TypeString},
+			"subject": {Type: huma.TypeString},
+			"message": {Type: huma.TypeString},
+			"payload": payloadSchema,
+			"workflow": r.Schema(reflect.TypeOf(workflowEventProjection{}), true, "WorkflowEventProjection"),
+		}
+		required := []string{"seq", "type", "ts", "actor", "payload"}
+		if tagged {
+			props["city"] = &huma.Schema{Type: huma.TypeString}
+			required = append(required, "city")
+		}
+		variants = append(variants, &huma.Schema{
+			Type:                 huma.TypeObject,
+			Properties:           props,
+			Required:             required,
+			AdditionalProperties: false,
+		})
+	}
+	return &huma.Schema{OneOf: variants}
+}
+
+// wireEventFrom decodes the bus's opaque Payload into the registered
+// typed variant and returns a wire envelope ready for SSE emission on
+// the per-city stream. Unregistered event types cause an error —
+// Principle 7's strict policy enforced at emission time
+// (the registry-coverage test catches this at CI).
+func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStreamEnvelope, error) {
+	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
+	if err != nil {
+		return eventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", e.Type, err)
+	}
+	if !registered {
+		return eventStreamEnvelope{}, fmt.Errorf("event type %q has no registered payload (see internal/api/event_payloads.go)", e.Type)
+	}
+	payload, _ := decoded.(events.Payload)
+	return eventStreamEnvelope{
+		Seq:      e.Seq,
+		Type:     e.Type,
+		Ts:       e.Ts,
+		Actor:    e.Actor,
+		Subject:  e.Subject,
+		Message:  e.Message,
+		Payload:  payload,
+		Workflow: workflow,
+	}, nil
+}
+
+// wireTaggedEventFrom is the supervisor-scope analog of wireEventFrom.
+func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjection) (taggedEventStreamEnvelope, error) {
+	decoded, registered, err := events.DecodePayload(te.Type, te.Payload)
+	if err != nil {
+		return taggedEventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", te.Type, err)
+	}
+	if !registered {
+		return taggedEventStreamEnvelope{}, fmt.Errorf("event type %q has no registered payload (see internal/api/event_payloads.go)", te.Type)
+	}
+	payload, _ := decoded.(events.Payload)
+	return taggedEventStreamEnvelope{
+		Seq:      te.Seq,
+		Type:     te.Type,
+		Ts:       te.Ts,
+		Actor:    te.Actor,
+		Subject:  te.Subject,
+		Message:  te.Message,
+		Payload:  payload,
+		City:     te.City,
+		Workflow: workflow,
+	}, nil
 }
 
 func projectWorkflowEvent(state State, event events.Event) *workflowEventProjection {

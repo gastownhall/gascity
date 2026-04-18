@@ -22,6 +22,22 @@
         ],
         "type": "object"
       },
+      "AdapterEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "account_id"
+        ],
+        "type": "object"
+      },
       "AgentCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -834,6 +850,18 @@
         ],
         "type": "object"
       },
+      "BeadEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead": {
+            "$ref": "#/components/schemas/Bead"
+          }
+        },
+        "required": [
+          "bead"
+        ],
+        "type": "object"
+      },
       "BeadGraphResponse": {
         "additionalProperties": false,
         "properties": {
@@ -931,6 +959,26 @@
           "ended"
         ],
         "type": "string"
+      },
+      "BoundEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "session_id"
+        ],
+        "type": "object"
       },
       "CityCreateRequest": {
         "additionalProperties": false,
@@ -1824,43 +1872,6 @@
         ],
         "type": "object"
       },
-      "EventStreamEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {},
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor"
-        ],
-        "type": "object"
-      },
       "ExtMsgAdapterRegisterInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2699,6 +2710,26 @@
         ],
         "type": "object"
       },
+      "GroupCreatedEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "mode"
+        ],
+        "type": "object"
+      },
       "GroupRouteDecision": {
         "additionalProperties": false,
         "properties": {
@@ -2759,6 +2790,30 @@
         },
         "required": [
           "timestamp"
+        ],
+        "type": "object"
+      },
+      "InboundEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "target_session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "actor",
+          "target_session"
         ],
         "type": "object"
       },
@@ -3373,6 +3428,21 @@
         ],
         "type": "object"
       },
+      "MailEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "rig": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rig"
+        ],
+        "type": "object"
+      },
       "MailListBody": {
         "additionalProperties": false,
         "properties": {
@@ -3577,6 +3647,10 @@
           "started_at",
           "updated_at"
         ],
+        "type": "object"
+      },
+      "NoPayload": {
+        "additionalProperties": false,
         "type": "object"
       },
       "OKResponseBody": {
@@ -3906,6 +3980,30 @@
         "required": [
           "items",
           "partial"
+        ],
+        "type": "object"
+      },
+      "OutboundEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "session",
+          "message_id"
         ],
         "type": "object"
       },
@@ -6013,47 +6111,6 @@
         ],
         "type": "object"
       },
-      "TaggedEventStreamEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {},
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "city",
-          "seq",
-          "type",
-          "ts",
-          "actor"
-        ],
-        "type": "object"
-      },
       "TranscriptMessageKind": {
         "description": "Direction of a transcript entry.",
         "enum": [
@@ -6069,6 +6126,23 @@
           "hydrated"
         ],
         "type": "string"
+      },
+      "UnboundEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "count"
+        ],
+        "type": "object"
       },
       "WorkflowAttemptSummary": {
         "additionalProperties": false,
@@ -9362,7 +9436,1520 @@
                       {
                         "properties": {
                           "data": {
-                            "$ref": "#/components/schemas/EventStreamEnvelope"
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BeadEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "bead.closed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BeadEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "bead.created"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BeadEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "bead.updated"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "city.resumed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "city.suspended"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "controller.started"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "controller.stopped"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "convoy.closed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "convoy.created"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/AdapterEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.adapter_added"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/AdapterEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.adapter_removed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BoundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.bound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/GroupCreatedEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.group_created"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/InboundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.inbound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/OutboundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.outbound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/UnboundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.unbound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.archived"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.deleted"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.marked_read"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.marked_unread"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.read"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.replied"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.sent"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "order.completed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "order.failed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "order.fired"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "provider.swapped"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.crashed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.draining"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.idle_killed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.quarantined"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.stopped"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.suspended"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.undrained"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.updated"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.woke"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload"
+                                ],
+                                "type": "object"
+                              }
+                            ]
                           },
                           "event": {
                             "const": "event",
@@ -15384,7 +16971,1664 @@
                       {
                         "properties": {
                           "data": {
-                            "$ref": "#/components/schemas/TaggedEventStreamEnvelope"
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BeadEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "bead.closed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BeadEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "bead.created"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BeadEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "bead.updated"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "city.resumed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "city.suspended"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "controller.started"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "controller.stopped"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "convoy.closed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "convoy.created"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/AdapterEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.adapter_added"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/AdapterEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.adapter_removed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/BoundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.bound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/GroupCreatedEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.group_created"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/InboundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.inbound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/OutboundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.outbound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/UnboundEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "extmsg.unbound"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.archived"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.deleted"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.marked_read"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.marked_unread"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.read"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.replied"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/MailEventPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "mail.sent"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "order.completed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "order.failed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "order.fired"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "provider.swapped"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.crashed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.draining"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.idle_killed"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.quarantined"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.stopped"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.suspended"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.undrained"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.updated"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "actor": {
+                                    "type": "string"
+                                  },
+                                  "city": {
+                                    "type": "string"
+                                  },
+                                  "message": {
+                                    "type": "string"
+                                  },
+                                  "payload": {
+                                    "$ref": "#/components/schemas/NoPayload"
+                                  },
+                                  "seq": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                  },
+                                  "subject": {
+                                    "type": "string"
+                                  },
+                                  "ts": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "session.woke"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "workflow": {
+                                    "$ref": "#/components/schemas/WorkflowEventProjection"
+                                  }
+                                },
+                                "required": [
+                                  "seq",
+                                  "type",
+                                  "ts",
+                                  "actor",
+                                  "payload",
+                                  "city"
+                                ],
+                                "type": "object"
+                              }
+                            ]
                           },
                           "event": {
                             "const": "tagged_event",

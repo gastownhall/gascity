@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -435,9 +436,16 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			if cs := sm.resolver.CityState(r.event.City); cs != nil {
 				wfp = projectWorkflowEvent(cs, r.event.Event)
 			}
-			envelope := &taggedEventStreamEnvelope{
-				TaggedEvent: r.event,
-				Workflow:    wfp,
+			envelope, decodeErr := wireTaggedEventFrom(r.event, wfp)
+			if decodeErr != nil {
+				// Strict registry policy (Principle 7): skip
+				// unregistered event types and continue the stream.
+				// CI's registry-coverage test prevents this path from
+				// firing in practice.
+				log.Printf("api: supervisor events-stream skip %s seq=%d city=%s: %v",
+					r.event.Type, r.event.Seq, r.event.City, decodeErr)
+				readNext()
+				continue
 			}
 			if err := send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope}); err != nil {
 				// Client disconnected or encoding failed — draining

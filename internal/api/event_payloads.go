@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 )
@@ -24,7 +25,18 @@ type MailEventPayload struct {
 
 func (MailEventPayload) IsEventPayload() {}
 
+// BeadEventPayload is the shape of every bead.* event payload
+// (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
+// snapshot of the bead as of the event; it is emitted by the beads
+// CachingStore's reconcile loop when external changes are detected.
+type BeadEventPayload struct {
+	Bead beads.Bead `json:"bead"`
+}
+
+func (BeadEventPayload) IsEventPayload() {}
+
 func init() {
+	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
 	events.RegisterPayload(events.MailRead, MailEventPayload{})
 	events.RegisterPayload(events.MailArchived, MailEventPayload{})
@@ -32,4 +44,35 @@ func init() {
 	events.RegisterPayload(events.MailMarkedUnread, MailEventPayload{})
 	events.RegisterPayload(events.MailReplied, MailEventPayload{})
 	events.RegisterPayload(events.MailDeleted, MailEventPayload{})
+
+	// bead.* — carry the bead snapshot.
+	events.RegisterPayload(events.BeadCreated, BeadEventPayload{})
+	events.RegisterPayload(events.BeadUpdated, BeadEventPayload{})
+	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
+
+	// session.* / convoy.* / controller.* / city.* / order.* /
+	// provider.* — these events carry no structured payload today;
+	// their semantics are fully captured by the envelope's Actor,
+	// Subject, and Message fields. NoPayload registers an empty typed
+	// shape so the spec still emits a discriminated-union variant
+	// for the event type and the registry-coverage test passes.
+	events.RegisterPayload(events.SessionWoke, events.NoPayload{})
+	events.RegisterPayload(events.SessionStopped, events.NoPayload{})
+	events.RegisterPayload(events.SessionCrashed, events.NoPayload{})
+	events.RegisterPayload(events.SessionDraining, events.NoPayload{})
+	events.RegisterPayload(events.SessionUndrained, events.NoPayload{})
+	events.RegisterPayload(events.SessionQuarantined, events.NoPayload{})
+	events.RegisterPayload(events.SessionIdleKilled, events.NoPayload{})
+	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
+	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
+	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
+	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
+	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
+	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
+	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
+	events.RegisterPayload(events.CityResumed, events.NoPayload{})
+	events.RegisterPayload(events.OrderFired, events.NoPayload{})
+	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
+	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
+	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 }
