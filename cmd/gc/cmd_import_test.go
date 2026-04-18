@@ -665,6 +665,44 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	}
 }
 
+func TestDoImportInstallWarnsOnLegacyAgentDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = "claude"
+`)
+	if err := writeImportLockfile(fsys.OSFS{}, dir, &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}); err != nil {
+		t.Fatalf("writeImportLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportInstall(dir, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") {
+		t.Fatalf("expected alias guidance, got stderr %q", stderr.String())
+	}
+}
+
 func TestDoImportUpgradeTargetedMergesPreservedImports(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -737,6 +775,43 @@ source = "../packs/local"
 	}
 }
 
+func TestDoImportUpgradeWarnsOnLegacyAgentDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = "claude"
+
+[imports.a]
+source = "https://example.com/a.git"
+version = "^1.0"
+`)
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				imports["a"].Source: {Version: "1.1.0", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "a", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") {
+		t.Fatalf("expected alias guidance, got stderr %q", stderr.String())
+	}
+}
+
 func TestDoImportListShowsDirectAndTransitive(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -791,6 +866,31 @@ source = "../packs/local"
 	}
 	if !strings.Contains(stdout.String(), "local\t../packs/local\t\t(path)") {
 		t.Fatalf("unexpected flat output:\n%s", stdout.String())
+	}
+}
+
+func TestDoImportListWarnsOnLegacyAgentDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = "claude"
+`)
+	if err := writeImportLockfile(fsys.OSFS{}, dir, &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}); err != nil {
+		t.Fatalf("writeImportLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportList(dir, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") {
+		t.Fatalf("expected alias guidance, got stderr %q", stderr.String())
 	}
 }
 

@@ -77,12 +77,16 @@ func (d cityPackAgentDefaults) unsupportedKeys() []string {
 	return keys
 }
 
-func warnPreservedUnsupportedPackAgentDefaults(stderr io.Writer, manifest *cityPackManifest) {
+func warnPackAgentDefaultsCompatibility(stderr io.Writer, manifest *cityPackManifest, rewrite bool) {
 	if stderr == nil || manifest == nil {
 		return
 	}
 	if manifest.HadAgentsDefaultsAlias {
-		fmt.Fprintln(stderr, "gc import: [agents] is a deprecated compatibility alias for [agent_defaults]; rewriting pack.toml to canonical [agent_defaults]") //nolint:errcheck
+		if rewrite {
+			fmt.Fprintln(stderr, "gc import: [agents] is a deprecated compatibility alias for [agent_defaults]; rewriting pack.toml to canonical [agent_defaults]") //nolint:errcheck
+		} else {
+			fmt.Fprintln(stderr, "gc import: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") //nolint:errcheck
+		}
 	}
 	if manifest.HadBothAgentDefaultsTables {
 		fmt.Fprintln(stderr, "gc import: both [agent_defaults] and [agents] are present in pack.toml; canonical [agent_defaults] wins for overlapping keys") //nolint:errcheck
@@ -392,7 +396,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
-	warnPreservedUnsupportedPackAgentDefaults(stderr, manifest)
+	warnPackAgentDefaultsCompatibility(stderr, manifest, true)
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
@@ -422,7 +426,7 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	warnPreservedUnsupportedPackAgentDefaults(stderr, manifest)
+	warnPackAgentDefaultsCompatibility(stderr, manifest, true)
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
@@ -437,6 +441,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
 	lock, err := syncImports(cityPath, manifest.Imports, packman.InstallFromLock)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
@@ -462,6 +467,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
 
 	var lock *packman.Lockfile
 	if target == "" {
@@ -523,6 +529,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
 	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck

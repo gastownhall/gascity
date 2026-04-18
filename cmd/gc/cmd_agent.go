@@ -18,7 +18,6 @@ import (
 var (
 	loadCityConfigWarningMu     sync.Mutex
 	loadCityConfigWarningWriter io.Writer = os.Stderr
-	loadCityConfigWarningsSeen            = map[string]struct{}{}
 )
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
@@ -65,12 +64,10 @@ func setLoadCityConfigWarningWriterForTest(w io.Writer) func() {
 	loadCityConfigWarningMu.Lock()
 	prev := loadCityConfigWarningWriter
 	loadCityConfigWarningWriter = w
-	loadCityConfigWarningsSeen = map[string]struct{}{}
 	loadCityConfigWarningMu.Unlock()
 	return func() {
 		loadCityConfigWarningMu.Lock()
 		loadCityConfigWarningWriter = prev
-		loadCityConfigWarningsSeen = map[string]struct{}{}
 		loadCityConfigWarningMu.Unlock()
 	}
 }
@@ -81,13 +78,24 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 	}
 	loadCityConfigWarningMu.Lock()
 	defer loadCityConfigWarningMu.Unlock()
+	seen := make(map[string]struct{}, len(prov.Warnings))
 	for _, warning := range prov.Warnings {
-		if _, dup := loadCityConfigWarningsSeen[warning]; dup {
+		if !shouldEmitLoadCityConfigWarning(warning) {
 			continue
 		}
-		loadCityConfigWarningsSeen[warning] = struct{}{}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
 		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
 	}
+}
+
+func shouldEmitLoadCityConfigWarning(warning string) bool {
+	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		return true
+	}
+	return strings.Contains(warning, `"agent_defaults.`) && strings.Contains(warning, `" is not supported`)
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
