@@ -230,17 +230,22 @@ func TestShouldAttachNewSession(t *testing.T) {
 	}
 }
 
-func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
+func TestBuildAttachmentCache_CachesWorkerObservedAttachmentState(t *testing.T) {
 	cache := buildAttachmentCache([]session.Info{
 		{SessionName: "active-attached", State: session.StateActive, Attached: true},
 		{SessionName: "active-detached", State: session.StateActive, Attached: false},
 		{SessionName: "sleeping", State: session.StateAsleep, Attached: false},
 		{SessionName: "suspended", State: session.StateSuspended, Attached: false},
 		{State: session.StateActive, Attached: true},
+	}, func(info session.Info) (bool, error) {
+		if info.SessionName == "sleeping" {
+			return true, nil
+		}
+		return info.Attached, nil
 	})
 
-	if len(cache) != 2 {
-		t.Fatalf("cache entries = %d, want 2", len(cache))
+	if len(cache) != 4 {
+		t.Fatalf("cache entries = %d, want 4", len(cache))
 	}
 	if got, ok := cache["active-attached"]; !ok || !got {
 		t.Fatalf("cache[active-attached] = (%v, %v), want (true, true)", got, ok)
@@ -248,11 +253,11 @@ func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
 	if got, ok := cache["active-detached"]; !ok || got {
 		t.Fatalf("cache[active-detached] = (%v, %v), want (false, true)", got, ok)
 	}
-	if _, ok := cache["sleeping"]; ok {
-		t.Fatal("sleeping session should not be cached")
+	if got, ok := cache["sleeping"]; !ok || !got {
+		t.Fatalf("cache[sleeping] = (%v, %v), want (true, true)", got, ok)
 	}
-	if _, ok := cache["suspended"]; ok {
-		t.Fatal("suspended session should not be cached")
+	if got, ok := cache["suspended"]; !ok || got {
+		t.Fatalf("cache[suspended] = (%v, %v), want (false, true)", got, ok)
 	}
 }
 
@@ -384,10 +389,10 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 }
 
 func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T) {
-	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "sleeping-worker", runtime.Config{})
-	sp.SetAttached("sleeping-worker", true)
-
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	cfg := &config.City{}
 	bead := beads.Bead{
 		ID:     "gc-1",
@@ -406,15 +411,18 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 		SessionName: "sleeping-worker",
 		Attached:    false,
 	}
+	wrapped := &attachmentCachingProvider{
+		Provider: provider,
+		cache: buildAttachmentCache([]session.Info{info}, func(info session.Info) (bool, error) {
+			return info.SessionName == "sleeping-worker", nil
+		}),
+	}
 
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
 		cfg,
-		&attachmentCachingProvider{
-			Provider: sp,
-			cache:    buildAttachmentCache([]session.Info{info}),
-		},
+		wrapped,
 		nil,
 		nil,
 	)

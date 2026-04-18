@@ -1526,6 +1526,9 @@ Current branch progress:
 - reconciler/controller start fallback for runtime-only targets now routes
   through `worker.NewRuntimeHandle` rather than calling `runtime.Provider`
   directly from `cmd/gc`
+- `gc session list` attachment-dependent reason projection now uses a
+  worker-observation cache rather than raw runtime attachment fallback in
+  the CLI surface
 
 Remaining branch-local Phase 4 gaps:
 
