@@ -25,7 +25,6 @@ const (
 
 	SystemRoot      = ".gc/system"
 	SystemPacksRoot = ".gc/system/packs"
-	SystemBinRoot   = ".gc/system/bin"
 
 	CacheRoot         = ".gc/cache"
 	CachePacksRoot    = ".gc/cache/packs"

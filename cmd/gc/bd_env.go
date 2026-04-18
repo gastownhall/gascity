@@ -151,7 +151,7 @@ var projectedDoltEnvKeys = []string{
 var beadsExecCommandRunnerWithEnv = beads.ExecCommandRunnerWithEnv
 
 var recoverManagedBDCommand = func(cityPath string) error {
-	script := filepath.Join(cityPath, citylayout.SystemBinRoot, "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	overrides := citylayout.CityRuntimeEnvMap(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
 	environ := mergeRuntimeEnv(os.Environ(), overrides)

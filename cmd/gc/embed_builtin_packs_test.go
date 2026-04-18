@@ -203,23 +203,27 @@ func TestBuiltinPackIncludes_DefaultProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Default provider (empty) → should include maintenance and bd.
+	// Default provider (empty) → should include core, maintenance, and bd.
 	t.Setenv("GC_BEADS", "")
 	includes := builtinPackIncludes(dir)
 
-	if len(includes) != 2 {
-		t.Fatalf("builtinPackIncludes() = %v, want 2 entries", includes)
+	if len(includes) != 3 {
+		t.Fatalf("builtinPackIncludes() = %v, want 3 entries", includes)
 	}
 
 	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
+	wantCore := filepath.Join(systemRoot, "core")
 	wantMaintenance := filepath.Join(systemRoot, "maintenance")
 	wantBd := filepath.Join(systemRoot, "bd")
 
-	if includes[0] != wantMaintenance {
-		t.Errorf("includes[0] = %q, want %q", includes[0], wantMaintenance)
+	if includes[0] != wantCore {
+		t.Errorf("includes[0] = %q, want %q", includes[0], wantCore)
 	}
-	if includes[1] != wantBd {
-		t.Errorf("includes[1] = %q, want %q", includes[1], wantBd)
+	if includes[1] != wantMaintenance {
+		t.Errorf("includes[1] = %q, want %q", includes[1], wantMaintenance)
+	}
+	if includes[2] != wantBd {
+		t.Errorf("includes[2] = %q, want %q", includes[2], wantBd)
 	}
 }
 
@@ -238,15 +242,18 @@ func TestBuiltinPackIncludes_ExplicitBd(t *testing.T) {
 	t.Setenv("GC_BEADS", "")
 	includes := builtinPackIncludes(dir)
 
-	if len(includes) != 2 {
-		t.Fatalf("builtinPackIncludes() = %v, want 2 entries (maintenance + bd)", includes)
+	if len(includes) != 3 {
+		t.Fatalf("builtinPackIncludes() = %v, want 3 entries (core + maintenance + bd)", includes)
 	}
 
-	if got := filepath.Base(includes[0]); got != "maintenance" {
-		t.Errorf("includes[0] base = %q, want maintenance", got)
+	if got := filepath.Base(includes[0]); got != "core" {
+		t.Errorf("includes[0] base = %q, want core", got)
 	}
-	if got := filepath.Base(includes[1]); got != "bd" {
-		t.Errorf("includes[1] base = %q, want bd", got)
+	if got := filepath.Base(includes[1]); got != "maintenance" {
+		t.Errorf("includes[1] base = %q, want maintenance", got)
+	}
+	if got := filepath.Base(includes[2]); got != "bd" {
+		t.Errorf("includes[2] base = %q, want bd", got)
 	}
 }
 
@@ -265,13 +272,17 @@ func TestBuiltinPackIncludes_NonBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "")
 	includes := builtinPackIncludes(dir)
 
-	// Only maintenance, no bd/dolt.
-	if len(includes) != 1 {
-		t.Fatalf("builtinPackIncludes() = %v, want 1 entry (maintenance only)", includes)
+	// Core and maintenance are always auto-included; bd/dolt are gated
+	// on a bd-compatible provider.
+	if len(includes) != 2 {
+		t.Fatalf("builtinPackIncludes() = %v, want 2 entries (core + maintenance)", includes)
 	}
 
-	if got := filepath.Base(includes[0]); got != "maintenance" {
-		t.Errorf("includes[0] base = %q, want maintenance", got)
+	if got := filepath.Base(includes[0]); got != "core" {
+		t.Errorf("includes[0] base = %q, want core", got)
+	}
+	if got := filepath.Base(includes[1]); got != "maintenance" {
+		t.Errorf("includes[1] base = %q, want maintenance", got)
 	}
 }
 
@@ -284,14 +295,19 @@ func TestBuiltinPackIncludes_ExecGcBeadsBdOverrideIncludesBdAndDolt(t *testing.T
 
 	t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
 	includes := builtinPackIncludes(dir)
-	if len(includes) != 3 {
-		t.Fatalf("builtinPackIncludes() = %v, want 3 entries when GC_BEADS=exec:gc-beads-bd", includes)
+	// core + maintenance + bd + dolt = 4 entries. Core and maintenance are
+	// always auto-included; bd and dolt arrive via the exec-override path.
+	if len(includes) != 4 {
+		t.Fatalf("builtinPackIncludes() = %v, want 4 entries when GC_BEADS=exec:gc-beads-bd", includes)
 	}
-	if got := filepath.Base(includes[1]); got != "bd" {
-		t.Fatalf("includes[1] base = %q, want bd", got)
+	if got := filepath.Base(includes[0]); got != "core" {
+		t.Fatalf("includes[0] base = %q, want core", got)
 	}
-	if got := filepath.Base(includes[2]); got != "dolt" {
-		t.Fatalf("includes[2] base = %q, want dolt", got)
+	if got := filepath.Base(includes[2]); got != "bd" {
+		t.Fatalf("includes[2] base = %q, want bd", got)
+	}
+	if got := filepath.Base(includes[3]); got != "dolt" {
+		t.Fatalf("includes[3] base = %q, want dolt", got)
 	}
 }
 
@@ -306,13 +322,17 @@ func TestBuiltinPackIncludes_EnvOverride(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	includes := builtinPackIncludes(dir)
 
-	// Only maintenance, no bd/dolt.
-	if len(includes) != 1 {
-		t.Fatalf("builtinPackIncludes() = %v, want 1 entry when GC_BEADS=file", includes)
+	// Core and maintenance are always auto-included; bd/dolt are gated on
+	// a bd-compatible provider.
+	if len(includes) != 2 {
+		t.Fatalf("builtinPackIncludes() = %v, want 2 entries when GC_BEADS=file", includes)
 	}
 
-	if got := filepath.Base(includes[0]); got != "maintenance" {
-		t.Errorf("includes[0] base = %q, want maintenance", got)
+	if got := filepath.Base(includes[0]); got != "core" {
+		t.Errorf("includes[0] base = %q, want core", got)
+	}
+	if got := filepath.Base(includes[1]); got != "maintenance" {
+		t.Errorf("includes[1] base = %q, want maintenance", got)
 	}
 }
 
@@ -326,14 +346,17 @@ func TestBuiltinPackIncludes_ManagedExecEnvStillIncludesBd(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(dir))
 	includes := builtinPackIncludes(dir)
 
-	if len(includes) != 2 {
-		t.Fatalf("builtinPackIncludes() = %v, want maintenance + bd", includes)
+	if len(includes) != 3 {
+		t.Fatalf("builtinPackIncludes() = %v, want core + maintenance + bd", includes)
 	}
-	if got := filepath.Base(includes[0]); got != "maintenance" {
-		t.Errorf("includes[0] base = %q, want maintenance", got)
+	if got := filepath.Base(includes[0]); got != "core" {
+		t.Errorf("includes[0] base = %q, want core", got)
 	}
-	if got := filepath.Base(includes[1]); got != "bd" {
-		t.Errorf("includes[1] base = %q, want bd", got)
+	if got := filepath.Base(includes[1]); got != "maintenance" {
+		t.Errorf("includes[1] base = %q, want maintenance", got)
+	}
+	if got := filepath.Base(includes[2]); got != "bd" {
+		t.Errorf("includes[2] base = %q, want bd", got)
 	}
 }
 

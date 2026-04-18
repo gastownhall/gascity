@@ -374,11 +374,19 @@ func initPromptTemplatePath(templatePath string) (string, bool) {
 	return filepath.Join("agents", base, "prompt.template.md"), true
 }
 
+// rewriteInitPromptTemplates rewrites the mayor agent's legacy prompt_template
+// from "prompts/mayor.md" to the V2 "agents/mayor/prompt.template.md" path
+// that writeInitAgentPrompts actually scaffolds. Other agents are left alone:
+// we only ship a scaffold for mayor, so rewriting e.g. "prompts/worker.md"
+// would silently point the config at a file that never gets created.
 func rewriteInitPromptTemplates(cfg *config.City) {
 	if cfg == nil {
 		return
 	}
 	for i := range cfg.Agents {
+		if cfg.Agents[i].Name != "mayor" {
+			continue
+		}
 		if next, ok := initPromptTemplatePath(cfg.Agents[i].PromptTemplate); ok {
 			cfg.Agents[i].PromptTemplate = next
 		}
