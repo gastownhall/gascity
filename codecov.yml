@@ -10,7 +10,8 @@ coverage:
           - integration-packages
           - integration-review-formulas
           - integration-bdstore
-          - integration-rest
+          - integration-rest-smoke
+          - integration-rest-full
 
 flags:
   unit:
@@ -40,7 +41,13 @@ flags:
       - internal/
       - test/
     carryforward: true
-  integration-rest:
+  integration-rest-smoke:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  integration-rest-full:
     paths:
       - cmd/
       - internal/

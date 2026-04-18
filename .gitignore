@@ -2,6 +2,7 @@
 CLAUDE.local.md
 coverage.txt
 coverage.integration-*.txt
+cmd/gc/.runtime/
 /bin/
 /gc
 /genschema

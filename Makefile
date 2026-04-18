@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -127,10 +127,10 @@ test-integration:
 	go test -tags integration -timeout 30m ./...
 
 ## test-integration-shards: run the CI integration shards sequentially
-test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest
+test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest-smoke test-integration-rest-full
 
 ## test-integration-shards-cover: run the CI integration coverage shards sequentially
-test-integration-shards-cover: test-integration-packages-cover test-integration-review-formulas-cover test-integration-bdstore-cover test-integration-rest-cover
+test-integration-shards-cover: test-integration-packages-cover test-integration-review-formulas-cover test-integration-bdstore-cover test-integration-rest-smoke-cover test-integration-rest-full-cover
 
 ## test-integration-packages: run all integration-tagged packages except ./test/integration
 test-integration-packages:
@@ -156,13 +156,35 @@ test-integration-bdstore:
 test-integration-bdstore-cover:
 	GO_TEST_COVERPROFILE=coverage.integration-bdstore.txt ./scripts/test-integration-shard bdstore
 
-## test-integration-rest: run the remaining ./test/integration tests
-test-integration-rest:
-	./scripts/test-integration-shard rest
+## test-integration-rest-smoke: run the PR smoke subset of the remaining ./test/integration tests
+test-integration-rest-smoke:
+	./scripts/test-integration-shard rest-smoke
 
-## test-integration-rest-cover: run the rest shard with a CI coverage profile
+## test-integration-rest-smoke-cover: run the smoke rest shard with a CI coverage profile
+test-integration-rest-smoke-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-rest-smoke.txt ./scripts/test-integration-shard rest-smoke
+
+## test-integration-rest-full: run the heavier rest shard kept for nightly/RC and targeted PRs
+test-integration-rest-full:
+	./scripts/test-integration-shard rest-full
+
+## test-integration-rest-full-cover: run the full rest shard with a CI coverage profile
+test-integration-rest-full-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-rest-full.txt ./scripts/test-integration-shard rest-full
+
+## test-integration-rest: run the combined rest smoke+full suite
+test-integration-rest:
+	@status=0; \
+	$(MAKE) test-integration-rest-smoke || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	$(MAKE) test-integration-rest-full || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	exit $$status
+
+## test-integration-rest-cover: run the combined rest smoke+full coverage shards
 test-integration-rest-cover:
-	GO_TEST_COVERPROFILE=coverage.integration-rest.txt ./scripts/test-integration-shard rest
+	@status=0; \
+	$(MAKE) test-integration-rest-smoke-cover || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	$(MAKE) test-integration-rest-full-cover || { st=$$?; [ $$status -ne 0 ] || status=$$st; }; \
+	exit $$status
 
 ## test-chaos-dolt: run the opt-in managed Dolt chaos integration test
 ## Set GC_DOLT_CHAOS_DURATION and GC_DOLT_CHAOS_SEED to control runtime and replay failures.

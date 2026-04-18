@@ -19,6 +19,7 @@ jobs:
       k8s: ${{ steps.filter.outputs.k8s }}
       beads: ${{ steps.filter.outputs.beads }}
       packs: ${{ steps.filter.outputs.packs }}
+      rest_full: ${{ steps.filter.outputs.rest_full }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
@@ -45,6 +46,20 @@ jobs:
               - 'internal/config/pack.go'
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
+            rest_full:
+              - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/nightly.yml'
+              - '.github/workflows/rc-gate.yml'
+              - 'Makefile'
+              - 'go.mod'
+              - 'go.sum'
+              - 'cmd/gc/**'
+              - 'scripts/test-integration-shard'
+              - 'test/agents/**'
+              - 'test/integration/**'
+              - 'test/tmuxtest/**'
+              - 'internal/**'
 
   # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
   check:
@@ -121,8 +136,8 @@ jobs:
   # for an emergency rollback to best-effort without editing the workflow.
   # The heavier end-to-end review-formulas shard is routed in its own
   # workflow so label-triggered reruns do not re-fire the whole CI suite.
-  # The remaining shards stay best-effort while we tighten their routing in
-  # follow-up phases.
+  # The rest shard is now split: a smoke slice stays here on every PR while
+  # the full tier runs separately on targeted runtime/workflow changes.
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}
     runs-on: ubuntu-latest
@@ -148,12 +163,12 @@ jobs:
             command: make test-integration-bdstore-cover
             coverage_file: coverage.integration-bdstore.txt
             coverage_flag: integration-bdstore
-          - shard_name: rest
+          - shard_name: rest-smoke
             continue_on_error: true
-            timeout_minutes: 35
-            command: make test-integration-rest-cover
-            coverage_file: coverage.integration-rest.txt
-            coverage_flag: integration-rest
+            timeout_minutes: 30
+            command: make test-integration-rest-smoke-cover
+            coverage_file: coverage.integration-rest-smoke.txt
+            coverage_flag: integration-rest-smoke
     env:
       DOLT_VERSION: "1.86.1"
       BD_VERSION: "v1.0.0"
@@ -183,6 +198,53 @@ jobs:
         with:
           files: ${{ matrix.coverage_file }}
           flags: ${{ matrix.coverage_flag }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
+  # The heavier rest tier only runs on workflow/runtime changes in PRs and
+  # pushes; nightly and RC still exercise it unconditionally.
+  integration-rest-full:
+    name: Integration / rest-full
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rest_full == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    env:
+      DOLT_VERSION: "1.86.1"
+      BD_VERSION: "v1.0.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run rest-full shard
+        id: shard
+        run: make test-integration-rest-full-cover
+      - name: Inspect shard coverage profile
+        if: steps.shard.outcome == 'success'
+        run: |
+          if [[ -f "coverage.integration-rest-full.txt" ]]; then
+            ls -lh "coverage.integration-rest-full.txt"
+          else
+            echo "coverage file missing: coverage.integration-rest-full.txt"
+          fi
+      - name: Upload shard coverage to Codecov
+        if: >-
+          steps.shard.outcome == 'success' &&
+          hashFiles('coverage.integration-rest-full.txt') != '' &&
+          (
+            github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        with:
+          files: coverage.integration-rest-full.txt
+          flags: integration-rest-full
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
 

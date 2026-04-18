@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <packages|review-formulas|bdstore|rest|all>" >&2
+  echo "usage: $0 <packages|review-formulas|bdstore|rest|rest-smoke|rest-full|all>" >&2
   exit 1
 fi
 
@@ -21,6 +21,18 @@ formula_tests=(
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
+)
+
+# Keep this list to top-level test names. Matching a parent test runs all of
+# its subtests, so additions here directly widen the every-PR smoke budget.
+rest_smoke_tests=(
+  TestE2E_WorkspaceDefaults
+  TestE2E_Hook_WithWork
+  TestE2E_MailCheck
+  TestE2E_MultiAgent_PoolAndFixed
+  TestGastown_ControllerStartStop
+  TestGastown_PipelineHumanToWorker
+  TestGraphWorkflowSuccessPath
 )
 
 join_regex() {
@@ -53,6 +65,23 @@ list_integration_tests() {
   go test -tags integration -list '^Test' "$pkg" | grep '^Test'
 }
 
+validate_selected_tests() {
+  local -a requested=("$@")
+  local available missing requested_name
+
+  available="$(list_integration_tests)"
+  missing=0
+  for requested_name in "${requested[@]}"; do
+    if ! printf '%s\n' "$available" | grep -Fxq -- "$requested_name"; then
+      echo "missing integration test for shard ${shard}: ${requested_name}" >&2
+      missing=1
+    fi
+  done
+  if [[ $missing -ne 0 ]]; then
+    exit 1
+  fi
+}
+
 run_packages_shard() {
   # Avoid bash 4 `mapfile` so this runs on macOS's stock bash 3.2.
   local -a packages=()
@@ -73,14 +102,19 @@ run_packages_shard() {
   go test "${go_test_args[@]}" "${packages[@]}"
 }
 
-run_rest_shard() {
+run_rest_smoke_shard() {
+  validate_selected_tests "${rest_smoke_tests[@]}"
+  run_pkg_tests "$pkg" "${rest_smoke_tests[@]}"
+}
+
+run_rest_full_shard() {
   # bash 3.2 has no associative arrays; encode the excluded set as a
   # newline-delimited string and use grep -Fx to test membership.
   local -a all_tests=() rest_tests=()
   local excluded excluded_name test_name
 
   excluded=""
-  for excluded_name in "${formula_tests[@]}" TestBdStoreConformance; do
+  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance; do
     excluded+="${excluded_name}"$'\n'
   done
 
@@ -107,14 +141,22 @@ case "$shard" in
   bdstore)
     run_pkg_tests "$pkg" TestBdStoreConformance
     ;;
+  rest-smoke)
+    run_rest_smoke_shard
+    ;;
+  rest-full)
+    run_rest_full_shard
+    ;;
   rest)
-    run_rest_shard
+    run_rest_smoke_shard
+    run_rest_full_shard
     ;;
   all)
     "$0" packages
     "$0" review-formulas
     "$0" bdstore
-    "$0" rest
+    "$0" rest-smoke
+    "$0" rest-full
     ;;
   *)
     echo "unknown shard: ${shard}" >&2
