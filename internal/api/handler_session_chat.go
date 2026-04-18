@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -143,8 +142,12 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) 
 		if resolved == nil {
 			return cmd, runtime.Config{WorkDir: workDir}
 		}
+		launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil)
+		if err != nil {
+			return cmd, runtime.Config{WorkDir: workDir}
+		}
 		resolvedInfo := info
-		resolvedInfo.Command = resolved.CommandString()
+		resolvedInfo.Command = launchCommand.Command
 		resolvedInfo.Provider = resolved.Name
 		resolvedInfo.ResumeFlag = resolved.ResumeFlag
 		resolvedInfo.ResumeStyle = resolved.ResumeStyle
@@ -335,19 +338,17 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Merge explicit options with provider effective defaults.
 	// User-specified options override defaults; unspecified options get the
 	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
-	command := resolved.CommandString()
-	if len(resolved.OptionsSchema) > 0 {
-		mergedOptions := make(map[string]string)
-		for k, v := range resolved.EffectiveDefaults {
-			mergedOptions[k] = v
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		if errors.Is(err, config.ErrUnknownOption) {
+			writeError(w, http.StatusBadRequest, "unknown_option", err.Error())
+			return
 		}
-		for k, v := range body.Options {
-			mergedOptions[k] = v
-		}
-		if mergedArgs, err := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); err == nil && len(mergedArgs) > 0 {
-			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
-		}
+		writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
+		return
 	}
+	command := launchCommand.Command
 
 	// Build template_overrides metadata. Includes schema overrides AND
 	// the initial message (as "initial_message" key). The reconciler
@@ -453,7 +454,6 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	// Resolve options against the provider's schema.
-	var extraArgs []string
 	var optMeta map[string]string
 	if len(body.Options) > 0 && len(resolved.OptionsSchema) == 0 {
 		s.idem.unreserve(idemKey)
@@ -462,7 +462,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	if len(resolved.OptionsSchema) > 0 {
 		var optErr error
-		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
+		_, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
 		if optErr != nil {
 			s.idem.unreserve(idemKey)
 			if errors.Is(optErr, config.ErrUnknownOption) {
@@ -505,10 +505,17 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	command := resolved.CommandString()
-	if len(extraArgs) > 0 {
-		command = command + " " + shellquote.Join(extraArgs)
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		if errors.Is(err, config.ErrUnknownOption) {
+			writeError(w, http.StatusBadRequest, "unknown_option", err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
+		return
 	}
+	command := launchCommand.Command
 
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)

@@ -118,6 +118,10 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
+		launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, nil)
+		if err != nil {
+			return "", err
+		}
 		workDir, err := resolveWorkDir(cityPath, cfg, spec.Agent)
 		if err != nil {
 			return "", err
@@ -162,7 +166,7 @@ func materializeSessionForTemplateWithOptions(
 						spec.SessionName,
 						templateIdentity,
 						title,
-						resolved.CommandString(),
+						launchCommand.Command,
 						workDir,
 						resolved.Name,
 						spec.Agent.Session,
@@ -209,7 +213,7 @@ func materializeSessionForTemplateWithOptions(
 				spec.SessionName,
 				templateIdentity,
 				title,
-				resolved.CommandString(),
+				launchCommand.Command,
 				workDir,
 				resolved.Name,
 				spec.Agent.Session,
@@ -272,6 +276,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
+	launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, nil)
+	if err != nil {
+		return "", err
+	}
 	workDir, err := resolveWorkDir(cityPath, cfg, agentCfg)
 	if err != nil {
 		return "", err
@@ -294,7 +302,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				"",
 				agentCfg.QualifiedName(),
 				title,
-				resolved.CommandString(),
+				launchCommand.Command,
 				workDir,
 				resolved.Name,
 				agentCfg.Session,
@@ -321,7 +329,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		"",
 		agentCfg.QualifiedName(),
 		title,
-		resolved.CommandString(),
+		launchCommand.Command,
 		workDir,
 		resolved.Name,
 		agentCfg.Session,
