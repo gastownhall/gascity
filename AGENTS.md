@@ -88,6 +88,39 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+## Architecture Spec
+
+Read **`specs/architecture.md`** before touching:
+
+- `internal/api/` (HTTP + SSE API layer)
+- `cmd/gc/` (CLI) — especially anything that constructs events,
+  calls `apiroute.go:apiClient()`, or uses
+  `internal/api/genclient`
+- `internal/events/` (event bus, registry)
+- `internal/extmsg/` (external-messaging emitters)
+- Anything that affects `internal/api/openapi.json`,
+  `docs/schema/openapi.json`, or the generated TS types under
+  `cmd/gc/dashboard/web/src/generated/`
+
+Load-bearing invariants enforced by CI (violating any fails the
+build):
+
+- **Typed wire.** No hand-written JSON on any HTTP or SSE wire
+  path; no `map[string]any` or `json.RawMessage` on wire types
+  (two documented exceptions live in the spec). All endpoints are
+  Huma-registered; the OpenAPI spec is generated, never
+  hand-written (`TestOpenAPISpecInSync`).
+- **Typed events.** Every constant in `events.KnownEventTypes`
+  must have a registered payload via
+  `events.RegisterPayload(constant, sample)`. Use
+  `events.NoPayload` for events whose envelope fields alone
+  capture the semantics. Enforced by
+  `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Projections, not parallel implementations.** The CLI and the
+  API are projections over `internal/{beads, mail, convoy, ...}`.
+  Neither should re-implement domain logic; both call into the
+  core library.
+
 ## Architecture Best Practices
 
 These apply to all code in this project — frontend and server:

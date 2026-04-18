@@ -106,6 +106,33 @@ These decisions are final. Do not revisit them.
 - **ZERO hardcoded roles.** Roles are pure configuration. No role name
   appears in Go source code.
 
+## Architecture specs
+
+- **`specs/architecture.md`** — the architectural invariants that
+  govern the object model, the CLI, the HTTP + SSE API, and event
+  typing. Read this before touching `internal/api/`, `cmd/gc/`,
+  `internal/events/`, or anything that affects the OpenAPI spec.
+  Load-bearing rules at a glance (the full rationale is in the spec):
+  - The object model (`internal/{beads, mail, convoy, formula,
+    agent, events, session, sling, ...}`) is the center. The CLI
+    (`cmd/gc/`) and the HTTP+SSE API (`internal/api/`) are
+    projections over it. Neither re-implements domain logic.
+  - The OpenAPI spec is the engine. Every HTTP + SSE endpoint is a
+    Huma-registered Go function with annotated input/output types.
+    No hand-written networking. No hand-written JSON. No
+    hand-written OpenAPI. Pre-commit regenerates
+    `internal/api/openapi.json`, the Go client, and the SPA TS
+    types.
+  - Every event-type constant in `events.KnownEventTypes` MUST
+    have a registered payload (via `events.RegisterPayload`).
+    `TestEveryKnownEventTypeHasRegisteredPayload` fails CI
+    otherwise. Use `events.NoPayload` for events whose envelope
+    fields alone capture the semantics.
+  - No `map[string]any` / `json.RawMessage` on wire types.
+    Exceptions (documented in the spec): `SessionRawMessageFrame`
+    for third-party provider frames; `EventPayloadUnion` for the
+    event-payload `oneOf`.
+
 ## Decision frameworks
 
 - **`engdocs/contributors/primitive-test.md`** — The Primitive Test: three necessary
