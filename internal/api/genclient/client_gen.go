@@ -2146,8 +2146,11 @@ type SessionStreamMessageEvent struct {
 	Format     string          `json:"format"`
 	Id         string          `json:"id"`
 	Pagination *PaginationInfo `json:"pagination,omitempty"`
-	Template   string          `json:"template"`
-	Turns      *[]OutputTurn   `json:"turns"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.).
+	Provider string        `json:"provider"`
+	Template string        `json:"template"`
+	Turns    *[]OutputTurn `json:"turns"`
 }
 
 // SessionStreamRawMessageEvent defines model for SessionStreamRawMessageEvent.
@@ -2155,10 +2158,13 @@ type SessionStreamRawMessageEvent struct {
 	Format string `json:"format"`
 	Id     string `json:"id"`
 
-	// Messages Provider-native transcript frames.
+	// Messages Provider-native transcript frames, emitted verbatim as the provider wrote them.
 	Messages   *[]SessionRawMessageFrame `json:"messages"`
 	Pagination *PaginationInfo           `json:"pagination,omitempty"`
-	Template   string                    `json:"template"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
+	Provider string `json:"provider"`
+	Template string `json:"template"`
 }
 
 // SessionSubmitInputBody defines model for SessionSubmitInputBody.
@@ -2191,10 +2197,13 @@ type SessionTranscriptGetResponse struct {
 	Format string `json:"format"`
 	Id     string `json:"id"`
 
-	// Messages Populated for raw format; provider-native frames.
+	// Messages Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.
 	Messages   *[]SessionRawMessageFrame `json:"messages,omitempty"`
 	Pagination *PaginationInfo           `json:"pagination,omitempty"`
-	Template   string                    `json:"template"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
+	Provider string `json:"provider"`
+	Template string `json:"template"`
 
 	// Turns Populated for conversation/text formats.
 	Turns *[]OutputTurn `json:"turns,omitempty"`

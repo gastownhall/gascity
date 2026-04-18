@@ -93,6 +93,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 			_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
 				ID:       info.ID,
 				Template: info.Template,
+				Provider: info.Provider,
 				Format:   "raw",
 				Messages: []SessionRawMessageFrame{},
 			}})

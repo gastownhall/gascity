@@ -164,6 +164,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 				Body: sessionTranscriptGetResponse{
 					ID:         info.ID,
 					Template:   info.Template,
+					Provider:   info.Provider,
 					Format:     "raw",
 					Messages:   wrapRawFrames(rawSess.RawPayloads()),
 					Pagination: rawSess.Pagination,
@@ -194,6 +195,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			Body: sessionTranscriptGetResponse{
 				ID:         info.ID,
 				Template:   info.Template,
+				Provider:   info.Provider,
 				Format:     "conversation",
 				Turns:      turns,
 				Pagination: sess.Pagination,
@@ -207,6 +209,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			Body: sessionTranscriptGetResponse{
 				ID:       info.ID,
 				Template: info.Template,
+				Provider: info.Provider,
 				Format:   "raw",
 				Messages: []SessionRawMessageFrame{},
 			},
@@ -227,6 +230,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			Body: sessionTranscriptGetResponse{
 				ID:       info.ID,
 				Template: info.Template,
+				Provider: info.Provider,
 				Format:   "text",
 				Turns:    turns,
 			},
@@ -238,6 +242,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		Body: sessionTranscriptGetResponse{
 			ID:       info.ID,
 			Template: info.Template,
+			Provider: info.Provider,
 			Format:   "conversation",
 			Turns:    []outputTurn{},
 		},

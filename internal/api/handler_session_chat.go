@@ -29,6 +29,7 @@ type sessionPendingResponse struct {
 type SessionStreamMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.)."`
 	Format     string                     `json:"format"`
 	Turns      []outputTurn               `json:"turns"`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
@@ -37,8 +38,9 @@ type SessionStreamMessageEvent struct {
 type SessionStreamRawMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
 	Format     string                     `json:"format"`
-	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames."`
+	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames, emitted verbatim as the provider wrote them."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
@@ -251,6 +253,7 @@ func (s *Server) emitClosedSessionSnapshot(send sse.Sender, info session.Info, l
 	if err := send(sse.Message{ID: 1, Data: SessionStreamMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
+		Provider: info.Provider,
 		Format:   "conversation",
 		Turns:    turns,
 	}}); err != nil {
@@ -277,6 +280,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(send sse.Sender, info session.Info
 	if err := send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
+		Provider: info.Provider,
 		Format:   "raw",
 		Messages: wrapRawFrames(rawMessages),
 	}}); err != nil {
@@ -369,6 +373,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sen
 				_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "raw",
 					Messages: wrapRawFrames(toSend),
 				}})
@@ -506,6 +511,7 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender
 				_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "conversation",
 					Turns:    toSend,
 				}})
@@ -576,6 +582,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 		_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
+			Provider: info.Provider,
 			Format:   "raw",
 			Messages: wrapRawFrames([]any{fakeMsg}),
 		}})
@@ -639,6 +646,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info se
 		_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
+			Provider: info.Provider,
 			Format:   "text",
 			Turns:    turns,
 		}})

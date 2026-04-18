@@ -294,9 +294,10 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 type sessionTranscriptGetResponse struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
 	Format     string                     `json:"format" doc:"conversation, text, or raw."`
 	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages   []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames."`
+	Messages   []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 

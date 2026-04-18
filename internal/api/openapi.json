@@ -5497,6 +5497,10 @@
           "pagination": {
             "$ref": "#/components/schemas/PaginationInfo"
           },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.).",
+            "type": "string"
+          },
           "template": {
             "type": "string"
           },
@@ -5513,6 +5517,7 @@
         "required": [
           "id",
           "template",
+          "provider",
           "format",
           "turns"
         ],
@@ -5528,7 +5533,7 @@
             "type": "string"
           },
           "messages": {
-            "description": "Provider-native transcript frames.",
+            "description": "Provider-native transcript frames, emitted verbatim as the provider wrote them.",
             "items": {
               "$ref": "#/components/schemas/SessionRawMessageFrame"
             },
@@ -5540,6 +5545,10 @@
           "pagination": {
             "$ref": "#/components/schemas/PaginationInfo"
           },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.",
+            "type": "string"
+          },
           "template": {
             "type": "string"
           }
@@ -5547,6 +5556,7 @@
         "required": [
           "id",
           "template",
+          "provider",
           "format",
           "messages"
         ],
@@ -5618,7 +5628,7 @@
             "type": "string"
           },
           "messages": {
-            "description": "Populated for raw format; provider-native frames.",
+            "description": "Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.",
             "items": {
               "$ref": "#/components/schemas/SessionRawMessageFrame"
             },
@@ -5629,6 +5639,10 @@
           },
           "pagination": {
             "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "provider": {
+            "description": "Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.",
+            "type": "string"
           },
           "template": {
             "type": "string"
@@ -5647,6 +5661,7 @@
         "required": [
           "id",
           "template",
+          "provider",
           "format"
         ],
         "type": "object"
