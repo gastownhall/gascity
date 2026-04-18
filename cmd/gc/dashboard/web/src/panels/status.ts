@@ -24,7 +24,7 @@ export async function renderStatus(): Promise<void> {
   const [statusR, sessionsR, beadsR, convoysR] = await Promise.all([
     api.GET("/v0/city/{cityName}/status", { params: { path: { cityName: city } } }),
     api.GET("/v0/city/{cityName}/sessions", {
-      params: { path: { cityName: city }, query: { state: "active", peek: "true" } },
+      params: { path: { cityName: city }, query: { state: "active", peek: true } },
     }),
     api.GET("/v0/city/{cityName}/beads", {
       params: { path: { cityName: city }, query: { status: "open", limit: 500 } },

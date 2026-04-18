@@ -58,7 +58,7 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
           desc: "Show current sessions JSON",
           category: "Status",
           run: () => read("sessions", api.GET("/v0/city/{cityName}/sessions", {
-            params: { path: { cityName: city }, query: { state: "active", peek: "true" } },
+            params: { path: { cityName: city }, query: { state: "active", peek: true } },
           })),
         },
         {
@@ -82,7 +82,7 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
           desc: "Show rig JSON",
           category: "Rigs",
           run: () => read("rigs", api.GET("/v0/city/{cityName}/rigs", {
-            params: { path: { cityName: city }, query: { git: "true" } },
+            params: { path: { cityName: city }, query: { git: true } },
           })),
         },
         {

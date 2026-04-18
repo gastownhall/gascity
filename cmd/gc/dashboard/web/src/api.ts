@@ -227,7 +227,7 @@ export function cityAPI(cityName: string) {
       return api.GET("/v0/city/{cityName}/rigs", {
         params: {
           path: { cityName },
-          query: { git: options.git ? "true" : undefined },
+          query: { git: options.git ? true : undefined },
         },
       });
     },
@@ -253,7 +253,7 @@ export function cityAPI(cityName: string) {
         params: {
           path: { cityName },
           query: {
-            peek: query.peek ? "true" : undefined,
+            peek: query.peek ? true : undefined,
             state: query.state,
           },
         },

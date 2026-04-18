@@ -32,7 +32,7 @@ export async function renderCrew(): Promise<void> {
   clear(crewBody);
 
   const { data, error } = await api.GET("/v0/city/{cityName}/sessions", {
-    params: { path: { cityName: city }, query: { state: "active", peek: "true" } },
+    params: { path: { cityName: city }, query: { state: "active", peek: true } },
   });
   if (error || !data?.items) {
     crewLoading.textContent = "Failed to load crew";

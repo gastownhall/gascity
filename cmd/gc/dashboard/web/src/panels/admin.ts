@@ -14,7 +14,7 @@ export async function renderAdminPanels(): Promise<void> {
 
   const [servicesR, rigsR, escalationsR, assignedR, queuesR] = await Promise.all([
     api.GET("/v0/city/{cityName}/services", { params: { path: { cityName: city } } }),
-    api.GET("/v0/city/{cityName}/rigs", { params: { path: { cityName: city }, query: { git: "true" } } }),
+    api.GET("/v0/city/{cityName}/rigs", { params: { path: { cityName: city }, query: { git: true } } }),
     api.GET("/v0/city/{cityName}/beads", {
       params: { path: { cityName: city }, query: { label: "gc:escalation", status: "open", limit: 200 } },
     }),
