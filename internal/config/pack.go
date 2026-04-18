@@ -1126,6 +1126,7 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 			}
 		}
 	}
+	applyInheritedPackAgentDefaults(includedAgents, tc.AgentDefaults)
 
 	// Process V2 [imports.X] entries. These are named bindings that
 	// produce agents with qualified names (bindingName.agentName).
@@ -1267,6 +1268,7 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 		return nil, nil, nil, nil, nil, nil, nil, dErr
 	}
 	tc.Agents = append(tc.Agents, discovered...)
+	applyInheritedPackAgentDefaults(tc.Agents, tc.AgentDefaults)
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
 	if err != nil {
@@ -1343,7 +1345,6 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedSkills = append(includedSkills, skills...)
-	applyInheritedPackAgentDefaults(includedAgents, tc.AgentDefaults)
 
 	// Apply pack-level patches to the merged agent list.
 	if !tc.Patches.IsEmpty() {
