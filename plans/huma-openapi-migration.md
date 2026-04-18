@@ -5,8 +5,14 @@
 Make the HTTP + SSE surface a pure projection of the core object model
 (`internal/{beads,mail,convoy,formula,sling,agent,events,session,...}`),
 where the spec is the engine: Go types and handler annotations are the
-single source of truth, and the framework handles every byte on the wire.
-No hand-written networking. No hand-written JSON. No hand-written OpenAPI.
+single source of truth, and the framework handles every byte on the
+wire. No hand-written networking. No hand-written JSON. No hand-written
+OpenAPI.
+
+The developer-facing consequence: changing types, adding operations,
+or adding new event variants is Go code only. Struct definitions and
+handler signatures are the contribution; spec, generated clients, TS
+types, and docs regenerate from them. CI gates every form of drift.
 
 ## Architecture context
 
@@ -118,14 +124,30 @@ The rule for this case:
 Passing through externally-authored shapes is not a license to also
 opacify our own shapes that happen to be nested near them.
 
-### 7. Event-bus payloads are typed at the wire
+### 7. Every event type has a typed wire payload
 
-The internal event bus (`internal/events`) stores event payloads as
-`[]byte` to stay domain-agnostic. That is fine inside the bus. At the
-wire, events are discriminated by `event.Type`; the SSE stream decodes
-the `[]byte` into the concrete Go type registered for that event type
-and emits a proper discriminated-union schema (oneOf by `type`). Event
-emitters take typed structs, never `map[string]any`.
+Both `/v0/events/stream` and `/v0/city/{cityName}/events/stream` emit
+a discriminated union of per-event-type variants. Each variant has a
+`type` const pinned to one event-type string and a `payload` $ref to
+the registered payload schema for that type. Consumers generate
+compile-time exhaustive switches over the full event catalog; there
+is no opaque `payload: {}` anywhere on the wire.
+
+The internal event bus (`internal/events`) stores payloads as
+`[]byte` so it stays domain-agnostic. That is fine inside the bus.
+The event-payload registry (`internal/events/payload.go`) holds the
+event-type → Go-type mapping: emitters take values of the sealed
+`events.Payload` interface, and the SSE projection calls
+`events.DecodePayload` to turn bus bytes back into typed Go values
+before wire emission.
+
+Every constant in `events.KnownEventTypes` must have a registered
+payload. Events that carry no structured data register `events.NoPayload`
+— a typed empty struct that still produces a named schema variant so
+the wire stays uniform across event types. `TestEveryKnownEventTypeHasRegisteredPayload`
+fails CI if a new constant is added without registration; that's how
+the registry discipline stays load-bearing rather than
+best-effort.
 
 ### 8. Error responses are typed too
 
@@ -142,6 +164,52 @@ declaration per well-known error, no runtime `json.Marshal`.
 their own contracts. It is explicitly not a typed API surface. This is
 the single carved-out path inside `internal/api/`. If `/svc/*` ever
 becomes typed, it gets its own migration.
+
+## Developer workflow
+
+The invariants above exist so the developer's contribution to the
+HTTP + SSE surface is Go code only. Tooling produces everything else.
+
+### Adding or changing a REST operation
+
+1. Edit or add input/output struct types with Huma tags (`json:"..."`,
+   `minLength:"1"`, `required:"true"`, etc.).
+2. Write the handler function; register via `huma.Register` (or the
+   `cityGet` / `cityPost` / `cityPatch` / etc. helpers for
+   per-city scoped operations).
+3. Commit. Pre-commit regenerates `internal/api/openapi.json`,
+   `docs/schema/openapi.json`, `internal/api/genclient/`, and the TS
+   types under `cmd/gc/dashboard/web/src/generated/`. Mintlify
+   publishes the spec on the next docs build.
+
+### Adding or changing an event type
+
+1. Add the constant to `internal/events/events.go` and append it to
+   `events.KnownEventTypes`.
+2. Define a typed payload struct implementing `events.Payload` (a
+   trivial `IsEventPayload()` method), or use `events.NoPayload` for
+   events whose envelope fields alone capture the semantics.
+3. Call `events.RegisterPayload(constant, sample)` from an `init()`
+   in the domain package that owns the event (e.g.
+   `internal/api/event_payloads.go` for mail/bead,
+   `internal/extmsg/events.go` for extmsg).
+4. Commit. Pre-commit regenerates the discriminated-union wire
+   schema; generated clients gain the new typed variant
+   automatically.
+
+### Failure modes and their guards
+
+Skipping any step lands on a CI failure, not a production bug:
+
+| Miss | Caught by |
+|---|---|
+| Spec not regenerated after Go-type change | `TestOpenAPISpecInSync` |
+| Generated Go client out of sync with spec | `TestGeneratedClientInSync` |
+| Handler response field undeclared in spec | Layer 1 response-validation tests |
+| Spec/client method-shape drift | Layer 2 round-trip tests |
+| End-to-end binary wire regression | Layer 3 integration tests |
+| New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
+| Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath`) |
 
 ## Testing discipline (invariants)
 
