@@ -21,6 +21,25 @@ type LoadRequest struct {
 	TailCompactions       int
 }
 
+// TranscriptRequest scopes provider-native transcript reads that preserve raw
+// pagination and entry fidelity for higher-level API/CLI adapters.
+type TranscriptRequest struct {
+	Provider        string
+	TranscriptPath  string
+	TailCompactions int
+	BeforeEntryID   string
+	Raw             bool
+}
+
+// TranscriptResult wraps a provider-native transcript read behind the worker
+// boundary so callers do not depend on sessionlog directly for file discovery.
+type TranscriptResult struct {
+	Provider       string
+	TranscriptPath string
+	Session        *sessionlog.Session
+	RawMessages    []json.RawMessage
+}
+
 // SessionLogAdapter exposes the normalized transcript contract while keeping
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
@@ -29,7 +48,63 @@ type SessionLogAdapter struct {
 
 // DiscoverTranscript returns the best available transcript path for a worker.
 func (a SessionLogAdapter) DiscoverTranscript(provider, workDir, gcSessionID string) string {
+	if strings.TrimSpace(gcSessionID) != "" {
+		if path := workertranscript.DiscoverKeyedPath(a.SearchPaths, provider, workDir, gcSessionID); path != "" {
+			return path
+		}
+		if path := workertranscript.DiscoverFallbackPath(a.SearchPaths, provider, workDir, gcSessionID); path != "" {
+			return path
+		}
+	}
 	return workertranscript.DiscoverPath(a.SearchPaths, provider, workDir, gcSessionID)
+}
+
+// TailMeta reads model/context metadata from a discovered transcript path.
+func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
+	return sessionlog.ExtractTailMetaFromSearchPaths(a.SearchPaths, path)
+}
+
+// ReadTranscript loads a provider transcript while preserving raw pagination
+// and message fidelity for worker-owned API/CLI surfaces.
+func (a SessionLogAdapter) ReadTranscript(req TranscriptRequest) (*TranscriptResult, error) {
+	path := strings.TrimSpace(req.TranscriptPath)
+	if path == "" {
+		return nil, fmt.Errorf("transcript path is required")
+	}
+
+	var (
+		sess *sessionlog.Session
+		err  error
+	)
+	if req.Raw {
+		if strings.TrimSpace(req.BeforeEntryID) != "" {
+			sess, err = sessionlog.ReadProviderFileRawOlder(req.Provider, path, req.TailCompactions, req.BeforeEntryID)
+		} else {
+			sess, err = sessionlog.ReadProviderFileRaw(req.Provider, path, req.TailCompactions)
+		}
+	} else if strings.TrimSpace(req.BeforeEntryID) != "" {
+		sess, err = sessionlog.ReadProviderFileOlder(req.Provider, path, req.TailCompactions, req.BeforeEntryID)
+	} else {
+		sess, err = sessionlog.ReadProviderFile(req.Provider, path, req.TailCompactions)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	result := &TranscriptResult{
+		Provider:       req.Provider,
+		TranscriptPath: filepath.Clean(path),
+		Session:        sess,
+	}
+	if req.Raw && sess != nil {
+		result.RawMessages = make([]json.RawMessage, 0, len(sess.Messages))
+		for _, entry := range sess.Messages {
+			if len(entry.Raw) > 0 {
+				result.RawMessages = append(result.RawMessages, entry.Raw)
+			}
+		}
+	}
+	return result, nil
 }
 
 // LoadHistory loads and normalizes a provider transcript.

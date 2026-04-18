@@ -182,7 +182,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (session not running; will be delivered on next start)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	if err := sp.Stop(sessionName); err != nil {
+	if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

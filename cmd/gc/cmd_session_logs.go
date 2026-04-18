@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,9 +11,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -89,13 +89,7 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 }
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
-	if logCtx.sessionKey != "" {
-		if path := workertranscript.DiscoverKeyedPath(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionKey); path != "" {
-			return path
-		}
-		return workertranscript.DiscoverFallbackPath(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionKey)
-	}
-	return workertranscript.DiscoverPath(searchPaths, logCtx.provider, logCtx.workDir, "")
+	return worker.SessionLogAdapter{SearchPaths: searchPaths}.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
 
 func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
@@ -104,9 +98,11 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store bead
 		return "", "", false
 	}
 	if logCtx.sessionID != "" {
-		mgr := session.NewManager(store, nil)
-		if path, err := mgr.TranscriptPath(logCtx.sessionID, searchPaths); err == nil {
-			return path, logCtx.provider, true
+		handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
+		if err == nil {
+			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil {
+				return path, logCtx.provider, true
+			}
 		}
 	}
 	return resolveSessionLogPath(searchPaths, logCtx), logCtx.provider, true
@@ -188,7 +184,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 		return 1
 	}
 
-	sess, readErr := sessionlog.ReadProviderFile(provider, path, tail)
+	sess, readErr := readSessionFile(provider, path, tail)
 	if readErr != nil {
 		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -246,7 +242,15 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 }
 
 func readSessionFile(provider, path string, tail int) (*sessionlog.Session, error) {
-	return sessionlog.ReadProviderFile(provider, path, tail)
+	result, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+		Provider:        provider,
+		TranscriptPath:  path,
+		TailCompactions: tail,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.Session, nil
 }
 
 // resolveMessage handles both message formats found in Claude JSONL files:

@@ -229,7 +229,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName && sp != nil && sp.IsRunning(oldSessionName) {
-				if err := sp.Stop(oldSessionName); err != nil {
+				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, oldSessionName); err != nil {
 					fmt.Fprintf(stderr, "session beads: stopping duplicate named session %q: %v\n", oldSessionName, err) //nolint:errcheck
 				}
 			}
@@ -301,7 +301,7 @@ func retireRemovedConfiguredNamedSessionBead(
 	}
 	oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 	if oldSessionName != "" && sp != nil && sp.IsRunning(oldSessionName) {
-		if err := sp.Stop(oldSessionName); err != nil {
+		if err := workerKillSessionTargetWithConfig("", store, sp, nil, oldSessionName); err != nil {
 			fmt.Fprintf(stderr, "session beads: stopping removed named session %q: %v\n", oldSessionName, err) //nolint:errcheck
 		}
 	}
@@ -549,7 +549,7 @@ func syncSessionBeadsWithSnapshot(
 			}
 			if closeBead(store, b.ID, "reconfigured", now, stderr) {
 				if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" && sp.IsRunning(sn) {
-					if err := sp.Stop(sn); err != nil {
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sn); err != nil {
 						fmt.Fprintf(stderr, "session beads: stopping drifted named session %q: %v\n", sn, err) //nolint:errcheck
 					}
 				}

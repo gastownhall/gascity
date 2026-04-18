@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -109,11 +110,11 @@ func (s *Server) handleRigAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRigRestart kills all agents in a rig so the reconciler restarts them.
-// Uses sp.Stop() directly — no StateMutator dependency for runtime kills.
 func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
+	store := s.state.CityBeadStore()
 
 	// Verify rig exists.
 	rigFound := false
@@ -140,7 +141,22 @@ func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
 		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
 		for _, ea := range expanded {
 			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
-			if err := sp.Stop(sessionName); err != nil {
+			killedViaWorker := false
+			err := error(nil)
+			if store != nil {
+				if sessionID, resolveErr := session.ResolveSessionID(store, sessionName); resolveErr == nil {
+					if handle, handleErr := s.workerHandleForSession(store, sessionID); handleErr == nil {
+						err = handle.Kill(context.Background())
+						killedViaWorker = err == nil
+					} else {
+						err = handleErr
+					}
+				}
+			}
+			if !killedViaWorker {
+				err = sp.Stop(sessionName)
+			}
+			if err != nil {
 				// "not found" / "not running" are benign — agent wasn't running.
 				if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "not running") {
 					failed = append(failed, ea.qualifiedName)

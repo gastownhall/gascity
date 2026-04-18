@@ -13,7 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const lookPathCacheTTL = 30 * time.Second
@@ -612,15 +612,16 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
+	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 	provider := strings.TrimSpace(agentCfg.Provider)
 	if provider == "" && cfg != nil {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	sessionFile := workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
+	sessionFile := adapter.DiscoverTranscript(provider, workDir, "")
 	if sessionFile == "" {
 		return
 	}
-	meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile)
+	meta, err := adapter.TailMeta(sessionFile)
 	if err != nil || meta == nil {
 		return
 	}

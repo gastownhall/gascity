@@ -25,12 +25,18 @@ var (
 type Handle interface {
 	Start(context.Context) error
 	Stop(context.Context) error
+	Kill(context.Context) error
+	Close(context.Context) error
+	Rename(context.Context, string) error
+	Peek(context.Context, int) (string, error)
 
 	State(context.Context) (State, error)
 
 	Message(context.Context, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
 	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
+	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
+	TranscriptPath(context.Context) (string, error)
 
 	History(context.Context, HistoryRequest) (*HistorySnapshot, error)
 
@@ -331,6 +337,42 @@ func (h *SessionHandle) Stop(context.Context) error {
 	return h.manager.Suspend(id)
 }
 
+// Kill terminates the live runtime without mutating the persisted lifecycle.
+func (h *SessionHandle) Kill(context.Context) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	return h.manager.Kill(id)
+}
+
+// Close permanently ends the worker session.
+func (h *SessionHandle) Close(context.Context) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	return h.manager.Close(id)
+}
+
+// Rename updates the user-facing session title.
+func (h *SessionHandle) Rename(_ context.Context, title string) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	return h.manager.Rename(id, strings.TrimSpace(title))
+}
+
+// Peek captures recent provider output without attaching.
+func (h *SessionHandle) Peek(_ context.Context, lines int) (string, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return "", sessionpkg.ErrSessionInactive
+	}
+	return h.manager.Peek(id, lines)
+}
+
 // State returns the worker-level lifecycle view.
 func (h *SessionHandle) State(ctx context.Context) (State, error) {
 	id := h.currentSessionID()
@@ -455,6 +497,42 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (NudgeResul
 	default:
 		return NudgeResult{}, fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 	}
+}
+
+// TranscriptPath resolves the provider-native transcript path for the worker.
+func (h *SessionHandle) TranscriptPath(_ context.Context) (string, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return "", ErrHistoryUnavailable
+	}
+	path, err := h.manager.TranscriptPath(id, h.adapter.SearchPaths)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", ErrHistoryUnavailable
+	}
+	return path, nil
+}
+
+// Transcript loads the provider-native transcript through the worker boundary.
+func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (*TranscriptResult, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return nil, ErrHistoryUnavailable
+	}
+	info, err := h.manager.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	path, err := h.TranscriptPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	readReq := req
+	readReq.Provider = h.historyProvider(info)
+	readReq.TranscriptPath = path
+	return h.adapter.ReadTranscript(readReq)
 }
 
 // History returns the normalized worker transcript.
