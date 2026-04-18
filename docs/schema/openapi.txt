@@ -56,6 +56,27 @@
         ],
         "type": "object"
       },
+      "AgentCreatedOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "description": "Created agent name.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Operation result.",
+            "examples": [
+              "created"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "agent"
+        ],
+        "type": "object"
+      },
       "AgentMapping": {
         "additionalProperties": false,
         "properties": {
@@ -1721,34 +1742,6 @@
             ]
           }
         },
-        "type": "object"
-      },
-      "CreatedResponseBody": {
-        "additionalProperties": false,
-        "properties": {
-          "agent": {
-            "description": "Created resource name.",
-            "type": "string"
-          },
-          "provider": {
-            "description": "Created resource name.",
-            "type": "string"
-          },
-          "rig": {
-            "description": "Created resource name.",
-            "type": "string"
-          },
-          "status": {
-            "description": "Operation result.",
-            "examples": [
-              "created"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "status"
-        ],
         "type": "object"
       },
       "DeliveryContextRecord": {
@@ -4461,6 +4454,27 @@
         ],
         "type": "object"
       },
+      "ProviderCreatedOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "description": "Created provider name.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Operation result.",
+            "examples": [
+              "created"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "provider"
+        ],
+        "type": "object"
+      },
       "ProviderOptionDTO": {
         "additionalProperties": false,
         "properties": {
@@ -4983,6 +4997,27 @@
         "required": [
           "name",
           "path"
+        ],
+        "type": "object"
+      },
+      "RigCreatedOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "rig": {
+            "description": "Created rig name.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Operation result.",
+            "examples": [
+              "created"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "rig"
         ],
         "type": "object"
       },
@@ -7857,7 +7892,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreatedResponseBody"
+                  "$ref": "#/components/schemas/AgentCreatedOutputBody"
                 }
               }
             },
@@ -13196,7 +13231,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreatedResponseBody"
+                  "$ref": "#/components/schemas/ProviderCreatedOutputBody"
                 }
               }
             },
@@ -13686,7 +13721,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreatedResponseBody"
+                  "$ref": "#/components/schemas/RigCreatedOutputBody"
                 }
               }
             },

@@ -19,6 +19,12 @@ import (
 
 const initPackSchemaVersion = 2
 
+// initExitAlreadyInitialized is the exit code `gc init` uses when the
+// target already contains a city. Callers (notably the supervisor HTTP
+// handler behind POST /v0/city) dispatch on this exit code instead of
+// string-matching stderr.
+const initExitAlreadyInitialized = 2
+
 var initConventionDirs = []string{
 	"agents",
 	"commands",
@@ -454,7 +460,7 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	// Create directory structure.
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return 1
+		return initExitAlreadyInitialized
 	}
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -532,12 +538,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
 		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return 1
+		return initExitAlreadyInitialized
 	}
 	if _, err := fs.Stat(tomlPath); err == nil {
 		if !canBootstrapExistingCity(wiz) {
 			fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-			return 1
+			return initExitAlreadyInitialized
 		}
 		if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -819,7 +825,7 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 	// Check target not already initialized.
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return 1
+		return initExitAlreadyInitialized
 	}
 
 	// Create target directory if needed.

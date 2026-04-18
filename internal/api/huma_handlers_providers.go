@@ -130,7 +130,7 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 
 // humaHandleProviderCreate is the Huma-typed handler for POST /v0/providers.
 // Name and Command required via struct tags on ProviderCreateInput.
-func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCreateInput) (*CreatedResponse, error) {
+func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCreateInput) (*ProviderCreatedOutput, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
@@ -149,7 +149,7 @@ func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCrea
 	if err := sm.CreateProvider(input.Body.Name, spec); err != nil {
 		return nil, mutationError(err)
 	}
-	resp := &CreatedResponse{}
+	resp := &ProviderCreatedOutput{}
 	resp.Body.Status = "created"
 	resp.Body.Provider = input.Body.Name
 	return resp, nil

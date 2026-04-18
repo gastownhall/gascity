@@ -213,6 +213,15 @@ type AgentCreateInputBody struct {
 	Scope *string `json:"scope,omitempty"`
 }
 
+// AgentCreatedOutputBody defines model for AgentCreatedOutputBody.
+type AgentCreatedOutputBody struct {
+	// Agent Created agent name.
+	Agent string `json:"agent"`
+
+	// Status Operation result.
+	Status string `json:"status"`
+}
+
 // AgentMapping defines model for AgentMapping.
 type AgentMapping struct {
 	AgentId         string `json:"agent_id"`
@@ -743,21 +752,6 @@ type ConvoyProgress struct {
 type ConvoyRemoveInputBody struct {
 	// Items Bead IDs to remove.
 	Items *[]string `json:"items,omitempty"`
-}
-
-// CreatedResponseBody defines model for CreatedResponseBody.
-type CreatedResponseBody struct {
-	// Agent Created resource name.
-	Agent *string `json:"agent,omitempty"`
-
-	// Provider Created resource name.
-	Provider *string `json:"provider,omitempty"`
-
-	// Rig Created resource name.
-	Rig *string `json:"rig,omitempty"`
-
-	// Status Operation result.
-	Status string `json:"status"`
 }
 
 // DeliveryContextRecord defines model for DeliveryContextRecord.
@@ -1772,6 +1766,15 @@ type ProviderCreateInputBody struct {
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
 }
 
+// ProviderCreatedOutputBody defines model for ProviderCreatedOutputBody.
+type ProviderCreatedOutputBody struct {
+	// Provider Created provider name.
+	Provider string `json:"provider"`
+
+	// Status Operation result.
+	Status string `json:"status"`
+}
+
 // ProviderOptionDTO defines model for ProviderOptionDTO.
 type ProviderOptionDTO struct {
 	Choices *[]OptionChoiceDTO `json:"choices"`
@@ -1951,6 +1954,15 @@ type RigCreateInputBody struct {
 
 	// Prefix Session name prefix.
 	Prefix *string `json:"prefix,omitempty"`
+}
+
+// RigCreatedOutputBody defines model for RigCreatedOutputBody.
+type RigCreatedOutputBody struct {
+	// Rig Created rig name.
+	Rig string `json:"rig"`
+
+	// Status Operation result.
+	Status string `json:"status"`
 }
 
 // RigPatch defines model for RigPatch.
@@ -15128,7 +15140,7 @@ func (r GetV0CityByCityNameAgentsResponse) StatusCode() int {
 type CreateAgentResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON201                       *CreatedResponseBody
+	JSON201                       *AgentCreatedOutputBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -17082,7 +17094,7 @@ func (r GetV0CityByCityNameProvidersResponse) StatusCode() int {
 type CreateProviderResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON201                       *CreatedResponseBody
+	JSON201                       *ProviderCreatedOutputBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -17266,7 +17278,7 @@ func (r GetV0CityByCityNameRigsResponse) StatusCode() int {
 type CreateRigResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON201                       *CreatedResponseBody
+	JSON201                       *RigCreatedOutputBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -20127,7 +20139,7 @@ func ParseCreateAgentResponse(rsp *http.Response) (*CreateAgentResponse, error) 
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest CreatedResponseBody
+		var dest AgentCreatedOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -22925,7 +22937,7 @@ func ParseCreateProviderResponse(rsp *http.Response) (*CreateProviderResponse, e
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest CreatedResponseBody
+		var dest ProviderCreatedOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -23189,7 +23201,7 @@ func ParseCreateRigResponse(rsp *http.Response) (*CreateRigResponse, error) {
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest CreatedResponseBody
+		var dest RigCreatedOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

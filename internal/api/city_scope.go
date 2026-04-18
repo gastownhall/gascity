@@ -118,11 +118,7 @@ func sseCityPrecheck[I any](sm *SupervisorMux,
 	fn func(*Server, context.Context, *I) error,
 ) func(context.Context, *I) error {
 	return func(ctx context.Context, input *I) error {
-		named, ok := any(input).(cityNamer)
-		if !ok {
-			return fmt.Errorf("internal: input %T does not embed CityScope", input)
-		}
-		name := named.GetCityName()
+		name := cityScopeName(input)
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
 			return huma.Error404NotFound("not_found: city not found or not running: " + name)
@@ -138,16 +134,26 @@ func sseCityStream[I any](sm *SupervisorMux,
 	fn func(*Server, huma.Context, *I, sse.Sender),
 ) func(huma.Context, *I, sse.Sender) {
 	return func(hctx huma.Context, input *I, send sse.Sender) {
-		named, ok := any(input).(cityNamer)
-		if !ok {
-			return
-		}
-		srv := sm.resolveCityServer(named.GetCityName())
+		srv := sm.resolveCityServer(cityScopeName(input))
 		if srv == nil {
 			return
 		}
 		fn(srv, hctx, input, send)
 	}
+}
+
+// cityScopeName extracts the city name from any city-scoped Huma input.
+// The type assertion is a programmer-bug tripwire — every city-scoped
+// input embeds CityScope by construction, so a failure here means
+// someone registered a handler whose input type does not embed it.
+// Panic rather than silently returning so the mistake surfaces
+// immediately in tests instead of as a confusing EOF from SSE clients.
+func cityScopeName[I any](input *I) string {
+	named, ok := any(input).(cityNamer)
+	if !ok {
+		panic(fmt.Sprintf("api: input type %T does not embed CityScope", input))
+	}
+	return named.GetCityName()
 }
 
 // resolveCityServer looks up (or constructs + caches) the per-city

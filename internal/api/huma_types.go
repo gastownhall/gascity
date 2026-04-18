@@ -193,13 +193,27 @@ type OKResponse struct {
 	}
 }
 
-// CreatedResponse is a success response for create operations.
-type CreatedResponse struct {
+// AgentCreatedOutput is the 201 response for POST /agents.
+type AgentCreatedOutput struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"created"`
+		Agent  string `json:"agent" doc:"Created agent name."`
+	}
+}
+
+// RigCreatedOutput is the 201 response for POST /rigs.
+type RigCreatedOutput struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"created"`
+		Rig    string `json:"rig" doc:"Created rig name."`
+	}
+}
+
+// ProviderCreatedOutput is the 201 response for POST /providers.
+type ProviderCreatedOutput struct {
 	Body struct {
 		Status   string `json:"status" doc:"Operation result." example:"created"`
-		Agent    string `json:"agent,omitempty" doc:"Created resource name."`
-		Rig      string `json:"rig,omitempty" doc:"Created resource name."`
-		Provider string `json:"provider,omitempty" doc:"Created resource name."`
+		Provider string `json:"provider" doc:"Created provider name."`
 	}
 }
 

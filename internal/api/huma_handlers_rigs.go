@@ -59,7 +59,7 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 
 // humaHandleRigCreate is the Huma-typed handler for POST /v0/rigs.
 // Name and Path required via struct tags on RigCreateInput.
-func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (*CreatedResponse, error) {
+func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (*RigCreatedOutput, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
@@ -74,7 +74,7 @@ func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (
 	if err := sm.CreateRig(rig); err != nil {
 		return nil, mutationError(err)
 	}
-	resp := &CreatedResponse{}
+	resp := &RigCreatedOutput{}
 	resp.Body.Status = "created"
 	resp.Body.Rig = input.Body.Name
 	return resp, nil

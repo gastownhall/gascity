@@ -10,6 +10,13 @@ import (
 
 var responseCacheTTL = 2 * time.Second
 
+// responseCacheMaxEntries caps the in-memory cache. Query-parameter
+// combinations (Rig, Pool, blocking index, etc.) produce a wide but
+// bounded key space; a hostile or buggy client could still exhaust
+// memory without a ceiling. Eviction is oldest-by-expiry, so the most
+// recently warmed entries stay hot.
+const responseCacheMaxEntries = 256
+
 // responseCacheEntry stores the typed response value directly. No JSON
 // serialization happens inside the cache — Huma serializes at the handler
 // boundary on every hit. At 2-second TTL on localhost, the re-serialization
@@ -126,7 +133,8 @@ func (s *Server) cachedResponse(key string, index uint64) (any, bool) {
 
 // storeResponse caches the typed value under (key, index). No JSON work is
 // performed here; Huma re-serializes on each cache hit at the handler
-// boundary.
+// boundary. The map is capped at responseCacheMaxEntries with TTL-based
+// eviction on insert.
 func (s *Server) storeResponse(key string, index uint64, v any) {
 	if key == "" {
 		return
@@ -136,10 +144,39 @@ func (s *Server) storeResponse(key string, index uint64, v any) {
 	if s.responseCacheEntries == nil {
 		s.responseCacheEntries = make(map[string]responseCacheEntry)
 	}
+	now := time.Now()
+	if _, exists := s.responseCacheEntries[key]; !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
+		s.evictResponseCache(now)
+	}
 	s.responseCacheEntries[key] = responseCacheEntry{
 		index:   index,
-		expires: time.Now().Add(responseCacheTTL),
+		expires: now.Add(responseCacheTTL),
 		value:   v,
+	}
+}
+
+// evictResponseCache drops expired entries, and — if the cache is still
+// over cap — the single oldest-by-expiry remaining entry. Called under
+// the cache mutex.
+func (s *Server) evictResponseCache(now time.Time) {
+	for k, entry := range s.responseCacheEntries {
+		if now.After(entry.expires) {
+			delete(s.responseCacheEntries, k)
+		}
+	}
+	if len(s.responseCacheEntries) < responseCacheMaxEntries {
+		return
+	}
+	var oldestKey string
+	var oldestExp time.Time
+	for k, entry := range s.responseCacheEntries {
+		if oldestKey == "" || entry.expires.Before(oldestExp) {
+			oldestKey = k
+			oldestExp = entry.expires
+		}
+	}
+	if oldestKey != "" {
+		delete(s.responseCacheEntries, oldestKey)
 	}
 }
 

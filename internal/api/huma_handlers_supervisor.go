@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -112,6 +113,12 @@ type SupervisorEventStreamInput struct {
 	LastEventID string `header:"Last-Event-ID" required:"false" doc:"Reconnect cursor (composite per-city cursor)."`
 	AfterCursor string `query:"after_cursor" required:"false" doc:"Alternative to Last-Event-ID for browsers that can't set custom headers."`
 }
+
+// cityInitExitAlreadyInitialized mirrors initExitAlreadyInitialized in
+// cmd/gc/cmd_init.go. Duplicated here because the CLI's exit-code
+// constant is declared in the main package and not importable; the two
+// must stay in sync. TestCityInitExitCodeInSync enforces that.
+const cityInitExitAlreadyInitialized = 2
 
 // --- Huma API setup ---
 
@@ -310,7 +317,11 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		if msg == "" {
 			msg = err.Error()
 		}
-		if bytes.Contains(stderr.Bytes(), []byte("already initialized")) {
+		// gc init exits with initExitAlreadyInitialized when the
+		// target already contains a city. Dispatch on the exit code
+		// rather than scraping stderr text.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == cityInitExitAlreadyInitialized {
 			return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 		}
 		return nil, huma.Error500InternalServerError("init_failed: " + msg)
