@@ -180,3 +180,28 @@ func TestWorkerDeliveryIntentForSubmitIntent(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerNudgeDeliveryForMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode nudgeDeliveryMode
+		want worker.NudgeDelivery
+		ok   bool
+	}{
+		{name: "immediate", mode: nudgeDeliveryImmediate, want: worker.NudgeDeliveryImmediate, ok: true},
+		{name: "wait idle", mode: nudgeDeliveryWaitIdle, want: worker.NudgeDeliveryWaitIdle, ok: true},
+		{name: "queue", mode: nudgeDeliveryQueue, want: "", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := workerNudgeDeliveryForMode(tt.mode)
+			if ok != tt.ok {
+				t.Fatalf("workerNudgeDeliveryForMode(%q) ok = %v, want %v", tt.mode, ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("workerNudgeDeliveryForMode(%q) = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
+	}
+}

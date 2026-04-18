@@ -420,7 +420,8 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 	if err != nil {
 		return err
 	}
-	return handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	return err
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for

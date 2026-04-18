@@ -120,3 +120,14 @@ func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.Del
 		return worker.DeliveryIntentDefault
 	}
 }
+
+func workerNudgeDeliveryForMode(mode nudgeDeliveryMode) (worker.NudgeDelivery, bool) {
+	switch mode {
+	case nudgeDeliveryImmediate:
+		return worker.NudgeDeliveryImmediate, true
+	case nudgeDeliveryWaitIdle:
+		return worker.NudgeDeliveryWaitIdle, true
+	default:
+		return "", false
+	}
+}

@@ -339,6 +339,132 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryImmediate,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(immediate): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(immediate) Delivered = false, want true")
+	}
+
+	calls := sp.Calls[startCalls:]
+	if !hasCall(calls, "NudgeNow", "check deploy status") {
+		t.Fatalf("calls = %#v, want immediate nudge", calls)
+	}
+	if firstCall(calls, "Nudge") != nil {
+		t.Fatalf("calls = %#v, want NudgeNow without fallback Nudge", calls)
+	}
+	if firstCall(calls, "Pending") == nil {
+		t.Fatalf("calls = %#v, want pending interaction probe before nudge", calls)
+	}
+	if info.SessionName == "" {
+		t.Fatal("SessionName is empty")
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true")
+	}
+
+	calls := sp.Calls[startCalls:]
+	methods := make([]string, 0, len(calls))
+	for _, call := range calls {
+		methods = append(methods, call.Method)
+	}
+	if !containsSubsequence(methods, []string{"IsRunning", "WaitForIdle", "NudgeNow"}) {
+		t.Fatalf("methods = %v, want IsRunning -> WaitForIdle -> NudgeNow", methods)
+	}
+	nudge := firstCall(calls, "NudgeNow")
+	if nudge == nil {
+		t.Fatalf("calls = %#v, want NudgeNow", calls)
+	}
+	if !strings.Contains(nudge.Message, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system-reminder wrapper", nudge.Message)
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleReturnsUndeliveredForUnsupportedProvider(t *testing.T) {
+	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex",
+		WorkDir:  t.TempDir(),
+		Provider: "codex",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false for unsupported provider")
+	}
+
+	for _, call := range sp.Calls[startCalls:] {
+		if call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no live wait-idle delivery on unsupported provider", sp.Calls[startCalls:])
+		}
+	}
+}
+
 func TestSessionHandlePendingRespondAndBlockedState(t *testing.T) {
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileCodexTmuxCLI,
