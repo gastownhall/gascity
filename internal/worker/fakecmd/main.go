@@ -1,3 +1,5 @@
+// Package main provides the standalone fake-worker helper binary used by
+// worker conformance tests.
 package main
 
 import (

@@ -55,6 +55,7 @@ type Handle interface {
 type Phase string
 
 const (
+	// PhaseUnknown reports that the worker lifecycle phase is not yet known.
 	PhaseUnknown  Phase = "unknown"
 	PhaseStarting Phase = "starting"
 	PhaseReady    Phase = "ready"
@@ -79,6 +80,7 @@ type State struct {
 type DeliveryIntent string
 
 const (
+	// DeliveryIntentDefault submits a normal follow-up turn.
 	DeliveryIntentDefault      DeliveryIntent = "default"
 	DeliveryIntentFollowUp     DeliveryIntent = "follow_up"
 	DeliveryIntentInterruptNow DeliveryIntent = "interrupt_now"
@@ -99,6 +101,7 @@ type MessageResult struct {
 type CreateMode string
 
 const (
+	// CreateModeDeferred creates the session without starting live runtime work.
 	CreateModeDeferred CreateMode = "deferred"
 	CreateModeStarted  CreateMode = "started"
 )
@@ -106,15 +109,17 @@ const (
 // InterruptRequest is reserved for future interrupt controls.
 type InterruptRequest struct{}
 
-// NudgeRequest delivers a best-effort wake or redirect message.
+// NudgeDelivery controls how a nudge should be delivered.
 type NudgeDelivery string
 
 const (
+	// NudgeDeliveryDefault uses the provider's default nudge path.
 	NudgeDeliveryDefault   NudgeDelivery = "default"
 	NudgeDeliveryImmediate NudgeDelivery = "immediate"
 	NudgeDeliveryWaitIdle  NudgeDelivery = "wait_idle"
 )
 
+// NudgeRequest delivers a best-effort wake or redirect message.
 type NudgeRequest struct {
 	Text     string          `json:"text"`
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
@@ -127,9 +132,11 @@ type NudgeResult struct {
 	Delivered bool `json:"delivered"`
 }
 
+// NudgeWakePolicy controls whether a nudge may wake a stopped session.
 type NudgeWakePolicy string
 
 const (
+	// NudgeWakeIfNeeded allows the nudge to wake a stopped session first.
 	NudgeWakeIfNeeded NudgeWakePolicy = "wake_if_needed"
 	NudgeWakeLiveOnly NudgeWakePolicy = "live_only"
 )

@@ -55,6 +55,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 	}, nil
 }
 
+// Start reports unsupported for runtime-only handles that lack bead-backed state.
 func (h *RuntimeHandle) Start(context.Context) error {
 	if h.provider.IsRunning(h.sessionName) {
 		return nil
