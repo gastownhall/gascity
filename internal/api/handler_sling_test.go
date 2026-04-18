@@ -261,7 +261,7 @@ func TestSlingRejectsScopeRefQualifiedTargetMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "conflicts with qualified target rig") {
+	if !strings.Contains(rec.Body.String(), "conflicts with resolved target rig") {
 		t.Errorf("error message = %s; expected mismatch diagnostic", rec.Body.String())
 	}
 }
@@ -279,8 +279,55 @@ func TestSlingAllowsScopeRefQualifiedTargetMatch(t *testing.T) {
 	body := `{"target":"myrig/worker","bead":"BD-42","scope_kind":"rig","scope_ref":"myrig"}`
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
-	if strings.Contains(rec.Body.String(), "conflicts with qualified target rig") {
+	if strings.Contains(rec.Body.String(), "conflicts") {
 		t.Errorf("should not reject matching scope_ref/target; body = %s", rec.Body.String())
+	}
+}
+
+// TestSlingRejectsCityScopedAgentWithRigScope catches the bare-name
+// fall-through that iter2's original guard missed: a caller asks for
+// rig scope but the bare target resolves to a city-scoped agent
+// (agentCfg.Dir == ""). findSlingStore would select the city bead
+// store while FormulaOpts.ScopeRef would claim rig scope — split-brain.
+func TestSlingRejectsCityScopedAgentWithRigScope(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	// Add a city-scoped agent.
+	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+		Name:              "mayor",
+		Provider:          "test-agent",
+		MaxActiveSessions: intPtr(1),
+	})
+
+	// Bare "mayor" + scope_kind=rig — qualifySlingTarget will not find
+	// "myrig/mayor", falls through to city-scoped mayor, guard must reject.
+	body := `{"target":"mayor","formula":"mol-review","scope_kind":"rig","scope_ref":"myrig"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "city-scoped") {
+		t.Errorf("error = %s; expected city-scoped diagnostic", rec.Body.String())
+	}
+}
+
+// TestSlingRejectsBodyRigMismatch catches the case where the caller
+// explicitly sets body.Rig to something different from scope_ref.
+// body.Rig wins store selection in findSlingStore, so disagreement
+// produces split-brain dispatch.
+func TestSlingRejectsBodyRigMismatch(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "gc"})
+	state.stores["otherrig"] = beads.NewMemStore()
+
+	body := `{"target":"myrig/worker","formula":"mol-review","scope_kind":"rig","scope_ref":"myrig","rig":"otherrig"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rig otherrig") {
+		t.Errorf("error = %s; expected body-rig mismatch diagnostic", rec.Body.String())
 	}
 }
 

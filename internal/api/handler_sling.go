@@ -111,17 +111,32 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject contradictory rig inputs. When the caller sends a
-	// qualified target ("otherrig/worker") alongside scope_kind=rig
-	// with a different scope_ref, the downstream store selection (via
-	// agentCfg.Dir) and the formula's ScopeRef disagree, producing a
-	// split-brain dispatch where beads land in one rig and formula
-	// scope metadata references another. Surface the ambiguity loud.
-	if body.ScopeKind == "rig" && body.ScopeRef != "" && strings.Contains(body.Target, "/") {
-		targetDir := strings.SplitN(body.Target, "/", 2)[0]
-		if targetDir != body.ScopeRef {
+	// Reject contradictory rig inputs. When scope_kind=rig, the
+	// sling operation's effective rig must agree across every input
+	// that drives routing or storage, because downstream:
+	//   - findSlingStore picks the store from body.Rig → agentCfg.Dir → city
+	//   - FormulaOpts.ScopeRef flows from body.ScopeRef
+	// Silently accepting disagreement produces split-brain dispatches
+	// (beads land in one rig, formula scope metadata references
+	// another). This single guard covers three concrete classes:
+	//   (a) qualified target in a different rig than scope_ref
+	//       ("otherrig/worker" + scope_ref="myrig"): agentCfg.Dir="otherrig"
+	//   (b) bare name fell through to a city-scoped agent while the
+	//       caller requested rig scope ("mayor" + scope_ref="myrig"):
+	//       agentCfg.Dir=""
+	//   (c) body.Rig override disagreeing with scope_ref.
+	if body.ScopeKind == "rig" && body.ScopeRef != "" {
+		if agentCfg.Dir != body.ScopeRef {
+			msg := "scope_ref " + body.ScopeRef + " conflicts with resolved target rig " + agentCfg.Dir
+			if agentCfg.Dir == "" {
+				msg = "scope_ref " + body.ScopeRef + " requires a rig-scoped target; resolved target " + body.Target + " is city-scoped"
+			}
+			writeError(w, http.StatusBadRequest, "invalid", msg)
+			return
+		}
+		if body.Rig != "" && body.Rig != body.ScopeRef {
 			writeError(w, http.StatusBadRequest, "invalid",
-				"scope_ref "+body.ScopeRef+" conflicts with qualified target rig "+targetDir)
+				"rig "+body.Rig+" conflicts with scope_ref "+body.ScopeRef)
 			return
 		}
 	}
