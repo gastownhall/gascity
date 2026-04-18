@@ -16,7 +16,7 @@ metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else

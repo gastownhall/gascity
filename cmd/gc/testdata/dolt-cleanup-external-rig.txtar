@@ -463,46 +463,69 @@ if [ "$orphan_count" -eq 0 ]; then
   exit 0
 fi
 
-# overlapping_rig_path — emit the non-HQ rig path that overlaps $1, or nothing.
-# Strips trailing slashes so $data_dir/*/ glob output matches registry paths.
-overlapping_rig_path() {
-  _db_path=${1%/}
-  gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null \
-    | while IFS= read -r rig_path; do
-        [ -z "$rig_path" ] && continue
-        rig_path=${rig_path%/}
-        if [ "$_db_path" = "$rig_path" ] \
-          || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
-          || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
-        then
-          printf '%s\n' "$rig_path"
-          break
-        fi
-      done
-}
-
-# Fail closed: --force requires gc+jq for the overlap safety check.
-if [ "$force" = true ]; then
+compute_allowlist_file() {
+  _out=$1
   if ! command -v gc >/dev/null 2>&1; then
-    echo "gc dolt cleanup --force requires gc for the overlap safety check" >&2
-    exit 1
+    echo "gc dolt cleanup: gc not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    return 1
   fi
   if ! command -v jq >/dev/null 2>&1; then
-    echo "gc dolt cleanup --force requires jq for the overlap safety check" >&2
+    echo "gc dolt cleanup: jq not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    return 1
+  fi
+  _list=$(gc rig list --json 2>/dev/null) || {
+    echo "gc dolt cleanup: gc rig list --json failed; refusing to run overlap allowlist unverified" >&2
+    return 1
+  }
+  if ! printf '%s\n' "$_list" | jq -e '.rigs' >/dev/null 2>&1; then
+    echo "gc dolt cleanup: gc rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
+    return 1
+  fi
+  printf '%s\n' "$_list" | jq -r '.rigs[] | select(.hq != true) | .path' > "$_out" || return 1
+}
+
+overlapping_rig_path() {
+  _db_path=${1%/}
+  while IFS= read -r rig_path; do
+    [ -z "$rig_path" ] && continue
+    rig_path=${rig_path%/}
+    if [ "$_db_path" = "$rig_path" ] \
+      || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
+      || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
+    then
+      printf '%s\n' "$rig_path"
+      return
+    fi
+  done < "$allowlist_file"
+}
+
+allowlist_file=$(mktemp)
+trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}"' EXIT
+allowlist_ready=true
+if ! compute_allowlist_file "$allowlist_file"; then
+  allowlist_ready=false
+  if [ "$force" = true ]; then
     exit 1
   fi
+  : > "$allowlist_file"
 fi
 
 printf "%-30s  %-12s  %s\n" "NAME" "SIZE" "STATUS"
 echo "$orphans" | while IFS='|' read -r name size path; do
   [ -z "$name" ] && continue
   status=""
-  if [ "$force" != true ]; then
+  if [ "$force" != true ] && [ "$allowlist_ready" = true ]; then
     overlap=$(overlapping_rig_path "$path")
     [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
   fi
   printf "%-30s  %-12s  %s\n" "$name" "$size" "$status"
 done
+
+if [ "$orphan_count" -gt "$max_orphans" ]; then
+  echo "" >&2
+  echo "gc dolt cleanup: $orphan_count orphans exceeds --max $max_orphans; remove manually or increase --max" >&2
+  exit 1
+fi
 
 if [ "$force" != true ]; then
   echo ""
@@ -511,6 +534,7 @@ if [ "$force" != true ]; then
 fi
 
 refused_tmp=$(mktemp)
+removed_tmp=$(mktemp)
 echo "$orphans" | while IFS='|' read -r db_name size path; do
   [ -z "$db_name" ] && continue
   overlap=$(overlapping_rig_path "$path")
@@ -519,18 +543,21 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
     echo "refused" >> "$refused_tmp"
     continue
   fi
-  rm -rf "$path"
-  echo "  Removed $db_name"
+  if rm -rf "$path"; then
+    echo "removed" >> "$removed_tmp"
+    echo "  Removed $db_name"
+  else
+    echo "  Failed to remove $db_name" >&2
+  fi
 done
 
-removed=$(echo "$orphans" | grep -c '|' || true)
+removed=$(wc -l < "$removed_tmp" | tr -d ' ')
 refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
-rm -f "$refused_tmp"
-removed=$((removed - refused_count))
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
 
-if [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; then
+if [ "$removed" -lt "$((orphan_count - refused_count))" ] \
+  || { [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; }; then
   exit 1
 fi
 
@@ -570,7 +597,7 @@ is_running() {
 routes_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/routes.jsonl"
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else

@@ -107,40 +107,68 @@ if [ "$orphan_count" -eq 0 ]; then
   exit 0
 fi
 
-# overlapping_rig_path — emit the registered non-HQ rig path that overlaps
-# the given database path, or nothing if no overlap. Strips trailing slashes
-# before comparison so `$data_dir/*/` glob output (always ending in `/`)
-# matches correctly against registry paths (no trailing slash).
-overlapping_rig_path() {
-  _db_path=${1%/}
-  gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null \
-    | while IFS= read -r rig_path; do
-        [ -z "$rig_path" ] && continue
-        rig_path=${rig_path%/}
-        # Exact equality, db under rig, or rig under db.
-        if [ "$_db_path" = "$rig_path" ] \
-          || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
-          || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
-        then
-          printf '%s\n' "$rig_path"
-          break
-        fi
-      done
-}
-
-# Fail closed: the allowlist guard relies on `gc rig list --json` plus jq.
-# Without either, we cannot reliably exclude HQ or match paths, so refuse
-# --force rather than silently skipping the safety check.
-if [ "$force" = true ]; then
+# Precompute the non-HQ allowlist once from `gc rig list --json`. This lets us
+# fail closed if the registry query or jq parse fails at runtime (not just if
+# the binaries are missing), and avoids spawning N subprocess pairs for N
+# orphans. The allowlist file is empty iff no non-HQ rigs are registered —
+# distinguished from a *failed* query, which exits before any delete runs.
+#
+# compute_allowlist_file — write one non-HQ rig path per line to $1, or fail
+# with exit 1 if the pipeline can't be completed.
+compute_allowlist_file() {
+  _out=$1
   if ! command -v gc >/dev/null 2>&1; then
-    echo "gc dolt cleanup --force requires gc for the overlap safety check" >&2
-    exit 1
+    echo "gc dolt cleanup: gc not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    return 1
   fi
   if ! command -v jq >/dev/null 2>&1; then
-    echo "gc dolt cleanup --force requires jq for the overlap safety check" >&2
+    echo "gc dolt cleanup: jq not found on PATH; cannot evaluate rig overlap allowlist" >&2
     echo "install jq or remove orphans manually" >&2
+    return 1
+  fi
+  _list=$(gc rig list --json 2>/dev/null) || {
+    echo "gc dolt cleanup: gc rig list --json failed; refusing to run overlap allowlist unverified" >&2
+    return 1
+  }
+  if ! printf '%s\n' "$_list" | jq -e '.rigs' >/dev/null 2>&1; then
+    echo "gc dolt cleanup: gc rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
+    return 1
+  fi
+  printf '%s\n' "$_list" | jq -r '.rigs[] | select(.hq != true) | .path' > "$_out" || return 1
+}
+
+# overlapping_rig_path — emit the non-HQ rig path from $allowlist_file that
+# overlaps $1, or nothing if no overlap. Strips trailing slashes so
+# `$data_dir/*/` glob output (always ending in `/`) matches against registry
+# paths (no trailing slash).
+overlapping_rig_path() {
+  _db_path=${1%/}
+  while IFS= read -r rig_path; do
+    [ -z "$rig_path" ] && continue
+    rig_path=${rig_path%/}
+    # Exact equality, db under rig, or rig under db.
+    if [ "$_db_path" = "$rig_path" ] \
+      || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
+      || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
+    then
+      printf '%s\n' "$rig_path"
+      return
+    fi
+  done < "$allowlist_file"
+}
+
+# Build the allowlist. Under --force, failure aborts before any rm -rf.
+# Under dry-run, failure degrades to "no annotations" — we still print the
+# table so operators can see what exists.
+allowlist_file=$(mktemp)
+trap 'rm -f "$allowlist_file" "${refused_tmp:-}"' EXIT
+allowlist_ready=true
+if ! compute_allowlist_file "$allowlist_file"; then
+  allowlist_ready=false
+  if [ "$force" = true ]; then
     exit 1
   fi
+  : > "$allowlist_file"  # empty → no overlap annotations in dry-run
 fi
 
 # Print orphan table. Under dry-run, annotate entries that --force would refuse
@@ -149,7 +177,7 @@ printf "%-30s  %-12s  %s\n" "NAME" "SIZE" "STATUS"
 echo "$orphans" | while IFS='|' read -r name size path; do
   [ -z "$name" ] && continue
   status=""
-  if [ "$force" != true ]; then
+  if [ "$force" != true ] && [ "$allowlist_ready" = true ]; then
     overlap=$(overlapping_rig_path "$path")
     [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
   fi
@@ -169,9 +197,11 @@ if [ "$force" != true ]; then
   exit 0
 fi
 
-# Remove each orphan.
-removed=0
+# Remove each orphan. Track refusals and successful removals via tmpfiles so
+# the subshell's counters survive (the pipe creates a subshell).
 refused_tmp=$(mktemp)
+removed_tmp=$(mktemp)
+trap 'rm -f "$allowlist_file" "$refused_tmp" "$removed_tmp"' EXIT
 echo "$orphans" | while IFS='|' read -r db_name size path; do
   [ -z "$db_name" ] && continue
 
@@ -186,19 +216,23 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
     continue
   fi
 
-  rm -rf "$path"
-  echo "  Removed $db_name"
+  if rm -rf "$path"; then
+    echo "removed" >> "$removed_tmp"
+    echo "  Removed $db_name"
+  else
+    echo "  Failed to remove $db_name" >&2
+  fi
 done
 
-# Count removed and refused (re-check since removal loop runs in a subshell).
-removed=$(echo "$orphans" | grep -c '|' || true)
+# Count removed and refused (the removal loop runs in a subshell, so the
+# parent shell reads back through the tmpfiles).
+removed=$(wc -l < "$removed_tmp" | tr -d ' ')
 refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
-rm -f "$refused_tmp"
-removed=$((removed - refused_count))
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
 
-# Exit non-zero iff all attempts were refused.
-if [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; then
+# Exit non-zero if any orphan was refused or failed to remove.
+if [ "$removed" -lt "$((orphan_count - refused_count))" ] \
+  || { [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; }; then
   exit 1
 fi
