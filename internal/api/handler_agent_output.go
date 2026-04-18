@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
@@ -213,6 +214,98 @@ func entryToTurn(e *sessionlog.Entry) outputTurn {
 	// containing JSON. Unwrap and try again.
 	turn.Text = unwrapDoubleEncoded(e.Message)
 	return turn
+}
+
+func historyEntryToTurn(entry worker.HistoryEntry) outputTurn {
+	turn := outputTurn{
+		Role: entry.Kind,
+	}
+	if turn.Role == "" {
+		turn.Role = string(entry.Actor)
+	}
+	if entry.Timestamp != nil {
+		turn.Timestamp = entry.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+	}
+	if strings.TrimSpace(entry.Text) != "" {
+		turn.Text = entry.Text
+		return turn
+	}
+
+	var parts []string
+	for _, block := range entry.Blocks {
+		switch block.Kind {
+		case worker.BlockKindText:
+			if block.Text != "" {
+				parts = append(parts, block.Text)
+			}
+		case worker.BlockKindToolUse:
+			if block.Name != "" {
+				parts = append(parts, "["+block.Name+"]")
+			}
+		case worker.BlockKindToolResult:
+			text := extractToolResultText(block.Content)
+			if text != "" {
+				if len(text) > 500 {
+					text = text[:500] + "…"
+				}
+				parts = append(parts, "[result] "+text)
+			}
+		case worker.BlockKindThinking:
+			parts = append(parts, "[thinking]")
+		}
+	}
+	turn.Text = strings.Join(parts, "\n")
+	if turn.Text == "" {
+		turn.Text = historyRawEntryText(entry.Provenance.Raw)
+	}
+	return turn
+}
+
+func historySnapshotTurns(snapshot *worker.HistorySnapshot) ([]outputTurn, []string) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	turns := make([]outputTurn, 0, len(snapshot.Entries))
+	ids := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		turn := historyEntryToTurn(entry)
+		if turn.Text == "" {
+			continue
+		}
+		turns = append(turns, turn)
+		ids = append(ids, entry.ID)
+	}
+	return turns, ids
+}
+
+func historySnapshotRawMessages(snapshot *worker.HistorySnapshot) ([]json.RawMessage, []string) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	rawMessages := make([]json.RawMessage, 0, len(snapshot.Entries))
+	ids := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		if len(entry.Provenance.Raw) == 0 {
+			continue
+		}
+		rawMessages = append(rawMessages, entry.Provenance.Raw)
+		ids = append(ids, entry.ID)
+	}
+	return rawMessages, ids
+}
+
+func historySnapshotActivity(snapshot *worker.HistorySnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	switch snapshot.TailState.Activity {
+	case worker.TailActivityIdle:
+		return "idle"
+	case worker.TailActivityInTurn:
+		return "in-turn"
+	default:
+		return ""
+	}
 }
 
 // extractToolResultText extracts human-readable text from a tool_result
@@ -478,14 +571,12 @@ func unwrapDoubleEncoded(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	// Try to unwrap: raw might be a JSON string like "{\"role\":...}"
 	var inner string
-	if err := json.Unmarshal(raw, &inner); err != nil {
-		return ""
+	if err := json.Unmarshal(raw, &inner); err == nil {
+		raw = []byte(inner)
 	}
-	// Now inner is the JSON object as a string. Parse it.
 	var mc sessionlog.MessageContent
-	if err := json.Unmarshal([]byte(inner), &mc); err != nil {
+	if err := json.Unmarshal(raw, &mc); err != nil {
 		return ""
 	}
 	// Try string content.
@@ -505,4 +596,17 @@ func unwrapDoubleEncoded(raw []byte) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+func historyRawEntryText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var entry struct {
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return ""
+	}
+	return unwrapDoubleEncoded(entry.Message)
 }
