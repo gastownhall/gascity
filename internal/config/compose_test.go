@@ -438,6 +438,48 @@ scope = "city"
 	t.Fatalf("expected dep.mayor agent, got %v", explicitAgents(cfg.Agents))
 }
 
+func TestLoadWithIncludes_IncludingPackDefaultsKeepInnermostScalarDefault(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+includes = ["packs/outer"]
+`)
+	fs.Files["/city/packs/outer/pack.toml"] = []byte(`
+[pack]
+name = "outer"
+schema = 2
+includes = ["../base"]
+
+[agent_defaults]
+default_sling_formula = "mol-outer"
+`)
+	fs.Files["/city/packs/base/pack.toml"] = []byte(`
+[pack]
+name = "base"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-base"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(explicitAgents(cfg.Agents)) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(explicitAgents(cfg.Agents)))
+	}
+	if got := explicitAgents(cfg.Agents)[0].EffectiveDefaultSlingFormula(); got != "mol-base" {
+		t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, "mol-base")
+	}
+}
+
 func TestLoadWithIncludes_IncludingPackDefaultsDoNotBleedAcrossNestedImportBoundaries(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

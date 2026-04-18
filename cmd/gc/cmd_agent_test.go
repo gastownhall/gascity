@@ -148,9 +148,8 @@ append_fragments = ["footer"]
 `)
 
 	var stderr bytes.Buffer
-	prev := loadCityConfigWarningWriter
-	loadCityConfigWarningWriter = &stderr
-	t.Cleanup(func() { loadCityConfigWarningWriter = prev })
+	restore := setLoadCityConfigWarningWriterForTest(&stderr)
+	t.Cleanup(restore)
 
 	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
 	if err != nil {
@@ -161,6 +160,39 @@ append_fragments = ["footer"]
 	}
 	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
 		t.Fatalf("expected [agents] alias warning, got %q", stderr.String())
+	}
+}
+
+func TestLoadCityConfigFSDedupesProvenanceWarningsAcrossCalls(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[agents]
+append_fragments = ["footer"]
+`)
+
+	var stderr bytes.Buffer
+	restore := setLoadCityConfigWarningWriterForTest(&stderr)
+	t.Cleanup(restore)
+
+	for i := 0; i < 2; i++ {
+		cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+		if err != nil {
+			t.Fatalf("loadCityConfigFS call %d: %v", i+1, err)
+		}
+		if cfg == nil {
+			t.Fatalf("loadCityConfigFS call %d returned nil config", i+1)
+		}
+	}
+
+	const want = "[agents] is a deprecated compatibility alias for [agent_defaults]"
+	if got := strings.Count(stderr.String(), want); got != 1 {
+		t.Fatalf("warning count = %d, want 1; stderr=%q", got, stderr.String())
 	}
 }
 

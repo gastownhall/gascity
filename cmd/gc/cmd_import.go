@@ -46,19 +46,20 @@ type cityPackAgentDefaults struct {
 }
 
 type cityPackManifest struct {
-	Pack           config.PackMeta                `toml:"pack"`
-	Imports        map[string]config.Import       `toml:"imports,omitempty"`
-	AgentDefaults  cityPackAgentDefaults          `toml:"agent_defaults,omitempty"`
-	AgentsDefaults cityPackAgentDefaults          `toml:"agents,omitempty"`
-	Agents         []config.Agent                 `toml:"agent,omitempty"`
-	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
-	Services       []config.Service               `toml:"service,omitempty"`
-	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
-	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
-	Patches        config.Patches                 `toml:"patches,omitempty"`
-	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands       []config.PackCommandEntry      `toml:"commands,omitempty"`
-	Global         config.PackGlobal              `toml:"global,omitempty"`
+	Pack                       config.PackMeta                `toml:"pack"`
+	Imports                    map[string]config.Import       `toml:"imports,omitempty"`
+	AgentDefaults              cityPackAgentDefaults          `toml:"agent_defaults,omitempty"`
+	AgentsDefaults             cityPackAgentDefaults          `toml:"agents,omitempty"`
+	Agents                     []config.Agent                 `toml:"agent,omitempty"`
+	NamedSessions              []config.NamedSession          `toml:"named_session,omitempty"`
+	Services                   []config.Service               `toml:"service,omitempty"`
+	Providers                  map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Formulas                   config.FormulasConfig          `toml:"formulas,omitempty"`
+	Patches                    config.Patches                 `toml:"patches,omitempty"`
+	Doctor                     []config.PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands                   []config.PackCommandEntry      `toml:"commands,omitempty"`
+	Global                     config.PackGlobal              `toml:"global,omitempty"`
+	HadBothAgentDefaultsTables bool                           `toml:"-"`
 }
 
 func (d cityPackAgentDefaults) unsupportedKeys() []string {
@@ -79,11 +80,50 @@ func warnPreservedUnsupportedPackAgentDefaults(stderr io.Writer, manifest *cityP
 	if stderr == nil || manifest == nil {
 		return
 	}
+	if manifest.HadBothAgentDefaultsTables {
+		fmt.Fprintln(stderr, "gc import: both [agent_defaults] and [agents] are present in pack.toml; canonical [agent_defaults] wins for overlapping keys") //nolint:errcheck
+	}
 	keys := manifest.AgentDefaults.unsupportedKeys()
 	if len(keys) == 0 {
 		return
 	}
 	fmt.Fprintf(stderr, "gc import: preserved unsupported [agent_defaults] keys in pack.toml: %s; runtime will continue warning until they are moved to per-agent config\n", strings.Join(keys, ", ")) //nolint:errcheck
+}
+
+func mergeCityPackAgentDefaultsPreferCanonical(dst *cityPackAgentDefaults, src cityPackAgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "model") {
+		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "wake_mode") {
+		dst.WakeMode = src.WakeMode
+	}
+	if !meta.IsDefined("agent_defaults", "default_sling_formula") {
+		dst.DefaultSlingFormula = src.DefaultSlingFormula
+	}
+	if !meta.IsDefined("agent_defaults", "allow_overlay") {
+		dst.AllowOverlay = append([]string(nil), src.AllowOverlay...)
+	}
+	if !meta.IsDefined("agent_defaults", "allow_env_override") {
+		dst.AllowEnvOverride = append([]string(nil), src.AllowEnvOverride...)
+	}
+	if !meta.IsDefined("agent_defaults", "append_fragments") {
+		dst.AppendFragments = append([]string(nil), src.AppendFragments...)
+	}
+	if !meta.IsDefined("agent_defaults", "skills") {
+		dst.Skills = append([]string(nil), src.Skills...)
+	}
+	if !meta.IsDefined("agent_defaults", "mcp") {
+		dst.MCP = append([]string(nil), src.MCP...)
+	}
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = src.Provider
+	}
+	if !meta.IsDefined("agent_defaults", "scope") {
+		dst.Scope = src.Scope
+	}
+	if !meta.IsDefined("agent_defaults", "install_agent_hooks") {
+		dst.InstallAgentHooks = append([]string(nil), src.InstallAgentHooks...)
+	}
 }
 
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -635,6 +675,10 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 
 func normalizeCityPackManifestAgentDefaultsAlias(manifest *cityPackManifest, meta toml.MetaData) {
 	if meta.IsDefined("agent_defaults") {
+		if meta.IsDefined("agents") {
+			manifest.HadBothAgentDefaultsTables = true
+			mergeCityPackAgentDefaultsPreferCanonical(&manifest.AgentDefaults, manifest.AgentsDefaults, meta)
+		}
 		manifest.AgentsDefaults = cityPackAgentDefaults{}
 		return
 	}

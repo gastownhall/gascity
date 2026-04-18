@@ -1418,7 +1418,9 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 		if agents[i].BindingName != "" {
 			continue
 		}
-		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil {
+		// Includes compose from the inside out: once an included agent has
+		// inherited a scalar default, outer packs do not replace it.
+		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil && agents[i].InheritedDefaultSlingFormula == nil {
 			agents[i].InheritedDefaultSlingFormula = copyStringPtr(&defaults.DefaultSlingFormula)
 		}
 		if len(defaults.AppendFragments) > 0 {
