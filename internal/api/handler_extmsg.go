@@ -41,11 +41,58 @@ func (s *Server) extmsgEmitEvent() func(string, string, events.Payload) {
 	}
 }
 
-// extmsgNotifyMembers sends a "check transcript" message to all transcript
-// members via the session message API. This ensures delivery regardless of
-// session state: sleeping sessions are woken, idle sessions get a new prompt
-// turn that triggers the transcript check hook.
-func (s *Server) extmsgNotifyMembers(ctx context.Context, conv extmsg.ConversationRef, inboundMsg extmsg.ExternalInboundMessage) {
+func extmsgHandleLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	if idx := strings.LastIndex(value, "/"); idx >= 0 && idx+1 < len(value) {
+		return value[idx+1:]
+	}
+	return value
+}
+
+func (s *Server) extmsgSessionHandleForSelector(selector string) string {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return extmsgHandleLabel(selector)
+	}
+	resolvedID, err := session.ResolveSessionIDAllowClosed(store, selector)
+	if err != nil {
+		return extmsgHandleLabel(selector)
+	}
+	return s.extmsgSessionHandleForResolvedID(resolvedID, selector)
+}
+
+func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) string {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return extmsgHandleLabel(fallback)
+	}
+	b, err := store.Get(resolvedID)
+	if err != nil {
+		return extmsgHandleLabel(fallback)
+	}
+	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
+		return extmsgHandleLabel(alias)
+	}
+	if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" {
+		return extmsgHandleLabel(sessionName)
+	}
+	return extmsgHandleLabel(fallback)
+}
+
+// extmsgNotifyMembers sends a peer-publication reminder to transcript members
+// via the session message API. This treats membership as the routing truth and
+// lets session resolution materialize or wake named sessions on first receive.
+func (s *Server) extmsgNotifyMembers(
+	ctx context.Context,
+	conv extmsg.ConversationRef,
+	actorDisplayName string,
+	actorKind string,
+	text string,
+	excludeSelector string,
+) {
 	svc := s.state.ExtMsgServices()
 	store := s.state.CityBeadStore()
 	if svc == nil || store == nil {
@@ -58,29 +105,30 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, conv extmsg.Conversati
 		return
 	}
 
-	actorKind := "agent"
-	if !inboundMsg.Actor.IsBot {
-		actorKind = "human"
+	excludedResolvedID := ""
+	if selector := strings.TrimSpace(excludeSelector); selector != "" {
+		resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, selector)
+		if err != nil {
+			log.Printf("extmsg: resolve sender %s failed: %v", selector, err)
+		} else {
+			excludedResolvedID = resolvedID
+		}
 	}
 
 	var wg sync.WaitGroup
 	for _, m := range members {
 		wg.Add(1)
-		go func(sessionID string) {
+		go func(sessionSelector string) {
 			defer wg.Done()
-			// Resolve the member's handle from their session bead alias.
-			// Membership stores session names (s-et-xxxx); bead IDs drop the "s-" prefix.
-			handle := sessionID
-			beadID := strings.TrimPrefix(sessionID, "s-")
-			if b, err := store.Get(beadID); err == nil {
-				if alias := b.Metadata["alias"]; alias != "" {
-					if idx := strings.LastIndex(alias, "/"); idx >= 0 {
-						handle = alias[idx+1:]
-					} else {
-						handle = alias
-					}
-				}
+			resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionSelector)
+			if err != nil {
+				log.Printf("extmsg: resolve session %s failed: %v", sessionSelector, err)
+				return
 			}
+			if excludedResolvedID != "" && resolvedID == excludedResolvedID {
+				return
+			}
+			handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
 			nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
 				"- %s (%s): %s\n\n"+
 				"To reply in Discord, write your response to a file and run:\n"+
@@ -89,20 +137,22 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, conv extmsg.Conversati
 				"Run 'gc transcript read --ack' after responding to mark as read.\n"+
 				"</system-reminder>",
 				conv.Provider, conv.ConversationID,
-				inboundMsg.Actor.DisplayName, actorKind, inboundMsg.Text,
+				actorDisplayName, actorKind, text,
 				conv.ConversationID,
 				handle,
 			)
-			// Resolve session identifier to bead ID, then send.
-			resolvedID, err := session.ResolveSessionID(store, sessionID)
-			if err != nil {
-				log.Printf("extmsg: resolve session %s failed: %v", sessionID, err)
-				return
-			}
 			if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
-				log.Printf("extmsg: notify %s failed: %v", sessionID, err)
+				log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
 			}
 		}(m.SessionID)
 	}
 	wg.Wait()
+}
+
+func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
+	actorKind := "agent"
+	if !msg.Actor.IsBot {
+		actorKind = "human"
+	}
+	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "")
 }
