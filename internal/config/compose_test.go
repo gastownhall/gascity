@@ -240,6 +240,105 @@ mcp = ["shared-mcp", "common-mcp"]
 	}
 }
 
+func TestLoadWithIncludes_WarnsOnPackAgentDefaultsCompatibilityAndMigrationKeys(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "hw"
+path = "/tmp/hw"
+includes = ["packs/rigpack"]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[agents]
+append_fragments = ["root-footer"]
+`)
+	fs.Files["/city/packs/rigpack/pack.toml"] = []byte(`
+[pack]
+name = "rigpack"
+schema = 2
+
+[agent_defaults]
+provider = "claude"
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.AgentDefaults.AppendFragments; len(got) != 1 || got[0] != "root-footer" {
+		t.Fatalf("AgentDefaults.AppendFragments = %v, want [root-footer]", got)
+	}
+	warnings := strings.Join(prov.Warnings, "\n")
+	if !strings.Contains(warnings, "/city/pack.toml: "+agentsAliasWarning) {
+		t.Fatalf("expected root pack alias warning, got: %v", prov.Warnings)
+	}
+	if !strings.Contains(warnings, `/city/packs/rigpack/pack.toml: "agent_defaults.provider" is not supported`) {
+		t.Fatalf("expected rig pack migration warning, got: %v", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_ImportedPackAgentDefaultsLayerIntoEffectiveFormula(t *testing.T) {
+	tests := []struct {
+		name        string
+		cityDefault string
+		want        string
+	}{
+		{name: "pack default only", want: "mol-pack"},
+		{name: "city override wins", cityDefault: "mol-city", want: "mol-city"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			cityDefaults := ""
+			if tt.cityDefault != "" {
+				cityDefaults = "\n[agent_defaults]\ndefault_sling_formula = \"" + tt.cityDefault + "\"\n"
+			}
+			fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+includes = ["packs/imported"]
+` + cityDefaults)
+			fs.Files["/city/packs/imported/pack.toml"] = []byte(`
+[pack]
+name = "imported"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-pack"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if len(explicitAgents(cfg.Agents)) != 1 {
+				t.Fatalf("len(explicit agents) = %d, want 1", len(explicitAgents(cfg.Agents)))
+			}
+			got := explicitAgents(cfg.Agents)[0].EffectiveDefaultSlingFormula()
+			if got != tt.want {
+				t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadWithIncludes_ConcatRigs(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

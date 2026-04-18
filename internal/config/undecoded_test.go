@@ -265,7 +265,9 @@ install_agent_hooks = ["hooks/gascity.json"]
 			for _, w := range warnings {
 				if strings.Contains(w, tt.want) {
 					found = true
-					break
+				}
+				if strings.Contains(w, "unknown field") {
+					t.Fatalf("got generic unknown-field warning for %s: %v", tt.name, warnings)
 				}
 			}
 			if !found {

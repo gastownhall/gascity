@@ -25,18 +25,19 @@ const currentPackSchema = 2
 // packConfig is the TOML structure of a pack.toml file.
 // It has a [pack] metadata header and agent definitions.
 type packConfig struct {
-	Pack          PackMeta                `toml:"pack"`
-	Imports       map[string]Import       `toml:"imports,omitempty"`
-	AgentDefaults AgentDefaults           `toml:"agent_defaults,omitempty"`
-	Agents        []Agent                 `toml:"agent"`
-	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
-	Services      []Service               `toml:"service,omitempty"`
-	Providers     map[string]ProviderSpec `toml:"providers,omitempty"`
-	Formulas      FormulasConfig          `toml:"formulas,omitempty"`
-	Patches       Patches                 `toml:"patches,omitempty"`
-	Doctor        []PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands      []PackCommandEntry      `toml:"commands,omitempty"`
-	Global        PackGlobal              `toml:"global,omitempty"`
+	Pack           PackMeta                `toml:"pack"`
+	Imports        map[string]Import       `toml:"imports,omitempty"`
+	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentsDefaults AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
+	Agents         []Agent                 `toml:"agent"`
+	NamedSessions  []NamedSession          `toml:"named_session,omitempty"`
+	Services       []Service               `toml:"service,omitempty"`
+	Providers      map[string]ProviderSpec `toml:"providers,omitempty"`
+	Formulas       FormulasConfig          `toml:"formulas,omitempty"`
+	Patches        Patches                 `toml:"patches,omitempty"`
+	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
+	Global         PackGlobal              `toml:"global,omitempty"`
 }
 
 // ExpandPacks resolves pack references on all rigs. For each rig
@@ -85,6 +86,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			if err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
+			cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, cachedPackWarnings(cache, topoDir)...)
 			if len(services) > 0 {
 				return fmt.Errorf("rig %q pack %q: [[service]] is only allowed in city-scoped packs", rig.Name, ref)
 			}
@@ -163,6 +165,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
+				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, cachedPackWarnings(cache, impDir)...)
 				if len(services) > 0 {
 					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
 				}
@@ -353,6 +356,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	var allPackDirs []string
 	var allRequires []PackRequirement
 	var allGlobals []ResolvedPackGlobal
+	var packWarnings []string
 	// Shared cache across all pack loads to deduplicate diamond DAGs.
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 
@@ -389,6 +393,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 			return nil, nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
+		packWarnings = appendUnique(packWarnings, cachedPackWarnings(cache, topoDir)...)
 		allRequires = append(allRequires, reqs...)
 		allGlobals = append(allGlobals, globals...)
 		cfg.Services = append(cfg.Services, services...)
@@ -457,6 +462,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
+			packWarnings = appendUnique(packWarnings, cachedPackWarnings(cache, impDir)...)
 			commands := cachedPackCommands(cache, impDir)
 			doctors := cachedPackDoctors(cache, impDir)
 
@@ -648,6 +654,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 
 	// Store city-level pack globals.
 	cfg.PackGlobals = append(cfg.PackGlobals, allGlobals...)
+	shadowWarnings = appendUnique(shadowWarnings, packWarnings...)
 
 	return formulaDirs, allRequires, shadowWarnings, nil
 }
@@ -852,6 +859,30 @@ type packLoadResult struct {
 	globals       []ResolvedPackGlobal
 	commands      []DiscoveredCommand
 	doctors       []DiscoveredDoctor
+	warnings      []string
+}
+
+func parsePackConfigWithMeta(data []byte, source string) (packConfig, []string, error) {
+	var cfg packConfig
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return packConfig{}, nil, err
+	}
+	normalizePackAgentDefaultsAlias(&cfg, md)
+	warnings := agentDefaultsCompatibilityWarnings(md, source)
+	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
+	return cfg, warnings, nil
+}
+
+func normalizePackAgentDefaultsAlias(cfg *packConfig, meta toml.MetaData) {
+	if !meta.IsDefined("agents") {
+		cfg.AgentsDefaults = AgentDefaults{}
+		return
+	}
+	if !meta.IsDefined("agent_defaults") {
+		cfg.AgentDefaults = cfg.AgentsDefaults
+	}
+	cfg.AgentsDefaults = AgentDefaults{}
 }
 
 //nolint:unparam // compatibility wrapper keeps the recursion-set argument at the public helper boundary.
@@ -899,8 +930,8 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("loading %s: %w", packFile, err)
 	}
 
-	var tc packConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
+	tc, packWarnings, err := parsePackConfigWithMeta(data, topoPath)
+	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %w", packFile, err)
 	}
 
@@ -918,6 +949,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	var includedGlobals []ResolvedPackGlobal
 	var includedCommands []DiscoveredCommand
 	var includedDoctors []DiscoveredDoctor
+	var inheritedWarnings []string
 	includedProviders := make(map[string]ProviderSpec)
 
 	for _, inc := range tc.Pack.Includes {
@@ -932,6 +964,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("include %q: %w", inc, err)
 		}
+		inheritedWarnings = appendUnique(inheritedWarnings, cachedPackWarnings(cache, incTopoDir)...)
 
 		includedAgents = append(includedAgents, incAgents...)
 		includedNamedSessions = append(includedNamedSessions, incNamedSessions...)
@@ -978,6 +1011,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
+		inheritedWarnings = appendUnique(inheritedWarnings, cachedPackWarnings(cache, impDir)...)
 		impCommands := cachedPackCommands(cache, impDir)
 		impDoctors := cachedPackDoctors(cache, impDir)
 
@@ -1080,6 +1114,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		return nil, nil, nil, nil, nil, nil, nil, dErr
 	}
 	tc.Agents = append(tc.Agents, discovered...)
+	applyInheritedPackAgentDefaults(tc.Agents, tc.AgentDefaults)
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
 	if err != nil {
@@ -1224,6 +1259,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		globals:       allGlobals,
 		commands:      includedCommands,
 		doctors:       includedDoctors,
+		warnings:      appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
 	})
 
 	return includedAgents, includedNamedSessions, mergedProviders, includedServices, topoDirs, allRequires, allGlobals, nil
@@ -1243,6 +1279,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		globals:       deepCopyResolvedPackGlobals(in.globals),
 		commands:      deepCopyCommands(in.commands),
 		doctors:       deepCopyDoctors(in.doctors),
+		warnings:      append([]string(nil), in.warnings...),
 	}
 }
 
@@ -1268,6 +1305,8 @@ func deepCopyAgents(in []Agent) []Agent {
 		out[i].HooksInstalled = copyBoolPtr(in[i].HooksInstalled)
 		out[i].InjectAssignedSkills = copyBoolPtr(in[i].InjectAssignedSkills)
 		out[i].DefaultSlingFormula = copyStringPtr(in[i].DefaultSlingFormula)
+		out[i].InheritedDefaultSlingFormula = copyStringPtr(in[i].InheritedDefaultSlingFormula)
+		out[i].InheritedAppendFragments = append([]string(nil), in[i].InheritedAppendFragments...)
 		out[i].Attach = copyBoolPtr(in[i].Attach)
 	}
 	return out
@@ -1373,6 +1412,17 @@ func copyStringPtr(in *string) *string {
 	return &out
 }
 
+func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
+	for i := range agents {
+		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil {
+			agents[i].InheritedDefaultSlingFormula = copyStringPtr(&defaults.DefaultSlingFormula)
+		}
+		if len(defaults.AppendFragments) > 0 {
+			agents[i].InheritedAppendFragments = appendUnique(agents[i].InheritedAppendFragments, defaults.AppendFragments...)
+		}
+	}
+}
+
 func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
 	if cache == nil {
 		return nil
@@ -1387,6 +1437,21 @@ func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredComman
 	}
 	out := deepCopyCommands(result.commands)
 	return out
+}
+
+func cachedPackWarnings(cache *packLoadCache, topoDir string) []string {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), result.warnings...)
 }
 
 func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor {

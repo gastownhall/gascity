@@ -245,8 +245,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
-	// plus V2 append_fragments from agent defaults.
+	// imported-pack [agent_defaults].append_fragments, then city-level
+	// [agent_defaults].append_fragments.
 	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	if len(cfgAgent.InheritedAppendFragments) > 0 {
+		fragments = mergeFragmentLists(fragments, cfgAgent.InheritedAppendFragments)
+	}
 	if len(p.appendFragments) > 0 {
 		fragments = mergeFragmentLists(fragments, p.appendFragments)
 	}

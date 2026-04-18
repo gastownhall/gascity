@@ -63,10 +63,11 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	packPath := filepath.Join(cityRoot, packFile)
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
-		var pc packConfig
-		if _, decErr := toml.Decode(string(packData), &pc); decErr != nil {
+		pc, packWarnings, decErr := parsePackConfigWithMeta(packData, packPath)
+		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
 		}
+		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
@@ -323,6 +324,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	if HasPackRigs(root.Rigs) {
 		if err := ExpandPacks(root, fs, cityRoot, rigFormulaDirs); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
+		}
+		if len(root.LoadWarnings) > 0 {
+			prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 		}
 		// Track pack-expanded agents in provenance.
 		for _, r := range root.Rigs {

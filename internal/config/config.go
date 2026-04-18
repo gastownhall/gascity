@@ -175,6 +175,10 @@ type City struct {
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
 	// when both tables are present.
 	AgentsDefaults AgentDefaults `toml:"agents,omitempty" jsonschema:"-"`
+	// LoadWarnings accumulates non-fatal warnings discovered while expanding
+	// imported packs so LoadWithIncludes can surface them through provenance.
+	// Runtime-only — not persisted to TOML or JSON.
+	LoadWarnings []string `toml:"-" json:"-"`
 	// ResolvedWorkspaceName is the effective city name derived from the
 	// config file path when workspace.name is omitted. Runtime-only.
 	ResolvedWorkspaceName string `toml:"-" json:"-"`
@@ -1561,10 +1565,21 @@ type Agent struct {
 	// when beads are slung to this agent, unless --no-formula is set.
 	// Example: "mol-polecat-work"
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
+	// InheritedDefaultSlingFormula records the pack-scoped default formula for
+	// agents loaded from imported packs. City-level [agent_defaults] can still
+	// override it later because the explicit DefaultSlingFormula pointer remains
+	// nil until a higher-precedence layer sets it.
+	// Runtime-only — not persisted to TOML or JSON.
+	InheritedDefaultSlingFormula *string `toml:"-" json:"-"`
 	// InjectFragments lists named template fragments to append to this agent's
 	// rendered prompt. Fragments come from shared template directories across
 	// all loaded packs. Each name must match a {{ define "name" }} block.
 	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// InheritedAppendFragments records pack-scoped append_fragments inherited
+	// from an imported pack's [agent_defaults]. City-level append_fragments are
+	// layered separately during prompt rendering.
+	// Runtime-only — not persisted to TOML or JSON.
+	InheritedAppendFragments []string `toml:"-" json:"-"`
 	// InjectAssignedSkills controls whether gc appends an
 	// "assigned skills" appendix to the agent's rendered prompt. The
 	// appendix lists every skill visible to this agent, partitioned
@@ -1764,10 +1779,13 @@ func (a *Agent) EffectiveSlingQuery() string {
 // EffectiveDefaultSlingFormula returns the default sling formula for
 // this agent, or "" if none is set.
 func (a *Agent) EffectiveDefaultSlingFormula() string {
-	if a.DefaultSlingFormula == nil {
-		return ""
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
 	}
-	return *a.DefaultSlingFormula
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
 }
 
 // DrainTimeoutDuration returns the drain timeout as a time.Duration.
