@@ -2078,7 +2078,7 @@ type SessionPendingResponse struct {
 	Supported bool                `json:"supported"`
 }
 
-// SessionRawMessageFrame Provider-native transcript frame. The supervisor forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value (object, array, null, primitive).
+// SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
 // SessionRenameInputBody defines model for SessionRenameInputBody.
