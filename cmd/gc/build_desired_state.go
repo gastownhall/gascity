@@ -220,23 +220,6 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 
-		if sp.Max == 1 && !isMultiSessionCfgAgent(&cfg.Agents[i]) {
-			// Fixed agent.
-			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
-			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
-				continue
-			}
-
-			fpExtra := buildFingerprintExtra(&cfg.Agents[i])
-			tp, err := resolveTemplatePrepared(bp, &cfg.Agents[i], cfg.Agents[i].QualifiedName(), fpExtra)
-			if err != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: %v (skipping)\n", err) //nolint:errcheck
-				continue
-			}
-			installAgentSideEffects(bp, &cfg.Agents[i], tp, stderr)
-			desired[tp.SessionName] = tp
-			continue
-		}
 		rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
 			continue

@@ -54,8 +54,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	const seededSession = "seeded-session"
 
-	var controllerStdout bytes.Buffer
-	var controllerStderr syncBuffer
+	var controllerStdout, controllerStderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -73,7 +72,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
+	waitForController(t, dir)
 	if err := sp.Start(context.Background(), seededSession, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
@@ -136,13 +135,12 @@ func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	systemBin := filepath.Join(cityDir, ".gc", "system", "bin")
-	if err := os.MkdirAll(systemBin, 0o755); err != nil {
+	script := gcBeadsBdScriptPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := filepath.Join(systemBin, "gc-beads-bd")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" >> \""+logFile+"\"\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -273,8 +271,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	var controllerStdout bytes.Buffer
-	var controllerStderr syncBuffer
+	var controllerStdout, controllerStderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -292,7 +289,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
+	waitForController(t, dir)
 
 	const sess = "margin-session"
 	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {

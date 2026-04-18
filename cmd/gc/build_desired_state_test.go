@@ -226,6 +226,7 @@ func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T)
 			Name:              "probe",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 1",
 			WorkDir:           "worker",
 			InstallAgentHooks: []string{"gemini"},
 		}},

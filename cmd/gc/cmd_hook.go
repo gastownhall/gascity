@@ -160,20 +160,16 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	return doHookWithFormat(workQuery, workDir, inject, hookFormat, runner, stdout, stderr)
 }
 
-// hookQueryEnv returns the bd runtime overrides for a hook subprocess.
-// Agents that resolve to a configured rig get rig-scoped BEADS_DIR and
-// Dolt coordinates via bdRuntimeEnvForRig; other agents (including those
-// with a plain dir that does not map to a rig) fall back to bdRuntimeEnv.
-// The returned map is always non-nil so callers can add identity keys.
+// hookQueryEnv returns the full work-query environment for a hook subprocess.
+// It includes scope metadata (store root/scope/prefix) plus any rig-scoped
+// runtime overrides so hook queries observe the same routing contract as the
+// controller probes.
 func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string]string {
-	if a != nil && cfg != nil {
-		if rigName := configuredRigName(cityPath, a, cfg.Rigs); rigName != "" {
-			if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
-				return bdRuntimeEnvForRig(cityPath, cfg, rigRoot)
-			}
-		}
+	env := controllerWorkQueryEnv(cityPath, cfg, a)
+	if env == nil {
+		env = map[string]string{}
 	}
-	return bdRuntimeEnv(cityPath)
+	return env
 }
 
 // WorkQueryRunner runs a work query command and returns its stdout.

@@ -239,7 +239,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				return 1
 			}
 			var info session.Info
-			err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
+			err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
 				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 					return err
 				}
