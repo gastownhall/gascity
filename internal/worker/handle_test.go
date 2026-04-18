@@ -311,6 +311,21 @@ func TestSessionHandleResetUsesWorkerBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionHandleResetRequiresExistingSession(t *testing.T) {
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Reset(context.Background()); !errors.Is(err, ErrOperationUnsupported) {
+		t.Fatalf("Reset err = %v, want %v", err, ErrOperationUnsupported)
+	}
+}
+
 func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Template: "probe",
