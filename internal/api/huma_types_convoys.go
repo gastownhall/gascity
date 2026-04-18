@@ -4,8 +4,6 @@ package api
 // group. Split out of the original huma_types.go; mirrors the layout
 // of huma_handlers_convoys.go.
 
-import "encoding/json"
-
 // --- Workflow snapshot response types ---
 //
 // These response bodies are shared between convoy/get and workflow/get
@@ -25,9 +23,9 @@ type workflowSnapshotResponse struct {
 	ScopeRef          string                 `json:"scope_ref"`
 	Beads             []workflowBeadResponse `json:"beads"`
 	Deps              []workflowDepResponse  `json:"deps"`
-	LogicalNodes      []logicalNodeResponse  `json:"logical_nodes"`
+	LogicalNodes      []LogicalNode          `json:"logical_nodes"`
 	LogicalEdges      []workflowDepResponse  `json:"logical_edges"`
-	ScopeGroups       []scopeGroupResponse   `json:"scope_groups"`
+	ScopeGroups       []ScopeGroup           `json:"scope_groups"`
 	Partial           bool                   `json:"partial"`
 	ResolvedRootStore string                 `json:"resolved_root_store"`
 	StoresScanned     []string               `json:"stores_scanned"`
@@ -56,15 +54,19 @@ type workflowDepResponse struct {
 	Kind string `json:"kind,omitempty"`
 }
 
-// Presentation types (logical_nodes, logical_edges, scope_groups) are
-// computed by the MC server's workflow_presentation module; GC always
-// emits empty arrays here. They stay json.RawMessage so the spec
-// declares them as opaque objects — describing them as typed would
-// claim a contract GC doesn't own.
-type (
-	logicalNodeResponse = json.RawMessage
-	scopeGroupResponse  = json.RawMessage
-)
+// LogicalNode is a workflow-presentation node in a snapshot response.
+// Gas City's own convoy/workflow snapshot endpoints always emit an
+// empty array for the logical_nodes field; the populated shape is
+// defined and owned by a downstream workflow-presentation server that
+// extends this response. Consumers of a populated snapshot should code
+// against that downstream server's contract. This type exists so the
+// OpenAPI spec declares a concrete (empty) shape instead of an opaque
+// json.RawMessage.
+type LogicalNode struct{}
+
+// ScopeGroup is a workflow-presentation scope group in a snapshot
+// response. See LogicalNode for emission semantics.
+type ScopeGroup struct{}
 
 // --- Convoy types ---
 

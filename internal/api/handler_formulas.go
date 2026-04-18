@@ -189,7 +189,7 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	if root := recipe.RootStep(); root != nil {
 		rootID = root.ID
 	}
-	steps := make([]map[string]any, 0, len(recipe.Steps))
+	steps := make([]FormulaStepResponse, 0, len(recipe.Steps))
 	nodes := make([]formulaPreviewNodeResponse, 0, len(recipe.Steps))
 	included := make(map[string]bool, len(recipe.Steps))
 	for _, step := range recipe.Steps {
@@ -199,22 +199,18 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 		included[step.ID] = true
 		kind := recipeStepKind(step)
 		title := formula.Substitute(step.Title, displayVars)
-		item := map[string]any{
-			"id":    step.ID,
-			"title": title,
-			"kind":  kind,
-		}
-		if step.Type != "" {
-			item["type"] = step.Type
-		}
-		if step.Assignee != "" {
-			item["assignee"] = step.Assignee
+		item := FormulaStepResponse{
+			ID:       step.ID,
+			Title:    title,
+			Kind:     kind,
+			Type:     step.Type,
+			Assignee: step.Assignee,
 		}
 		if len(step.Labels) > 0 {
-			item["labels"] = step.Labels
+			item.Labels = step.Labels
 		}
 		if len(step.Metadata) > 0 {
-			item["metadata"] = step.Metadata
+			item.Metadata = step.Metadata
 		}
 		steps = append(steps, item)
 

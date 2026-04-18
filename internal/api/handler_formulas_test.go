@@ -600,8 +600,8 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	if len(detail.Steps) != 2 {
 		t.Fatalf("steps = %+v, want 2 non-root steps", detail.Steps)
 	}
-	if detail.Steps[0]["title"] != "Prep BD-123" {
-		t.Fatalf("step[0].title = %v, want substituted title", detail.Steps[0]["title"])
+	if detail.Steps[0].Title != "Prep BD-123" {
+		t.Fatalf("step[0].title = %v, want substituted title", detail.Steps[0].Title)
 	}
 	if len(detail.Deps) != 1 || detail.Deps[0].From != "mol-preview.prep" || detail.Deps[0].To != "mol-preview.review" {
 		t.Fatalf("deps = %+v, want prep -> review", detail.Deps)

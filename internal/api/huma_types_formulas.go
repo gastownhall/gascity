@@ -69,21 +69,28 @@ type formulaPreviewEdgeResponse struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// FormulaStepResponse is one step in a formula detail response. The
+// wire fields are uniform across step kinds; the Kind discriminator
+// carries the step variant (sling, converge, wait, subflow, etc.) and
+// Metadata carries per-kind extras as a string-keyed string-valued
+// dictionary.
+type FormulaStepResponse struct {
+	ID       string            `json:"id"`
+	Title    string            `json:"title"`
+	Kind     string            `json:"kind"`
+	Type     string            `json:"type,omitempty"`
+	Assignee string            `json:"assignee,omitempty"`
+	Labels   []string          `json:"labels,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
 // formulaDetailResponse is the body for GET formula/{name}.
-//
-// Steps remains `[]map[string]any` by design: formula step shapes are
-// heterogeneous (a step may be a sling, a converge loop, a wait, a
-// subflow, etc.) and each step's fields depend on its kind. Making
-// Steps a discriminated union would bloat the spec without helping
-// clients, which either render steps generically or dispatch on
-// "kind" themselves. The opacity is intentional and limited to one
-// field — it is not a stand-in for untyped network transport.
 type formulaDetailResponse struct {
 	Name        string                       `json:"name"`
 	Description string                       `json:"description"`
 	Version     string                       `json:"version"`
 	VarDefs     []formulaVarDefResponse      `json:"var_defs"`
-	Steps       []map[string]any             `json:"steps"`
+	Steps       []FormulaStepResponse        `json:"steps"`
 	Deps        []formulaPreviewEdgeResponse `json:"deps"`
 	Preview     FormulaPreviewResponse       `json:"preview"`
 }

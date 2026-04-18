@@ -11,8 +11,8 @@ import (
 var errWorkflowNotFound = errors.New("workflow not found")
 
 // Response types (workflowSnapshotResponse, workflowBeadResponse,
-// workflowDepResponse, logicalNodeResponse, scopeGroupResponse) live
-// in huma_types_convoys.go so every response-body struct has one
+// workflowDepResponse, LogicalNode, ScopeGroup) live in
+// huma_types_convoys.go so every response-body struct has one
 // canonical home. This file contains only the dispatch helpers that
 // populate them from the bead store.
 
@@ -187,9 +187,9 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 		ScopeRef:          scopeRef,
 		Beads:             beadResponses,
 		Deps:              workflowDeps,
-		LogicalNodes:      []logicalNodeResponse{},
+		LogicalNodes:      []LogicalNode{},
 		LogicalEdges:      []workflowDepResponse{},
-		ScopeGroups:       []scopeGroupResponse{},
+		ScopeGroups:       []ScopeGroup{},
 		Partial:           partial,
 		ResolvedRootStore: info.ref,
 		StoresScanned:     storesScanned,

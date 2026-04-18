@@ -10,22 +10,31 @@ import (
 )
 
 type workflowEventProjection struct {
-	Type            string               `json:"type"`
-	WorkflowID      string               `json:"workflow_id"`
-	RootBeadID      string               `json:"root_bead_id"`
-	RootStoreRef    string               `json:"root_store_ref"`
-	ScopeKind       string               `json:"scope_kind"`
-	ScopeRef        string               `json:"scope_ref"`
-	WatchGeneration string               `json:"watch_generation"`
-	EventSeq        uint64               `json:"event_seq"`
-	WorkflowSeq     uint64               `json:"workflow_seq"`
-	EventTS         string               `json:"event_ts"`
-	EventType       string               `json:"event_type"`
-	Bead            workflowBeadResponse `json:"bead"`
-	ChangedFields   []string             `json:"changed_fields"`
-	LogicalNodeID   string               `json:"logical_node_id"`
-	AttemptSummary  map[string]any       `json:"attempt_summary,omitempty"`
-	RequiresResync  bool                 `json:"requires_resync,omitempty"`
+	Type            string                   `json:"type"`
+	WorkflowID      string                   `json:"workflow_id"`
+	RootBeadID      string                   `json:"root_bead_id"`
+	RootStoreRef    string                   `json:"root_store_ref"`
+	ScopeKind       string                   `json:"scope_kind"`
+	ScopeRef        string                   `json:"scope_ref"`
+	WatchGeneration string                   `json:"watch_generation"`
+	EventSeq        uint64                   `json:"event_seq"`
+	WorkflowSeq     uint64                   `json:"workflow_seq"`
+	EventTS         string                   `json:"event_ts"`
+	EventType       string                   `json:"event_type"`
+	Bead            workflowBeadResponse     `json:"bead"`
+	ChangedFields   []string                 `json:"changed_fields"`
+	LogicalNodeID   string                   `json:"logical_node_id"`
+	AttemptSummary  *WorkflowAttemptSummary  `json:"attempt_summary,omitempty"`
+	RequiresResync  bool                     `json:"requires_resync,omitempty"`
+}
+
+// WorkflowAttemptSummary describes retry accounting for a workflow bead.
+// Emitted on workflow projections whenever a bead has a non-zero attempt
+// count. MaxAttempts is omitted when no ceiling is configured.
+type WorkflowAttemptSummary struct {
+	AttemptCount  int `json:"attempt_count"`
+	ActiveAttempt int `json:"active_attempt"`
+	MaxAttempts   int `json:"max_attempts,omitempty"`
 }
 
 type eventStreamEnvelope struct {
@@ -109,7 +118,7 @@ func projectWorkflowEvent(state State, event events.Event) *workflowEventProject
 		projection.RequiresResync = true
 	}
 
-	if summary := workflowAttemptSummary(bead); len(summary) > 0 {
+	if summary := workflowAttemptSummary(bead); summary != nil {
 		projection.AttemptSummary = summary
 	}
 
@@ -228,17 +237,17 @@ func workflowChangedFields(eventType string) []string {
 	}
 }
 
-func workflowAttemptSummary(bead beads.Bead) map[string]any {
+func workflowAttemptSummary(bead beads.Bead) *WorkflowAttemptSummary {
 	attempt := workflowAttemptValue(bead)
 	if attempt <= 0 {
 		return nil
 	}
-	summary := map[string]any{
-		"attempt_count":  attempt,
-		"active_attempt": attempt,
+	summary := &WorkflowAttemptSummary{
+		AttemptCount:  attempt,
+		ActiveAttempt: attempt,
 	}
 	if maxAttempts := metadataInt(bead.Metadata, "gc.max_attempts"); maxAttempts > 0 {
-		summary["max_attempts"] = maxAttempts
+		summary.MaxAttempts = maxAttempts
 	}
 	return summary
 }

@@ -995,7 +995,7 @@ type FormulaDetailResponse struct {
 	Description string                        `json:"description"`
 	Name        string                        `json:"name"`
 	Preview     FormulaPreviewResponse        `json:"preview"`
-	Steps       *[]map[string]interface{}     `json:"steps"`
+	Steps       *[]FormulaStepResponse        `json:"steps"`
 	VarDefs     *[]FormulaVarDefResponse      `json:"var_defs"`
 	Version     string                        `json:"version"`
 }
@@ -1053,6 +1053,17 @@ type FormulaRunsResponse struct {
 	PartialErrors *[]string                   `json:"partial_errors,omitempty"`
 	RecentRuns    *[]FormulaRecentRunResponse `json:"recent_runs"`
 	RunCount      int64                       `json:"run_count"`
+}
+
+// FormulaStepResponse defines model for FormulaStepResponse.
+type FormulaStepResponse struct {
+	Assignee *string            `json:"assignee,omitempty"`
+	Id       string             `json:"id"`
+	Kind     string             `json:"kind"`
+	Labels   *[]string          `json:"labels,omitempty"`
+	Metadata *map[string]string `json:"metadata,omitempty"`
+	Title    string             `json:"title"`
+	Type     *string            `json:"type,omitempty"`
 }
 
 // FormulaSummaryResponse defines model for FormulaSummaryResponse.
@@ -1355,6 +1366,9 @@ type ListBodyStatus struct {
 	// Total Total number of items matching the query.
 	Total int64 `json:"total"`
 }
+
+// LogicalNode defines model for LogicalNode.
+type LogicalNode = map[string]interface{}
 
 // MailCountOutputBody defines model for MailCountOutputBody.
 type MailCountOutputBody struct {
@@ -1906,6 +1920,9 @@ type RigUpdateInputBody struct {
 	Suspended *bool `json:"suspended,omitempty"`
 }
 
+// ScopeGroup defines model for ScopeGroup.
+type ScopeGroup = map[string]interface{}
+
 // ServiceRestartOutputBody defines model for ServiceRestartOutputBody.
 type ServiceRestartOutputBody struct {
 	// Action Action performed.
@@ -2363,6 +2380,13 @@ type TranscriptMessageKind string
 // TranscriptProvenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
 type TranscriptProvenance string
 
+// WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
+type WorkflowAttemptSummary struct {
+	ActiveAttempt int64  `json:"active_attempt"`
+	AttemptCount  int64  `json:"attempt_count"`
+	MaxAttempts   *int64 `json:"max_attempts,omitempty"`
+}
+
 // WorkflowBeadResponse defines model for WorkflowBeadResponse.
 type WorkflowBeadResponse struct {
 	Assignee      *string           `json:"assignee,omitempty"`
@@ -2404,7 +2428,7 @@ type WorkflowDepResponse struct {
 
 // WorkflowEventProjection defines model for WorkflowEventProjection.
 type WorkflowEventProjection struct {
-	AttemptSummary  *map[string]interface{} `json:"attempt_summary,omitempty"`
+	AttemptSummary  *WorkflowAttemptSummary `json:"attempt_summary,omitempty"`
 	Bead            WorkflowBeadResponse    `json:"bead"`
 	ChangedFields   *[]string               `json:"changed_fields"`
 	EventSeq        int64                   `json:"event_seq"`
@@ -2427,12 +2451,12 @@ type WorkflowSnapshotResponse struct {
 	Beads             *[]WorkflowBeadResponse `json:"beads"`
 	Deps              *[]WorkflowDepResponse  `json:"deps"`
 	LogicalEdges      *[]WorkflowDepResponse  `json:"logical_edges"`
-	LogicalNodes      *[]interface{}          `json:"logical_nodes"`
+	LogicalNodes      *[]LogicalNode          `json:"logical_nodes"`
 	Partial           bool                    `json:"partial"`
 	ResolvedRootStore string                  `json:"resolved_root_store"`
 	RootBeadId        string                  `json:"root_bead_id"`
 	RootStoreRef      string                  `json:"root_store_ref"`
-	ScopeGroups       *[]interface{}          `json:"scope_groups"`
+	ScopeGroups       *[]ScopeGroup           `json:"scope_groups"`
 	ScopeKind         string                  `json:"scope_kind"`
 	ScopeRef          string                  `json:"scope_ref"`
 	SnapshotEventSeq  *int64                  `json:"snapshot_event_seq,omitempty"`
