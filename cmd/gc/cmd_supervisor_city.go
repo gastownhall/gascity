@@ -29,7 +29,7 @@ var registerCityWithSupervisorTestHook func(cityPath, commandName string, stdout
 
 func supervisorCityStartTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return timeout
 	}
@@ -41,7 +41,7 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 
 func supervisorCityStopTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return timeout
 	}
@@ -64,10 +64,11 @@ func fetchCityPacksIfNeeded(cityPath string) error {
 func effectiveCityName(cityPath string) (string, error) {
 	name := filepath.Base(cityPath)
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		return "", err
 	}
+	emitLoadCityConfigWarnings(io.Discard, prov)
 	if cfg.Workspace.Name != "" {
 		name = cfg.Workspace.Name
 	}

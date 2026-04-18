@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -57,11 +58,12 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 }
 
 func syncManagedDoltPortMirrors(cityPath string) error {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		removeDoltPortFile(cityPath)
 		return nil
 	}
+	emitLoadCityConfigWarnings(io.Discard, prov)
 	return syncConfiguredDoltPortFiles(cityPath, rawBeadsProvider(cityPath), cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs)
 }
 
