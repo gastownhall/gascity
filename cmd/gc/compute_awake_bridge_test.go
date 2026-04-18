@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -9,6 +10,7 @@ import (
 )
 
 func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilityStates(t *testing.T) {
+	now := time.Now().UTC()
 	input := buildAwakeInputFromReconciler(
 		&config.City{},
 		[]beads.Bead{{
@@ -39,6 +41,7 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 }
 
 func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T) {
+	now := time.Now().UTC()
 	sp := runtime.NewFake()
 	sp.SetPendingInteraction("s-worker", &runtime.PendingInteraction{
 		RequestID: "req-1",

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -11,8 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const lookPathCacheTTL = 30 * time.Second
@@ -59,6 +60,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
+	store := s.state.CityBeadStore()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
 	wantPeek := r.URL.Query().Get("peek") == "true"
@@ -90,7 +92,9 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 			}
 
 			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
-			running := sp.IsRunning(sessionName)
+			handle, _ := s.workerHandleForSessionTarget(store, sessionName)
+			obs, _ := worker.ObserveHandle(context.Background(), handle)
+			running := obs.Running
 
 			if qRunning == "true" && !running {
 				continue
@@ -100,10 +104,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Merge config + runtime suspended state.
-			suspended := ea.suspended
-			if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
-				suspended = true
-			}
+			suspended := ea.suspended || obs.Suspended
 
 			// Resolve provider and display name.
 			provider, displayName := resolveProviderInfo(ea.provider, cfg)
@@ -135,18 +136,15 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var lastActivity *time.Time
-			sessionID := ""
+			sessionID := strings.TrimSpace(obs.RuntimeSessionID)
 			if running {
 				si := &sessionInfo{Name: sessionName}
-				if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
-					si.LastActivity = &t
-					lastActivity = &t
+				if obs.LastActivity != nil {
+					si.LastActivity = obs.LastActivity
+					lastActivity = obs.LastActivity
 				}
-				si.Attached = sp.IsAttached(sessionName)
+				si.Attached = obs.Attached
 				resp.Session = si
-				if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
-					sessionID = strings.TrimSpace(id)
-				}
 			}
 
 			// Find active bead by querying bead stores.
@@ -157,8 +155,8 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 			resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
 
 			// Peek preview (opt-in).
-			if wantPeek && running {
-				if output, err := sp.Peek(sessionName, 5); err == nil {
+			if wantPeek && running && handle != nil {
+				if output, err := handle.Peek(context.Background(), 5); err == nil {
 					resp.LastOutput = output
 				}
 			}
@@ -198,7 +196,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
+	store := s.state.CityBeadStore()
 	cityName := s.state.CityName()
 
 	// Try exact agent match first, then check for sub-resource suffix.
@@ -220,13 +218,12 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	handle, _ := s.workerHandleForSessionTarget(store, sessionName)
+	obs, _ := worker.ObserveHandle(context.Background(), handle)
+	running := obs.Running
 
 	// Merge config + runtime suspended state.
-	suspended := agentCfg.Suspended
-	if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
-		suspended = true
-	}
+	suspended := agentCfg.Suspended || obs.Suspended
 
 	// Resolve provider and display name.
 	provider, displayName := resolveProviderInfo(agentCfg.Provider, cfg)
@@ -260,18 +257,15 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var lastActivity *time.Time
-	sessionID := ""
+	sessionID := strings.TrimSpace(obs.RuntimeSessionID)
 	if running {
 		si := &sessionInfo{Name: sessionName}
-		if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
-			si.LastActivity = &t
-			lastActivity = &t
+		if obs.LastActivity != nil {
+			si.LastActivity = obs.LastActivity
+			lastActivity = obs.LastActivity
 		}
-		si.Attached = sp.IsAttached(sessionName)
+		si.Attached = obs.Attached
 		resp.Session = si
-		if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
-			sessionID = strings.TrimSpace(id)
-		}
 	}
 
 	// Find active bead by querying bead stores.
@@ -607,19 +601,19 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
 	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	factory, err := s.workerFactory(s.state.CityBeadStore())
+	if err != nil {
+		return
 	}
 	provider := strings.TrimSpace(agentCfg.Provider)
 	if provider == "" && cfg != nil {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	sessionFile := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	sessionFile := factory.DiscoverTranscript(provider, workDir, "")
 	if sessionFile == "" {
 		return
 	}
-	meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile)
+	meta, err := factory.TailMeta(sessionFile)
 	if err != nil || meta == nil {
 		return
 	}

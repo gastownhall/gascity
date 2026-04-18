@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -188,6 +189,83 @@ func TestDuplicateSession(t *testing.T) {
 	if !errors.Is(err, ErrSessionExists) {
 		t.Errorf("expected ErrSessionExists, got %v", err)
 	}
+}
+
+func TestHiddenAttachedClientLifecycle(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-hidden-attach-" + t.Name()
+	_ = tm.KillSession(sessionName)
+
+	if err := tm.NewSession(sessionName, "sleep 300"); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if tm.IsSessionAttached(sessionName) {
+		t.Fatal("session unexpectedly attached before hidden client starts")
+	}
+
+	if err := tm.ensureHiddenAttachedClient(sessionName); err != nil {
+		t.Fatalf("ensureHiddenAttachedClient: %v", err)
+	}
+	if !tm.IsSessionAttached(sessionName) {
+		t.Fatal("session should report attached while hidden client is active")
+	}
+
+	tm.CloseHiddenAttachClient(sessionName)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !tm.IsSessionAttached(sessionName) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("session stayed attached after hidden client close")
+}
+
+func TestHiddenAttachedClientCanSendText(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-hidden-input-" + t.Name()
+	_ = tm.KillSession(sessionName)
+
+	bin := buildEchoBinary(t, t.TempDir(), "echo-hidden-input")
+	if err := tm.NewSession(sessionName, bin); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if err := tm.ensureHiddenAttachedClient(sessionName); err != nil {
+		t.Fatalf("ensureHiddenAttachedClient: %v", err)
+	}
+	defer tm.CloseHiddenAttachClient(sessionName)
+
+	used, err := tm.sendHiddenAttachedText(sessionName, "HELLO_HIDDEN_ATTACH")
+	if err != nil {
+		t.Fatalf("sendHiddenAttachedText: %v", err)
+	}
+	if !used {
+		t.Fatal("sendHiddenAttachedText = false, want true with hidden client active")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := tm.CapturePaneAll(sessionName)
+		if err == nil && strings.Contains(out, "HELLO_HIDDEN_ATTACH") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	out, _ := tm.CapturePaneAll(sessionName)
+	t.Fatalf("CapturePaneAll did not contain hidden attach text:\n%s", out)
 }
 
 func TestSendKeysAndCapture(t *testing.T) {
@@ -2207,6 +2285,52 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 				t.Errorf("paneContainsBusyIndicator(%v) = %v, want %v", tt.lines, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCodexTranscriptTailContainsTurnAborted(t *testing.T) {
+	tail := strings.Join([]string{
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}`,
+	}, "\n")
+	if !codexTranscriptTailContainsTurnAborted(tail) {
+		t.Fatal("codexTranscriptTailContainsTurnAborted() = false, want true")
+	}
+
+	oldAbort := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}`
+	var stale []string
+	stale = append(stale, oldAbort)
+	for i := 0; i < codexInterruptBoundaryRecentLines+2; i++ {
+		stale = append(stale, fmt.Sprintf(`{"type":"event_msg","payload":{"type":"agent_message","message":"line-%d"}}`, i))
+	}
+	if codexTranscriptTailContainsTurnAborted(strings.Join(stale, "\n")) {
+		t.Fatal("codexTranscriptTailContainsTurnAborted() = true for stale abort marker, want false")
+	}
+}
+
+func TestWaitForCodexInterruptBoundary(t *testing.T) {
+	codexHome := t.TempDir()
+	transcript := filepath.Join(codexHome, "sessions", "2026", "04", "18", "rollout.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"still working"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	since := time.Now()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
+	}()
+
+	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {
+		t.Fatalf("waitForCodexInterruptBoundary: %v", err)
 	}
 }
 

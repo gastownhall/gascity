@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,8 +13,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
@@ -25,10 +26,10 @@ type outputTurn struct {
 
 // agentOutputResponse is the response for GET /v0/agent/{name}/output.
 type agentOutputResponse struct {
-	Agent      string                     `json:"agent"`
-	Format     string                     `json:"format"` // "conversation" or "text"
-	Turns      []outputTurn               `json:"turns"`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	Agent      string                       `json:"agent"`
+	Format     string                       `json:"format"` // "conversation" or "text"
+	Turns      []outputTurn                 `json:"turns"`
+	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
 // handleAgentOutput returns unified conversation output for an agent.
@@ -58,7 +59,8 @@ func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name 
 	}
 
 	// No session file found — fall back to Peek() (raw terminal text).
-	s.peekFallbackOutput(w, name, cfg)
+	handle := s.agentWorkerHandle(name, cfg)
+	s.peekFallbackOutput(r.Context(), w, name, handle)
 }
 
 // trySessionLogOutput attempts to read structured conversation data from
@@ -75,12 +77,11 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	if provider == "" && cfg != nil {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	factory, err := s.workerFactory(s.state.CityBeadStore())
+	if err != nil {
+		return nil, err
 	}
-	path := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	path := factory.DiscoverTranscript(provider, workDir, "")
 	if path == "" {
 		return nil, nil
 	}
@@ -93,16 +94,16 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	}
 	before := r.URL.Query().Get("before")
 
-	var sess *sessionlog.Session
-	var err error
-	if before != "" {
-		sess, err = sessionlog.ReadProviderFileOlder(provider, path, tail, before)
-	} else {
-		sess, err = sessionlog.ReadProviderFile(provider, path, tail)
-	}
+	transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
+		Provider:        provider,
+		TranscriptPath:  path,
+		TailCompactions: tail,
+		BeforeEntryID:   before,
+	})
 	if err != nil {
 		return nil, err
 	}
+	sess := transcript.Session
 
 	turns := make([]outputTurn, 0, len(sess.Messages))
 	for _, e := range sess.Messages {
@@ -122,16 +123,14 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 }
 
 // peekFallbackOutput returns raw terminal text wrapped as a single turn.
-func (s *Server) peekFallbackOutput(w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
-	if !sp.IsRunning(sessionName) {
+func (s *Server) peekFallbackOutput(ctx context.Context, w http.ResponseWriter, name string, handle worker.Handle) {
+	running, err := workerHandleRunning(ctx, handle)
+	if err != nil || !running {
 		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
 		return
 	}
 
-	output, err := sp.Peek(sessionName, 100)
+	output, err := handle.Peek(ctx, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -162,8 +161,8 @@ func (s *Server) resolveAgentWorkDir(a config.Agent, qualifiedName string) strin
 	)
 }
 
-// entryToTurn converts a sessionlog Entry to a human-readable outputTurn.
-func entryToTurn(e *sessionlog.Entry) outputTurn {
+// entryToTurn converts a provider transcript entry to a human-readable output turn.
+func entryToTurn(e *worker.TranscriptEntry) outputTurn {
 	turn := outputTurn{
 		Role: e.Type,
 	}
@@ -214,6 +213,120 @@ func entryToTurn(e *sessionlog.Entry) outputTurn {
 	return turn
 }
 
+func historyEntryToTurn(entry worker.HistoryEntry) outputTurn {
+	turn := outputTurn{
+		Role: entry.Kind,
+	}
+	if turn.Role == "" {
+		turn.Role = string(entry.Actor)
+	}
+	if entry.Timestamp != nil {
+		turn.Timestamp = entry.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+	}
+
+	if len(entry.Blocks) > 0 {
+		var parts []string
+		for _, block := range entry.Blocks {
+			switch block.Kind {
+			case worker.BlockKindText:
+				if block.Text != "" {
+					parts = append(parts, block.Text)
+				}
+			case worker.BlockKindToolUse:
+				if block.Name != "" {
+					parts = append(parts, "["+block.Name+"]")
+				}
+			case worker.BlockKindToolResult:
+				text := extractToolResultText(block.Content)
+				if text != "" {
+					if len(text) > 500 {
+						text = text[:500] + "…"
+					}
+					parts = append(parts, "[result] "+text)
+				}
+			case worker.BlockKindThinking:
+				parts = append(parts, "[thinking]")
+			}
+		}
+		turn.Text = strings.Join(parts, "\n")
+		if turn.Text != "" {
+			return turn
+		}
+	}
+
+	if strings.TrimSpace(entry.Text) != "" {
+		turn.Text = entry.Text
+		return turn
+	}
+	if turn.Text == "" {
+		turn.Text = historyRawEntryText(entry.Provenance.Raw)
+	}
+	return turn
+}
+
+func historySnapshotTurns(snapshot *worker.HistorySnapshot) ([]outputTurn, []string) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	turns := make([]outputTurn, 0, len(snapshot.Entries))
+	ids := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		if !historyEntryVisibleInConversation(entry) {
+			continue
+		}
+		turn := historyEntryToTurn(entry)
+		if turn.Text == "" {
+			continue
+		}
+		turns = append(turns, turn)
+		ids = append(ids, entry.ID)
+	}
+	return turns, ids
+}
+
+func historyEntryVisibleInConversation(entry worker.HistoryEntry) bool {
+	switch entry.Provenance.RawType {
+	case "user", "assistant", "system", "result":
+		return true
+	}
+	switch entry.Kind {
+	case "user", "assistant", "system", "result":
+		return true
+	default:
+		return false
+	}
+}
+
+func historySnapshotRawMessages(snapshot *worker.HistorySnapshot) ([]json.RawMessage, []string) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	rawMessages := make([]json.RawMessage, 0, len(snapshot.Entries))
+	ids := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		if len(entry.Provenance.Raw) == 0 {
+			continue
+		}
+		rawMessages = append(rawMessages, entry.Provenance.Raw)
+		ids = append(ids, entry.ID)
+	}
+	return rawMessages, ids
+}
+
+func historySnapshotActivity(snapshot *worker.HistorySnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	switch snapshot.TailState.Activity {
+	case worker.TailActivityIdle:
+		return "idle"
+	case worker.TailActivityInTurn:
+		return "in-turn"
+	default:
+		return ""
+	}
+}
+
 // extractToolResultText extracts human-readable text from a tool_result
 // Content field (json.RawMessage). The content can be a plain string or
 // an array of content blocks (e.g., [{type:"text", text:"..."}]).
@@ -227,7 +340,7 @@ func extractToolResultText(raw json.RawMessage) string {
 		return s
 	}
 	// Try array of content blocks.
-	var blocks []sessionlog.ContentBlock
+	var blocks []worker.TranscriptContentBlock
 	if json.Unmarshal(raw, &blocks) == nil {
 		var parts []string
 		for _, b := range blocks {
@@ -264,20 +377,18 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	if provider == "" {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	}
-
 	var logPath string
 	if workDir != "" {
-		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		logPath = factory.DiscoverTranscript(provider, workDir, "")
 	}
 
-	// Check if agent is running.
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	handle := s.agentWorkerHandle(name, cfg)
+	running, _ := workerHandleRunning(r.Context(), handle)
 
 	// If no session log and agent isn't running, return 404 before committing SSE headers.
 	if logPath == "" && !running {
@@ -300,23 +411,16 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 
 	ctx := r.Context()
 	if logPath != "" {
-		s.streamSessionLog(ctx, w, name, logPath)
+		s.streamSessionLog(ctx, w, name, provider, logPath)
 	} else {
-		s.streamPeekOutput(ctx, w, name, cfg)
+		s.streamPeekOutput(ctx, w, name, handle)
 	}
 }
 
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name string, logPath string) {
-	// Derive provider from agent config for session log parsing.
-	cfg := s.state.Config()
-	agentCfg, _ := findAgent(cfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
+func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name, provider, logPath string) {
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
@@ -337,10 +441,19 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		sess, err := sessionlog.ReadProviderFile(provider, logPath, 1)
+		factory, err := s.workerFactory(s.state.CityBeadStore())
 		if err != nil {
 			return
 		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
+			Provider:        provider,
+			TranscriptPath:  logPath,
+			TailCompactions: 1,
+		})
+		if err != nil {
+			return
+		}
+		sess := transcript.Session
 		lastSize = currentSize
 
 		turns := make([]outputTurn, 0, len(sess.Messages))
@@ -413,11 +526,9 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
 }
 
-// streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
+// streamPeekOutput polls Peek() through the worker boundary and emits changes
+// as SSE events.
+func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, handle worker.Handle) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -427,10 +538,11 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 	var seq uint64
 
 	emitPeek := func() {
-		if !sp.IsRunning(sessionName) {
+		running, err := workerHandleRunning(ctx, handle)
+		if err != nil || !running {
 			return
 		}
-		output, err := sp.Peek(sessionName, 100)
+		output, err := handle.Peek(ctx, 100)
 		if err != nil || output == lastOutput {
 			return
 		}
@@ -470,6 +582,33 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 	}
 }
 
+func (s *Server) agentWorkerHandle(name string, cfg *config.City) worker.Handle {
+	if cfg == nil {
+		return nil
+	}
+	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	handle, _ := s.workerHandleForSessionTarget(s.state.CityBeadStore(), sessionName)
+	return handle
+}
+
+func workerHandleRunning(ctx context.Context, handle worker.Handle) (bool, error) {
+	if handle == nil {
+		return false, nil
+	}
+	obs, err := worker.ObserveHandle(ctx, handle)
+	if err == nil {
+		return obs.Running, nil
+	}
+	state, stateErr := handle.State(ctx)
+	if stateErr != nil {
+		if errors.Is(err, worker.ErrOperationUnsupported) {
+			return false, stateErr
+		}
+		return false, err
+	}
+	return state.Phase != worker.PhaseStopped && state.Phase != worker.PhaseFailed, nil
+}
+
 // unwrapDoubleEncoded handles Claude's double-encoded message format
 // where the "message" field is a JSON string containing a JSON object.
 // Returns the human-readable content text, or "" if not parseable.
@@ -477,14 +616,12 @@ func unwrapDoubleEncoded(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	// Try to unwrap: raw might be a JSON string like "{\"role\":...}"
 	var inner string
-	if err := json.Unmarshal(raw, &inner); err != nil {
-		return ""
+	if err := json.Unmarshal(raw, &inner); err == nil {
+		raw = []byte(inner)
 	}
-	// Now inner is the JSON object as a string. Parse it.
-	var mc sessionlog.MessageContent
-	if err := json.Unmarshal([]byte(inner), &mc); err != nil {
+	var mc worker.TranscriptMessageContent
+	if err := json.Unmarshal(raw, &mc); err != nil {
 		return ""
 	}
 	// Try string content.
@@ -493,7 +630,7 @@ func unwrapDoubleEncoded(raw []byte) string {
 		return s
 	}
 	// Try array of content blocks.
-	var blocks []sessionlog.ContentBlock
+	var blocks []worker.TranscriptContentBlock
 	if err := json.Unmarshal(mc.Content, &blocks); err == nil {
 		var parts []string
 		for _, b := range blocks {
@@ -504,4 +641,17 @@ func unwrapDoubleEncoded(raw []byte) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+func historyRawEntryText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var entry struct {
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return ""
+	}
+	return unwrapDoubleEncoded(entry.Message)
 }

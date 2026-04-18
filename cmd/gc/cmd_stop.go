@@ -39,6 +39,8 @@ running, delegates shutdown to it.`,
 
 var sessionProviderForStopCity = newSessionProviderForCity
 
+const sleepReasonCityStop = "city-stop"
+
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
 func cmdStop(args []string, stdout, stderr io.Writer) int {
@@ -62,10 +64,14 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 			return code
 		}
 		if supervisorAliveHook() != 0 {
+			stopCityManagedBeadsProviderIfRunning(cityPath, stderr)
 			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 			return 0
 		}
 	}
+
+	store, _ := openCityStoreAt(cityPath)
+	markCityStopSessionSleepReason(store, stderr)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopController(cityPath, stdout) {
@@ -83,7 +89,6 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 
 	sp := sessionProviderForStopCity(cfg, cityPath)
 	st := cfg.Workspace.SessionTemplate
-	store, _ := openCityStoreAt(cityPath)
 	var sessionNames []string
 	desired := make(map[string]bool, len(cfg.Agents))
 	for _, a := range cfg.Agents {
@@ -121,6 +126,41 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return code
+}
+
+func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
+	if store == nil {
+		return
+	}
+	sessions, err := store.ListByLabel("gc:session", 0)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
+		return
+	}
+	for _, session := range sessions {
+		state := sessionMetadataState(session)
+		if state != "active" && state != "creating" {
+			continue
+		}
+		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {
+			continue
+		}
+		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
+		}
+	}
+}
+
+func stopCityManagedBeadsProviderIfRunning(cityPath string, stderr io.Writer) {
+	if rawBeadsProvider(cityPath) != "bd" {
+		return
+	}
+	if currentManagedDoltPort(cityPath) == "" {
+		return
+	}
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort warning
+	}
 }
 
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
@@ -200,7 +240,7 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 ) int {
 	var running []string
 	for _, sn := range sessionNames {
-		if sp.IsRunning(sn) {
+		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
 			running = append(running, sn)
 		}
 	}

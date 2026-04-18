@@ -13,11 +13,18 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // staleKeyDetectDelay is how long to wait after starting a session before
 // checking if it died immediately (stale resume key detection).
 const staleKeyDetectDelay = 2 * time.Second
+
+const waitIdleNudgeTimeout = 30 * time.Second
+
+// ErrStateSync reports that the runtime reached the requested lifecycle
+// boundary but persisting the corresponding bead metadata failed.
+var ErrStateSync = errors.New("session state sync failed")
 
 // stripResumeFlag removes the resume flag and session key from a command
 // string, returning a command suitable for a fresh start.
@@ -181,6 +188,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
+		if err := m.confirmLiveSessionState(id, &b); err != nil {
+			return err
+		}
 		return nil
 	}
 	if resumeCommand == "" {
@@ -275,11 +285,125 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
 	}
-	if err := m.store.SetMetadata(id, "state", string(StateActive)); err != nil {
-		if started {
+	if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
-		return fmt.Errorf("updating session state: %w", err)
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	transport, _ := m.transportForBead(b, sessName)
+	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	if m.sp.IsRunning(sessName) {
+		return nil
+	}
+	if resumeCommand == "" {
+		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+	}
+
+	cfg := hints
+	cfg.Command = resumeCommand
+	if cfg.WorkDir == "" {
+		cfg.WorkDir = b.Metadata["work_dir"]
+	}
+	generation, err := strconv.Atoi(b.Metadata["generation"])
+	if err != nil || generation <= 0 {
+		generation = DefaultGeneration
+	}
+	continuationEpoch, err := strconv.Atoi(b.Metadata["continuation_epoch"])
+	if err != nil || continuationEpoch <= 0 {
+		continuationEpoch = DefaultContinuationEpoch
+	}
+	instanceToken := b.Metadata["instance_token"]
+	if instanceToken == "" {
+		instanceToken = NewInstanceToken()
+		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
+			return fmt.Errorf("storing instance token: %w", err)
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string)
+		}
+		b.Metadata["instance_token"] = instanceToken
+	}
+	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
+		id,
+		sessName,
+		strings.TrimSpace(b.Metadata["alias"]),
+		strings.TrimSpace(b.Metadata["template"]),
+		strings.TrimSpace(b.Metadata["session_origin"]),
+		generation,
+		continuationEpoch,
+		instanceToken,
+	))
+	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
+	}
+	cfg = runtime.SyncWorkDirEnv(cfg)
+	started := false
+	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		switch {
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if err != nil {
+				return err
+			}
+			started = retried
+		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
+			return err
+		default:
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("resuming session: %w", err)
+		}
+	} else {
+		started = true
+	}
+	if started && b.Metadata["session_key"] != "" {
+		if err := sleepWithContext(ctx, staleKeyDetectDelay); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+	if b == nil {
+		return nil
+	}
+	batch := make(map[string]string)
+	switch State(b.Metadata["state"]) {
+	case "", StateCreating, StateAsleep, StateSuspended:
+		batch["state"] = string(StateActive)
+		batch["state_reason"] = "creation_complete"
+	}
+	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
+		batch["pending_create_claim"] = ""
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	for k, v := range batch {
+		b.Metadata[k] = v
 	}
 	return nil
 }
@@ -300,6 +424,16 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func formatWaitIdleReminder(source, message string) string {
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	sb.WriteString("You have a deferred reminder that was queued until a safe boundary:\n\n")
+	fmt.Fprintf(&sb, "- [%s] %s\n", source, message)
+	sb.WriteString("\nHandle them after this turn.\n")
+	sb.WriteString("</system-reminder>\n")
+	return sb.String()
 }
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
@@ -325,6 +459,69 @@ func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, 
 	return m.sp.Nudge(sessName, content)
 }
 
+func normalizeWaitIdleNudgeSource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "session"
+	}
+	return source
+}
+
+func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	if transportFromMetadata(b) == "acp" {
+		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+			return false, err
+		}
+		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return false, err
+	}
+	if providerKind(b) != "claude" {
+		return false, nil
+	}
+	waiter, ok := m.sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false, nil
+	}
+	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
+		return false, nil
+	}
+	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
+	if !m.sp.IsRunning(sessName) {
+		return false, nil
+	}
+	if transportFromMetadata(b) == "acp" {
+		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if providerKind(b) != "claude" {
+		return false, nil
+	}
+	waiter, ok := m.sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false, nil
+	}
+	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
+		return false, nil
+	}
+	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (m *Manager) pendingInteractionLocked(sessName string) error {
 	if ip, ok := m.sp.(runtime.InteractionProvider); ok {
 		pending, err := ip.Pending(sessName)
@@ -338,14 +535,43 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 	return nil
 }
 
+func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string, timeout time.Duration) bool {
+	dp, ok := m.sp.(runtime.DialogProvider)
+	if !ok {
+		return false
+	}
+	_ = dp.DismissKnownDialogs(ctx, sessName, timeout)
+	return true
+}
+
+func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
+	if err := m.store.SetMetadata(id, startupDialogVerifiedKey, "true"); err != nil {
+		return
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata[startupDialogVerifiedKey] = "true"
+}
+
 func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) error {
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 		return err
 	}
+	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
+	if verifyDeferredDialogs {
+		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
+	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return err
 	}
-	return m.nudgeSession(ctx, sessName, message, immediate)
+	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		return err
+	}
+	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
+		m.markStartupDialogsVerifiedLocked(id, &b)
+	}
+	return nil
 }
 
 func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) error {
@@ -355,6 +581,53 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 			return err
 		}
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
+	})
+}
+
+func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		_, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			delivered = false
+			return nil
+		}
+		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+			return err
+		}
+		delivered = true
+		return nil
+	})
+	return delivered, err
+}
+
+// Start ensures the session runtime is live without sending a message.
+// It is the canonical manager-level bring-up path for worker handles and
+// other callers that need bounded startup without attaching a terminal.
+func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+	})
+}
+
+// StartRuntimeOnly brings the runtime live for a bead-backed session without
+// mutating persisted lifecycle metadata. Legacy reconciler callers use this
+// bridge while they still own commit/rollback bookkeeping above the worker
+// boundary.
+func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		return m.ensureRunningRuntimeOnly(ctx, id, b, sessName, resumeCommand, hints)
 	})
 }
 
@@ -372,6 +645,52 @@ func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand 
 	return m.send(ctx, id, message, resumeCommand, hints, true)
 }
 
+// SendLiveOnly nudges the runtime only when the current session is already
+// running. It never resumes or restarts the session.
+func (m *Manager) SendLiveOnly(ctx context.Context, id, message string) (bool, error) {
+	return m.sendLiveOnly(ctx, id, message, false)
+}
+
+// SendImmediateLiveOnly is like SendLiveOnly but uses the immediate nudge path
+// when the runtime supports it. It never resumes or restarts the session.
+func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string) (bool, error) {
+	return m.sendLiveOnly(ctx, id, message, true)
+}
+
+// TryWaitIdleNudge delivers a best-effort session nudge at a provider-defined
+// safe boundary. It resumes supported runtimes if needed, then reports whether
+// live delivery actually happened. Unsupported providers return (false, nil)
+// so higher layers can fall back to queue semantics without treating that as
+// an operational error.
+func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
+		return err
+	})
+	return delivered, err
+}
+
+// TryWaitIdleNudgeLiveOnly delivers a best-effort nudge at a safe boundary
+// only when the runtime is already live. It never resumes or restarts the
+// session.
+func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (bool, error) {
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		delivered, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message)
+		return err
+	})
+	return delivered, err
+}
+
 // StopTurn issues a provider-appropriate interrupt for the currently running
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.
@@ -381,15 +700,15 @@ func (m *Manager) StopTurn(id string) error {
 		if err != nil {
 			return err
 		}
+		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
 		}
-		if waitsForIdleAfterInterrupt(b) {
-			if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
-				if err := waiter.WaitForIdle(context.Background(), sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-					return fmt.Errorf("waiting for stopped session to become idle: %w", err)
-				}
-			}
+		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName); err != nil {
+			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
+		}
+		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
+			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
 		return nil
 	})
@@ -475,10 +794,8 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
-	if sessionKey := b.Metadata["session_key"]; sessionKey != "" {
-		if path := sessionlog.FindSessionFileByID(searchPaths, workDir, sessionKey); path != "" {
-			return path, nil
-		}
+	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, nil
 	}
 
 	all, err := m.store.List(beads.ListQuery{
@@ -509,5 +826,5 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			}
 		}
 	}
-	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir), nil
+	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
 }

@@ -311,6 +311,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
 	result := cr.buildDesiredState(sessionBeads, startupTrace)
+	sessionBeads = cr.loadSessionBeadSnapshot()
+	result = refreshDesiredStateWithSessionBeads(
+		result,
+		cr.cityName,
+		cr.cityPath,
+		cr.cfg,
+		cr.sp,
+		cr.cityBeadStore(),
+		sessionBeads,
+		cr.stderr,
+	)
 	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
 	result = refreshDesiredStateWithSessionBeads(
 		result,
@@ -442,6 +453,17 @@ func (cr *CityRuntime) tick(
 	// corrects bead state, and the pre-reconcile sync is sufficient for
 	// the reconciler to read/write hashes during reconciliation.
 	result := cr.buildDesiredState(sessionBeads, trace)
+	sessionBeads = cr.loadSessionBeadSnapshot()
+	result = refreshDesiredStateWithSessionBeads(
+		result,
+		cr.cityName,
+		cr.cityPath,
+		cr.cfg,
+		cr.sp,
+		cr.cityBeadStore(),
+		sessionBeads,
+		cr.stderr,
+	)
 	_ = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
 	// Reload snapshot after sync so the reconciler sees metadata written
 	// by syncBeadsAndUpdateIndex (e.g., configured_named_session/mode
@@ -929,7 +951,7 @@ func sweepUndesiredPoolSessionBeads(
 		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
 			continue
 		}
-		if sp != nil && sp.IsRunning(bead.Metadata["session_name"]) {
+		if running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, bead.ID); err == nil && running {
 			continue
 		}
 		// Don't sweep beads that the reconciler still considers "start

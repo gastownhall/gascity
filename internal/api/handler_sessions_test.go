@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func newSessionFakeState(t *testing.T) *fakeState {
@@ -2194,34 +2195,47 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	}
 }
 
-func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
+func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-
 	searchBase := t.TempDir()
-	workDir := t.TempDir()
-	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
 	}
-	logPath := filepath.Join(logDir, "session.jsonl")
-	initial := strings.Join([]string{
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
 		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(logPath, []byte(initial), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	)
+
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
 	}
 
-	info := session.Info{ID: "sess-1", Template: "default"}
 	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
 	defer cancel()
 
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.streamSessionTranscriptLog(ctx, rec, info, logPath)
+		initial, histErr := handle.History(ctx, worker.HistoryRequest{})
+		if histErr != nil {
+			t.Errorf("History(initial): %v", histErr)
+			close(done)
+			return
+		}
+		srv.streamSessionTranscriptHistory(ctx, rec, info, handle, initial)
 		close(done)
 	}()
 
@@ -2233,6 +2247,8 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
 	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
@@ -2257,6 +2273,125 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 	}
 	if !strings.Contains(body, "after second boundary") {
 		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
+	}
+}
+
+func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"tool_use","message":"{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"debugtool\"}]}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"tool_result","message":"{\"role\":\"tool\",\"content\":\"internal raw detail\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "hello") || !strings.Contains(body, "world") {
+		t.Fatalf("conversation stream body missing display turns: %s", body)
+	}
+	if strings.Contains(body, "debugtool") || strings.Contains(body, "internal raw detail") {
+		t.Fatalf("conversation stream leaked non-display transcript entries: %s", body)
+	}
+}
+
+func TestHandleSessionStreamConversationRedactsThinkingText(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"private chain of thought\"},{\"type\":\"text\",\"text\":\"visible answer\"}]}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "visible answer") {
+		t.Fatalf("conversation stream body missing visible assistant answer: %s", body)
+	}
+	if strings.Contains(body, "private chain of thought") {
+		t.Fatalf("conversation stream leaked thinking text: %s", body)
+	}
+}
+
+func TestHandleSessionStreamRawUsesLatestCompactionTail(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"cb1","parentUuid":"b","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"c","parentUuid":"cb1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after second boundary\"}","timestamp":"2025-01-01T00:00:04Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "after second boundary") {
+		t.Fatalf("raw stream body missing latest compaction tail: %s", body)
+	}
+	if strings.Contains(body, "before compaction") || strings.Contains(body, "after first boundary") {
+		t.Fatalf("raw stream replayed full transcript instead of latest compaction tail: %s", body)
 	}
 }
 

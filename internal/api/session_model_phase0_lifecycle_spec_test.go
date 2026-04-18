@@ -475,6 +475,45 @@ func TestPhase0ProviderCompatibility_CreateWritesManualOrigin(t *testing.T) {
 	}
 }
 
+func TestPhase0AgentCompatibility_CreateWritesEphemeralOrigin(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", resp.ID, err)
+	}
+	if got := bead.Metadata["session_origin"]; got != "ephemeral" {
+		t.Fatalf("session_origin = %q, want ephemeral", got)
+	}
+}
+
+func TestPhase0NamedCompatibility_MaterializeWritesNamedOrigin(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
+	bead, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got := bead.Metadata["session_origin"]; got != "named" {
+		t.Fatalf("session_origin = %q, want named", got)
+	}
+}
+
 func phase0MaterializeCityScopedNamedWorker(t *testing.T, srv *Server, fs *fakeState) string {
 	t.Helper()
 	fs.cfg.Agents[0].Dir = ""

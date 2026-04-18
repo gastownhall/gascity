@@ -12,8 +12,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 var errTemplateTargetNotFound = errors.New("template target not found")
@@ -124,7 +124,6 @@ func materializeSessionForTemplateWithOptions(
 		}
 
 		sp := newSessionProvider()
-		mgr := newSessionManager(store, sp)
 		title := spec.Identity
 		templateIdentity := namedSessionBackingTemplate(spec)
 		extraMeta := map[string]string{
@@ -139,11 +138,28 @@ func materializeSessionForTemplateWithOptions(
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind
 		}
-		resume := session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
+		providerName := ""
+		if spec.Agent != nil {
+			providerName = spec.Agent.Provider
+		}
+		handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+			cityPath,
+			store,
+			sp,
+			cfg,
+			spec.Identity,
+			spec.SessionName,
+			templateIdentity,
+			title,
+			resolved.CommandString(),
+			providerName,
+			workDir,
+			spec.Agent.Session,
+			resolved,
+			extraMeta,
+		)
+		if err != nil {
+			return "", err
 		}
 
 		if cityUsesManagedReconciler(cityPath) {
@@ -156,20 +172,9 @@ func materializeSessionForTemplateWithOptions(
 					if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
 						return err
 					}
-					var err error
-					info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-						spec.Identity,
-						spec.SessionName,
-						templateIdentity,
-						title,
-						resolved.CommandString(),
-						workDir,
-						resolved.Name,
-						spec.Agent.Session,
-						resume,
-						extraMeta,
-					)
-					return err
+					var createErr error
+					info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+					return createErr
 				})
 				if createErr == nil {
 					_ = pokeController(cityPath)
@@ -188,12 +193,6 @@ func materializeSessionForTemplateWithOptions(
 			}
 		}
 
-		hints := runtime.Config{
-			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-			ReadyDelayMs:           resolved.ReadyDelayMs,
-			ProcessNames:           resolved.ProcessNames,
-			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		}
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
 			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
@@ -203,21 +202,7 @@ func materializeSessionForTemplateWithOptions(
 				return err
 			}
 			var createErr error
-			info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-				context.Background(),
-				spec.Identity,
-				spec.SessionName,
-				templateIdentity,
-				title,
-				resolved.CommandString(),
-				workDir,
-				resolved.Name,
-				spec.Agent.Session,
-				resolved.Env,
-				resume,
-				hints,
-				extraMeta,
-			)
+			info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
 			return createErr
 		})
 		if err == nil {
@@ -278,29 +263,34 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 	title := agentCfg.QualifiedName()
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
+	extraMeta := map[string]string{"session_origin": "ephemeral"}
+	if resolved.Kind != "" && resolved.Kind != resolved.Name {
+		extraMeta["provider_kind"] = resolved.Kind
+	}
+	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		"",
+		"",
+		agentCfg.QualifiedName(),
+		title,
+		resolved.CommandString(),
+		agentCfg.Provider,
+		workDir,
+		agentCfg.Session,
+		resolved,
+		extraMeta,
+	)
+	if err != nil {
+		return "", err
 	}
 
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			info, createErr := mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-				"",
-				"",
-				agentCfg.QualifiedName(),
-				title,
-				resolved.CommandString(),
-				workDir,
-				resolved.Name,
-				agentCfg.Session,
-				resume,
-				map[string]string{"session_origin": "ephemeral"},
-			)
+			info, createErr := handle.Create(context.Background(), worker.CreateModeDeferred)
 			if createErr == nil {
 				_ = pokeController(cityPath)
 				return info.SessionName, nil
@@ -309,27 +299,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		}
 	}
 
-	hints := runtime.Config{
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-	}
-	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
-		context.Background(),
-		"",
-		"",
-		agentCfg.QualifiedName(),
-		title,
-		resolved.CommandString(),
-		workDir,
-		resolved.Name,
-		agentCfg.Session,
-		resolved.Env,
-		resume,
-		hints,
-		map[string]string{"session_origin": "ephemeral"},
-	)
+	info, err := handle.Create(context.Background(), worker.CreateModeStarted)
 	if err == nil {
 		return info.SessionName, nil
 	}

@@ -410,7 +410,7 @@ func gracefulStopAll(
 ) {
 	if timeout <= 0 || len(names) == 0 {
 		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, sp, rec, "gc", stdout, stderr)
+		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
 		return
 	}
 	targets := stopTargetsForNames(names, cfg, store, stderr)
@@ -425,7 +425,7 @@ func gracefulStopAll(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBounded(targets, sp, stderr)
+	sent := interruptTargetsBounded(targets, cfg, store, sp, stderr)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
@@ -434,10 +434,15 @@ func gracefulStopAll(
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		allExited := true
-		for _, name := range names {
-			if sp.IsRunning(name) {
-				allExited = false
-				break
+		if runningSet, ok := runningSessionSet(sp, names); ok {
+			allExited = len(runningSet) == 0
+		} else {
+			for _, name := range names {
+				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+				if err == nil && running {
+					allExited = false
+					break
+				}
 			}
 		}
 		if allExited {
@@ -453,8 +458,15 @@ func gracefulStopAll(
 
 	// Pass 2: kill survivors.
 	var survivors []string
+	runningSet, listed := runningSessionSet(sp, names)
 	for _, name := range names {
-		if !sp.IsRunning(name) {
+		running := false
+		if listed {
+			running = runningSet[name]
+		} else {
+			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+		}
+		if !running {
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
 			if target, ok := targetByName[name]; ok && target.subject != "" {
@@ -467,7 +479,28 @@ func gracefulStopAll(
 		}
 		survivors = append(survivors, name)
 	}
-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, sp, rec, "gc", stdout, stderr)
+	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
+}
+
+func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
+	running, err := sp.ListRunning("")
+	if err != nil {
+		return nil, false
+	}
+	if len(names) == 0 {
+		return map[string]bool{}, true
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	result := make(map[string]bool, len(names))
+	for _, name := range running {
+		if wanted[name] {
+			result[name] = true
+		}
+	}
+	return result, true
 }
 
 // controllerLoop is a compatibility shim that wraps CityRuntime.run().

@@ -28,6 +28,16 @@ type Session struct {
 
 	// Pagination metadata.
 	Pagination *PaginationInfo
+
+	// Diagnostics surfaces parser health for the underlying session file.
+	Diagnostics SessionDiagnostics
+}
+
+// SessionDiagnostics reports non-fatal issues detected while loading a
+// session file.
+type SessionDiagnostics struct {
+	MalformedLineCount int
+	MalformedTail      bool
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -52,7 +62,7 @@ var displayTypes = map[string]bool{
 // entries. Returns the most recent tailCompactions worth of messages
 // (0 = all messages).
 func ReadFile(path string, tailCompactions int) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +86,7 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
+		Diagnostics:        diagnostics,
 	}
 
 	// Apply compact-boundary pagination.
@@ -104,7 +115,7 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 // All DAG-resolved entries are returned, preserving tool_use, progress,
 // and other non-display types. Used by the raw transcript API.
 func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +131,7 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
+		Diagnostics:        diagnostics,
 	}
 
 	if tailCompactions > 0 {
@@ -149,7 +161,7 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 // ReadFileOlder loads older messages before a cursor, returning the
 // previous tailCompactions segment.
 func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -174,12 +186,13 @@ func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*S
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
 		Pagination:         info,
+		Diagnostics:        diagnostics,
 	}, nil
 }
 
 // ReadFileRawOlder loads older raw (unfiltered) messages before a cursor.
 func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +211,7 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
 		Pagination:         info,
+		Diagnostics:        diagnostics,
 	}, nil
 }
 
@@ -231,13 +245,22 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 
 // parseFile reads all JSONL lines from a file into entries.
 func parseFile(path string) ([]*Entry, error) {
+	entries, _, err := parseFileDetailed(path)
+	return entries, err
+}
+
+// parseFileDetailed reads all JSONL lines from a file into entries and
+// returns load diagnostics for malformed lines and torn tails.
+func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening session file: %w", err)
+		return nil, SessionDiagnostics{}, fmt.Errorf("opening session file: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
 	var entries []*Entry
+	var diagnostics SessionDiagnostics
+	var lastNonEmptyLineMalformed bool
 	scanner := bufio.NewScanner(f)
 	// Default scanner buffer is 64KB; Claude entries can be large
 	// (tool results with full file contents, base64 images, etc.).
@@ -251,8 +274,11 @@ func parseFile(path string) ([]*Entry, error) {
 		}
 		var e Entry
 		if err := json.Unmarshal(line, &e); err != nil {
+			diagnostics.MalformedLineCount++
+			lastNonEmptyLineMalformed = true
 			continue // skip malformed lines
 		}
+		lastNonEmptyLineMalformed = false
 		// Preserve the raw JSON for API pass-through.
 		raw := make([]byte, len(line))
 		copy(raw, line)
@@ -260,10 +286,11 @@ func parseFile(path string) ([]*Entry, error) {
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanning session file: %w", err)
+		return nil, SessionDiagnostics{}, fmt.Errorf("scanning session file: %w", err)
 	}
 
-	return entries, nil
+	diagnostics.MalformedTail = lastNonEmptyLineMalformed
+	return entries, diagnostics, nil
 }
 
 // sliceAtCompactBoundaries returns the tail portion of messages starting

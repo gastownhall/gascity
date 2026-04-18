@@ -49,7 +49,7 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -107,7 +107,7 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -169,7 +169,7 @@ start_command = "true"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

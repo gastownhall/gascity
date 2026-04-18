@@ -130,6 +130,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	return nil
 }
 
+// DismissKnownDialogs best-effort clears known trust/permissions dialogs on a
+// running session using a bounded timeout.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
+		func(lines int) (string, error) { return p.Peek(name, lines) },
+		func(keys ...string) error { return p.SendKeys(name, keys...) },
+	)
+}
+
 // Stop destroys the named session: script stop <name>
 func (p *Provider) Stop(name string) error {
 	_, err := p.run(nil, "stop", name)

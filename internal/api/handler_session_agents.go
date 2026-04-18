@@ -1,11 +1,10 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
-	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // handleSessionAgentList returns subagent mappings for a session.
@@ -25,24 +24,26 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if logPath == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"agents": []any{}})
-		return
-	}
-
-	mappings, err := sessionlog.FindAgentMappings(logPath)
+	mappings, err := handle.AgentMappings(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "failed to list agents")
+		if errors.Is(err, worker.ErrHistoryUnavailable) {
+			writeJSON(w, http.StatusOK, map[string]any{"agents": []any{}})
+			return
+		}
+		writeSessionManagerError(w, err)
 		return
 	}
 	if mappings == nil {
-		mappings = []sessionlog.AgentMapping{}
+		mappings = []worker.AgentMapping{}
+	}
+	if len(mappings) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"agents": []any{}})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agents": mappings})
 }
@@ -70,25 +71,23 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sessionlog.ValidateAgentID(agentID); err != nil {
+	if err := worker.ValidateAgentID(agentID); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if logPath == "" {
-		writeError(w, http.StatusNotFound, "not_found", "no transcript found for session "+id)
-		return
-	}
-
-	agentSession, err := sessionlog.ReadAgentSession(logPath, agentID)
+	agentSession, err := handle.AgentTranscript(r.Context(), agentID)
 	if err != nil {
-		if errors.Is(err, sessionlog.ErrAgentNotFound) {
+		if errors.Is(err, worker.ErrHistoryUnavailable) {
+			writeError(w, http.StatusNotFound, "not_found", "no transcript found for session "+id)
+			return
+		}
+		if errors.Is(err, worker.ErrAgentNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "agent not found")
 		} else {
 			writeError(w, http.StatusInternalServerError, "internal", "failed to read agent transcript")
@@ -97,15 +96,8 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build raw message array for API pass-through (same as raw transcript).
-	rawMessages := make([]json.RawMessage, 0, len(agentSession.Messages))
-	for _, entry := range agentSession.Messages {
-		if len(entry.Raw) > 0 {
-			rawMessages = append(rawMessages, entry.Raw)
-		}
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
-		"messages": rawMessages,
-		"status":   agentSession.Status,
+		"messages": agentSession.RawMessages,
+		"status":   agentSession.Session.Status,
 	})
 }

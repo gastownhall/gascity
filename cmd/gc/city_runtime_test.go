@@ -1360,6 +1360,64 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	}
 }
 
+func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Daemon.ShutdownTimeout = "20ms"
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "probe-session", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			cancel()
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if sp.IsRunning("probe-session") {
+		t.Fatal("probe-session still running after runtime cancellation")
+	}
+
+	var stopCalls int
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "probe-session" {
+			stopCalls++
+		}
+	}
+	if stopCalls == 0 {
+		t.Fatalf("expected forced stop during shutdown, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Stopped agent 'probe-session'") {
+		t.Fatalf("stdout = %q, want shutdown stop message", stdout.String())
+	}
+}
+
 func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
 	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
