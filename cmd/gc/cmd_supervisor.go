@@ -1104,6 +1104,7 @@ func reconcileCities(
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
+		emitLoadCityConfigWarnings(stderr, prov)
 
 		// Use registered name as authoritative identity. city.toml may keep a
 		// different workspace.name because registration aliases are machine-local.

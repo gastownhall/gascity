@@ -21,7 +21,7 @@ func quietLoadCityConfig(cityPath string) (*config.City, error) {
 	prev := log.Writer()
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(prev)
-	return loadCityConfig(cityPath)
+	return loadCityConfig(cityPath, io.Discard)
 }
 
 // registerPackCommands attempts to discover the city, load config, and

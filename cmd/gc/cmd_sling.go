@@ -189,11 +189,12 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	emitLoadCityConfigWarnings(stderr, prov)
 	applyFeatureFlags(cfg)
 
 	var target, beadOrFormula string
