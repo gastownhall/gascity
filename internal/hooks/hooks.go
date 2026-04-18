@@ -42,9 +42,39 @@ func SupportedProviders() []string {
 	return out
 }
 
+// FamilyResolver maps a raw provider name (which may be a custom wrapper
+// alias like "my-fast-claude") to its built-in family name (e.g. "claude").
+// A nil resolver (or one that returns "") is treated as identity: the raw
+// name is used verbatim for the switch lookup. Provided so callers holding
+// a city-providers map can route wrapped aliases to their ancestor's hook
+// format without pulling the config package into hooks.
+type FamilyResolver func(name string) string
+
+// resolveFamily applies fn to name, falling back to name itself when fn
+// is nil or returns "". The identity fallback preserves Install/Validate's
+// existing contract for callers that pass raw built-in names directly.
+func resolveFamily(fn FamilyResolver, name string) string {
+	if fn == nil {
+		return name
+	}
+	if family := fn(name); family != "" {
+		return family
+	}
+	return name
+}
+
 // Validate checks that all provider names are supported for hook installation.
 // Returns an error listing any unsupported names.
 func Validate(providers []string) error {
+	return ValidateWithResolver(providers, nil)
+}
+
+// ValidateWithResolver is Validate with a FamilyResolver so callers that
+// hold city-provider inheritance context can validate wrapped custom
+// aliases against the resolved built-in family (e.g. a custom
+// "my-fast-claude" with base = "builtin:claude" validates as claude-
+// family). Passing a nil resolver is equivalent to Validate.
+func ValidateWithResolver(providers []string, resolve FamilyResolver) error {
 	sup := make(map[string]bool, len(supported))
 	for _, s := range supported {
 		sup[s] = true
@@ -55,12 +85,14 @@ func Validate(providers []string) error {
 	}
 	var bad []string
 	for _, p := range providers {
-		if !sup[p] {
-			if noHook[p] {
-				bad = append(bad, fmt.Sprintf("%s (no hook mechanism)", p))
-			} else {
-				bad = append(bad, fmt.Sprintf("%s (unknown)", p))
-			}
+		family := resolveFamily(resolve, p)
+		if sup[family] {
+			continue
+		}
+		if noHook[family] {
+			bad = append(bad, fmt.Sprintf("%s (no hook mechanism)", p))
+		} else {
+			bad = append(bad, fmt.Sprintf("%s (unknown)", p))
 		}
 	}
 	if len(bad) > 0 {
@@ -75,9 +107,19 @@ func Validate(providers []string) error {
 // working directory (used for per-project files like Gemini, OpenCode, Copilot).
 // Idempotent — existing files are not overwritten.
 func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
+	return InstallWithResolver(fs, cityDir, workDir, providers, nil)
+}
+
+// InstallWithResolver is Install with a FamilyResolver so callers that
+// hold city-provider inheritance context can route wrapped custom
+// aliases to their resolved built-in hook handler (e.g. "my-fast-claude"
+// with base = "builtin:claude" installs claude-style hooks). Passing a
+// nil resolver is equivalent to Install.
+func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string, resolve FamilyResolver) error {
 	for _, p := range providers {
+		family := resolveFamily(resolve, p)
 		var err error
-		switch p {
+		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
 		case "codex":

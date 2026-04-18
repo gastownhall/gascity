@@ -1057,9 +1057,14 @@ func namedSessionAllowsControllerWorkQuery(cityPath string, cfg *config.City, sp
 // agent: hook installation and ACP route registration. Called from
 // buildDesiredState on every tick; safe to repeat.
 func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	// Install provider hooks (idempotent filesystem side effect).
+	// Install provider hooks (idempotent filesystem side effect). Route
+	// through the family resolver so wrapped custom aliases (e.g.
+	// [providers.my-fast-claude] base = "builtin:claude") install their
+	// ancestor's hook format rather than erroring with
+	// "unsupported hook provider".
 	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
-		if hErr := hooks.Install(bp.fs, bp.cityPath, tp.WorkDir, ih); hErr != nil {
+		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, tp.WorkDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
 		}
 	}

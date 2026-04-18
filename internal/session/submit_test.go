@@ -10,6 +10,84 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// TestProviderKind_PreferenceOrder exercises the metadata preference
+// used to derive a session bead's family: builtin_ancestor > provider_kind
+// > provider. This keeps wrapped custom aliases (e.g. claude-max with
+// base = "builtin:claude", stamped as builtin_ancestor="claude" at
+// session-bead creation) routed through the same claude-family branches
+// as literal "claude".
+func TestProviderKind_PreferenceOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{
+			name: "builtin_ancestor wins over provider_kind and provider",
+			meta: map[string]string{
+				"builtin_ancestor": "claude",
+				"provider_kind":    "claude-max",
+				"provider":         "claude-max",
+			},
+			want: "claude",
+		},
+		{
+			name: "provider_kind wins over provider when builtin_ancestor absent",
+			meta: map[string]string{
+				"provider_kind": "claude",
+				"provider":      "custom-alias",
+			},
+			want: "claude",
+		},
+		{
+			name: "provider is the last-resort fallback",
+			meta: map[string]string{
+				"provider": "codex",
+			},
+			want: "codex",
+		},
+		{
+			name: "empty builtin_ancestor falls through",
+			meta: map[string]string{
+				"builtin_ancestor": "",
+				"provider_kind":    "gemini",
+				"provider":         "raw",
+			},
+			want: "gemini",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerKind(beads.Bead{Metadata: tc.meta})
+			if got != tc.want {
+				t.Errorf("providerKind(%+v) = %q, want %q", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWaitsForIdleAfterInterrupt_WrappedClaude verifies that a session
+// bead whose builtin_ancestor = "claude" (e.g. claude-max wrapping the
+// built-in) triggers the same wait-for-idle-after-interrupt branch that
+// a literal "claude" session does.
+func TestWaitsForIdleAfterInterrupt_WrappedClaude(t *testing.T) {
+	wrapped := beads.Bead{Metadata: map[string]string{
+		"builtin_ancestor": "claude",
+		"provider":         "claude-max",
+	}}
+	if !waitsForIdleAfterInterrupt(wrapped) {
+		t.Error("wrapped claude (builtin_ancestor=claude) should wait for idle after interrupt")
+	}
+	// Control: a wrapped codex must NOT trigger the claude-only branch.
+	wrappedCodex := beads.Bead{Metadata: map[string]string{
+		"builtin_ancestor": "codex",
+		"provider":         "codex-mini",
+	}}
+	if waitsForIdleAfterInterrupt(wrappedCodex) {
+		t.Error("wrapped codex (builtin_ancestor=codex) should not trigger claude-only branch")
+	}
+}
+
 func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

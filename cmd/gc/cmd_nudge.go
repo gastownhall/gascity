@@ -638,7 +638,18 @@ func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, source, me
 		err := sp.Nudge(target.sessionName, runtime.TextContent(message))
 		return err == nil
 	}
-	if target.resolved == nil || target.resolved.Name != "claude" {
+	// Wait-for-idle is a Claude-family behaviour. Use BuiltinFamily so a
+	// wrapped custom provider (e.g. [providers.claude-max]
+	// base = "builtin:claude") is recognised as claude-family — not the
+	// raw resolved.Name which would be "claude-max" and miss the match.
+	if target.resolved == nil {
+		return false
+	}
+	var cityProviders map[string]config.ProviderSpec
+	if target.cfg != nil {
+		cityProviders = target.cfg.Providers
+	}
+	if config.BuiltinFamily(target.resolved.Name, cityProviders) != "claude" {
 		return false
 	}
 	wp, ok := sp.(runtime.IdleWaitProvider)

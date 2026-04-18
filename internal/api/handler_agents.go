@@ -165,8 +165,10 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 
 			// Model + context usage (best-effort, Claude only).
 			// Skip when session file attribution is ambiguous (pools,
-			// multiple Claude agents in same rig).
-			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
+			// multiple Claude agents in same rig). Use BuiltinFamily so
+			// wrapped custom providers (e.g. claude-max with
+			// base = "builtin:claude") are recognised as claude-family.
+			if running && config.BuiltinFamily(provider, cfg.Providers) == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
 				s.enrichSessionMeta(&resp, a, ea.qualifiedName, cfg)
 			}
 
@@ -281,8 +283,10 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	quarantined := s.state.IsQuarantined(sessionName)
 	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
 
-	// Model + context usage (best-effort, Claude only).
-	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
+	// Model + context usage (best-effort, Claude only). Use BuiltinFamily
+	// so wrapped custom providers (e.g. claude-max with
+	// base = "builtin:claude") are recognised as claude-family.
+	if running && config.BuiltinFamily(provider, cfg.Providers) == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name, cfg)
 	}
 
@@ -653,7 +657,10 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 		if provider == "" {
 			provider = cfg.Workspace.Provider
 		}
-		if provider == "claude" {
+		// Use BuiltinFamily so wrapped custom providers (e.g. claude-max
+		// with base = "builtin:claude") participate in the claude-family
+		// attribution count the same way literal "claude" does.
+		if config.BuiltinFamily(provider, cfg.Providers) == "claude" {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false

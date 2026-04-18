@@ -695,7 +695,7 @@ func TestResolveInstallHooksNeitherSet(t *testing.T) {
 func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 	agent := &Agent{Name: "mayor"}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "claude") {
+	if !AgentHasHooks(agent, ws, "claude", nil) {
 		t.Error("claude should always have hooks")
 	}
 }
@@ -703,7 +703,7 @@ func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini", "opencode"}}
-	if !AgentHasHooks(agent, ws, "gemini") {
+	if !AgentHasHooks(agent, ws, "gemini", nil) {
 		t.Error("gemini with install_agent_hooks should have hooks")
 	}
 }
@@ -711,7 +711,7 @@ func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
-	if AgentHasHooks(agent, ws, "codex") {
+	if AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("codex not in install_agent_hooks should not have hooks")
 	}
 }
@@ -719,7 +719,7 @@ func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 func TestAgentHasHooks_NoHooksByDefault(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "test"}
-	if AgentHasHooks(agent, ws, "codex") {
+	if AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("codex with no install_agent_hooks should not have hooks")
 	}
 }
@@ -728,7 +728,7 @@ func TestAgentHasHooks_ExplicitOverrideTrue(t *testing.T) {
 	yes := true
 	agent := &Agent{Name: "worker", HooksInstalled: &yes}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "codex") {
+	if !AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("hooks_installed=true should override to true")
 	}
 }
@@ -738,7 +738,7 @@ func TestAgentHasHooks_ExplicitOverrideFalse(t *testing.T) {
 	agent := &Agent{Name: "worker", HooksInstalled: &no}
 	ws := &Workspace{Name: "test"}
 	// Even claude should be overridden to false when explicit.
-	if AgentHasHooks(agent, ws, "claude") {
+	if AgentHasHooks(agent, ws, "claude", nil) {
 		t.Error("hooks_installed=false should override even claude")
 	}
 }
@@ -747,11 +747,27 @@ func TestAgentHasHooks_AgentLevelInstallHooks(t *testing.T) {
 	agent := &Agent{Name: "worker", InstallAgentHooks: []string{"copilot"}}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
 	// Agent-level overrides workspace — only copilot in list.
-	if !AgentHasHooks(agent, ws, "copilot") {
+	if !AgentHasHooks(agent, ws, "copilot", nil) {
 		t.Error("agent install_agent_hooks should be checked")
 	}
-	if AgentHasHooks(agent, ws, "opencode") {
+	if AgentHasHooks(agent, ws, "opencode", nil) {
 		t.Error("opencode not in agent install_agent_hooks")
+	}
+}
+
+// TestAgentHasHooks_WrappedClaudeRecognizedViaBuiltinFamily verifies
+// that a wrapped custom provider (e.g. claude-max with base = "builtin:claude")
+// is recognised as claude-family and gets hooks installed by default —
+// matching what literal "claude" would get.
+func TestAgentHasHooks_WrappedClaudeRecognizedViaBuiltinFamily(t *testing.T) {
+	base := "builtin:claude"
+	cityProviders := map[string]ProviderSpec{
+		"claude-max": {Base: &base, Command: "claude-max"},
+	}
+	agent := &Agent{Name: "mayor"}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "claude-max", cityProviders) {
+		t.Error("claude-max (wrapped claude) should be recognized as claude-family and have hooks")
 	}
 }
 

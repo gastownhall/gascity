@@ -69,6 +69,12 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	// Step 4: merge agent-level overrides.
 	resolved := specToResolved(name, spec)
 	resolved.Kind = resolveProviderKind(name, cityProviders)
+	// BuiltinAncestor is the chain-derived family name (e.g. "claude"
+	// for a custom provider with base = "builtin:claude"). Runtime sites
+	// that branch on provider family should consume this field instead
+	// of the raw Name. See engdocs/design/provider-inheritance.md
+	// §Kind / provider-family propagation.
+	resolved.BuiltinAncestor = BuiltinFamily(name, cityProviders)
 	mergeAgentOverrides(resolved, agent)
 
 	// Step 4b: workspace.start_command overrides the resolved command when
@@ -306,6 +312,54 @@ func resolveProviderKind(name string, cityProviders map[string]ProviderSpec) str
 	return name
 }
 
+// BuiltinFamily returns the built-in ancestor for a provider name,
+// resolving the chain if the name refers to a custom provider with
+// `base` set. Returns the name itself when it's a built-in, or "" when
+// the name is fully custom with no built-in ancestor (including when
+// chain resolution fails — callers should treat "" as "family
+// undetermined" rather than silently widening the match).
+//
+// Runtime sites that branch on provider family (soft-escape interrupt,
+// default submit, hook handler, skill-sink vendor) MUST consume this
+// helper (or ResolvedProvider.BuiltinAncestor when available) instead
+// of comparing the raw provider name. This lets a wrapped custom
+// provider (e.g. [providers.my-fast-claude] base = "builtin:claude")
+// be recognised as claude-family.
+func BuiltinFamily(name string, cityProviders map[string]ProviderSpec) string {
+	builtins := BuiltinProviders()
+	// Direct built-in match.
+	if _, ok := builtins[name]; ok {
+		return name
+	}
+	if cityProviders == nil {
+		return ""
+	}
+	spec, ok := cityProviders[name]
+	if !ok {
+		return ""
+	}
+	// Explicit inheritance declaration: walk the chain to find the
+	// nearest built-in hop (may be unreachable on cycles or unknown
+	// bases, in which case we report "" rather than guessing).
+	if spec.Base != nil {
+		resolved, err := ResolveProviderChain(name, spec, cityProviders)
+		if err != nil {
+			return ""
+		}
+		return resolved.BuiltinAncestor
+	}
+	// Phase A legacy auto-inheritance: no `base` declared — a same-name
+	// match is already covered above, so check command-match next. This
+	// keeps legacy [providers.fast] command = "claude" recognised as
+	// claude-family without requiring users to add base = "builtin:claude".
+	if spec.Command != "" {
+		if _, ok := builtins[spec.Command]; ok {
+			return spec.Command
+		}
+	}
+	return ""
+}
+
 // detectProviderName scans PATH for known built-in provider binaries.
 // Returns the first found in priority order (see BuiltinProviderOrder).
 func detectProviderName(lookPath LookPathFunc) (string, error) {
@@ -412,16 +466,25 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 // (either auto-installed or manually). The determination considers:
 //
 //  1. Explicit override: agent.HooksInstalled is set → use that value.
-//  2. Claude always has hooks (via --settings override).
+//  2. Claude-family always has hooks (via --settings override).
 //  3. Provider name appears in the resolved install_agent_hooks list.
 //  4. Otherwise: no hooks.
-func AgentHasHooks(agent *Agent, ws *Workspace, providerName string) bool {
+//
+// cityProviders is consulted via BuiltinFamily so a wrapped custom
+// provider (e.g. [providers.claude-max] base = "builtin:claude") is
+// recognised as claude-family and gets the same default behaviour as
+// literal "claude". Passing nil falls back to raw name comparison and
+// is only correct when the caller is certain no wrapped alias is in
+// play.
+func AgentHasHooks(agent *Agent, ws *Workspace, providerName string, cityProviders map[string]ProviderSpec) bool {
 	// 1. Explicit override wins.
 	if agent.HooksInstalled != nil {
 		return *agent.HooksInstalled
 	}
-	// 2. Claude always has hooks via --settings.
-	if providerName == "claude" {
+	// 2. Claude-family always has hooks via --settings. Use BuiltinFamily
+	//    so wrapped custom providers (e.g. claude-max with
+	//    base = "builtin:claude") are correctly recognized.
+	if BuiltinFamily(providerName, cityProviders) == "claude" {
 		return true
 	}
 	// 3. Check install_agent_hooks (agent-level overrides workspace-level).

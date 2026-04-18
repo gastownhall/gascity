@@ -139,6 +139,15 @@ func materializeSessionForTemplateWithOptions(
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind
 		}
+		// Stamp BuiltinAncestor so downstream family branches
+		// (idle-wait-after-interrupt, soft-escape, default submit) can
+		// resolve the wrapped custom alias to its claude/codex/gemini
+		// family via session.providerKind without re-deriving. See
+		// engdocs/design/provider-inheritance.md §Kind/provider-family
+		// propagation.
+		if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+			extraMeta["builtin_ancestor"] = resolved.BuiltinAncestor
+		}
 		resume := session.ProviderResume{
 			ResumeFlag:    resolved.ResumeFlag,
 			ResumeStyle:   resolved.ResumeStyle,

@@ -190,9 +190,22 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 }
 
 // providerKind returns the canonical provider kind for a session bead.
-// It checks provider_kind metadata first (set for custom aliases that derive
-// from a builtin), then falls back to the raw provider metadata value.
+// Preference order:
+//  1. builtin_ancestor — stamped from ResolvedProvider.BuiltinAncestor
+//     at session-bead creation for custom providers with explicit
+//     `base = "builtin:..."` (see cmd/gc session-bead creation sites).
+//  2. provider_kind — stamped for command-matched custom aliases
+//     (legacy Phase A auto-inheritance path).
+//  3. provider — raw provider metadata value as a last-resort fallback.
+//
+// Callers that branch on Claude/Codex/Gemini-family behaviour
+// (idle-wait-after-interrupt, soft-escape interrupt, default submit,
+// etc.) consume this helper so wrapped custom aliases inherit the
+// correct family behaviour without every call site re-deriving it.
 func providerKind(b beads.Bead) string {
+	if ancestor := strings.TrimSpace(b.Metadata["builtin_ancestor"]); ancestor != "" {
+		return ancestor
+	}
 	if kind := strings.TrimSpace(b.Metadata["provider_kind"]); kind != "" {
 		return kind
 	}

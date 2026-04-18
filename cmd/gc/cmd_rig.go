@@ -385,7 +385,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		if err := hooks.Install(fs, cityPath, rigPath, ih); err != nil {
+		resolver := func(name string) string { return config.BuiltinFamily(name, cfg.Providers) }
+		if err := hooks.InstallWithResolver(fs, cityPath, rigPath, ih, resolver); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}

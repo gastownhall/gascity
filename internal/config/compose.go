@@ -383,6 +383,18 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 
+	// Build the resolved provider cache now that compose + patch have
+	// populated the full provider table. Chain resolution errors
+	// (cycles, unknown base, wrapper-resume missing) surface here so
+	// they fail at config load rather than at session spawn. If the
+	// cache cannot be built, emit a warning and leave the cache nil —
+	// callers can still fall back to ResolveProvider per lookup.
+	if err := BuildResolvedProviderCache(root); err != nil {
+		prov.Warnings = append(prov.Warnings, fmt.Sprintf(
+			"%s: provider cache build failed: %v (runtime will fall back to per-call resolution)",
+			path, err))
+	}
+
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
 

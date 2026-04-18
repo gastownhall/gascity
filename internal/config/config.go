@@ -229,6 +229,16 @@ type City struct {
 	// PackMCPDir holds the current city pack's shared MCP catalog root.
 	// Runtime-only — not persisted to TOML or JSON.
 	PackMCPDir string `toml:"-" json:"-"`
+	// ResolvedProviders is the eager-resolution cache populated by
+	// BuildResolvedProviderCache after compose + patch. Each entry
+	// represents a custom provider with its chain fully walked and
+	// merged, including BuiltinAncestor and the resolved Chain.
+	// Lookups via ResolvedProviderCached return deep-copied values so
+	// mutations don't poison the cache. Runtime-only; not persisted.
+	// Nil means the cache was never built or was invalidated (load
+	// paths should always build it; the field may be nil transiently
+	// during reload).
+	ResolvedProviders map[string]ResolvedProvider `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent

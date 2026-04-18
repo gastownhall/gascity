@@ -1691,7 +1691,7 @@ func TestSettingsArgsClaude(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := settingsArgs(dir, "claude")
+	got := settingsArgs(dir, "claude", nil)
 	// Must be absolute so K8s command remapping converts cityPath → /workspace.
 	// A relative path breaks agents whose workingDir differs from the city root.
 	// Path is quoted to handle spaces in city paths.
@@ -1714,7 +1714,7 @@ func TestSettingsArgsRemapping(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sa := settingsArgs(dir, "claude")
+	sa := settingsArgs(dir, "claude", nil)
 	command := "claude " + sa
 
 	// Simulate K8s pod.go remapping: replace cityPath with /workspace.
@@ -1736,7 +1736,7 @@ func TestSettingsArgsNonClaude(t *testing.T) {
 	}
 
 	for _, provider := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode"} {
-		got := settingsArgs(dir, provider)
+		got := settingsArgs(dir, provider, nil)
 		if got != "" {
 			t.Errorf("settingsArgs(%q) = %q, want empty", provider, got)
 		}
@@ -1753,7 +1753,7 @@ func TestSettingsArgsHookWithoutRuntimeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := settingsArgs(dir, "claude")
+	got := settingsArgs(dir, "claude", nil)
 	want := fmt.Sprintf("--settings %q", filepath.Join(dir, "hooks", "claude.json"))
 	if got != want {
 		t.Errorf("settingsArgs(claude, hook only) = %q, want %q", got, want)
@@ -1762,9 +1762,42 @@ func TestSettingsArgsHookWithoutRuntimeFile(t *testing.T) {
 
 func TestSettingsArgsMissingFile(t *testing.T) {
 	dir := t.TempDir()
-	got := settingsArgs(dir, "claude")
+	got := settingsArgs(dir, "claude", nil)
 	if got != "" {
 		t.Errorf("settingsArgs(claude, no file) = %q, want empty", got)
+	}
+}
+
+// TestSettingsArgsWrappedClaudeViaBuiltinFamily verifies that a custom
+// provider wrapping built-in claude (e.g. claude-max with
+// base = "builtin:claude") receives the same --settings flag injection
+// that literal "claude" would — BuiltinFamily resolution, not raw name.
+func TestSettingsArgsWrappedClaudeViaBuiltinFamily(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := "builtin:claude"
+	cityProviders := map[string]config.ProviderSpec{
+		"claude-max": {Base: &base, Command: "claude-max"},
+	}
+	got := settingsArgs(dir, "claude-max", cityProviders)
+	want := fmt.Sprintf("--settings %q", filepath.Join(dir, ".gc", "settings.json"))
+	if got != want {
+		t.Errorf("settingsArgs(claude-max via builtin:claude) = %q, want %q", got, want)
+	}
+
+	// A custom provider with no claude base should NOT get --settings.
+	unrelated := map[string]config.ProviderSpec{
+		"my-amp": {Command: "amp"},
+	}
+	if ga := settingsArgs(dir, "my-amp", unrelated); ga != "" {
+		t.Errorf("settingsArgs(my-amp) = %q, want empty", ga)
 	}
 }
 

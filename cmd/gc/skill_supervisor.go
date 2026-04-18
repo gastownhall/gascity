@@ -50,7 +50,7 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
 			continue
 		}
-		provider := effectiveAgentProvider(agent, cfg.Workspace.Provider)
+		provider := effectiveAgentProviderFamily(agent, cfg.Workspace.Provider, cfg.Providers)
 		vendor, ok := materialize.VendorSink(provider)
 		if !ok {
 			continue

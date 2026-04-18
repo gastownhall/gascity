@@ -179,6 +179,29 @@ func effectiveAgentProvider(agent *config.Agent, workspaceProvider string) strin
 	return workspaceProvider
 }
 
+// effectiveAgentProviderFamily resolves the agent's effective provider to
+// its built-in family name (e.g. a wrapped custom "my-fast-claude" with
+// base = "builtin:claude" resolves to "claude"). When the effective
+// provider is already a built-in, its name is returned unchanged. When it
+// has no built-in ancestor, the raw name is returned so downstream lookups
+// (e.g. materialize.VendorSink) fail closed on truly-unknown providers
+// rather than silently widening the match.
+//
+// Vendor-sink and hook-family lookups use this helper so wrapped providers
+// behave like their ancestor. cityProviders may be nil (tests, legacy
+// paths with no custom providers) — the helper degrades to identity
+// resolution.
+func effectiveAgentProviderFamily(agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec) string {
+	raw := effectiveAgentProvider(agent, workspaceProvider)
+	if raw == "" {
+		return ""
+	}
+	if family := config.BuiltinFamily(raw, cityProviders); family != "" {
+		return family
+	}
+	return raw
+}
+
 // effectiveSkillsForAgent returns the post-precedence desired skill set
 // for one agent. Returns nil when the agent's effective provider has
 // no vendor sink, when no catalog produced any entries, or when the
@@ -188,11 +211,11 @@ func effectiveAgentProvider(agent *config.Agent, workspaceProvider string) strin
 // city-catalog pattern in newAgentBuildParams) so a permissions
 // glitch on an agent's skills_dir is observable rather than silently
 // dropping agent-local skills.
-func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, stderr io.Writer) []materialize.SkillEntry {
+func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec, stderr io.Writer) []materialize.SkillEntry {
 	if agent == nil {
 		return nil
 	}
-	provider := effectiveAgentProvider(agent, workspaceProvider)
+	provider := effectiveAgentProviderFamily(agent, workspaceProvider, cityProviders)
 	if _, ok := materialize.VendorSink(provider); !ok {
 		return nil
 	}

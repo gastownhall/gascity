@@ -218,6 +218,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				if resolved.Kind != "" && resolved.Kind != resolved.Name {
 					kindMeta["provider_kind"] = resolved.Kind
 				}
+				if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+					kindMeta["builtin_ancestor"] = resolved.BuiltinAncestor
+				}
 				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
 					ResumeStyle:   resolved.ResumeStyle,
@@ -278,6 +281,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	kindMeta := map[string]string{"session_origin": "ephemeral"}
 	if resolved.Kind != "" && resolved.Kind != resolved.Name {
 		kindMeta["provider_kind"] = resolved.Kind
+	}
+	if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+		kindMeta["builtin_ancestor"] = resolved.BuiltinAncestor
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
@@ -795,7 +801,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 			command = command + " " + shellquote.Join(defaultArgs)
 		}
-		if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
+		if sa := settingsArgs(cityPath, resolved.Name, cfg.Providers); sa != "" {
 			command = command + " " + sa
 		}
 		resolvedInfo.Command = command

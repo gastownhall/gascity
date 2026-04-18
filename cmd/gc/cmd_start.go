@@ -696,8 +696,13 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 // it resolves correctly regardless of the session's working directory. The K8s
 // provider remaps city-root references to /workspace automatically.
 // Returns empty string for non-Claude providers or if no settings file is present.
-func settingsArgs(cityPath, providerName string) string {
-	if providerName != "claude" {
+//
+// cityProviders is consulted via config.BuiltinFamily so a wrapped custom
+// provider (e.g. [providers.claude-max] base = "builtin:claude") is
+// recognised as claude-family and receives the same --settings flag
+// injection as literal "claude".
+func settingsArgs(cityPath, providerName string, cityProviders map[string]config.ProviderSpec) string {
+	if config.BuiltinFamily(providerName, cityProviders) != "claude" {
 		return ""
 	}
 	settingsPath, _ := claudeSettingsSource(cityPath)

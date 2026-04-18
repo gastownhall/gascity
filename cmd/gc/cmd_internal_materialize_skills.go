@@ -65,7 +65,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
-			provider := effectiveAgentProvider(&agent, cfg.Workspace.Provider)
+			provider := effectiveAgentProviderFamily(&agent, cfg.Workspace.Provider, cfg.Providers)
 			vendorSink, sinkOK := materialize.VendorSink(provider)
 			if !sinkOK {
 				// Providers outside the v0.15.1 four-vendor set (copilot,
