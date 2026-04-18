@@ -14,6 +14,8 @@ import (
 // - Default work_query contract
 // - Default on_boot / on_death hooks
 // - Cap Accounting for mode=always named sessions
+// Keep these cases unique; a prior rebase duplicated the trailing block and
+// broke CI typechecking.
 
 func TestPhase0NamedSessionConfig_ExplicitNameCreatesDistinctIdentityFromTemplate(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city.toml")
@@ -110,97 +112,6 @@ func TestPhase0ConfigDefaults_OnDeathUnclaimsAssignedWorkByDefault(t *testing.T)
 		if !strings.Contains(got, want) {
 			t.Fatalf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
-	}
-}
-
-func TestPhase0NamedSessionConfig_DuplicateExplicitNamesRejectedAcrossTemplates(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "city.toml")
-	configText := `[workspace]
-name = "test-city"
-
-[[agent]]
-name = "reviewer"
-start_command = "true"
-
-[[agent]]
-name = "coder"
-start_command = "true"
-
-[[named_session]]
-name = "mayor"
-template = "reviewer"
-
-[[named_session]]
-name = "mayor"
-template = "coder"
-`
-	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-
-	if _, err := Load(fsys.OSFS{}, cityPath); err == nil {
-		t.Fatal("Load(city.toml) error = nil, want duplicate configured named-session identity rejection")
-	}
-}
-
-func TestPhase0NamedSessionConfig_AlwaysModeCannotExceedBackingConfigCapacity(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "city.toml")
-	configText := `[workspace]
-name = "test-city"
-
-[[agent]]
-name = "worker"
-start_command = "true"
-max_active_sessions = 1
-
-[[named_session]]
-name = "one"
-template = "worker"
-mode = "always"
-
-[[named_session]]
-name = "two"
-template = "worker"
-mode = "always"
-`
-	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-
-	_, err := Load(fsys.OSFS{}, cityPath)
-	if err == nil {
-		t.Fatal("Load(city.toml) error = nil, want mode=always named-session capacity rejection")
-	}
-	if !strings.Contains(err.Error(), "max_active_sessions") && !strings.Contains(err.Error(), "capacity") {
-		t.Fatalf("Load(city.toml) error = %v, want explicit capacity/max_active_sessions rejection", err)
-	}
-}
-
-func TestPhase0NamedSessionConfig_OmittedNameDefaultsToTemplateIdentity(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "city.toml")
-	configText := `[workspace]
-name = "test-city"
-
-[[agent]]
-name = "reviewer"
-start_command = "true"
-
-[[named_session]]
-template = "reviewer"
-`
-	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-
-	cfg, err := Load(fsys.OSFS{}, cityPath)
-	if err != nil {
-		t.Fatalf("Load(city.toml): %v", err)
-	}
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("len(NamedSessions) = %d, want 1", len(cfg.NamedSessions))
-	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "reviewer" {
-		t.Fatalf("QualifiedName = %q, want compatibility default reviewer", got)
 	}
 }
 
