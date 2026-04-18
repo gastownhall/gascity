@@ -72,6 +72,175 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 	}
 }
 
+func TestDeliverSessionNudgeWithWorkerImmediateResumesSuspendedSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Nudged "+info.ID) {
+		t.Fatalf("stdout = %q, want nudge confirmation", stdout.String())
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != session.StateActive {
+		t.Fatalf("state = %q, want %q", got.State, session.StateActive)
+	}
+
+	var sawStart, sawNudgeNow bool
+	for _, call := range fake.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			sawStart = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "check deploy status" {
+			sawNudgeNow = true
+		}
+	}
+	if !sawStart || !sawNudgeNow {
+		t.Fatalf("calls = %#v, want resumed Start and immediate nudge", fake.Calls)
+	}
+}
+
+func TestDeliverSessionNudgeWithWorkerWaitIdleResumesClaudeSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = nil
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Nudged "+info.ID) {
+		t.Fatalf("stdout = %q, want nudge confirmation", stdout.String())
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != session.StateActive {
+		t.Fatalf("state = %q, want %q", got.State, session.StateActive)
+	}
+
+	var sawWait bool
+	delivered := ""
+	for _, call := range fake.Calls {
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWait = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName {
+			delivered = call.Message
+		}
+	}
+	if !sawWait {
+		t.Fatalf("calls = %#v, want WaitForIdle", fake.Calls)
+	}
+	if !strings.Contains(delivered, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system-reminder wrapper", delivered)
+	}
+}
+
+func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResume(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "codex", dir, "codex", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+	called := false
+	prev := startNudgePoller
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		called = true
+		if cityPath != dir || agentName != info.ID || sessionName != info.SessionName {
+			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
+		}
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) {
+		t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
+	}
+	if !called {
+		t.Fatal("startNudgePoller was not called")
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != session.StateActive {
+		t.Fatalf("state = %q, want %q", got.State, session.StateActive)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, info.ID, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
 func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

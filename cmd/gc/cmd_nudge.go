@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -453,7 +454,40 @@ func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time)
 }
 
 func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
-	return deliverSessionNudgeWithProvider(target, newSessionProvider(), message, mode, stdout, stderr)
+	if mode == nudgeDeliveryQueue {
+		return deliverSessionNudgeWithProvider(target, newSessionProvider(), message, mode, stdout, stderr)
+	}
+	store := openNudgeBeadStore(target.cityPath)
+	if store == nil {
+		fmt.Fprintf(stderr, "gc session nudge: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+		return 1
+	}
+	return deliverSessionNudgeWithWorker(target, store, newSessionProvider(), message, mode, stdout, stderr)
+}
+
+func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
+	delivery, ok := workerNudgeDeliveryForMode(mode)
+	if !ok {
+		return deliverSessionNudgeWithProvider(target, sp, message, mode, stdout, stderr)
+	}
+	handle, err := workerHandleForSessionWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+		Text:     message,
+		Delivery: delivery,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
+		return queueSessionNudge(target, sp, message, stdout, stderr)
+	}
+	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
+	return 0
 }
 
 func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
@@ -506,6 +540,18 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
 		return 1
 	}
+}
+
+func queueSessionNudge(target nudgeTarget, sp runtime.Provider, message string, stdout, stderr io.Writer) int {
+	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if sp.IsRunning(target.sessionName) {
+		maybeStartNudgePoller(target)
+	}
+	fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
+	return 0
 }
 
 func sendMailNotify(target nudgeTarget, sender string) error {

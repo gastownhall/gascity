@@ -30,7 +30,7 @@ type Handle interface {
 
 	Message(context.Context, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
-	Nudge(context.Context, NudgeRequest) error
+	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
 
 	History(context.Context, HistoryRequest) (*HistorySnapshot, error)
 
@@ -94,9 +94,22 @@ const (
 type InterruptRequest struct{}
 
 // NudgeRequest delivers a best-effort wake or redirect message.
+type NudgeDelivery string
+
+const (
+	NudgeDeliveryDefault   NudgeDelivery = "default"
+	NudgeDeliveryImmediate NudgeDelivery = "immediate"
+	NudgeDeliveryWaitIdle  NudgeDelivery = "wait_idle"
+)
+
 type NudgeRequest struct {
-	Text      string `json:"text"`
-	Immediate bool   `json:"immediate,omitempty"`
+	Text     string        `json:"text"`
+	Delivery NudgeDelivery `json:"delivery,omitempty"`
+}
+
+// NudgeResult reports whether the requested live delivery actually happened.
+type NudgeResult struct {
+	Delivered bool `json:"delivered"`
 }
 
 // HistoryRequest scopes transcript loading for a worker.
@@ -387,22 +400,38 @@ func (h *SessionHandle) Interrupt(context.Context, InterruptRequest) error {
 }
 
 // Nudge sends a best-effort redirect message to the worker.
-func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) error {
+func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
 	if strings.TrimSpace(req.Text) == "" {
-		return fmt.Errorf("nudge text is required")
+		return NudgeResult{}, fmt.Errorf("nudge text is required")
 	}
 	id, err := h.ensureSessionID()
 	if err != nil {
-		return err
+		return NudgeResult{}, err
 	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
-		return err
+		return NudgeResult{}, err
 	}
-	if req.Immediate {
-		return h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+	switch req.Delivery {
+	case "", NudgeDeliveryDefault:
+		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+			return NudgeResult{}, err
+		}
+		return NudgeResult{Delivered: true}, nil
+	case NudgeDeliveryImmediate:
+		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+			return NudgeResult{}, err
+		}
+		return NudgeResult{Delivered: true}, nil
+	case NudgeDeliveryWaitIdle:
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		if err != nil {
+			return NudgeResult{}, err
+		}
+		return NudgeResult{Delivered: delivered}, nil
+	default:
+		return NudgeResult{}, fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 	}
-	return h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints())
 }
 
 // History returns the normalized worker transcript.

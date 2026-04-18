@@ -20,6 +20,8 @@ import (
 // checking if it died immediately (stale resume key detection).
 const staleKeyDetectDelay = 2 * time.Second
 
+const waitIdleNudgeTimeout = 30 * time.Second
+
 // stripResumeFlag removes the resume flag and session key from a command
 // string, returning a command suitable for a fresh start.
 func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
@@ -334,6 +336,16 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+func formatWaitIdleReminder(source, message string) string {
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	sb.WriteString("You have a deferred reminder that was queued until a safe boundary:\n\n")
+	fmt.Fprintf(&sb, "- [%s] %s\n", source, message)
+	sb.WriteString("\nHandle them after this turn.\n")
+	sb.WriteString("</system-reminder>\n")
+	return sb.String()
+}
+
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
 	err := m.nudgeContent(sessName, content, immediate)
@@ -355,6 +367,35 @@ func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, 
 		}
 	}
 	return m.sp.Nudge(sessName, content)
+}
+
+func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	if transportFromMetadata(b) == "acp" {
+		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+			return false, err
+		}
+		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return false, err
+	}
+	if providerKind(b) != "claude" {
+		return false, nil
+	}
+	waiter, ok := m.sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false, nil
+	}
+	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
+		return false, nil
+	}
+	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder("session", message), true); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (m *Manager) pendingInteractionLocked(sessName string) error {
@@ -444,6 +485,24 @@ func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, h
 // optional immediate nudge capability.
 func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {
 	return m.send(ctx, id, message, resumeCommand, hints, true)
+}
+
+// TryWaitIdleNudge delivers a best-effort session nudge at a provider-defined
+// safe boundary. It resumes supported runtimes if needed, then reports whether
+// live delivery actually happened. Unsupported providers return (false, nil)
+// so higher layers can fall back to queue semantics without treating that as
+// an operational error.
+func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return err
+	})
+	return delivered, err
 }
 
 // StopTurn issues a provider-appropriate interrupt for the currently running
