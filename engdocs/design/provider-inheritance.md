@@ -146,6 +146,27 @@ containing `:` is rejected at parse time. Built-in provider names
 cannot contain `:`. The `builtin:` and `provider:` prefixes are
 reserved.
 
+**Ambiguity warning on bare names.** At config load, when a bare
+`base = "X"` (no `builtin:` / `provider:` prefix) resolves via
+self-exclusion fallthrough (i.e., a custom X existed but resolution
+skipped to the built-in because X is the declarer itself), no warning
+fires — that's the intended self-exclusion idiom. But when a bare
+`base = "X"` on a non-shadowing provider could resolve either way —
+because there exists both a custom X AND a built-in X — the loader
+emits a **collision warning**:
+
+```
+config warning: provider "P" uses bare `base = "X"`, which currently
+  resolves to <custom|builtin> X because a <custom|builtin> provider
+  with that name is defined. If a <builtin|custom> X appears later
+  (via pack import, CRUD, etc.), this provider's ancestry will
+  silently retarget. Use `base = "builtin:X"` or `base = "provider:X"`
+  to pin the resolution.
+```
+
+Warning, not error — users who deliberately want "whichever X is in
+scope" behavior can ignore it. Most authors should pin the form.
+
 `base = "P"` inside `[providers.P]` when no built-in named `P` exists
 is a self-cycle error.
 
@@ -286,7 +307,9 @@ Opt-in: `options_schema_merge = "by_key"`. Each
 - Child entry with `omit = true` alongside any other non-`Key` fields:
   **load error** (omit is key-only).
 - Empty `Key` or duplicate `Key` within one layer: load error.
-- `options_schema = []` under `by_key` mode: clear inherited schema.
+- `options_schema = []` under `by_key` mode: clear inherited schema
+  AND prune inherited `OptionDefaults` entries for every cleared key.
+  (Consistent with per-key `omit = true`, which also prunes.)
 
 Opt-in model avoids the round-2 "silent semantic drift" blocker — no
 existing config's resolution changes unless the user explicitly sets
@@ -319,9 +342,11 @@ Built-in codex uses `ResumeStyle = "subcommand"`, which today inserts
 (`aimux run codex -- ...`) it produces `aimux resume <id> run codex --
 ...`, which is not a valid resume command.
 
-Solution: `ResumeCommand string` field on `ProviderSpec`. When set, it
-overrides `ResumeFlag`/`ResumeStyle`/`SessionIDFlag` heuristics. Uses
-`{{session_id}}` as the substitution token.
+Solution: use the **existing** `ResumeCommand string` field on
+`ProviderSpec` ([`provider.go:73-77`](../../internal/config/provider.go#L73))
+with its **existing** `{{.SessionKey}}` template variable. When set,
+it overrides `ResumeFlag`/`ResumeStyle`/`SessionIDFlag` heuristics.
+This design does not introduce new template syntax.
 
 **Required for wrapper descendants**: a provider whose inherited
 `ResumeStyle == "subcommand"` and whose `command` differs from its
@@ -397,6 +422,23 @@ and updates every listed call site; Phase 4 tests cover each.
   [`session_lifecycle_parallel.go:406-409`](../../cmd/gc/session_lifecycle_parallel.go#L406))
 - Crash adoption and `GC_PROVIDER` env propagation
   ([`manager.go:373-376`](../../internal/session/manager.go#L373))
+- Idle-safe nudge path
+  ([`cmd_nudge.go:641`](../../cmd/gc/cmd_nudge.go#L641))
+- `install_agent_hooks` matching: match against the resolved
+  `BuiltinAncestor`, not the raw provider name
+  ([`hooks.go`](../../internal/hooks/hooks.go))
+- `/v0/agents` display name + availability
+  ([`handler_agents.go:109,118,533,552`](../../internal/api/handler_agents.go#L109))
+- `/v0/sessions` list derivation
+  ([`handler_sessions.go:71`](../../internal/api/handler_sessions.go#L71))
+
+**Capability-disable precedence.** Family-derived behavior from
+`BuiltinAncestor` is gated by the resolved capability flags. Explicit
+`supports_hooks = false` (or equivalent for ACP / permission warning)
+suppresses family behavior at every site — hook install, `--settings`
+injection, ACP wiring, permission-warning surfacing, etc. No
+family-derived code path fires when the corresponding capability is
+explicitly disabled. This rule is normative, not advisory.
 
 Per-site regression tests: Claude `--settings` injection for
 `claude-max base="builtin:claude"`; skill materialization for same;
@@ -456,6 +498,19 @@ test for base-only descendants is required.
   entries as resolved absences rather than raw structs; the CRUD round
   trip preserves the user's raw input.
 
+**PATCH semantics for presence-sensitive fields** (`base`, capability
+`*bool` overrides, `options_schema_merge`):
+
+| PATCH body | Effect |
+|---|---|
+| Field omitted from body | no-op (keep current value) |
+| Field present, value `null` | clear the explicit declaration, restore inherit-from-parent behavior (equivalent to removing the TOML key) |
+| Field present, value `""` | set to explicit empty (distinct from null; e.g., `base = ""` = standalone opt-out) |
+| Field present, concrete value | set to that value |
+
+`null` vs omitted distinction is load-bearing — this is why raw DTOs
+use JSON `null` rather than dropping keys.
+
 **Response DTO key naming**: `/v0/config/explain --json` maps
 provenance keys to **TOML/API names**, not Go struct identifiers.
 `Command` → `command`, `ReadyDelayMs` → `ready_delay_ms`,
@@ -497,11 +552,19 @@ providers that happen to collide with a built-in name. Silences the
 warning; cache does not synthesize legacy merge; the provider stands
 alone with only its declared fields.
 
-Warnings surface on three channels:
+Warnings surface on four channels so users see them during normal
+operation, not only diagnostic commands:
 
 - Config load returns a structured warnings list alongside errors.
+- **Standard CLI paths** that run `config.Load` (every `gc` invocation
+  that reads config — `gc session start`, `gc convoy`, `gc sling`,
+  `gc config show`, etc.) render the warnings once to stderr at startup.
 - `gc doctor` renders them for operator-initiated checks.
 - `gc config explain <provider>` includes them in its output.
+
+Rendering is de-duplicated per config-load (multiple CLI invocations
+each show warnings once; a single `gc session start` does not repeat
+the same warning for each provider in scope).
 
 #### Phase B (next release) — auto-inheritance removed
 
@@ -609,8 +672,12 @@ type ProviderProvenance struct {
 }
 
 type FieldProv struct {
-    Layer  string   // source layer
+    Layer  string   // logical layer name: "providers.codex-max", "builtin:codex", etc.
+    Source string   // originating file + key: "pack.toml[providers.codex-max]",
+                    //                          "city.toml[providers.codex-max]",
+                    //                          "patches[2].target=providers.codex-max"
     Action string   // "set" | "inherited" | "cleared" (for [] clear of slice fields)
+                    //   | "legacy_synthesized" (Phase A auto-inheritance synthesis)
 }
 
 type HopIdentity struct {
@@ -683,9 +750,11 @@ in the next release. Phase 9 docs update ships alongside Phase 1–7.
 ### Phase 1 — data model + built-in spec gaps
 
 - Add to `ProviderSpec` in
-  [`provider.go`](../../internal/config/provider.go): `Base string`,
-  `ArgsAppend []string`, `ResumeCommand string`, `OptionsSchemaMerge
-  string`, capability `*bool` overrides, TOML tags.
+  [`provider.go`](../../internal/config/provider.go): `Base *string`
+  (presence-aware), `ArgsAppend []string`, `OptionsSchemaMerge string`,
+  capability `*bool` overrides, TOML tags. `ResumeCommand` already
+  exists — not added in this phase, just gains a new normative use via
+  the wrapper-resume validator.
 - **Simultaneously** add all new fields to `ProviderPatch`
   ([`patch.go:160`](../../internal/config/patch.go#L160)),
   `applyProviderPatch`, deep-copy paths. Patch-side presence-awareness
@@ -746,7 +815,10 @@ in the next release. Phase 9 docs update ships alongside Phase 1–7.
   through the cache.
 - Relax CRUD validation for `base`-only descendants.
 - `/v0/config/explain` `--provider <name>` form.
-- `omit` sentinel stripped from public DTOs (`json:"-"`).
+- `omit` IS accepted on authoring DTOs (PUT/POST/PATCH); tag
+  `omit,omitempty`. Public resolved read DTOs suppress omitted entries
+  by dropping them from the flattened slice during resolution — they
+  never appear as raw structs with `omit = true` in resolved output.
 
 ### Phase 7 — observability
 
