@@ -79,8 +79,8 @@ func (c *CityConfigCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	summary := fmt.Sprintf("city.toml loaded (%d agents, %d rigs)", len(cfg.Agents), len(cfg.Rigs))
 	if cfg.Workspace.Name == "" {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("workspace.name not set (using derived name %q); %s", cfg.ResolvedWorkspaceName, summary)
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("city.toml loaded with derived workspace name %q (%d agents, %d rigs)", cfg.ResolvedWorkspaceName, len(cfg.Agents), len(cfg.Rigs))
 		return r
 	}
 	r.Status = StatusOK
@@ -161,23 +161,29 @@ func (c *ConfigRefsCheck) Name() string { return "config-refs" }
 func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	var issues []string
+	resolvePath := func(value string) string {
+		if filepath.IsAbs(value) {
+			return value
+		}
+		return filepath.Join(c.cityPath, value)
+	}
 
 	for _, a := range c.cfg.Agents {
 		qn := a.QualifiedName()
 		if a.PromptTemplate != "" {
-			path := filepath.Join(c.cityPath, a.PromptTemplate)
+			path := resolvePath(a.PromptTemplate)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: prompt_template %q not found", qn, a.PromptTemplate))
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := filepath.Join(c.cityPath, a.SessionSetupScript)
+			path := resolvePath(a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, a.SessionSetupScript))
 			}
 		}
 		if a.OverlayDir != "" {
-			path := filepath.Join(c.cityPath, a.OverlayDir)
+			path := resolvePath(a.OverlayDir)
 			if fi, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: overlay_dir %q not found", qn, a.OverlayDir))
 			} else if !fi.IsDir() {

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 )
 
 func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
@@ -151,6 +152,26 @@ func TestNewSessionProvider_PreregistersACPBeadAndLegacyNames(t *testing.T) {
 	mayorName := agent.SessionNameFor("test-city", "mayor", "")
 	if err := sp.Attach(mayorName); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Attach(%q) error = %v, want fake-provider not found", mayorName, err)
+	}
+}
+
+func TestNewSessionProviderByName_UsesFirstClassT3Bridge(t *testing.T) {
+	sp, err := newSessionProviderByName("t3bridge", config.SessionConfig{}, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("newSessionProviderByName(t3bridge): %v", err)
+	}
+	if _, ok := sp.(*sessiont3bridge.Provider); !ok {
+		t.Fatalf("provider type = %T, want *t3bridge.Provider", sp)
+	}
+}
+
+func TestNewSessionProviderByName_LegacyExecT3BridgeStillMapsNative(t *testing.T) {
+	sp, err := newSessionProviderByName("exec:/tmp/gc-session-t3", config.SessionConfig{}, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("newSessionProviderByName(exec gc-session-t3): %v", err)
+	}
+	if _, ok := sp.(*sessiont3bridge.Provider); !ok {
+		t.Fatalf("provider type = %T, want *t3bridge.Provider", sp)
 	}
 }
 

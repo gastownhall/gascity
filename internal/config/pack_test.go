@@ -2824,6 +2824,33 @@ nudge = "beta dog"
 	}
 }
 
+func TestFallbackAgent_BoundImportsStillDedup(t *testing.T) {
+	agents := []Agent{
+		{
+			Name:        "dog",
+			BindingName: "dolt",
+			SourceDir:   "/packs/dolt",
+			Fallback:    true,
+			Nudge:       "dolt dog",
+		},
+		{
+			Name:        "dog",
+			BindingName: "maintenance",
+			SourceDir:   "/packs/maintenance",
+			Fallback:    true,
+			Nudge:       "maintenance dog",
+		},
+	}
+
+	got := resolveFallbackAgents(agents)
+	if len(got) != 1 {
+		t.Fatalf("got %d dogs, want 1", len(got))
+	}
+	if got[0].Nudge != "dolt dog" {
+		t.Fatalf("surviving dog nudge = %q, want %q", got[0].Nudge, "dolt dog")
+	}
+}
+
 func TestFallbackAgent_NeitherFallback_CollisionError(t *testing.T) {
 	// Two non-fallback dogs from different packs. Should still error.
 	dir := t.TempDir()

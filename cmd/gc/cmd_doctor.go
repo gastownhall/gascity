@@ -129,7 +129,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	controllerRunning := doctor.IsControllerRunning(cityPath)
 	d.Register(doctor.NewControllerCheck(cityPath, controllerRunning))
 
-	if cfgErr == nil && !controllerRunning {
+	if cfgErr == nil && !controllerRunning && verbose {
 		cityName := cfg.Workspace.Name
 		if cityName == "" {
 			cityName = filepath.Base(cityPath)

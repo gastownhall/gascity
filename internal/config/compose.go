@@ -293,15 +293,8 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		}
 	}
 
-	// Apply patches after all fragments are merged + city packs expanded.
-	if !root.Patches.IsEmpty() {
-		if err := ApplyPatches(root, root.Patches); err != nil {
-			return nil, nil, fmt.Errorf("applying patches: %w", err)
-		}
-		root.Patches = Patches{} // clear after application
-	}
-
-	// Expand rig packs after patches (pack agents get rig overrides).
+	// Expand rig packs before patches so patches can target rig-scoped
+	// resources stamped from packs (for example gascity/refinery named sessions).
 	rigFormulaDirs := make(map[string][]string)
 	if HasPackRigs(root.Rigs) {
 		if err := ExpandPacks(root, fs, cityRoot, rigFormulaDirs); err != nil {
@@ -320,6 +313,15 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 				}
 			}
 		}
+	}
+
+	// Apply patches after all fragments and all pack expansion so both
+	// city-scoped and rig-scoped resources exist in the merged config.
+	if !root.Patches.IsEmpty() {
+		if err := ApplyPatches(root, root.Patches); err != nil {
+			return nil, nil, fmt.Errorf("applying patches: %w", err)
+		}
+		root.Patches = Patches{} // clear after application
 	}
 
 	// Apply [global] sections from packs to agents in scope.

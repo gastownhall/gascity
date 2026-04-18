@@ -1065,7 +1065,16 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "peek <session-id-or-alias>",
 		Short: "View session output without attaching",
-		Args:  cobra.ExactArgs(1),
+		Long: `View recent session output without attaching.
+
+Accepts either a GC session ID or a session alias.
+
+Provider behavior:
+- tmux / exec / acp sessions: peeks the provider runtime output directly
+- t3bridge sessions: previews the latest thread messages via the T3 GC peek surface
+
+Use --lines to control how much preview content is returned.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionPeek(args, lines, stdout, stderr) != 0 {
 				return errExit

@@ -1,6 +1,6 @@
 // Package t3bridge provides a native Go runtime.Provider that talks directly
 // to the T3 WebSocket API for T3 session lifecycle and turn operations, using
-// the exec-provider shim only for the small remaining shell surface.
+// an internal exec shim only for a small remaining helper surface.
 package t3bridge
 
 import (
@@ -24,8 +24,8 @@ import (
 )
 
 // Provider wraps an exec.Provider, moving the T3-specific lifecycle and turn
-// operations into native Go WebSocket calls while leaving the remaining shell
-// bridge behavior as a fallback.
+// operations into native Go WebSocket calls while leaving a small helper
+// surface on the internal exec shim.
 type Provider struct {
 	exec         *sessionexec.Provider
 	mu           sync.Mutex
@@ -72,8 +72,9 @@ type execStartConfig struct {
 	CopyFiles          []execCopyEntry   `json:"copy_files,omitempty"`
 }
 
-// NewProvider creates a t3bridge Provider with a thin exec shim for the small
-// remaining shell surface and native WebSocket calls for T3 lifecycle work.
+// NewProvider creates a t3bridge Provider with an internal exec shim for the
+// small remaining helper surface and native WebSocket calls for T3 lifecycle
+// work.
 // resolveWsURL reads the t3code WebSocket URL from the environment or
 // the ws-url file. Called on each connection so a t3code restart with
 // a new port/token is picked up without restarting gc.
@@ -846,7 +847,7 @@ func buildGCMetadata(envelope StartupEnvelope, runtimeProvider, state string, se
 		"gc.convoyStatus":      envelope.Assignment.ConvoyStatus,
 		"gc.convoyClosedCount": envelope.Assignment.ConvoyClosedCount,
 		"gc.convoyTotalCount":  envelope.Assignment.ConvoyTotalCount,
-		"gc.provider":          "exec:gc-session-t3",
+		"gc.provider":          "t3bridge",
 		"gc.runtimeProvider":   runtimeProvider,
 		"gc.state":             state,
 		"gc.startupVersion":    fmt.Sprintf("%d", envelope.Version),
@@ -1740,6 +1741,33 @@ func (p *Provider) RemoveMeta(name, key string) error {
 }
 
 func (p *Provider) Peek(name string, lines int) (string, error) {
+	resultMap, err := p.rpcCall("gc.peekThreadMessages", map[string]interface{}{
+		"sessionName": name,
+		"limit":       lines,
+	})
+	if err == nil {
+		if rawResults, ok := resultMap["results"].([]interface{}); ok && len(rawResults) > 0 {
+			builder := &strings.Builder{}
+			for i, raw := range rawResults {
+				row, _ := raw.(map[string]interface{})
+				if row == nil {
+					continue
+				}
+				snippet, _ := row["snippet"].(string)
+				if strings.TrimSpace(snippet) == "" {
+					continue
+				}
+				if i > 0 {
+					_, _ = io.WriteString(builder, "\n\n")
+				}
+				_, _ = io.WriteString(builder, snippet)
+			}
+			if builder.Len() > 0 {
+				return builder.String(), nil
+			}
+		}
+	}
+
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		return "", err

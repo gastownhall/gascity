@@ -27,12 +27,13 @@ type workspaceResponse struct {
 }
 
 type configAgentResponse struct {
-	Name      string `json:"name"`
-	Dir       string `json:"dir,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	IsPool    bool   `json:"is_pool,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	Suspended bool   `json:"suspended"`
+	Name             string `json:"name"`
+	Dir              string `json:"dir,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	IsPool           bool   `json:"is_pool,omitempty"`
+	Scope            string `json:"scope,omitempty"`
+	Suspended        bool   `json:"suspended"`
+	NamedSessionMode string `json:"named_session_mode,omitempty"`
 }
 
 type configRigResponse struct {
@@ -58,18 +59,33 @@ type configPatchesResponse struct {
 	ProviderCount int `json:"provider_count"`
 }
 
+func configAgentNamedSessionMode(agent config.Agent, namedSessionModes map[string]string) string {
+	if mode := namedSessionModes[agent.QualifiedName()]; mode != "" {
+		return mode
+	}
+	if agent.Implicit || isMultiSessionAgent(agent) {
+		return "on_demand"
+	}
+	return "always"
+}
+
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.state.Config()
+	namedSessionModes := make(map[string]string, len(cfg.NamedSessions))
+	for _, ns := range cfg.NamedSessions {
+		namedSessionModes[ns.QualifiedName()] = ns.ModeOrDefault()
+	}
 
 	agents := make([]configAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		agents = append(agents, configAgentResponse{
-			Name:      a.Name,
-			Dir:       a.Dir,
-			Provider:  a.Provider,
-			IsPool:    isMultiSessionAgent(a),
-			Scope:     a.Scope,
-			Suspended: a.Suspended,
+			Name:             a.Name,
+			Dir:              a.Dir,
+			Provider:         a.Provider,
+			IsPool:           isMultiSessionAgent(a),
+			Scope:            a.Scope,
+			Suspended:        a.Suspended,
+			NamedSessionMode: configAgentNamedSessionMode(a, namedSessionModes),
 		})
 	}
 

@@ -716,6 +716,13 @@ func ComputeScriptLayers(cityPackScripts []string, rigPackScripts map[string][]s
 // Agents from the same SourceDir are never in conflict (they're duplicates
 // within one pack, handled elsewhere). Order is preserved.
 func resolveFallbackAgents(agents []Agent) []Agent {
+	fallbackGroupKey := func(a Agent) string {
+		if a.Dir == "" {
+			return a.Name
+		}
+		return a.Dir + "/" + a.Name
+	}
+
 	// Build per-name groups from distinct SourceDirs.
 	type entry struct {
 		idx      int
@@ -724,9 +731,14 @@ func resolveFallbackAgents(agents []Agent) []Agent {
 	}
 	groups := make(map[string][]entry)
 	for i, a := range agents {
-		// Use QualifiedName so agents with different bindings
-		// (e.g., "gs.mayor" and "maint.mayor") don't collide.
-		groups[a.QualifiedName()] = append(groups[a.QualifiedName()], entry{i, a.Fallback, a.SourceDir})
+		key := a.QualifiedName()
+		if a.Fallback {
+			// Fallback agents are interchangeable defaults. If two packs
+			// contribute the same logical fallback agent, they should
+			// compete on the bare city/rig identity, not on import binding.
+			key = fallbackGroupKey(a)
+		}
+		groups[key] = append(groups[key], entry{i, a.Fallback, a.SourceDir})
 	}
 
 	// Determine which indices to remove.

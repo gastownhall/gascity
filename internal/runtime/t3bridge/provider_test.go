@@ -184,13 +184,13 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 
 func TestBuildThreadEnv_DropsStartupEnvelope(t *testing.T) {
 	env := buildThreadEnv(map[string]string{
-		"GC_STARTUP_ENVELOPE": `{"runtime":{"provider":"claudeAgent","model":"claude-sonnet-4-6"}}`,
-		"GC_MODEL":            "gpt-5.4-mini",
-		"GC_SESSION_NAME":     "gc--mayor",
-		"GC_DOLT_HOST":        "127.0.0.1",
-		"GC_DOLT_PORT":        "35819",
+		"GC_STARTUP_ENVELOPE":      `{"runtime":{"provider":"claudeAgent","model":"claude-sonnet-4-6"}}`,
+		"GC_MODEL":                 "gpt-5.4-mini",
+		"GC_SESSION_NAME":          "gc--mayor",
+		"GC_DOLT_HOST":             "127.0.0.1",
+		"GC_DOLT_PORT":             "35819",
 		"BEADS_DOLT_SHARED_SERVER": "1",
-		"NOT_GC":              "ignore",
+		"NOT_GC":                   "ignore",
 	})
 
 	if _, ok := env["GC_STARTUP_ENVELOPE"]; ok {
@@ -216,6 +216,13 @@ func TestBuildThreadEnv_DropsStartupEnvelope(t *testing.T) {
 	}
 	if _, ok := env["NOT_GC"]; ok {
 		t.Fatal("non-GC key should not persist into thread env")
+	}
+}
+
+func TestBuildGCMetadata_UsesFirstClassT3BridgeProviderName(t *testing.T) {
+	meta := buildGCMetadata(StartupEnvelope{}, "codex", "active", nil)
+	if got := meta["gc.provider"]; got != "t3bridge" {
+		t.Fatalf("gc.provider = %v, want t3bridge", got)
 	}
 }
 

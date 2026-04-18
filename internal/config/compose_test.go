@@ -1420,3 +1420,60 @@ name = "coder"
 		}
 	}
 }
+
+func TestLoadWithIncludes_AppliesNamedSessionPatchesAfterRigPackExpansion(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	writeFile(t, cityDir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+
+[[named_session]]
+template = "refinery"
+scope = "rig"
+mode = "on_demand"
+`)
+
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+path = "`+rigDir+`"
+
+[rigs.imports.gastown]
+source = "packs/gastown"
+
+[patches]
+
+[[patches.named_session]]
+dir = "frontend"
+template = "refinery"
+mode = "always"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("NamedSessions = %d, want 1", len(cfg.NamedSessions))
+	}
+	if got := cfg.NamedSessions[0].QualifiedName(); got != "frontend/gastown.refinery" {
+		t.Fatalf("NamedSessions[0] = %q, want frontend/gastown.refinery", got)
+	}
+	if got := cfg.NamedSessions[0].Mode; got != "always" {
+		t.Fatalf("NamedSessions[0].Mode = %q, want always", got)
+	}
+}

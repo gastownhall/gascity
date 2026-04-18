@@ -15,6 +15,11 @@ func TestHandleConfigGet(t *testing.T) {
 	fs.cfg.Workspace.Provider = "claude"
 	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
 	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
+	fs.cfg.NamedSessions = []config.NamedSession{{
+		Template: fs.cfg.Agents[0].Name,
+		Dir:      fs.cfg.Agents[0].Dir,
+		Mode:     "on_demand",
+	}}
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {DisplayName: "Custom", Command: "custom-cli"},
 	}
@@ -43,11 +48,66 @@ func TestHandleConfigGet(t *testing.T) {
 	if !resp.Agents[0].IsPool {
 		t.Error("expected config agent to expose is_pool=true")
 	}
+	if resp.Agents[0].NamedSessionMode != "on_demand" {
+		t.Errorf("agents[0].named_session_mode = %q, want %q", resp.Agents[0].NamedSessionMode, "on_demand")
+	}
 	if len(resp.Rigs) != 1 {
 		t.Errorf("rigs count = %d, want 1", len(resp.Rigs))
 	}
 	if _, ok := resp.Providers["custom"]; !ok {
 		t.Error("expected 'custom' in providers")
+	}
+}
+
+func TestHandleConfigGet_OmitsNamedSessionModeWhenNoNamedSession(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.Agents[0].MaxActiveSessions = intPtr(1)
+	srv := New(fs)
+
+	req := httptest.NewRequest("GET", "/v0/config", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var raw map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	agents, ok := raw["agents"].([]any)
+	if !ok || len(agents) == 0 {
+		t.Fatalf("agents = %#v, want non-empty array", raw["agents"])
+	}
+	agent0, ok := agents[0].(map[string]any)
+	if !ok {
+		t.Fatalf("agent[0] = %#v, want object", agents[0])
+	}
+	if got := agent0["named_session_mode"]; got != "on_demand" {
+		t.Fatalf("named_session_mode = %#v, want %q", got, "on_demand")
+	}
+}
+
+func TestConfigAgentNamedSessionMode_DefaultsImplicitAndPoolToOnDemand(t *testing.T) {
+	if got := configAgentNamedSessionMode(config.Agent{
+		Name:     "dog",
+		Implicit: true,
+	}, nil); got != "on_demand" {
+		t.Fatalf("implicit mode = %q, want on_demand", got)
+	}
+	if got := configAgentNamedSessionMode(config.Agent{
+		Name:              "polecat",
+		MaxActiveSessions: intPtr(5),
+	}, nil); got != "on_demand" {
+		t.Fatalf("pool mode = %q, want on_demand", got)
+	}
+	if got := configAgentNamedSessionMode(config.Agent{
+		Name:              "boot",
+		MaxActiveSessions: intPtr(1),
+	}, nil); got != "always" {
+		t.Fatalf("singleton mode = %q, want always", got)
 	}
 }
 
