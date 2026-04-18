@@ -61,6 +61,7 @@ func TestValidateAlias(t *testing.T) {
 	}{
 		{name: "empty allowed", input: "", want: ""},
 		{name: "trimmed qualified", input: "  myrig/worker  ", want: "myrig/worker"},
+		{name: "binding qualified", input: "employees.corp--alex", want: "employees.corp--alex"},
 		{name: "reserved prefix", input: "s-gc-123", wantErr: ErrInvalidSessionAlias},
 		{name: "human reserved", input: "human", wantErr: ErrInvalidSessionAlias},
 		{name: "session id syntax reserved", input: "gc-42", wantErr: ErrInvalidSessionAlias},
