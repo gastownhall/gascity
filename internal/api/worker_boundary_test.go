@@ -13,6 +13,9 @@ func TestAPINonTestFilesStayOnWorkerBoundary(t *testing.T) {
 		`"github.com/gastownhall/gascity/internal/sessionlog"`,
 		"worker.NewSessionHandle(",
 		"worker.NewSessionCatalog(",
+		"session.NewManager(",
+		"session.NewManagerWithCityPath(",
+		"session.NewManagerWithTransportResolverAndCityPath(",
 	})
 }
 
