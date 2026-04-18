@@ -82,6 +82,14 @@ type MessageResult struct {
 	Queued bool `json:"queued"`
 }
 
+// CreateMode controls how a worker session should be materialized.
+type CreateMode string
+
+const (
+	CreateModeDeferred CreateMode = "deferred"
+	CreateModeStarted  CreateMode = "started"
+)
+
 // InterruptRequest is reserved for future interrupt controls.
 type InterruptRequest struct{}
 
@@ -242,6 +250,26 @@ func (h *SessionHandle) Start(ctx context.Context) error {
 		return err
 	}
 	return h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+}
+
+// Create materializes the worker session without requiring API callers to
+// invoke session.Manager lifecycle methods directly.
+func (h *SessionHandle) Create(ctx context.Context, mode CreateMode) (sessionpkg.Info, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.sessionID != "" {
+		return h.manager.Get(h.sessionID)
+	}
+
+	switch mode {
+	case CreateModeDeferred:
+		return h.createDeferredLocked()
+	case CreateModeStarted:
+		return h.createStartedLocked(ctx)
+	default:
+		return sessionpkg.Info{}, fmt.Errorf("%w: unknown create mode %q", ErrHandleConfig, mode)
+	}
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
@@ -466,6 +494,14 @@ func (h *SessionHandle) ensureSessionID() (string, error) {
 	if h.sessionID != "" {
 		return h.sessionID, nil
 	}
+	info, err := h.createDeferredLocked()
+	if err != nil {
+		return "", err
+	}
+	return info.ID, nil
+}
+
+func (h *SessionHandle) createDeferredLocked() (sessionpkg.Info, error) {
 	info, err := h.manager.CreateAliasedBeadOnlyNamedWithMetadata(
 		h.session.Alias,
 		h.session.ExplicitName,
@@ -479,10 +515,33 @@ func (h *SessionHandle) ensureSessionID() (string, error) {
 		cloneStringMap(h.session.Metadata),
 	)
 	if err != nil {
-		return "", err
+		return sessionpkg.Info{}, err
 	}
 	h.sessionID = info.ID
-	return h.sessionID, nil
+	return info, nil
+}
+
+func (h *SessionHandle) createStartedLocked(ctx context.Context) (sessionpkg.Info, error) {
+	info, err := h.manager.CreateAliasedNamedWithTransportAndMetadata(
+		ctx,
+		h.session.Alias,
+		h.session.ExplicitName,
+		h.session.Template,
+		h.session.Title,
+		h.session.Command,
+		h.session.WorkDir,
+		h.session.Provider,
+		h.session.Transport,
+		cloneStringMap(h.session.Env),
+		h.session.Resume,
+		cloneRuntimeConfig(h.session.Hints),
+		cloneStringMap(h.session.Metadata),
+	)
+	if err != nil {
+		return sessionpkg.Info{}, err
+	}
+	h.sessionID = info.ID
+	return info, nil
 }
 
 func (h *SessionHandle) currentSessionID() string {

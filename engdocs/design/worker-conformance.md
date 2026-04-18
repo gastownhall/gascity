@@ -1472,11 +1472,12 @@ Current branch progress:
 - API submit / background-nudge / stop-turn / respond paths now call the
   worker handle rather than invoking `session.Manager` semantics
   directly
+- API session creation and configured named-session materialization now
+  materialize sessions through a worker-owned creation seam rather than
+  calling `session.Manager` lifecycle methods directly
 
 Remaining branch-local Phase 4 gaps:
 
-- session creation and named-session materialization still create sessions
-  below the worker boundary
 - transcript streaming endpoints still read provider files directly
   instead of projecting from worker history
 - reconciler and controller orchestration still own start/stop policy

@@ -99,6 +99,123 @@ func TestSessionHandleStartStopState(t *testing.T) {
 	}
 }
 
+func TestSessionHandleCreateDeferred(t *testing.T) {
+	handle, store, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Metadata: map[string]string{
+			"session_origin": "ephemeral",
+		},
+	})
+
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if info.ID == "" {
+		t.Fatal("Create(deferred) returned empty ID")
+	}
+	if handle.sessionID != info.ID {
+		t.Fatalf("sessionID = %q, want %q", handle.sessionID, info.ID)
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", info.ID, err)
+	}
+	if bead.Metadata["state"] != string(sessionpkg.StateCreating) {
+		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateCreating)
+	}
+	if bead.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", bead.Metadata["pending_create_claim"])
+	}
+	if bead.Metadata["session_origin"] != "ephemeral" {
+		t.Fatalf("session_origin = %q, want ephemeral", bead.Metadata["session_origin"])
+	}
+	if bead.Metadata["worker_profile_provider_family"] != "claude" {
+		t.Fatalf("worker_profile_provider_family = %q, want claude", bead.Metadata["worker_profile_provider_family"])
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("runtime calls = %#v, want none for deferred create", sp.Calls)
+	}
+}
+
+func TestSessionHandleCreateStarted(t *testing.T) {
+	handle, store, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude --dangerously-skip-permissions",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Env: map[string]string{
+			"EXTRA_ENV": "present",
+		},
+		Hints: runtime.Config{
+			ReadyDelayMs: 1234,
+		},
+		Metadata: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+
+	info, err := handle.Create(context.Background(), CreateModeStarted)
+	if err != nil {
+		t.Fatalf("Create(started): %v", err)
+	}
+	if handle.sessionID != info.ID {
+		t.Fatalf("sessionID = %q, want %q", handle.sessionID, info.ID)
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", info.ID, err)
+	}
+	if bead.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateActive)
+	}
+	if bead.Metadata["session_origin"] != "manual" {
+		t.Fatalf("session_origin = %q, want manual", bead.Metadata["session_origin"])
+	}
+
+	start := firstCall(sp.Calls, "Start")
+	if start == nil {
+		t.Fatalf("runtime calls = %#v, want Start", sp.Calls)
+	}
+	if start.Config.Command != "claude --dangerously-skip-permissions" {
+		t.Fatalf("start command = %q, want command", start.Config.Command)
+	}
+	if start.Config.WorkDir != handle.session.WorkDir {
+		t.Fatalf("start workdir = %q, want %q", start.Config.WorkDir, handle.session.WorkDir)
+	}
+	if start.Config.Env["EXTRA_ENV"] != "present" {
+		t.Fatalf("start env EXTRA_ENV = %q, want present", start.Config.Env["EXTRA_ENV"])
+	}
+	if start.Config.ReadyDelayMs != 1234 {
+		t.Fatalf("start ReadyDelayMs = %d, want 1234", start.Config.ReadyDelayMs)
+	}
+
+	again, err := handle.Create(context.Background(), CreateModeStarted)
+	if err != nil {
+		t.Fatalf("Create(started second): %v", err)
+	}
+	if again.ID != info.ID {
+		t.Fatalf("Create(started second) ID = %q, want %q", again.ID, info.ID)
+	}
+	startCalls := 0
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			startCalls++
+		}
+	}
+	if startCalls != 1 {
+		t.Fatalf("Start call count = %d, want 1", startCalls)
+	}
+}
+
 func TestCanonicalProfileIdentity(t *testing.T) {
 	identity, ok := CanonicalProfileIdentity(ProfileCodexTmuxCLI)
 	if !ok {
