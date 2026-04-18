@@ -2186,13 +2186,17 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 	}
 
 	tp := TemplateParams{
-		Command:          "claude",
-		Env:              map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1"},
-		WorkDir:          t.TempDir(),
-		SessionName:      "ants-ant-1",
-		InstanceName:     "ants-ant-1",
-		ResolvedProvider: &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
-		TemplateName:     "ants",
+		Command: "claude",
+		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT stamped)
+		// plus an unrelated template key to verify the merge preserves it.
+		Env:                map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1", "TEMPLATE_KEY": "keep"},
+		WorkDir:            t.TempDir(),
+		SessionName:        "ants-ant-1",
+		InstanceName:       "ants-ant-1",
+		PoolSlot:           1,
+		EnvIdentityStamped: true,
+		ResolvedProvider:   &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:       "ants",
 	}
 
 	prepared, err := prepareStartCandidate(
@@ -2207,6 +2211,12 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 
 	if got := prepared.cfg.Env["GC_ALIAS"]; got != "ants-ant-1" {
 		t.Fatalf("GC_ALIAS = %q, want %q (template value must survive merge when bead alias is empty)", got, "ants-ant-1")
+	}
+	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-ant-1" {
+		t.Fatalf("GC_AGENT = %q, want %q (companion identity key must also survive)", got, "ants-ant-1")
+	}
+	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
+		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")
 	}
 }
 
@@ -2226,13 +2236,19 @@ func TestPrepareStartCandidate_EmptyAliasEverywhereKeepsEmptyForTmuxScrub(t *tes
 	}
 
 	tp := TemplateParams{
-		Command:          "claude",
-		Env:              map[string]string{"BASE": "1"},
+		Command: "claude",
+		// Shape matches resolveTemplate output: GC_ALIAS is unconditionally
+		// seeded with qualifiedName on every session, pool or not. The guard
+		// must distinguish identity-stamped templates from the resolver's
+		// default stamping so that the empty runtime value still wins here
+		// and tmux emits `env -u GC_ALIAS`.
+		Env:              map[string]string{"GC_ALIAS": "s-gc-test", "GC_AGENT": "s-gc-test", "BASE": "1"},
 		WorkDir:          t.TempDir(),
 		SessionName:      "s-gc-test",
 		InstanceName:     "s-gc-test",
 		ResolvedProvider: &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
 		TemplateName:     "s",
+		// EnvIdentityStamped is false — setTemplateEnvIdentity was not called.
 	}
 
 	prepared, err := prepareStartCandidate(

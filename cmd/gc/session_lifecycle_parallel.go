@@ -404,16 +404,15 @@ func buildPreparedStart(
 		continuationEpoch,
 		instanceToken,
 	)
-	// When the bead has no alias but the template assigned a non-empty
-	// GC_ALIAS (e.g. pool workers via setTemplateEnvIdentity), don't let
-	// mergeEnv's override-wins semantics clobber it with the runtime's
-	// empty value. Leaving GC_ALIAS="" when the template has no alias is
-	// preserved on purpose: the tmux runtime translates empty entries
-	// into "env -u <key>" to scrub inherited env from the tmux server.
-	if beadAlias == "" {
-		if tplAlias, ok := agentCfg.Env["GC_ALIAS"]; ok && tplAlias != "" {
-			delete(runtimeEnv, "GC_ALIAS")
-		}
+	// When the bead has no alias but the template was identity-stamped
+	// (pool workers and dependency floors via setTemplateEnvIdentity),
+	// don't let mergeEnv's override-wins semantics clobber the stamped
+	// GC_ALIAS with the runtime's empty value. For ordinary sessions the
+	// resolver-stamped GC_ALIAS is left to be overwritten by the empty
+	// runtime value so the tmux runtime emits `env -u GC_ALIAS` and scrubs
+	// any inherited GC_ALIAS from the tmux server.
+	if beadAlias == "" && tp.EnvIdentityStamped {
+		delete(runtimeEnv, "GC_ALIAS")
 	}
 	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
 	if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {

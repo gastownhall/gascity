@@ -893,6 +893,7 @@ func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
 	}
 	tp.Env["GC_AGENT"] = identity
 	tp.Env["GC_ALIAS"] = identity
+	tp.EnvIdentityStamped = true
 }
 
 func resolveTemplateForSessionBead(

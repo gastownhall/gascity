@@ -84,6 +84,13 @@ type TemplateParams struct {
 	// pool_slot metadata without reverse-engineering the slot from the name
 	// (which fails for namepool-themed instances like "fenrir").
 	PoolSlot int
+	// EnvIdentityStamped reports whether setTemplateEnvIdentity has written
+	// an authoritative GC_ALIAS/GC_AGENT identity into Env. resolveTemplate
+	// always seeds GC_ALIAS=qualifiedName, so "Env has GC_ALIAS" is not a
+	// sufficient signal on its own — callers use this flag to distinguish
+	// identity-stamped templates (pool workers, dependency floors) from the
+	// resolver's default stamping on ordinary sessions.
+	EnvIdentityStamped bool
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
