@@ -1,6 +1,6 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Phase 1 + 2 + 3 + 3.5 Complete (server + CLI). Dashboard migration out of scope.
+## Status: Phase 1 + 2 + 3 + 3.5 Complete (server). Consumer alignment follow-on in progress.
 
 **Phase 3.5 "real routes, real types" (shipped 2026-04-17):** Every
 per-city operation is registered on the supervisor's single Huma API
@@ -68,16 +68,74 @@ the consumer side are both fully spec-driven.
   callers off the genclient package and converts the wire-level
   intent string to the typed `session.SubmitIntent` in one place.
 
+**Post-3.5 consumer alignment follow-on (2026-04-17, in progress):**
+
+- **Dashboard moved from “legacy proxy mindset” toward direct API-contract
+  consumption.** The restored standalone dashboard is now a static
+  HTML/CSS/TS client that treats the supervisor API as the authority,
+  not a private Go adapter surface. Current work includes:
+  - **Supervisor-first boot.** `gc dashboard` no longer requires a city
+    directory; the UI launches in supervisor scope with no `?city=...`
+    and degrades by hiding city-scoped panels instead of rendering
+    confusing empty states.
+  - **Parity regressions closed with frontend tests.** Palette-driven
+    compose / new-issue / new-convoy / assign flows now open their real
+    forms or modals again, and empty-state copy resets correctly when a
+    city is selected after supervisor mode. `vitest` + `jsdom` coverage
+    now guards those flows.
+  - **One live event stream, not two.** The SPA is being tightened so
+    activity rendering and panel invalidation both derive from the API's
+    SSE contract instead of opening duplicate streams and guessing at
+    semantic event names from the SSE `event:` line.
+  - **API-typed client helpers.** The frontend already generates TS
+    types from `internal/api/openapi.json` and uses `openapi-fetch`;
+    current follow-on work is pushing more of the restored dashboard
+    behavior through those typed helpers instead of scattered ad hoc
+    endpoint strings and brute-force refreshes.
+  - **Structured operator flows.** The remaining `window.prompt` /
+    `window.confirm` interactions in the restored dashboard are being
+    replaced with explicit modal flows so assignment, sling, and
+    reassign actions are real UI interactions backed by the same API
+    contract the docs publish.
+
+- **`gc events` is being realigned as a reflection of the API, not an
+  alternate event model.** The source of truth remains the typed API:
+  city list/stream (`/v0/city/{cityName}/events`,
+  `/v0/city/{cityName}/events/stream`) and supervisor list/stream
+  (`/v0/events`, `/v0/events/stream`). Follow-on work on `gc events`
+  is defined by that constraint:
+  - **Per-scope parity.** In city scope, `gc events` must reflect the
+    city event list/stream contract. In supervisor scope, it must
+    reflect the supervisor tagged-event list/stream contract.
+    This is now wired through typed REST + SSE calls, not direct local
+    event-provider access.
+  - **SSE schema awareness.** The CLI and dashboard must treat the SSE
+    `event:` field as a transport envelope (`event`, `tagged_event`,
+    `heartbeat`) and the semantic event type as the JSON payload's
+    `type` field. That mapping is part of the contract and must be
+    documented explicitly.
+    The CLI now emits list-item DTOs as JSONL in default list mode and
+    stream-envelope DTOs as JSONL in `--watch` / `--follow`, with
+    supervisor resume via the new `--after-cursor` flag.
+  - **User-facing docs.** `docs/reference/api.md` and the generated CLI
+    reference need an explicit event-schema section that explains the
+    relationship between list responses, SSE envelopes, and `gc events`
+    JSON output so developers can match them 1:1 when building external
+    tools. The API reference now carries that mapping explicitly.
+  - **Dashboard invalidation contract.** The restored SPA currently
+    consumes events operationally; this follow-on makes that explicit by
+    deriving invalidation from the same typed event payloads that `gc
+    events` and the published API docs describe.
+
 **Out of scope for this plan:**
 
-- **Dashboard Go HTTP layer.** 37 raw HTTP sites remain across
-  `cmd/gc/dashboard/api.go` (~1,886 lines), `api_fetcher.go`,
-  `serve.go`, and `handler.go`. These all go through `scopedPath()`
-  and already target city-scoped paths (`/v0/city/{cityScope}/...`),
-  so they work fine against the post-Fix-3b supervisor. Migrating
-  them onto the generated client is a separate, dashboard-only
-  plan. This plan is about the control-plane surface and its primary
-  consumers (CLI + server-side REST/SSE) — not the dashboard proxy.
+- **Historical dashboard Go proxy rewrite.** The original Phase 3
+  inventory explicitly excluded the hand-written Go dashboard proxy
+  (`cmd/gc/dashboard/api.go`, `api_fetcher.go`, `serve.go`,
+  `handler.go`). That remains true as historical context: this plan did
+  not require finishing a generated Go client migration for that old
+  layer. The current dashboard follow-on is instead about the shipped
+  static SPA consuming the published API contract correctly.
 
 - **(Closed) Fix 3f remnant — bead PATCH `json.RawMessage` input.**
   Resolved: `BeadUpdateRawInput` deleted; handler now uses the typed

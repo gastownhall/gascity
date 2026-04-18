@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,5 +87,48 @@ func TestStaticHandlerServesIndex(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `<meta name="supervisor-url"`) {
 		t.Errorf("fallback did not serve SPA index")
+	}
+}
+
+func TestStaticHandlerAcceptsClientLogs(t *testing.T) {
+	h, err := NewStaticHandler("http://127.0.0.1:8372")
+	if err != nil {
+		t.Fatalf("NewStaticHandler: %v", err)
+	}
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/__client-log", strings.NewReader(`{
+		"ts":"2026-04-17T16:00:00Z",
+		"level":"error",
+		"scope":"mail",
+		"message":"Compose failed",
+		"details":{"reason":"missing recipient"},
+		"url":"http://localhost:8080/?city=mc-city",
+		"city":"mc-city"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /__client-log: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logs.String(), `client[error]`) {
+		t.Fatalf("client log output missing level: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `scope=mail`) {
+		t.Fatalf("client log output missing scope: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `"reason":"missing recipient"`) {
+		t.Fatalf("client log output missing details: %s", logs.String())
 	}
 }

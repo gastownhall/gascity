@@ -855,7 +855,19 @@
             color: var(--red);
         }
 
+        .modal-body {
+            padding: 20px;
+        }
+
+        .modal-content-compact {
+            max-width: 420px;
+        }
+
         #issue-form {
+            padding: 20px;
+        }
+
+        #action-form {
             padding: 20px;
         }
 
@@ -893,6 +905,23 @@
         .form-group textarea {
             resize: vertical;
             min-height: 80px;
+        }
+
+        .readonly-group input[readonly] {
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .form-help {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            line-height: 1.5;
+            margin-top: 8px;
+        }
+
+        .action-modal-help {
+            margin-top: -2px;
+            margin-bottom: 2px;
         }
 
         .form-actions {
@@ -937,6 +966,33 @@
         .btn-secondary:hover {
             background: var(--border);
             color: var(--text-primary);
+        }
+
+        .supervisor-city-table {
+            width: 100%;
+        }
+
+        .supervisor-city-table th:last-child,
+        .supervisor-city-table td:last-child {
+            width: 72px;
+            text-align: right;
+        }
+
+        .supervisor-city-phases,
+        .supervisor-city-error {
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+        }
+
+        .supervisor-city-link {
+            color: var(--cyan);
+            font-size: 0.82rem;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        .supervisor-city-link:hover {
+            text-decoration: underline;
         }
 
         /* Panel Tabs */

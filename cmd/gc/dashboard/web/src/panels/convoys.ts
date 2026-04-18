@@ -179,20 +179,7 @@ function convoyLabel(row: ConvoyRow): string {
 
 export function installConvoyInteractions(): void {
   byId("new-convoy-btn")?.addEventListener("click", () => {
-    if (!cityScope()) {
-      showToast("info", "No city selected", "Select a city to create a convoy");
-      return;
-    }
-    const create = byId("convoy-create-form");
-    const wasOpen = create?.style.display === "block";
-    currentConvoyID = "";
-    byId("convoy-list")!.style.display = "none";
-    byId("convoy-detail")!.style.display = "none";
-    create!.style.display = "block";
-    byId<HTMLInputElement>("convoy-create-name")!.value = "";
-    byId<HTMLInputElement>("convoy-create-issues")!.value = "";
-    if (!wasOpen) pushPause();
-    byId<HTMLInputElement>("convoy-create-name")?.focus();
+    openConvoyCreate();
   });
   byId("convoy-back-btn")?.addEventListener("click", () => closeConvoyDetail());
   byId("convoy-create-back-btn")?.addEventListener("click", () => closeConvoyCreate());
@@ -211,6 +198,24 @@ export function installConvoyInteractions(): void {
   });
 }
 
+export function openConvoyCreate(): void {
+  if (!cityScope()) {
+    showToast("info", "No city selected", "Select a city to create a convoy");
+    return;
+  }
+  const create = byId("convoy-create-form");
+  const wasOpen = create?.style.display === "block";
+  currentConvoyID = "";
+  byId("convoy-list")!.style.display = "none";
+  byId("convoy-detail")!.style.display = "none";
+  create!.style.display = "block";
+  byId<HTMLInputElement>("convoy-create-name")!.value = "";
+  byId<HTMLInputElement>("convoy-create-issues")!.value = "";
+  if (!wasOpen) pushPause();
+  revealConvoyPanel("convoy-create-name");
+  byId<HTMLInputElement>("convoy-create-name")?.focus();
+}
+
 async function openConvoyDetail(convoyID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
@@ -219,6 +224,7 @@ async function openConvoyDetail(convoyID: string): Promise<void> {
   byId("convoy-list")!.style.display = "none";
   byId("convoy-create-form")!.style.display = "none";
   byId("convoy-detail")!.style.display = "block";
+  revealConvoyPanel("convoy-detail");
   byId("convoy-detail-id")!.textContent = convoyID;
   byId("convoy-detail-title")!.textContent = `Convoy: ${convoyID}`;
   byId("convoy-issues-loading")!.style.display = "block";
@@ -323,4 +329,11 @@ async function addIssueToConvoy(): Promise<void> {
   showToast("success", "Issue added", item);
   await openConvoyDetail(currentConvoyID);
   await renderConvoys();
+}
+
+function revealConvoyPanel(focusID: string): void {
+  byId("convoy-panel")?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => {
+    byId<HTMLElement>(focusID)?.focus();
+  }, 0);
 }

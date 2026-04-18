@@ -98,18 +98,6 @@ func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride strin
 		return strings.TrimRight(override, "/"), nil
 	}
 
-	if cityPath != "" {
-		if supervisorURL, ok, err := discoverSupervisorDashboardAPI(cityPath); err != nil {
-			return "", err
-		} else if ok {
-			return supervisorURL, nil
-		}
-
-		if standaloneURL, ok := discoverStandaloneDashboardAPI(cfg); ok {
-			return standaloneURL, nil
-		}
-	}
-
 	if supervisorAliveHook() != 0 {
 		baseURL, err := supervisorAPIBaseURL()
 		if err != nil {
@@ -119,28 +107,12 @@ func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride strin
 	}
 
 	if cityPath == "" {
-		return "", fmt.Errorf("could not auto-discover a GC API server; start the supervisor with %q, start a city with %q, pass --city, or pass --api explicitly", "gc supervisor start", "gc start")
+		return "", fmt.Errorf("could not auto-discover the supervisor API; start the supervisor with %q or pass --api explicitly", "gc supervisor start")
 	}
-	return "", fmt.Errorf("could not auto-discover a GC API server for %q; start that city with %q, start the supervisor with %q, or pass --api explicitly", cityPath, "gc start", "gc supervisor start")
-}
-
-func discoverSupervisorDashboardAPI(cityPath string) (apiURL string, ok bool, err error) {
-	_, registered, err := registeredCityEntry(cityPath)
-	if err != nil {
-		return "", false, err
+	if _, ok := discoverStandaloneDashboardAPI(cfg); ok {
+		return "", fmt.Errorf("dashboard requires the supervisor API; standalone city APIs do not expose /v0/city/{cityName}/... routes. Start the supervisor with %q or pass --api to a supervisor endpoint explicitly", "gc supervisor start")
 	}
-	if !registered || supervisorAliveHook() == 0 {
-		return "", false, nil
-	}
-	running, _, known := supervisorCityRunningHook(cityPath)
-	if !known || !running {
-		return "", false, nil
-	}
-	baseURL, err := supervisorAPIBaseURL()
-	if err != nil {
-		return "", false, err
-	}
-	return strings.TrimRight(baseURL, "/"), true, nil
+	return "", fmt.Errorf("could not auto-discover the supervisor API for %q; start the supervisor with %q or pass --api explicitly", cityPath, "gc supervisor start")
 }
 
 func discoverStandaloneDashboardAPI(cfg *config.City) (string, bool) {

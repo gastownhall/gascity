@@ -84,7 +84,7 @@ func TestRunDashboardServeAllowsNoCityWithAPIOverride(t *testing.T) {
 	}
 }
 
-func TestRunDashboardServeHonorsExplicitCityOutsideCityDir(t *testing.T) {
+func TestRunDashboardServeRejectsStandaloneCityAPIOutsideCityDir(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 
 	cityDir := filepath.Join(t.TempDir(), "alpha")
@@ -119,16 +119,20 @@ port = 9123
 	cityFlag = cityDir
 	rigFlag = ""
 
-	var gotURL string
+	calledServe := false
 	dashboardServeHook = func(_ int, apiURL string) error {
-		gotURL = apiURL
+		calledServe = true
 		return nil
 	}
 
-	if err := runDashboardServe("gc dashboard", 9090, "", io.Discard); err != nil {
-		t.Fatalf("runDashboardServe() error: %v", err)
+	err := runDashboardServe("gc dashboard", 9090, "", io.Discard)
+	if err == nil {
+		t.Fatal("runDashboardServe() error = nil, want supervisor-only failure")
 	}
-	if gotURL != "http://127.0.0.1:9123" {
-		t.Fatalf("dashboard api URL = %q, want standalone city API", gotURL)
+	if !strings.Contains(err.Error(), "requires the supervisor API") {
+		t.Fatalf("runDashboardServe() error = %q, want supervisor-only failure", err)
+	}
+	if calledServe {
+		t.Fatal("dashboardServeHook was called for unsupported standalone city API")
 	}
 }

@@ -25,6 +25,9 @@ go run ./cmd/genspec
 For the narrative API overview, endpoint families, and wire-level notes, see
 the [Supervisor REST API](/reference/api) page.
 
+For the explicit `gc events` CLI output contract layered on top of those API
+schemas, see [gc events Formats](/reference/events).
+
 ## City Config JSON Schema
 
 The `city.toml` configuration schema is also published as a raw JSON Schema

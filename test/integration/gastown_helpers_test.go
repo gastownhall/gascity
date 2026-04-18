@@ -265,8 +265,8 @@ func verifyEvents(t *testing.T, cityDir, eventType string) {
 	if err != nil {
 		t.Fatalf("gc events --type %s failed: %v\noutput: %s", eventType, err, out)
 	}
-	if strings.Contains(out, "No events.") {
-		t.Errorf("expected events of type %s, got 'No events.'", eventType)
+	if strings.TrimSpace(out) == "" {
+		t.Errorf("expected events of type %s, got empty output", eventType)
 	}
 }
 

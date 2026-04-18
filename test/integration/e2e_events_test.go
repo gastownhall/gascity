@@ -50,13 +50,13 @@ func TestE2E_EventsQuery(t *testing.T) {
 		t.Errorf("filtered output should not contain e2e.beta:\n%s", out)
 	}
 
-	// Unknown type should show "No events."
+	// Unknown type should produce empty JSONL output.
 	out, err = gc(cityDir, "events", "--type", "e2e.nonexistent")
 	if err != nil {
 		t.Fatalf("gc events for unknown type failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "No events.") {
-		t.Errorf("expected 'No events.' for unknown type:\n%s", out)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected empty output for unknown type:\n%s", out)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestE2E_EventsSince(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc events --since failed: %v\noutput: %s", err, out)
 	}
-	if strings.Contains(out, "No events.") {
+	if strings.TrimSpace(out) == "" {
 		t.Errorf("expected recent event to appear with --since=1m:\n%s", out)
 	}
 
@@ -87,7 +87,7 @@ func TestE2E_EventsSince(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc events --since=30s failed: %v\noutput: %s", err, out)
 	}
-	if strings.Contains(out, "No events.") {
+	if strings.TrimSpace(out) == "" {
 		t.Errorf("expected recent event to appear with --since=30s:\n%s", out)
 	}
 }

@@ -4,9 +4,8 @@
 // every panel re-fetches against the new scope.
 
 import { api, cityScope } from "../api";
+import { getCachedCities, setCachedCities } from "../state";
 import { byId, clear, el } from "../util/dom";
-
-let cachedCityItems: Array<{ name?: string; running?: boolean }> = [];
 
 export async function renderCityTabs(): Promise<void> {
   const container = byId("city-tabs");
@@ -14,8 +13,16 @@ export async function renderCityTabs(): Promise<void> {
 
   const { data, error } = await api.GET("/v0/cities");
   if (!error && data?.items) {
-    cachedCityItems = data.items.map((city) => ({ name: city.name, running: city.running }));
+    setCachedCities(data.items.map((city) => ({
+      error: city.error ?? undefined,
+      name: city.name ?? "",
+      path: city.path ?? undefined,
+      phasesCompleted: city.phases_completed ?? [],
+      running: city.running === true,
+      status: city.status ?? undefined,
+    })));
   }
+  const cachedCityItems = getCachedCities();
   if (error || cachedCityItems.length === 0) {
     return;
   }
@@ -39,17 +46,17 @@ export async function renderCityTabs(): Promise<void> {
     ),
   );
   for (const city of cachedCityItems) {
-    const running = city.running === true;
+    const running = city.running;
     const current = city.name === selected;
     const tab = el(
       "a",
       {
-        href: `${basePath}?city=${encodeURIComponent(city.name ?? "")}`,
+        href: `${basePath}?city=${encodeURIComponent(city.name)}`,
         class: `city-tab${current ? " active" : ""}${running ? "" : " stopped"}`,
       },
       [
         el("span", { class: `city-dot${running ? " running" : ""}` }),
-        ` ${city.name ?? ""}`,
+        ` ${city.name}`,
       ],
     );
     nav.append(tab);

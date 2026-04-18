@@ -39,6 +39,16 @@
       <div class="summary-banner" id="status-banner"></div>
 
       <div class="panels">
+        <div class="panel panel-full" id="supervisor-overview-panel" hidden>
+          <div class="panel-header">
+            <h2>🏙️ Fleet Overview</h2>
+            <span class="count" id="supervisor-city-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="supervisor-overview-body"></div>
+        </div>
+
         <div class="panel" id="convoy-panel">
           <div class="panel-header">
             <h2>🚚 Convoys</h2>
@@ -353,16 +363,7 @@
             <button class="collapse-btn" aria-label="Toggle panel">▼</button>
             <button class="expand-btn">Expand</button>
           </div>
-          <div class="panel-body">
-            <div id="assign-form" class="assign-form" style="display: none;">
-              <div class="assign-form-row">
-                <input type="text" id="assign-bead" class="assign-input" placeholder="Bead ID (e.g. gc-abc)" />
-                <button class="assign-submit" id="assign-submit-btn">Assign</button>
-                <button class="assign-cancel" id="assign-cancel-btn">Cancel</button>
-              </div>
-            </div>
-            <div id="assigned-body"></div>
-          </div>
+          <div class="panel-body" id="assigned-body"></div>
         </div>
       </div>
     </div>
@@ -411,6 +412,55 @@
             <button type="submit" class="btn-primary" id="issue-submit-btn">Create Issue</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="action-modal" class="modal" style="display: none;">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="action-modal-title">Assign Work</h3>
+          <button class="modal-close" id="action-modal-close-btn">✕</button>
+        </div>
+        <form id="action-form">
+          <div class="form-group readonly-group" id="action-bead-group">
+            <label for="action-bead-id">Bead ID</label>
+            <input type="text" id="action-bead-id" placeholder="gc-abc" required />
+            <div class="form-help" id="action-bead-hint"></div>
+          </div>
+          <div class="form-group">
+            <label for="action-target" id="action-target-label">Target agent or pool</label>
+            <input type="text" id="action-target" list="action-target-list" placeholder="mayor, reviewer, refinery..." required />
+            <datalist id="action-target-list"></datalist>
+          </div>
+          <div class="form-group" id="action-rig-group">
+            <label for="action-rig">Rig (optional)</label>
+            <input type="text" id="action-rig" list="action-rig-list" placeholder="Leave blank for any rig" />
+            <datalist id="action-rig-list"></datalist>
+          </div>
+          <div class="form-help action-modal-help" id="action-modal-help"></div>
+          <div class="form-actions">
+            <button type="button" class="btn-secondary" id="action-modal-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary" id="action-modal-submit-btn">Assign</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="confirm-modal" class="modal" style="display: none;">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content modal-content-compact">
+        <div class="modal-header">
+          <h3 id="confirm-modal-title">Confirm Action</h3>
+          <button class="modal-close" id="confirm-modal-close-btn">✕</button>
+        </div>
+        <div class="modal-body">
+          <p id="confirm-modal-body"></p>
+          <div class="form-actions">
+            <button type="button" class="btn-secondary" id="confirm-modal-cancel-btn">Cancel</button>
+            <button type="button" class="btn-primary" id="confirm-modal-confirm-btn">Confirm</button>
+          </div>
+        </div>
       </div>
     </div>
 

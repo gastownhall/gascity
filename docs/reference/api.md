@@ -33,8 +33,9 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Mail, convoys, orders, formulas, molecules, participants,
   transcripts, adapters.** External messaging and orchestration
   surfaces; see the spec for per-operation shapes.
-- **Event bus.** `GET /v0/events` (append-only poll) and
-  `GET /v0/events/stream` (SSE).
+- **Event bus.** `GET /v0/events` + `GET /v0/events/stream` at
+  supervisor scope, and `GET /v0/city/{cityName}/events` +
+  `GET /v0/city/{cityName}/events/stream` at city scope.
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
 
@@ -65,6 +66,57 @@ Fatal setup errors are returned as normal Problem Details responses
 closes immediately. For example, `GET /v0/events/stream` returns
 `503 application/problem+json` with `detail: "no_providers: ..."`
 when no running city has an event provider registered.
+
+## Event Contract
+
+The event APIs, the SSE streams, and `gc events` are the same contract
+at three different presentation layers. The API is the source of
+truth.
+
+For the explicit CLI output contract, including JSONL framing, empty-output
+behavior, heartbeat suppression, and the `--seq` scalar format, see
+[gc events Formats](/reference/events).
+
+### City Scope
+
+- `GET /v0/city/{cityName}/events`
+  returns `ListBody<Event>` and includes `X-GC-Index`.
+- `GET /v0/city/{cityName}/events/stream`
+  emits:
+  - `event: event` with `EventStreamEnvelope`
+  - `event: heartbeat` with `HeartbeatEvent`
+- Resume:
+  - `Last-Event-ID` or `after_seq`
+- `gc events` in city scope outputs one `Event` JSON object per line.
+- `gc events --watch` and `gc events --follow` in city scope output one
+  `EventStreamEnvelope` JSON object per line.
+- `gc events --seq` in city scope prints the API's `X-GC-Index` value.
+
+### Supervisor Scope
+
+- `GET /v0/events`
+  returns `{ items: TaggedEvent[], total }`.
+- `GET /v0/events/stream`
+  emits:
+  - `event: tagged_event` with `TaggedEventStreamEnvelope`
+  - `event: heartbeat` with `HeartbeatEvent`
+- Resume:
+  - `Last-Event-ID` or `after_cursor`
+- `gc events` in supervisor scope outputs one `TaggedEvent` JSON object
+  per line.
+- `gc events --watch` and `gc events --follow` in supervisor scope
+  output one `TaggedEventStreamEnvelope` JSON object per line.
+- `gc events --seq` in supervisor scope prints the current composite
+  supervisor cursor, suitable for `--after-cursor`.
+
+### Transport vs Semantic Type
+
+- The SSE `event:` line is the transport envelope:
+  `event`, `tagged_event`, or `heartbeat`.
+- The semantic event kind is the JSON payload's `type` field:
+  `bead.created`, `mail.sent`, `session.woke`, and so on.
+- The CLI does not define a separate event schema. It streams the same
+  DTOs and envelopes as JSONL.
 
 ## Versioning
 

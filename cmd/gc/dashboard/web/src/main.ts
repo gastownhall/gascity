@@ -5,16 +5,21 @@ import { renderCrew, installCrewInteractions } from "./panels/crew";
 import { renderIssues, installIssueInteractions } from "./panels/issues";
 import { renderMail, installMailInteractions } from "./panels/mail";
 import { renderConvoys, installConvoyInteractions } from "./panels/convoys";
-import { loadActivityHistory, startActivityStream, renderActivity, installActivityInteractions } from "./panels/activity";
+import { eventTypeFromMessage, loadActivityHistory, startActivityStream, installActivityInteractions } from "./panels/activity";
 import { renderAdminPanels, installAdminInteractions } from "./panels/admin";
 import { invalidateOptions } from "./panels/options";
-import { connectEvents } from "./sse";
-import { installPanelAffordances, popPause, refreshPaused } from "./ui";
+import { installPanelAffordances, popPause, refreshPaused, reportUIError } from "./ui";
 import { installCommandPalette } from "./palette";
-
-const REFRESH_MS = 30_000;
-
-type RefreshFn = () => Promise<void> | void;
+import { installDashboardLogging, logInfo } from "./logger";
+import {
+  consumeInvalidated,
+  invalidateAll,
+  invalidateForEventType,
+  syncCityScopeFromLocation,
+  type DashboardResource,
+} from "./state";
+import { renderSupervisorOverview } from "./panels/supervisor";
+import { installSharedModals } from "./modals";
 
 const CITY_SCOPED_PANEL_IDS = [
   "convoy-panel",
@@ -30,53 +35,31 @@ const CITY_SCOPED_PANEL_IDS = [
   "assigned-panel",
 ];
 
-const dataPanels: RefreshFn[] = [
-  renderStatus,
-  renderCrew,
-  renderIssues,
-  renderMail,
-  renderConvoys,
-  renderAdminPanels,
-  loadActivityHistory,
-];
-
 async function refreshAll(): Promise<void> {
   if (refreshPaused()) return;
-  await refreshAllForced();
+  await refreshVisibleResources();
 }
 
 async function refreshAllForced(): Promise<void> {
-  syncCityScopedControls();
-  invalidateOptions();
-  await Promise.allSettled([
-    renderCityTabs(),
-    ...dataPanels.map((fn) => Promise.resolve(fn())),
-  ]);
-  renderActivity();
+  invalidateAll();
+  await refreshVisibleResources(true);
 }
 
 function wireSSE(): void {
-  startActivityStream();
+  startActivityStream((msg) => {
+    if (refreshPaused()) return;
+    const eventType = eventTypeFromMessage(msg);
+    if (!eventType || eventType === "heartbeat") return;
+    invalidateForEventType(eventType);
+    void refreshVisibleResources().catch((error) => reportUIError("Refresh failed", error));
+  });
   byId("connection-status")?.replaceChildren(document.createTextNode("Live"));
   byId("connection-status")?.classList.add("connection-live");
-
-  connectEvents((msg) => {
-    if (refreshPaused()) return;
-    if (msg.type === "message" || msg.type === "heartbeat") return;
-    const stateChanging = [
-      "session.started", "session.ended", "session.crashed", "session.woke", "session.suspended",
-      "bead.created", "bead.updated", "bead.closed",
-      "mail.delivered", "mail.read",
-      "convoy.created", "convoy.closed",
-    ];
-    if (stateChanging.includes(msg.type)) {
-      void Promise.all(dataPanels.map((fn) => Promise.resolve(fn())));
-    }
-  });
 }
 
 function installInteractions(): void {
   installPanelAffordances();
+  installSharedModals();
   installCrewInteractions();
   installIssueInteractions();
   installMailInteractions();
@@ -87,20 +70,20 @@ function installInteractions(): void {
 }
 
 async function boot(): Promise<void> {
+  installDashboardLogging();
+  logInfo("dashboard", "Boot start", { city: cityScope(), href: window.location.href });
   installInteractions();
   installCityScopeNavigation();
   await refreshAllForced();
   wireSSE();
-  window.setInterval(() => {
-    void refreshAll();
-  }, REFRESH_MS);
+  logInfo("dashboard", "Boot complete", { city: cityScope(), href: window.location.href });
 }
 
 function byId(id: string): HTMLElement | null {
   return document.getElementById(id);
 }
 
-void boot();
+void boot().catch((error) => reportUIError("Dashboard boot failed", error));
 
 function syncCityScopedControls(): void {
   const hasCity = cityScope() !== "";
@@ -132,14 +115,20 @@ function installCityScopeNavigation(): void {
   });
 
   window.addEventListener("popstate", () => {
-    void refreshAllForced();
+    logInfo("dashboard", "Popstate navigation", { href: window.location.href });
+    syncCityScopeFromLocation();
+    invalidateAll();
+    void refreshVisibleResources().catch((error) => reportUIError("Refresh failed", error));
     startActivityStream();
   });
 }
 
 async function navigateCityScope(nextURL: string): Promise<void> {
+  logInfo("dashboard", "Navigate city scope", { nextURL });
   window.history.pushState({}, "", nextURL);
-  await refreshAllForced();
+  syncCityScopeFromLocation();
+  invalidateAll();
+  await refreshVisibleResources();
   startActivityStream();
 }
 
@@ -156,4 +145,52 @@ function syncCityScopedPanels(hasCity: boolean): void {
       popPause();
     }
   });
+}
+
+async function refreshVisibleResources(force = false): Promise<void> {
+  syncCityScopeFromLocation();
+  syncCityScopedControls();
+
+  const dirty = consumeInvalidated(force);
+  if (dirty.size === 0) return;
+  if (dirty.has("options")) {
+    invalidateOptions();
+  }
+
+  if (dirty.has("cities")) {
+    await renderCityTabs().catch((error) => reportUIError("City tabs failed", error));
+  }
+
+  const tasks: Array<Promise<void>> = [];
+  const hasCity = cityScope() !== "";
+
+  queueRefresh(tasks, dirty, "status", () => renderStatus());
+  queueRefresh(tasks, dirty, "activity", () => loadActivityHistory());
+  if (hasCity) {
+    queueRefresh(tasks, dirty, "crew", () => renderCrew());
+    queueRefresh(tasks, dirty, "issues", () => renderIssues());
+    queueRefresh(tasks, dirty, "mail", () => renderMail());
+    queueRefresh(tasks, dirty, "convoys", () => renderConvoys());
+    queueRefresh(tasks, dirty, "admin", () => renderAdminPanels());
+  }
+
+  const results = await Promise.allSettled(tasks);
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failure) {
+    reportUIError("Panel refresh failed", failure.reason);
+  }
+
+  if (dirty.has("supervisor") || dirty.has("cities")) {
+    renderSupervisorOverview();
+  }
+}
+
+function queueRefresh(
+  tasks: Array<Promise<void>>,
+  dirty: Set<DashboardResource>,
+  resource: DashboardResource,
+  run: () => Promise<void>,
+): void {
+  if (!dirty.has(resource)) return;
+  tasks.push(run());
 }

@@ -1,20 +1,10 @@
+import type { BeadRecord } from "../api";
 import { api, cityScope } from "../api";
+import { promptActionDialog } from "../modals";
 import { byId, clear, el } from "../util/dom";
 import { beadPriority, formatTimestamp, priorityBadgeClass, truncate } from "../util/legacy";
 import { getOptions } from "./options";
 import { popPause, pushPause, showToast } from "../ui";
-
-interface BeadRecord {
-  assignee?: string;
-  created_at?: string;
-  description?: string;
-  id?: string;
-  issue_type?: string;
-  labels?: string[] | null;
-  priority?: number;
-  status?: string;
-  title?: string;
-}
 
 let allIssues: BeadRecord[] = [];
 let currentTab: "ready" | "progress" | "all" = "ready";
@@ -46,13 +36,13 @@ export async function renderIssues(): Promise<void> {
   }
 
   allIssues = [...(openR.data?.items ?? []), ...(progressR.data?.items ?? [])]
-    .filter((bead) => !isInternalBead(bead as BeadRecord))
+    .filter((bead) => !isInternalBead(bead))
     .sort((a, b) => {
       const pa = beadPriority(a.priority);
       const pb = beadPriority(b.priority);
       if (pa !== pb) return pa - pb;
       return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-    }) as BeadRecord[];
+    });
   byId("issues-count")!.textContent = String(allIssues.length);
 
   const rigTabs = byId("rig-filter-tabs");
@@ -202,6 +192,7 @@ export function openIssueModal(): void {
   if (!modal) return;
   if (modal.style.display !== "block") pushPause();
   modal.style.display = "block";
+  byId("issues-panel")?.scrollIntoView?.({ behavior: "smooth", block: "center" });
   byId<HTMLInputElement>("issue-title")?.focus();
 }
 
@@ -246,7 +237,7 @@ async function openIssueDetail(issueID: string): Promise<void> {
     showToast("error", "Issue failed", issueR.error?.detail ?? "Could not load bead");
     return;
   }
-  const issue = issueR.data as BeadRecord;
+  const issue = issueR.data;
   byId("issue-detail-id")!.textContent = issue.id ?? issueID;
   byId("issue-detail-title-text")!.textContent = issue.title ?? issueID;
   byId("issue-detail-description")!.textContent = issue.description || "(no description)";
@@ -417,18 +408,22 @@ async function assignIssue(issueID: string, assignee: string): Promise<void> {
 async function slingIssue(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
-  const target = window.prompt("Target agent or pool");
-  if (!target) return;
-  const rig = window.prompt("Rig name (optional)") ?? "";
+  const selection = await promptActionDialog({
+    beadID: issueID,
+    beadLabel: issueID,
+    mode: "sling",
+    title: "Sling Bead",
+  });
+  if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/sling", {
     params: { path: { cityName: city } },
-    body: { bead: issueID, target, rig: rig || undefined },
+    body: { bead: issueID, target: selection.target, rig: selection.rig || undefined },
   });
   if (res.error) {
     showToast("error", "Sling failed", res.error.detail ?? "Could not sling issue");
     return;
   }
-  showToast("success", "Work assigned", `${issueID} → ${target}`);
+  showToast("success", "Work assigned", `${issueID} → ${selection.target}`);
   await renderIssues();
   if (currentIssueID === issueID) {
     await openIssueDetail(issueID);

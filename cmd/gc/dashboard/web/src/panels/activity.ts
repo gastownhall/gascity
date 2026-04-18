@@ -1,19 +1,36 @@
+import type {
+  CityEventRecord,
+  CityEventStreamEnvelope,
+  SupervisorEventRecord,
+  SupervisorEventStreamEnvelope,
+} from "../api";
 import { api, cityScope } from "../api";
+import { logDebug } from "../logger";
 import { byId, clear, el } from "../util/dom";
-import { connectCityEvents, connectEvents, type EventMessage, type SSEHandle } from "../sse";
+import {
+  connectCityEvents,
+  connectEvents,
+  semanticEventType,
+  type DashboardEventMessage,
+  type SSEHandle,
+} from "../sse";
 import { eventCategory, eventIcon, eventSummary, extractRig, formatAgentAddress } from "../util/legacy";
 import { relativeTime } from "../util/time";
 
-interface ActivityEntry {
+export interface ActivityEntry {
   actor?: string;
   category: string;
   id: string;
   message?: string;
   rig: string;
+  scope: string;
+  seq: number;
   subject?: string;
   ts: string;
   type: string;
 }
+
+type DashboardEventRecord = CityEventRecord | SupervisorEventRecord | CityEventStreamEnvelope | SupervisorEventStreamEnvelope;
 
 const MAX_ENTRIES = 150;
 const entries: ActivityEntry[] = [];
@@ -23,7 +40,7 @@ let rigFilter = "all";
 let agentFilter = "all";
 
 export async function seedActivity(entriesFromAPI: ActivityEntry[]): Promise<void> {
-  entries.splice(0, entries.length, ...entriesFromAPI.slice(0, MAX_ENTRIES));
+  entries.splice(0, entries.length, ...normalizeEntries(entriesFromAPI));
   renderActivity();
 }
 
@@ -37,20 +54,27 @@ export async function loadActivityHistory(): Promise<void> {
         params: { query: { since: "1h" } },
       });
   const normalized = (res.data?.items ?? [])
-    .map((item) => toEntry({ type: String((item as { type?: string }).type ?? "event"), data: item }))
+    .map((item) => toEntryFromRecord(item))
     .filter((item): item is ActivityEntry => item !== null);
   await seedActivity(normalized);
 }
 
-export function startActivityStream(): void {
+export function startActivityStream(onEvent?: (msg: DashboardEventMessage, eventType: string) => void): void {
   const city = cityScope();
   handle?.close();
-  const connect = city ? (onEvent: (msg: EventMessage) => void) => connectCityEvents(city, onEvent) : connectEvents;
+  const connect = city
+    ? (listener: (msg: DashboardEventMessage) => void) => connectCityEvents(city, listener)
+    : connectEvents;
   handle = connect((msg) => {
-    const entry = toEntry(msg);
+    const eventType = eventTypeFromMessage(msg);
+    onEvent?.(msg, eventType);
+    const entry = toEntryFromMessage(msg);
     if (!entry) return;
-    entries.unshift(entry);
-    if (entries.length > MAX_ENTRIES) entries.length = MAX_ENTRIES;
+    if (entries.some((current) => current.id === entry.id)) {
+      logDebug("activity", "Duplicate stream event ignored", { id: entry.id, type: entry.type });
+      return;
+    }
+    entries.splice(0, entries.length, ...normalizeEntries([entry, ...entries]));
     renderActivity();
   });
 }
@@ -181,28 +205,92 @@ function filterButton(value: string, label: string): HTMLElement {
   return btn;
 }
 
-function toEntry(msg: EventMessage): ActivityEntry | null {
-  const raw = msg.data as Record<string, unknown> | undefined;
-  if (!raw) return null;
-  const envelope = raw.data && typeof raw.data === "object" ? raw.data as Record<string, unknown> : raw;
-  const type = (raw.type as string) || (msg.type === "event" ? String(envelope.type ?? "") : msg.type);
-  if (!type || type === "heartbeat") return null;
-  const actor = String(envelope.actor ?? raw.actor ?? "");
-  const subject = String(envelope.subject ?? raw.subject ?? "");
-  const message = String(envelope.message ?? raw.message ?? "");
-  const ts = String(envelope.ts ?? raw.ts ?? new Date().toISOString());
-  const city = String(envelope.city ?? raw.city ?? "");
+function toEntryFromMessage(msg: DashboardEventMessage): ActivityEntry | null {
+  if (msg.event === "heartbeat") return null;
+  return toActivityEntry(msg.data, msg.id);
+}
+
+function toEntryFromRecord(record: CityEventRecord | SupervisorEventRecord): ActivityEntry | null {
+  return toActivityEntry(record);
+}
+
+function toActivityEntry(record: DashboardEventRecord, eventID?: string): ActivityEntry | null {
+  if (!record.type) return null;
+  const scope = recordCity(record) ?? cityScope();
+  const seq = typeof record.seq === "number" ? record.seq : 0;
   return {
-    id: msg.id ?? `${type}:${ts}`,
-    type,
-    category: eventCategory(type),
-    actor,
-    subject,
-    message,
-    ts,
-    rig: extractRig(actor) || city,
+    id: stableEventID(record, eventID),
+    type: record.type,
+    category: eventCategory(record.type),
+    actor: record.actor || undefined,
+    subject: record.subject || undefined,
+    message: record.message || undefined,
+    ts: record.ts,
+    scope,
+    seq,
+    rig: extractRig(record.actor) || ("city" in record ? (record.city || "") : ""),
   };
 }
+
+function normalizeEntries(nextEntries: ActivityEntry[]): ActivityEntry[] {
+  const deduped = new Map<string, ActivityEntry>();
+  nextEntries.forEach((entry) => {
+    if (!deduped.has(entry.id)) {
+      deduped.set(entry.id, entry);
+    }
+  });
+  return [...deduped.values()]
+    .sort(compareEntries)
+    .slice(0, MAX_ENTRIES);
+}
+
+function compareEntries(a: ActivityEntry, b: ActivityEntry): number {
+  const byTimestamp = compareTimestampDesc(a.ts, b.ts);
+  if (byTimestamp !== 0) return byTimestamp;
+  const byScope = a.scope.localeCompare(b.scope);
+  if (byScope !== 0) return byScope;
+  const bySeq = b.seq - a.seq;
+  if (bySeq !== 0) return bySeq;
+  const byType = a.type.localeCompare(b.type);
+  if (byType !== 0) return byType;
+  const byActor = (a.actor ?? "").localeCompare(b.actor ?? "");
+  if (byActor !== 0) return byActor;
+  return (a.subject ?? "").localeCompare(b.subject ?? "");
+}
+
+function compareTimestampDesc(a: string, b: string): number {
+  const aTime = Number.isNaN(Date.parse(a)) ? 0 : Date.parse(a);
+  const bTime = Number.isNaN(Date.parse(b)) ? 0 : Date.parse(b);
+  return bTime - aTime;
+}
+
+function recordCity(record: DashboardEventRecord): string | undefined {
+  if ("city" in record && typeof record.city === "string" && record.city !== "") {
+    return record.city;
+  }
+  return undefined;
+}
+
+function stableEventID(record: DashboardEventRecord, eventID?: string): string {
+  const scope = recordCity(record) ?? cityScope();
+  if (typeof record.seq === "number" && record.seq > 0) {
+    return `${scope}:${record.seq}`;
+  }
+  const fallback = [
+    record.type,
+    record.ts,
+    record.actor ?? "",
+    record.subject ?? "",
+    record.message ?? "",
+    eventID ?? "",
+  ].join(":");
+  return `${scope}:${fallback}`;
+}
+
+export function eventTypeFromMessage(msg: DashboardEventMessage): string {
+  return semanticEventType(msg);
+}
+
 function activityTypeClass(category: string): string {
   switch (category) {
     case "agent":

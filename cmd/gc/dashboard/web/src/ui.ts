@@ -1,4 +1,5 @@
 import { byId } from "./util/dom";
+import { logError } from "./logger";
 
 let pauseCount = 0;
 
@@ -40,9 +41,22 @@ export function showToast(type: "success" | "error" | "info", title: string, mes
   toast.className = `toast toast-${type}`;
   toast.innerHTML = `<strong>${escapeHTML(title)}</strong><div>${escapeHTML(message)}</div>`;
   container.append(toast);
+  const lifetimeMs = type === "error" ? 9000 : 5000;
+  window.requestAnimationFrame(() => {
+    toast.classList.add("show");
+  });
   window.setTimeout(() => {
-    toast.remove();
-  }, 3200);
+    toast.classList.remove("show");
+    window.setTimeout(() => {
+      toast.remove();
+    }, 300);
+  }, lifetimeMs);
+}
+
+export function reportUIError(title: string, error: unknown, fallbackMessage = "Unexpected dashboard error"): void {
+  const message = error instanceof Error ? error.message : fallbackMessage;
+  logError("ui", title, { error, fallbackMessage, message });
+  showToast("error", title, message);
 }
 
 export function installPanelAffordances(): void {

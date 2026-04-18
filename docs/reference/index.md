@@ -8,6 +8,7 @@ description: CLI, config, formula, and provider reference material.
 - [CLI Reference](/reference/cli)
 - [Config Reference](/reference/config)
 - [Supervisor REST API](/reference/api)
+- [gc events Formats](/reference/events)
 
 ## Hand-Maintained Reference Docs
 

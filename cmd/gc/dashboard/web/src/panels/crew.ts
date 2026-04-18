@@ -1,22 +1,9 @@
+import type { SessionRecord } from "../api";
 import { api, cityScope } from "../api";
 import { byId, clear, el } from "../util/dom";
 import { calculateActivity, formatTimestamp, statusBadgeClass, truncate } from "../util/legacy";
-import { connectAgentOutput, type EventMessage, type SSEHandle } from "../sse";
+import { connectAgentOutput, type AgentOutputMessage, type SSEHandle } from "../sse";
 import { popPause, pushPause, showToast } from "../ui";
-
-interface SessionRecord {
-  active_bead?: string;
-  attached: boolean;
-  id: string;
-  last_active?: string;
-  last_output?: string;
-  pool?: string;
-  rig?: string;
-  running: boolean;
-  session_name: string;
-  state: string;
-  template: string;
-}
 
 let logHandle: SSEHandle | null = null;
 let logSessionID = "";
@@ -38,6 +25,7 @@ export async function renderCrew(): Promise<void> {
   const dogsBody = byId("dogs-body");
   if (!crewLoading || !crewTable || !crewEmpty || !crewBody || !polecatsBody || !dogsBody) return;
 
+  setCrewEmptyMessage("No crew configured");
   crewLoading.style.display = "block";
   crewTable.style.display = "none";
   crewEmpty.style.display = "none";
@@ -53,7 +41,7 @@ export async function renderCrew(): Promise<void> {
     return;
   }
 
-  const sessions = data.items as SessionRecord[];
+  const sessions = data.items;
   const pending = await Promise.all(
     sessions.map(async (session) => {
       const res = await api.GET("/v0/city/{cityName}/session/{id}/pending", {
@@ -107,6 +95,7 @@ export async function renderCrew(): Promise<void> {
   if (crew.length > 0) {
     crewTable.style.display = "table";
   } else {
+    setCrewEmptyMessage("No crew configured");
     crewEmpty.style.display = "block";
   }
 
@@ -130,10 +119,14 @@ function resetCrewNoCity(): void {
   crewLoading.style.display = "none";
   crewTable.style.display = "none";
   crewEmpty.style.display = "block";
-  crewEmpty.querySelector("p")?.replaceChildren(document.createTextNode("Select a city to view crew"));
+  setCrewEmptyMessage("Select a city to view crew");
   clear(crewBody);
   renderSimpleEmpty(polecatsBody, "Select a city to view polecats");
   renderSimpleEmpty(dogsBody, "Select a city to view dogs");
+}
+
+function setCrewEmptyMessage(message: string): void {
+  byId("crew-empty")?.querySelector("p")?.replaceChildren(document.createTextNode(message));
 }
 
 function classifyCrewState(session: SessionRecord, hasPending: boolean): string {
@@ -335,7 +328,7 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
   olderBtn.style.display = res.data.pagination?.has_older_messages ? "inline-flex" : "none";
 }
 
-function appendStreamEvent(msg: EventMessage): void {
+function appendStreamEvent(msg: AgentOutputMessage): void {
   const messagesEl = byId("log-drawer-messages");
   if (!messagesEl) return;
   const payload = msg.data as { data?: { message?: { role?: string; text?: string; timestamp?: string } }; event?: string } | null;

@@ -2,12 +2,15 @@ package dashboard
 
 import (
 	"bytes"
+	"encoding/json"
 	"embed"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Embed the compiled SPA bundle produced by `cmd/gc/dashboard/web/`.
@@ -19,6 +22,18 @@ import (
 //
 //go:embed web/dist
 var spaBundle embed.FS
+
+const maxClientLogBody = 64 << 10
+
+type clientLogEntry struct {
+	City    string          `json:"city"`
+	Details json.RawMessage `json:"details,omitempty"`
+	Level   string          `json:"level"`
+	Message string          `json:"message"`
+	Scope   string          `json:"scope"`
+	TS      string          `json:"ts"`
+	URL     string          `json:"url"`
+}
 
 // NewStaticHandler returns a handler that serves the SPA bundle.
 // `supervisorURL` is injected into index.html so the SPA knows where
@@ -39,6 +54,7 @@ func NewStaticHandler(supervisorURL string) (http.Handler, error) {
 	fileServer := http.FileServer(http.FS(sub))
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/__client-log", handleClientLog)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Every request that isn't a known static asset routes to
 		// index.html so client-side navigation works. The SPA has no
@@ -63,6 +79,53 @@ func NewStaticHandler(supervisorURL string) (http.Handler, error) {
 	})
 
 	return mux, nil
+}
+
+func handleClientLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close() //nolint:errcheck
+
+	var entry clientLogEntry
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxClientLogBody)).Decode(&entry); err != nil {
+		log.Printf("dashboard: client log decode failed from %s: %v", r.RemoteAddr, err)
+		http.Error(w, "invalid client log payload", http.StatusBadRequest)
+		return
+	}
+
+	level := strings.TrimSpace(entry.Level)
+	if level == "" {
+		level = "info"
+	}
+	scope := strings.TrimSpace(entry.Scope)
+	if scope == "" {
+		scope = "client"
+	}
+	if strings.TrimSpace(entry.Message) == "" {
+		http.Error(w, "missing client log message", http.StatusBadRequest)
+		return
+	}
+	ts := strings.TrimSpace(entry.TS)
+	if ts == "" {
+		ts = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+
+	log.Printf(
+		"dashboard: client[%s] ts=%s scope=%s city=%q url=%q msg=%q details=%s ua=%q",
+		level,
+		ts,
+		scope,
+		entry.City,
+		entry.URL,
+		entry.Message,
+		rawJSONDetails(entry.Details),
+		r.UserAgent(),
+	)
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // injectSupervisorURL rewrites the `<meta name="supervisor-url" content="…">`
@@ -98,6 +161,17 @@ func htmlEscape(s string) string {
 		`>`, `&gt;`,
 	)
 	return r.Replace(s)
+}
+
+func rawJSONDetails(details json.RawMessage) string {
+	if len(details) == 0 {
+		return "null"
+	}
+	trimmed := strings.TrimSpace(string(details))
+	if trimmed == "" {
+		return "null"
+	}
+	return trimmed
 }
 
 // logRequest is a thin middleware used by Serve.

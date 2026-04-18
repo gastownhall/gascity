@@ -1,5 +1,10 @@
 import { api, cityScope } from "./api";
+import { logInfo } from "./logger";
 import { byId, clear, el } from "./util/dom";
+import { openAssignModal } from "./panels/admin";
+import { openConvoyCreate } from "./panels/convoys";
+import { openIssueModal } from "./panels/issues";
+import { openMailComposer } from "./panels/mail";
 import { closeOutput, openOutput } from "./ui";
 
 interface PaletteCommand {
@@ -38,9 +43,10 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
         params: { query: { since: "1h" } },
       })) },
       ...(city ? [
-        { name: "new issue", desc: "Open the issue creation modal", category: "Work", run: () => click("new-issue-btn") },
-        { name: "compose mail", desc: "Open the compose mail form", category: "Mail", run: () => click("compose-mail-btn") },
-        { name: "new convoy", desc: "Open the convoy creation form", category: "Convoys", run: () => click("new-convoy-btn") },
+        { name: "new issue", desc: "Open the issue creation modal", category: "Work", run: () => openIssueModal() },
+        { name: "compose mail", desc: "Open the compose mail form", category: "Mail", run: () => openMailComposer() },
+        { name: "new convoy", desc: "Open the convoy creation form", category: "Convoys", run: () => openConvoyCreate() },
+        { name: "assign work", desc: "Open the assignment modal", category: "Assigned", run: () => openAssignModal() },
         {
           name: "status",
           desc: "Show current city status JSON",
@@ -146,6 +152,11 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
     const command = visible[index];
     close();
     if (!command) return;
+    logInfo("palette", "Execute command", {
+      category: command.category,
+      city: cityScope(),
+      command: command.name,
+    });
     await command.run();
   }
 
@@ -186,8 +197,4 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
       }
     }
   });
-}
-
-function click(id: string): void {
-  byId<HTMLElement>(id)?.click();
 }

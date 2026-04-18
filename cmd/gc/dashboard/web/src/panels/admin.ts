@@ -1,37 +1,9 @@
+import type { BeadRecord, RigRecord, ServiceStatusRecord } from "../api";
 import { api, cityScope } from "../api";
+import { promptActionDialog, promptConfirmDialog } from "../modals";
 import { byId, clear, el } from "../util/dom";
 import { formatAgentAddress, formatTimestamp, statusBadgeClass, truncate } from "../util/legacy";
-import { getOptions } from "./options";
 import { showToast } from "../ui";
-
-interface ServiceStatus {
-  kind?: string;
-  local_state: string;
-  publication_state: string;
-  service_name: string;
-  state?: string;
-}
-
-interface RigRecord {
-  agent_count: number;
-  git?: { branch?: string; dirty?: boolean };
-  last_activity?: string;
-  name: string;
-  running_count: number;
-  suspended: boolean;
-}
-
-interface BeadRecord {
-  assignee?: string;
-  created_at?: string;
-  description?: string;
-  id?: string;
-  issue_type?: string;
-  labels?: string[] | null;
-  priority?: number;
-  status?: string;
-  title?: string;
-}
 
 export async function renderAdminPanels(): Promise<void> {
   const city = cityScope();
@@ -54,11 +26,11 @@ export async function renderAdminPanels(): Promise<void> {
     }),
   ]);
 
-  renderServices(servicesR.data?.items as ServiceStatus[] | null, servicesR.error?.detail);
-  renderRigs(rigsR.data?.items as RigRecord[] | null);
-  renderEscalations(escalationsR.data?.items as BeadRecord[] | null);
-  renderAssigned(assignedR.data?.items as BeadRecord[] | null);
-  renderQueues(queuesR.data?.items as BeadRecord[] | null);
+  renderServices(servicesR.data?.items ?? null, servicesR.error?.detail);
+  renderRigs(rigsR.data?.items ?? null);
+  renderEscalations(escalationsR.data?.items ?? null);
+  renderAssigned(assignedR.data?.items ?? null);
+  renderQueues(queuesR.data?.items ?? null);
 }
 
 function renderAdminEmptyStates(): void {
@@ -67,38 +39,19 @@ function renderAdminEmptyStates(): void {
   renderEmptyBody("escalations-body", "escalations-count", "Select a city to view escalations");
   renderEmptyBody("assigned-body", "assigned-count", "Select a city to view assigned work");
   renderEmptyBody("queues-body", "queues-count", "Select a city to view queues");
-  byId("assign-form")!.style.display = "none";
   byId("clear-assigned-btn")!.style.display = "none";
 }
 
 export function installAdminInteractions(): void {
   byId("open-assign-btn")?.addEventListener("click", () => {
-    byId("assign-form")!.style.display = "block";
-    byId<HTMLInputElement>("assign-bead")?.focus();
-  });
-  byId("assign-cancel-btn")?.addEventListener("click", () => {
-    byId("assign-form")!.style.display = "none";
-  });
-  byId("assign-submit-btn")?.addEventListener("click", () => {
-    void assignFromPanel();
+    void openAssignModal();
   });
   byId("clear-assigned-btn")?.addEventListener("click", () => {
     void clearAllAssigned();
   });
-  byId<HTMLInputElement>("assign-bead")?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void assignFromPanel();
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      byId("assign-form")!.style.display = "none";
-    }
-  });
 }
 
-function renderServices(items: ServiceStatus[] | null, error?: string): void {
+function renderServices(items: ServiceStatusRecord[] | null, error?: string): void {
   const body = byId("services-body");
   const count = byId("services-count");
   if (!body || !count) return;
@@ -168,7 +121,7 @@ function renderRigs(items: RigRecord[] | null): void {
       el("td", {}, [el("span", { class: "rig-name" }, [rig.name])]),
       el("td", {}, [String(rig.agent_count - rig.running_count)]),
       el("td", {}, [String(rig.running_count)]),
-      el("td", {}, [rig.git?.branch ? `${rig.git.branch}${rig.git.dirty ? "*" : ""}` : "—"]),
+      el("td", {}, [rig.git?.branch ? `${rig.git.branch}${rig.git.clean ? "" : "*"}` : "—"]),
       el("td", {}, [formatTimestamp(rig.last_activity)]),
       el("td", {}, [suspendResume, " ", restart]),
     ]));
@@ -295,25 +248,22 @@ function renderQueues(items: BeadRecord[] | null): void {
 
   const tbody = el("tbody");
   queues.forEach((queue) => {
-    const counts = parseQueueDescription(queue.description ?? "");
     tbody.append(el("tr", {}, [
       el("td", {}, [queue.title ?? queue.id ?? "queue"]),
+      el("td", {}, [queue.id ?? "—"]),
       el("td", {}, [el("span", { class: `badge ${statusBadgeClass(queue.status)}` }, [queue.status ?? "open"])]),
-      el("td", {}, [String(counts.available)]),
-      el("td", {}, [String(counts.processing)]),
-      el("td", {}, [String(counts.completed)]),
-      el("td", {}, [String(counts.failed)]),
+      el("td", {}, [formatAgentAddress(queue.assignee)]),
+      el("td", {}, [formatTimestamp(queue.created_at)]),
     ]));
   });
 
   body.append(el("table", {}, [
     el("thead", {}, [el("tr", {}, [
       el("th", {}, ["Queue"]),
+      el("th", {}, ["Bead"]),
       el("th", {}, ["Status"]),
-      el("th", {}, ["Avail"]),
-      el("th", {}, ["Proc"]),
-      el("th", {}, ["Done"]),
-      el("th", {}, ["Fail"]),
+      el("th", {}, ["Assignee"]),
+      el("th", {}, ["Created"]),
     ])]),
     tbody,
   ]));
@@ -348,41 +298,25 @@ function severityBadge(severity: string): string {
   }
 }
 
-function parseQueueDescription(description: string): Record<string, number> {
-  const result = { available: 0, processing: 0, completed: 0, failed: 0 };
-  description.split("\n").forEach((line) => {
-    const match = line.trim().match(/^([a-z_]+):\s*(\d+)/);
-    if (!match) return;
-    const key = match[1];
-    const value = Number(match[2]);
-    if (key === "available_count") result.available = value;
-    if (key === "processing_count") result.processing = value;
-    if (key === "completed_count") result.completed = value;
-    if (key === "failed_count") result.failed = value;
-  });
-  return result;
-}
-
-async function assignFromPanel(): Promise<void> {
+export async function openAssignModal(beadID = ""): Promise<void> {
   const city = cityScope();
   if (!city) return;
-  const beadID = byId<HTMLInputElement>("assign-bead")?.value.trim() ?? "";
-  if (!beadID) return;
-  const options = await getOptions();
-  const target = window.prompt(`Target agent or pool.\nAvailable agents: ${options.agents.join(", ")}`);
-  if (!target) return;
-  const rig = window.prompt("Rig name (optional)") ?? "";
+  const selection = await promptActionDialog({
+    beadID: beadID || undefined,
+    beadLabel: beadID ? beadID : undefined,
+    mode: "assign",
+    title: "Assign Work",
+  });
+  if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/sling", {
     params: { path: { cityName: city } },
-    body: { bead: beadID, target, rig: rig || undefined },
+    body: { bead: selection.beadID, target: selection.target, rig: selection.rig || undefined },
   });
   if (res.error) {
     showToast("error", "Assign failed", res.error.detail ?? "Could not assign bead");
     return;
   }
-  byId("assign-form")!.style.display = "none";
-  byId<HTMLInputElement>("assign-bead")!.value = "";
-  showToast("success", "Assigned", `${beadID} → ${target}`);
+  showToast("success", "Assigned", `${selection.beadID} → ${selection.target}`);
   await renderAdminPanels();
 }
 
@@ -397,7 +331,12 @@ async function clearAllAssigned(): Promise<void> {
     showToast("info", "Nothing to clear", "No assigned work");
     return;
   }
-  if (!window.confirm("Unassign all active work?")) return;
+  const confirmed = await promptConfirmDialog({
+    body: `Unassign ${items.length} active ${items.length === 1 ? "bead" : "beads"}?`,
+    confirmLabel: "Unassign All",
+    title: "Clear Assignments",
+  });
+  if (!confirmed) return;
   await Promise.all(items.map((bead) =>
     api.POST("/v0/city/{cityName}/bead/{id}/assign", {
       params: { path: { cityName: city, id: bead.id ?? "" } },
@@ -484,17 +423,21 @@ async function closeBead(issueID: string): Promise<void> {
 async function reassignBead(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
-  const options = await getOptions();
-  const assignee = window.prompt(`New assignee.\nAvailable: ${options.agents.join(", ")}`);
-  if (assignee == null) return;
+  const selection = await promptActionDialog({
+    beadID: issueID,
+    beadLabel: issueID,
+    mode: "reassign",
+    title: "Reassign Escalation",
+  });
+  if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/assign", {
     params: { path: { cityName: city, id: issueID } },
-    body: { assignee },
+    body: { assignee: selection.target },
   });
   if (res.error) {
     showToast("error", "Reassign failed", res.error.detail ?? "Could not reassign escalation");
     return;
   }
-  showToast("success", "Reassigned", `${issueID} → ${assignee || "unassigned"}`);
+  showToast("success", "Reassigned", `${issueID} → ${selection.target || "unassigned"}`);
   await renderAdminPanels();
 }

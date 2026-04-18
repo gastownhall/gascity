@@ -1,21 +1,11 @@
+import type { MailRecord } from "../api";
 import { api, cityScope } from "../api";
+import { logError, logInfo, logWarn } from "../logger";
 import { byId, clear, el } from "../util/dom";
 import { formatAgentAddress, formatTimestamp } from "../util/legacy";
 import { relativeTime } from "../util/time";
 import { getOptions } from "./options";
-import { popPause, pushPause, showToast } from "../ui";
-
-interface MailRecord {
-  body?: string;
-  created_at?: string;
-  from?: string;
-  id?: string;
-  read?: boolean;
-  reply_to?: string;
-  subject?: string;
-  thread_id?: string;
-  to?: string;
-}
+import { popPause, pushPause, reportUIError, showToast } from "../ui";
 
 interface MailThread {
   id: string;
@@ -40,6 +30,7 @@ export async function renderMail(): Promise<void> {
     return;
   }
 
+  setMailEmptyMessage("No mail in inbox");
   loading.style.display = "block";
   threadsEl.style.display = "none";
   empty.style.display = "none";
@@ -55,7 +46,7 @@ export async function renderMail(): Promise<void> {
     return;
   }
 
-  allMessages = [...(data.items as MailRecord[])].sort((a, b) =>
+  allMessages = [...data.items].sort((a, b) =>
     (b.created_at ?? "").localeCompare(a.created_at ?? ""),
   );
   byId("mail-count")!.textContent = String(allMessages.length);
@@ -86,9 +77,13 @@ function resetMailNoCity(): void {
   clear(threadsEl);
   clear(allEl);
   threadsEl.style.display = "none";
-  empty.querySelector("p")?.replaceChildren(document.createTextNode("Select a city to view mail"));
+  setMailEmptyMessage("Select a city to view mail");
   empty.style.display = currentTab === "inbox" ? "block" : "none";
   allEl.append(el("div", { class: "empty-state" }, [el("p", {}, ["Select a city to view mail traffic"])]));
+}
+
+function setMailEmptyMessage(message: string): void {
+  byId("mail-empty")?.querySelector("p")?.replaceChildren(document.createTextNode(message));
 }
 
 function renderThreadedInbox(messages: MailRecord[]): void {
@@ -99,6 +94,7 @@ function renderThreadedInbox(messages: MailRecord[]): void {
   clear(threadsEl);
   if (threads.length === 0) {
     threadsEl.style.display = "none";
+    setMailEmptyMessage("No mail in inbox");
     empty.style.display = "block";
     return;
   }
@@ -174,7 +170,7 @@ async function openThread(threadID: string): Promise<void> {
     showToast("error", "Thread failed", res.error?.detail ?? "Could not load mail thread");
     return;
   }
-  const messages = res.data.items as MailRecord[];
+  const messages = res.data.items;
   const latest = messages[messages.length - 1] ?? messages[0];
   currentMessage = latest;
   showMailDetail(latest, messages);
@@ -190,7 +186,7 @@ async function openMessage(messageID: string): Promise<void> {
     showToast("error", "Message failed", res.error?.detail ?? "Could not load message");
     return;
   }
-  currentMessage = res.data as MailRecord;
+  currentMessage = res.data;
   await api.POST("/v0/city/{cityName}/mail/{id}/read", {
     params: { path: { cityName: city, id: messageID } },
   });
@@ -221,6 +217,7 @@ function showMailDetail(message: MailRecord, thread: MailRecord[]): void {
   }
   syncMailDetailControls();
   switchMailView("detail");
+  revealMailPanel("mail-detail");
   if (!hadSubview) pushPause();
 }
 
@@ -261,7 +258,7 @@ export function installMailInteractions(): void {
   });
 
   byId("compose-mail-btn")?.addEventListener("click", () => {
-    void openComposer();
+    void openMailComposer();
   });
   byId("compose-back-btn")?.addEventListener("click", () => {
     const returningToDetail = !!currentMessage;
@@ -276,7 +273,7 @@ export function installMailInteractions(): void {
   });
 
   byId("mail-reply-btn")?.addEventListener("click", () => {
-    if (currentMessage?.id) void openComposer(currentMessage);
+    if (currentMessage?.id) void openMailComposer(currentMessage);
   });
 
   byId("mail-send-btn")?.addEventListener("click", () => {
@@ -291,25 +288,47 @@ export function installMailInteractions(): void {
   });
 }
 
-async function openComposer(replyTo?: MailRecord): Promise<void> {
+export async function openMailComposer(replyTo?: MailRecord): Promise<void> {
+  if (!cityScope()) {
+    showToast("info", "No city selected", "Select a city to compose mail");
+    logWarn("mail", "Compose blocked without city", { replyTo: replyTo?.id ?? null });
+    return;
+  }
   const select = byId<HTMLSelectElement>("compose-to");
   if (!select) return;
   const hadSubview = mailSubviewOpen();
-  const options = await getOptions();
   clear(select);
   select.append(el("option", { value: "" }, ["Select recipient…"]));
-  options.sessions.forEach((session) => {
-    select.append(el("option", { value: session.id }, [session.label]));
-  });
+  try {
+    const options = await getOptions();
+    options.sessions.forEach((session) => {
+      select.append(el("option", { value: session.recipient }, [session.label]));
+    });
+    logInfo("mail", "Compose options loaded", {
+      city: cityScope(),
+      recipients: options.sessions.length,
+      replyTo: replyTo?.id ?? null,
+    });
+  } catch (error) {
+    logError("mail", "Compose options failed", { city: cityScope(), error });
+    reportUIError("Mail options failed", error, "Could not load recipients");
+  }
 
   byId<HTMLInputElement>("compose-subject")!.value = replyTo ? replySubject(replyTo.subject ?? "") : "";
   byId<HTMLTextAreaElement>("compose-body")!.value = "";
   byId<HTMLInputElement>("compose-reply-to")!.value = replyTo?.id ?? "";
   byId("mail-compose-title")!.textContent = replyTo ? "Reply" : "New Message";
   if (replyTo?.from) {
+    ensureRecipientOption(select, replyTo.from);
     select.value = replyTo.from;
   }
   switchMailView("compose");
+  revealMailPanel("compose-subject");
+  logInfo("mail", "Compose form opened", {
+    city: cityScope(),
+    replyTo: replyTo?.id ?? null,
+    selectedRecipient: select.value || null,
+  });
   if (!hadSubview) pushPause();
 }
 
@@ -323,8 +342,17 @@ async function sendCurrentMessage(): Promise<void> {
 
   if (!to || !subject) {
     showToast("error", "Missing fields", "Recipient and subject are required");
+    logWarn("mail", "Send blocked by missing fields", { bodyLength: body.length, city, subject, to });
     return;
   }
+
+  logInfo("mail", "Send requested", {
+    bodyLength: body.length,
+    city,
+    replyTo: replyTo || null,
+    subject,
+    to,
+  });
 
   const response = replyTo
     ? await api.POST("/v0/city/{cityName}/mail/{id}/reply", {
@@ -337,10 +365,25 @@ async function sendCurrentMessage(): Promise<void> {
       });
 
   if (response.error) {
+    logError("mail", "Send failed", {
+      bodyLength: body.length,
+      city,
+      error: response.error,
+      replyTo: replyTo || null,
+      subject,
+      to,
+    });
     showToast("error", "Send failed", response.error.detail ?? "Could not send message");
     return;
   }
 
+  logInfo("mail", "Send succeeded", {
+    bodyLength: body.length,
+    city,
+    replyTo: replyTo || null,
+    subject,
+    to,
+  });
   showToast("success", "Message sent", subject);
   const wasOpen = mailSubviewOpen();
   switchMailView("inbox");
@@ -401,6 +444,18 @@ function replySubject(subject: string): string {
   if (!subject) return "Re:";
   if (subject.toLowerCase().startsWith("re:")) return subject;
   return `Re: ${subject}`;
+}
+
+function ensureRecipientOption(select: HTMLSelectElement, recipient: string): void {
+  if (!recipient || [...select.options].some((option) => option.value === recipient)) return;
+  select.append(el("option", { value: recipient }, [recipient]));
+}
+
+function revealMailPanel(focusID: string): void {
+  byId("mail-panel")?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => {
+    byId<HTMLElement>(focusID)?.focus();
+  }, 0);
 }
 
 function groupIntoThreads(rows: MailRecord[]): MailThread[] {
