@@ -61,6 +61,31 @@ type cityPackManifest struct {
 	Global         config.PackGlobal              `toml:"global,omitempty"`
 }
 
+func (d cityPackAgentDefaults) unsupportedKeys() []string {
+	var keys []string
+	if d.Provider != "" {
+		keys = append(keys, "provider")
+	}
+	if d.Scope != "" {
+		keys = append(keys, "scope")
+	}
+	if len(d.InstallAgentHooks) > 0 {
+		keys = append(keys, "install_agent_hooks")
+	}
+	return keys
+}
+
+func warnPreservedUnsupportedPackAgentDefaults(stderr io.Writer, manifest *cityPackManifest) {
+	if stderr == nil || manifest == nil {
+		return
+	}
+	keys := manifest.AgentDefaults.unsupportedKeys()
+	if len(keys) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "gc import: preserved unsupported [agent_defaults] keys in pack.toml: %s; runtime will continue warning until they are moved to per-agent config\n", strings.Join(keys, ", ")) //nolint:errcheck
+}
+
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -306,6 +331,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
+	warnPreservedUnsupportedPackAgentDefaults(stderr, manifest)
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
@@ -335,6 +361,7 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
+	warnPreservedUnsupportedPackAgentDefaults(stderr, manifest)
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1

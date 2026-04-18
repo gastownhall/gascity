@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -45,6 +47,9 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "preserved unsupported [agent_defaults] keys in pack.toml") {
+		t.Fatalf("expected unsupported-keys warning, got stderr %q", stderr.String())
+	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
 	if err != nil {
@@ -70,6 +75,35 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 	}
 	if _, ok := lock.Packs["https://github.com/example/tools.git"]; !ok {
 		t.Fatal("missing lock entry")
+	}
+}
+
+func TestCityPackAgentDefaultsCoversConfigAgentDefaultsFields(t *testing.T) {
+	configFields := make(map[string]bool)
+	for _, field := range reflect.VisibleFields(reflect.TypeOf(config.AgentDefaults{})) {
+		if field.PkgPath != "" {
+			continue
+		}
+		configFields[field.Name] = true
+	}
+
+	manifestFields := make(map[string]bool)
+	for _, field := range reflect.VisibleFields(reflect.TypeOf(cityPackAgentDefaults{})) {
+		if field.PkgPath != "" {
+			continue
+		}
+		manifestFields[field.Name] = true
+	}
+
+	var missing []string
+	for name := range configFields {
+		if !manifestFields[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("cityPackAgentDefaults missing config.AgentDefaults fields: %v", missing)
 	}
 }
 

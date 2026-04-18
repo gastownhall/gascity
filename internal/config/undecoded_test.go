@@ -276,3 +276,60 @@ install_agent_hooks = ["hooks/gascity.json"]
 		})
 	}
 }
+
+func TestParsePackConfigWithMetaWarnsOnPackLocalUnsupportedAgentDefaultsKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "provider",
+			input: `
+[pack]
+name = "test"
+schema = 2
+
+[agent_defaults]
+provider = "claude"
+`,
+			want: `keep setting provider per agent in agents/<name>/agent.toml`,
+		},
+		{
+			name: "install_agent_hooks",
+			input: `
+[pack]
+name = "test"
+schema = 2
+
+[agent_defaults]
+install_agent_hooks = ["hooks/gascity.json"]
+`,
+			want: `keep setting install_agent_hooks per agent in agents/<name>/agent.toml`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, warnings, err := parsePackConfigWithMeta([]byte(tt.input), "/city/packs/test/pack.toml")
+			if err != nil {
+				t.Fatalf("parsePackConfigWithMeta: %v", err)
+			}
+			if len(warnings) == 0 {
+				t.Fatal("expected warning")
+			}
+			found := false
+			for _, w := range warnings {
+				if strings.Contains(w, tt.want) {
+					found = true
+				}
+				if strings.Contains(w, "workspace.") {
+					t.Fatalf("pack warning should not point at workspace.*, got: %v", warnings)
+				}
+			}
+			if !found {
+				t.Fatalf("expected warning containing %q, got: %v", tt.want, warnings)
+			}
+		})
+	}
+}
