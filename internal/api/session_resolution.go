@@ -94,7 +94,11 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			continue
 		}
 		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
-			_ = s.state.SessionProvider().Stop(sessionName)
+			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
+				_ = handle.Kill(context.Background())
+			} else {
+				_ = s.state.SessionProvider().Stop(sessionName)
+			}
 		}
 		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
 		patch["alias_history"] = ""

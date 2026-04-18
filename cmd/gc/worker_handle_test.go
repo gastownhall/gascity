@@ -160,6 +160,78 @@ session_id_flag = "--session-id"
 	}
 }
 
+func TestWorkerHandleForSessionTargetWithConfigResolvesSessionName(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+resume_flag = "--resume"
+resume_style = "flag"
+session_id_flag = "--session-id"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.Create(
+		context.Background(),
+		"worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"stub",
+		nil,
+		session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	handle, err := workerHandleForSessionTargetWithConfig(cityDir, store, sp, cfg, info.SessionName)
+	if err != nil {
+		t.Fatalf("workerHandleForSessionTargetWithConfig: %v", err)
+	}
+	if err := handle.Kill(context.Background()); err != nil {
+		t.Fatalf("handle.Kill: %v", err)
+	}
+	if stop := sp.Calls[len(sp.Calls)-1]; stop.Method != "Stop" || stop.Name != info.SessionName {
+		t.Fatalf("last runtime call = %#v, want Stop %q", stop, info.SessionName)
+	}
+}
+
+func TestWorkerKillSessionTargetWithConfigFallsBackToProvider(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatalf("sp.Start: %v", err)
+	}
+
+	if err := workerKillSessionTargetWithConfig("", nil, sp, nil, "orphan"); err != nil {
+		t.Fatalf("workerKillSessionTargetWithConfig: %v", err)
+	}
+	last := sp.Calls[len(sp.Calls)-1]
+	if last.Method != "Stop" || last.Name != "orphan" {
+		t.Fatalf("last runtime call = %#v, want Stop orphan", last)
+	}
+}
+
 func TestWorkerDeliveryIntentForSubmitIntent(t *testing.T) {
 	tests := []struct {
 		name   string

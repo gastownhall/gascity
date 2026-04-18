@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -18,6 +19,10 @@ func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp run
 		Manager: newSessionManagerWithConfig(cityPath, store, sp, cfg),
 		Session: spec,
 	})
+}
+
+func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
+	return worker.NewSessionCatalog(newSessionManagerWithConfig(cityPath, store, sp, cfg))
 }
 
 func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
@@ -111,6 +116,35 @@ func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp run
 		Manager: mgr,
 		Session: spec,
 	})
+}
+
+func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (*worker.SessionHandle, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, session.ErrSessionNotFound
+	}
+	if store == nil {
+		return nil, session.ErrSessionNotFound
+	}
+	if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+		return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
+	}
+	id, err := session.ResolveSessionID(store, target)
+	if err != nil {
+		return nil, err
+	}
+	return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
+}
+
+func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err == nil {
+		return handle.Kill(context.Background())
+	}
+	if sp == nil {
+		return err
+	}
+	return sp.Stop(target)
 }
 
 func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string, spec *worker.SessionSpec) {

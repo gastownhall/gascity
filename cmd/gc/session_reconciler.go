@@ -416,7 +416,7 @@ func reconcileSessionBeadsTraced(
 					}
 					stopped := !alive // already dead = effectively stopped
 					if alive {
-						if err := sp.Stop(name); err != nil {
+						if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 							fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
 							if !reconcilerOwnedAck && dt != nil {
 								dt.clearIdleProbe(session.ID)
@@ -540,7 +540,7 @@ func reconcileSessionBeadsTraced(
 					session.Metadata[key] = value
 				}
 				if alive {
-					if err := sp.Stop(name); err != nil {
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 					} else {
 						fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
@@ -766,7 +766,7 @@ func reconcileSessionBeadsTraced(
 			if trace != nil {
 				trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
 			}
-			if err := sp.Stop(name); err != nil {
+			if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			} else {
 				_ = sp.ClearScrollback(name)
@@ -1056,7 +1056,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 		nextState = "asleep"
 	}
 	if alive && sp != nil && sessionName != "" {
-		if err := sp.Stop(sessionName); err != nil {
+		if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
 		}
 	}

@@ -623,9 +623,13 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		writeSessionManagerError(w, err)
 		return
 	}
-
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	path, err := handle.TranscriptPath(r.Context())
+	if err != nil && !errors.Is(err, worker.ErrHistoryUnavailable) {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -642,45 +646,34 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		before := r.URL.Query().Get("before")
 
 		if wantRaw {
-			// Raw format uses ReadFileRaw (no display-type filtering) so
-			// all entry types are returned — consistent with the raw
-			// stream and snapshot paths.
-			var rawSess *sessionlog.Session
-			if before != "" {
-				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			} else {
-				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
-			}
+			transcript, err := handle.Transcript(r.Context(), worker.TranscriptRequest{
+				TailCompactions: tail,
+				BeforeEntryID:   before,
+				Raw:             true,
+			})
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
 				return
-			}
-			msgs := make([]json.RawMessage, 0, len(rawSess.Messages))
-			for _, entry := range rawSess.Messages {
-				if len(entry.Raw) > 0 {
-					msgs = append(msgs, entry.Raw)
-				}
 			}
 			writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
 				ID:         info.ID,
 				Template:   info.Template,
 				Format:     "raw",
-				Messages:   msgs,
-				Pagination: rawSess.Pagination,
+				Messages:   transcript.RawMessages,
+				Pagination: transcript.Session.Pagination,
 			})
 			return
 		}
 
-		var sess *sessionlog.Session
-		if before != "" {
-			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		} else {
-			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
-		}
+		transcript, err := handle.Transcript(r.Context(), worker.TranscriptRequest{
+			TailCompactions: tail,
+			BeforeEntryID:   before,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
 			return
 		}
+		sess := transcript.Session
 
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
@@ -1347,10 +1340,16 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 
 		// Use tail=1 (last compaction segment) to limit parsing scope,
 		// consistent with the non-raw streaming path.
-		sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 1)
+		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+			Provider:        info.Provider,
+			TranscriptPath:  logPath,
+			TailCompactions: 1,
+			Raw:             true,
+		})
 		if err != nil {
 			return
 		}
+		sess := transcript.Session
 		lastSize = stat.Size()
 
 		// Compute activity early (used after message emission).
@@ -1481,10 +1480,14 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 			return
 		}
 
-		sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
+		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+			Provider:       info.Provider,
+			TranscriptPath: logPath,
+		})
 		if err != nil {
 			return
 		}
+		sess := transcript.Session
 		lastSize = stat.Size()
 
 		// Compute activity early (used after turn emission).

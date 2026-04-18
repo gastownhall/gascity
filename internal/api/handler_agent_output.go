@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
@@ -82,7 +81,8 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	path := workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
+	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
+	path := adapter.DiscoverTranscript(provider, workDir, "")
 	if path == "" {
 		return nil, nil
 	}
@@ -95,16 +95,16 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	}
 	before := r.URL.Query().Get("before")
 
-	var sess *sessionlog.Session
-	var err error
-	if before != "" {
-		sess, err = sessionlog.ReadProviderFileOlder(provider, path, tail, before)
-	} else {
-		sess, err = sessionlog.ReadProviderFile(provider, path, tail)
-	}
+	transcript, err := adapter.ReadTranscript(worker.TranscriptRequest{
+		Provider:        provider,
+		TranscriptPath:  path,
+		TailCompactions: tail,
+		BeforeEntryID:   before,
+	})
 	if err != nil {
 		return nil, err
 	}
+	sess := transcript.Session
 
 	turns := make([]outputTurn, 0, len(sess.Messages))
 	for _, e := range sess.Messages {
@@ -378,10 +378,11 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
+	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 
 	var logPath string
 	if workDir != "" {
-		logPath = workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
+		logPath = adapter.DiscoverTranscript(provider, workDir, "")
 	}
 
 	// Check if agent is running.
@@ -410,7 +411,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 
 	ctx := r.Context()
 	if logPath != "" {
-		s.streamSessionLog(ctx, w, name, logPath)
+		s.streamSessionLog(ctx, w, name, provider, logPath)
 	} else {
 		s.streamPeekOutput(ctx, w, name, cfg)
 	}
@@ -419,14 +420,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name string, logPath string) {
-	// Derive provider from agent config for session log parsing.
-	cfg := s.state.Config()
-	agentCfg, _ := findAgent(cfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
+func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name, provider, logPath string) {
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
@@ -447,10 +441,15 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		sess, err := sessionlog.ReadProviderFile(provider, logPath, 1)
+		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+			Provider:        provider,
+			TranscriptPath:  logPath,
+			TailCompactions: 1,
+		})
 		if err != nil {
 			return
 		}
+		sess := transcript.Session
 		lastSize = currentSize
 
 		turns := make([]outputTurn, 0, len(sess.Messages))

@@ -19,14 +19,18 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 		return // no store — nothing to suspend
 	}
 
-	mgr := newSessionManager(store, sp)
 	cityPath, _ := resolveCity()
 	var cfg *config.City
 	if cityPath != "" {
 		cfg, _ = loadCityConfig(cityPath)
 	}
+	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: auto-suspend catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
 
-	sessions, err := mgr.List("active", "")
+	sessions, err := catalog.List("active", "")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: auto-suspend list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return

@@ -16,7 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // sessionResponse is the JSON representation of a chat session.
@@ -454,12 +454,13 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if searchPaths == nil {
 			searchPaths = sessionlog.DefaultSearchPaths()
 		}
+		adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
 		var sessionFile string
-		sessionFile = workertranscript.DiscoverPath(searchPaths, info.Provider, workDir, info.SessionKey)
+		sessionFile = adapter.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
 		if sessionFile != "" {
-			if meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile); err == nil && meta != nil {
+			if meta, err := adapter.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage

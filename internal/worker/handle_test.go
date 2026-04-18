@@ -266,6 +266,136 @@ func TestSessionHandleCreateStarted(t *testing.T) {
 	}
 }
 
+func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
+	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+
+	sp.Calls = nil
+	if err := handle.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	stop := firstCall(sp.Calls, "Stop")
+	if stop == nil || stop.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want Stop %q", sp.Calls, info.SessionName)
+	}
+
+	bead, err := store.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
+	}
+	if bead.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("bead state = %q, want %q after Kill", bead.Metadata["state"], sessionpkg.StateActive)
+	}
+}
+
+func TestSessionHandleCloseUsesWorkerBoundary(t *testing.T) {
+	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+
+	sp.Calls = nil
+	if err := handle.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	stop := firstCall(sp.Calls, "Stop")
+	if stop == nil || stop.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want Stop %q", sp.Calls, info.SessionName)
+	}
+
+	bead, err := store.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
+	}
+	if bead.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed", bead.Status)
+	}
+}
+
+func TestSessionHandleRenameUsesWorkerBoundary(t *testing.T) {
+	handle, _, _, mgr := newTestSessionHandle(t, SessionSpec{
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if _, err := handle.Create(context.Background(), CreateModeDeferred); err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := handle.Rename(context.Background(), "Renamed Session"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	if info.Title != "Renamed Session" {
+		t.Fatalf("title = %q, want Renamed Session", info.Title)
+	}
+}
+
+func TestSessionHandlePeekUsesWorkerBoundary(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	if sp.PeekOutput == nil {
+		sp.PeekOutput = map[string]string{}
+	}
+	sp.PeekOutput[info.SessionName] = "recent output"
+	sp.Calls = nil
+
+	output, err := handle.Peek(context.Background(), 25)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if output != "recent output" {
+		t.Fatalf("Peek output = %q, want recent output", output)
+	}
+	peek := firstCall(sp.Calls, "Peek")
+	if peek == nil || peek.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want Peek %q", sp.Calls, info.SessionName)
+	}
+}
+
 func TestCanonicalProfileIdentity(t *testing.T) {
 	identity, ok := CanonicalProfileIdentity(ProfileCodexTmuxCLI)
 	if !ok {
