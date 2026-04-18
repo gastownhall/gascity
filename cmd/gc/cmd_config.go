@@ -141,8 +141,71 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Emit provider inheritance chain annotations as a comment block
+	// preceding the marshaled TOML. `cfg.Marshal()` strips comments, so
+	// we can't annotate per-block — instead we produce an up-front
+	// summary that operators can diff / grep against.
+	if annotations := renderProviderChainAnnotations(cfg); annotations != "" {
+		fmt.Fprint(stdout, annotations) //nolint:errcheck // best-effort stdout
+	}
 	fmt.Fprint(stdout, string(data)) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// renderProviderChainAnnotations produces a commented block summarizing
+// each custom provider's resolved inheritance chain. Format:
+//
+//	# Provider inheritance chains (as resolved at config load):
+//	#   codex-max       → codex → builtin:codex
+//	#   my-standalone   → (no inheritance)
+//	#   my-alias        → my-base (no built-in ancestor)
+//
+// Returns empty string if there are no custom providers OR if the
+// resolved cache was not built (e.g., when chain resolution failed).
+func renderProviderChainAnnotations(cfg *config.City) string {
+	if cfg == nil || len(cfg.ResolvedProviders) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.ResolvedProviders))
+	for n := range cfg.ResolvedProviders {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("# Provider inheritance chains (as resolved at config load):\n")
+	for _, name := range names {
+		r := cfg.ResolvedProviders[name]
+		b.WriteString("#   ")
+		b.WriteString(padRight(name, 20))
+		b.WriteString(" ")
+		if len(r.Chain) <= 1 {
+			b.WriteString("(no inheritance)")
+		} else {
+			for i, hop := range r.Chain {
+				if i > 0 {
+					b.WriteString(" → ")
+				}
+				if hop.Kind == "builtin" {
+					b.WriteString(config.BasePrefixBuiltin)
+				}
+				b.WriteString(hop.Name)
+			}
+			if r.BuiltinAncestor == "" && len(r.Chain) > 1 {
+				b.WriteString(" (no built-in ancestor)")
+			}
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("#\n")
+	return b.String()
+}
+
+func padRight(s string, n int) string {
+	if len(s) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(s))
 }
 
 func newConfigExplainCmd(stdout, stderr io.Writer) *cobra.Command {
