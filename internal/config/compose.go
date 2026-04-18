@@ -381,6 +381,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 	// Validate cross-entity semantic constraints.
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
+	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
