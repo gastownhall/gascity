@@ -744,7 +744,11 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
-Use -s/--subject for the reply subject and -m/--message for the reply body.`,
+Use -s/--subject for the reply subject and -m/--message for the reply body.
+
+If -s/--subject is omitted, the subject defaults to "Re: <original subject>"
+(without stacking when the original already starts with "Re:"). An empty or
+missing original subject falls back to "(no subject)".`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailReply(args, subject, message, notify, stdout, stderr) != 0 {
@@ -1178,12 +1182,48 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 		body = strings.Join(args[1:], " ")
 	}
 
+	// Default subject to "Re: <original subject>" when caller omits -s.
+	resolvedSubject, err := resolveReplySubject(mp, args[0], subject)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	var nf nudgeFunc
 	if notify && hasStore {
 		nf = newMailNudgeFunc(sender)
 	}
 
-	return doMailReply(mp, rec, args[0], sender, subject, body, nf, stdout, stderr)
+	return doMailReply(mp, rec, args[0], sender, resolvedSubject, body, nf, stdout, stderr)
+}
+
+// resolveReplySubject returns the caller-supplied subject when non-empty,
+// or derives a default ("Re: <original subject>") by fetching the original
+// message. Returns an error only when the original cannot be fetched.
+func resolveReplySubject(mp mail.Provider, id, explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	original, err := mp.Get(id)
+	if err != nil {
+		return "", fmt.Errorf("fetch original: %w", err)
+	}
+	return defaultReplySubject(original.Subject), nil
+}
+
+// defaultReplySubject derives a reply subject from the original message's
+// subject. It prepends "Re: " unless the original already starts with "Re:"
+// (case-insensitive), avoiding "Re: Re: ..." stacking. An empty or
+// whitespace-only original falls back to "(no subject)".
+func defaultReplySubject(original string) string {
+	trimmed := strings.TrimSpace(original)
+	if trimmed == "" {
+		return "(no subject)"
+	}
+	if len(trimmed) >= 3 && strings.EqualFold(trimmed[:3], "Re:") {
+		return trimmed
+	}
+	return "Re: " + trimmed
 }
 
 // doMailReply creates a reply to an existing message.
