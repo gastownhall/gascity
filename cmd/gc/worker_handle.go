@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -177,6 +178,33 @@ func workerObserveSessionTargetWithConfig(cityPath string, store beads.Store, sp
 		return worker.LiveObservation{}, err
 	}
 	return worker.ObserveHandle(context.Background(), handle)
+}
+
+func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
+	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err != nil {
+		return false, err
+	}
+	return obs.Running, nil
+}
+
+func workerSessionTargetAttachedWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
+	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err != nil {
+		return false, err
+	}
+	return obs.Attached, nil
+}
+
+func workerSessionTargetLastActivityWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (time.Time, error) {
+	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if obs.LastActivity == nil {
+		return time.Time{}, nil
+	}
+	return *obs.LastActivity, nil
 }
 
 func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string, spec *worker.SessionSpec) {

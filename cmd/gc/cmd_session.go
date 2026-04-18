@@ -436,7 +436,12 @@ func waitForSession(sp runtime.Provider, sessionName string, timeout time.Durati
 	deadline := time.Now().Add(timeout)
 	lastProgress := time.Now()
 	for time.Now().Before(deadline) {
-		if sp.IsRunning(sessionName) {
+		target := sessionName
+		if store != nil && beadID != "" {
+			target = beadID
+		}
+		running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, target)
+		if err == nil && running {
 			return nil
 		}
 		// Check for early failure: bead closed or stuck in creating.

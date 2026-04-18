@@ -166,7 +166,12 @@ func cmdRuntimeDrain(args []string, stdout, stderr io.Writer) int {
 func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
-	if !sp.IsRunning(sn) {
+	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: observing %q: %v\n", targetName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !running {
 		fmt.Fprintf(stderr, "gc runtime drain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -225,7 +230,12 @@ func cmdRuntimeUndrain(args []string, stdout, stderr io.Writer) int {
 func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
-	if !sp.IsRunning(sn) {
+	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime undrain: observing %q: %v\n", targetName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !running {
 		fmt.Fprintf(stderr, "gc runtime undrain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}

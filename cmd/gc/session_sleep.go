@@ -153,7 +153,8 @@ func reconcileDetachedAt(
 	if name == "" {
 		return
 	}
-	if sp.IsAttached(name) {
+	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, session.ID)
+	if err == nil && attached {
 		if session.Metadata["detached_at"] != "" {
 			_ = store.SetMetadata(session.ID, "detached_at", "")
 			session.Metadata["detached_at"] = ""
@@ -174,7 +175,7 @@ func sessionIdleReference(session beads.Bead, sp runtime.Provider) time.Time {
 	}
 	lastActivity := time.Time{}
 	if sp != nil {
-		if activity, err := sp.GetLastActivity(session.Metadata["session_name"]); err == nil {
+		if activity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, session.Metadata["session_name"]); err == nil {
 			lastActivity = activity
 		}
 	}

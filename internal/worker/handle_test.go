@@ -538,6 +538,7 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 	result, err := handle.Nudge(context.Background(), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
 	})
 	if err != nil {
 		t.Fatalf("Nudge(wait_idle): %v", err)
@@ -560,6 +561,9 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 	}
 	if !strings.Contains(nudge.Message, "<system-reminder>") {
 		t.Fatalf("delivered message = %q, want system-reminder wrapper", nudge.Message)
+	}
+	if !strings.Contains(nudge.Message, "[mail] check deploy status") {
+		t.Fatalf("delivered message = %q, want source-tagged reminder content", nudge.Message)
 	}
 }
 
@@ -592,6 +596,70 @@ func TestSessionHandleNudgeWaitIdleReturnsUndeliveredForUnsupportedProvider(t *t
 	for _, call := range sp.Calls[startCalls:] {
 		if call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {
 			t.Fatalf("calls = %#v, want no live wait-idle delivery on unsupported provider", sp.Calls[startCalls:])
+		}
+	}
+}
+
+func TestSessionHandleLiveObservationUsesProviderRuntimeState(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("runtime.Stop(%q): %v", info.SessionName, err)
+	}
+
+	obs, err := ObserveHandle(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("ObserveHandle: %v", err)
+	}
+	if obs.Running {
+		t.Fatalf("LiveObservation.Running = true, want false after runtime stop; obs=%#v", obs)
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleLiveOnlyDoesNotResumeStoppedSession(t *testing.T) {
+	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if _, err := handle.Create(context.Background(), CreateModeDeferred); err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "queued reminder",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+		Wake:     NudgeWakeLiveOnly,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle live_only): %v", err)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle live_only) Delivered = true, want false when runtime is stopped")
+	}
+	for _, call := range sp.Calls[startCalls:] {
+		if call.Method == "Start" || call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no live delivery or wake on stopped session", sp.Calls[startCalls:])
 		}
 	}
 }

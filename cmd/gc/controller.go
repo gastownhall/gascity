@@ -438,7 +438,8 @@ func gracefulStopAll(
 			allExited = len(runningSet) == 0
 		} else {
 			for _, name := range names {
-				if sp.IsRunning(name) {
+				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+				if err == nil && running {
 					allExited = false
 					break
 				}
@@ -463,7 +464,7 @@ func gracefulStopAll(
 		if listed {
 			running = runningSet[name]
 		} else {
-			running = sp.IsRunning(name)
+			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 		}
 		if !running {
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout

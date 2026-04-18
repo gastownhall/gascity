@@ -123,6 +123,9 @@ func (h *RuntimeHandle) Nudge(_ context.Context, req NudgeRequest) (NudgeResult,
 		return NudgeResult{}, fmt.Errorf("nudge text is required")
 	}
 	if !h.provider.IsRunning(h.sessionName) {
+		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
+			return NudgeResult{Delivered: false}, nil
+		}
 		return NudgeResult{Delivered: false}, fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
 	}
 	if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {

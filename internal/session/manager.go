@@ -77,6 +77,15 @@ type Info struct {
 	Attached      bool
 }
 
+// RuntimeObservation reports the provider-backed live runtime state for a
+// persisted session.
+type RuntimeObservation struct {
+	Running     bool
+	Attached    bool
+	LastActive  time.Time
+	SessionName string
+}
+
 func normalizeInfoState(state State) State {
 	switch state {
 	case "awake":
@@ -855,6 +864,27 @@ func (m *Manager) Get(id string) (Info, error) {
 		return Info{}, err
 	}
 	return m.infoFromBead(b), nil
+}
+
+// ObserveRuntime reports live provider state for the current session runtime.
+func (m *Manager) ObserveRuntime(id string) (RuntimeObservation, error) {
+	info, err := m.Get(id)
+	if err != nil {
+		return RuntimeObservation{}, err
+	}
+	obs := RuntimeObservation{SessionName: info.SessionName}
+	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
+		return obs, nil
+	}
+	obs.Running = m.sp.IsRunning(info.SessionName)
+	if !obs.Running {
+		return obs, nil
+	}
+	obs.Attached = m.sp.IsAttached(info.SessionName)
+	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
+		obs.LastActive = lastActive
+	}
+	return obs, nil
 }
 
 // ListResult holds the results of a ListFull call, including the raw beads
