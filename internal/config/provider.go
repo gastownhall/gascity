@@ -186,7 +186,12 @@ type ResolvedProvider struct {
 	BuiltinAncestor string
 	// Chain records the resolved ancestry from leaf (index 0) to root
 	// (index len-1). Populated by resolveProviderChain.
-	Chain                  []HopIdentity
+	Chain []HopIdentity
+	// Provenance records per-field / per-map-key layer attribution.
+	// Populated during chain resolution. Used by gc config explain
+	// --provider to answer "which layer set this field". See
+	// engdocs/design/provider-inheritance.md §Provenance data model.
+	Provenance             ProviderProvenance
 	Command                string
 	Args                   []string
 	PromptMode             string

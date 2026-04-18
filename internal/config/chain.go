@@ -20,7 +20,8 @@ type chainResolveContext struct {
 	builtins   map[string]ProviderSpec
 	visited    map[HopIdentity]bool
 	chain      []HopIdentity
-	chainPath  []string // human-readable chain names for error messages
+	chainSpecs []ProviderSpec // raw spec per hop, parallel to chain
+	chainPath  []string       // human-readable chain names for error messages
 	warnings   []string
 }
 
@@ -56,6 +57,7 @@ func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	leafID := HopIdentity{Kind: "custom", Name: leafName}
 	ctx.visited[leafID] = true
 	ctx.chain = append(ctx.chain, leafID)
+	ctx.chainSpecs = append(ctx.chainSpecs, leaf)
 	ctx.chainPath = append(ctx.chainPath, leafName)
 
 	merged, err := ctx.walkFromLeaf(leafName, leaf)
@@ -85,6 +87,7 @@ func ResolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	resolvedPtr := specToResolved(leafName, &merged)
 	resolvedPtr.BuiltinAncestor = ancestor
 	resolvedPtr.Chain = ctx.chain
+	resolvedPtr.Provenance = buildProviderProvenance(ctx, customProviders)
 	// Kind is the legacy field; mirror BuiltinAncestor for backward compat.
 	if ancestor != "" {
 		resolvedPtr.Kind = ancestor
@@ -133,6 +136,7 @@ func (ctx *chainResolveContext) walkFromLeaf(name string, spec ProviderSpec) (Pr
 	}
 	ctx.visited[parentID] = true
 	ctx.chain = append(ctx.chain, parentID)
+	ctx.chainSpecs = append(ctx.chainSpecs, parentSpec)
 	ctx.chainPath = append(ctx.chainPath, formatHopName(parentID))
 
 	// Recurse: resolve the parent's own chain first.
@@ -292,4 +296,121 @@ func formatHopName(id HopIdentity) string {
 		return BasePrefixBuiltin + id.Name
 	}
 	return id.Name
+}
+
+// buildProviderProvenance walks the chain (root → leaf) a second time
+// to compute per-field attribution. For each scalar field that has a
+// non-zero value at some layer, the "most specific wins" rule of
+// MergeProviderOverBuiltin means the leaf-most non-zero value wins;
+// provenance records that leaf's layer.
+//
+// For additive maps (Env, OptionDefaults, PermissionModes), provenance
+// is tracked per-key: each key's layer is the leaf-most layer that set
+// that key in the raw (unmerged) spec.
+//
+// Runs in O(chain_depth × field_count) — negligible for typical configs.
+func buildProviderProvenance(ctx *chainResolveContext, customProviders map[string]ProviderSpec) ProviderProvenance {
+	_ = customProviders // kept for signature stability; specs come from ctx.chainSpecs
+	prov := ProviderProvenance{
+		Chain:       append([]HopIdentity(nil), ctx.chain...),
+		FieldLayer:  make(map[string]string),
+		MapKeyLayer: make(map[string]map[string]string),
+	}
+	// Walk leaf → root; record the FIRST layer (leaf-most) that sets
+	// each scalar field. For additive maps, record per-key leaf-most.
+	for i, hop := range ctx.chain {
+		spec := ctx.chainSpecs[i]
+		layer := provenanceSource(hop)
+		recordScalarProvenance(spec, layer, prov.FieldLayer)
+		recordMapProvenance(spec, layer, prov.MapKeyLayer)
+	}
+	return prov
+}
+
+// recordScalarProvenance marks fields that have a non-zero value in
+// `spec` as sourced from `layer`, but only if they haven't been marked
+// by an earlier (more specific) hop already.
+func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]string) {
+	set := func(key, value string) {
+		if value == "" {
+			return
+		}
+		if _, already := into[key]; already {
+			return
+		}
+		into[key] = layer
+	}
+	setInt := func(key string, value int) {
+		if value == 0 {
+			return
+		}
+		if _, already := into[key]; already {
+			return
+		}
+		into[key] = layer
+	}
+	setBool := func(key string, value *bool) {
+		if value == nil {
+			return
+		}
+		if _, already := into[key]; already {
+			return
+		}
+		into[key] = layer
+	}
+	setSlice := func(key string, value []string) {
+		if value == nil {
+			return
+		}
+		if _, already := into[key]; already {
+			return
+		}
+		into[key] = layer
+	}
+
+	set("display_name", spec.DisplayName)
+	set("command", spec.Command)
+	setSlice("args", spec.Args)
+	setSlice("args_append", spec.ArgsAppend)
+	set("prompt_mode", spec.PromptMode)
+	set("prompt_flag", spec.PromptFlag)
+	setInt("ready_delay_ms", spec.ReadyDelayMs)
+	set("ready_prompt_prefix", spec.ReadyPromptPrefix)
+	setSlice("process_names", spec.ProcessNames)
+	set("path_check", spec.PathCheck)
+	setBool("supports_acp", spec.SupportsACP)
+	setBool("supports_hooks", spec.SupportsHooks)
+	setBool("emits_permission_warning", spec.EmitsPermissionWarning)
+	set("instructions_file", spec.InstructionsFile)
+	set("resume_flag", spec.ResumeFlag)
+	set("resume_style", spec.ResumeStyle)
+	set("resume_command", spec.ResumeCommand)
+	set("session_id_flag", spec.SessionIDFlag)
+	set("title_model", spec.TitleModel)
+	set("options_schema_merge", spec.OptionsSchemaMerge)
+	setSlice("print_args", spec.PrintArgs)
+}
+
+// recordMapProvenance marks each key of each additive map as sourced
+// from `layer`, preserving earlier (more specific) attributions.
+func recordMapProvenance(spec ProviderSpec, layer string, into map[string]map[string]string) {
+	recordKeys := func(field string, m map[string]string) {
+		if len(m) == 0 {
+			return
+		}
+		existing, ok := into[field]
+		if !ok {
+			existing = make(map[string]string)
+			into[field] = existing
+		}
+		for k := range m {
+			if _, already := existing[k]; already {
+				continue
+			}
+			existing[k] = layer
+		}
+	}
+	recordKeys("env", spec.Env)
+	recordKeys("permission_modes", spec.PermissionModes)
+	recordKeys("option_defaults", spec.OptionDefaults)
 }
