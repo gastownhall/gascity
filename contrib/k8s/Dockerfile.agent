@@ -1,7 +1,8 @@
-# Gas City agent container image — binaries + developer tools.
+# Gas City agent container image — binary layer.
 #
-# Multi-stage build: compiles gc and bd from source, downloads br from release,
-# then layers them with developer tools on top of gc-agent-base (Dockerfile.base).
+# Built on top of gc-agent-base (Dockerfile.base) which has all system
+# dependencies. This layer only copies project binaries, so rebuilds
+# after code changes take ~5s instead of ~2.5 min.
 #
 # Build:
 #   make docker-agent
@@ -9,129 +10,33 @@
 #
 # Full rebuild (base + agent):
 #   make docker-base docker-agent
+#
+# The gc binary should be built first and placed in the build context root:
+#   go build -o gc ./cmd/gc
 
-# Global ARG — must be before all FROM stages to be usable in FROM.
 ARG BASE_IMAGE=gc-agent-base:latest
-
-# --- Stage 1: Build beads (bd) from source ---
-FROM golang:1-trixie AS beads-build
-
-# libicu-dev kept as a compile-time safety net even though the gms_pure_go
-# build tag drops the ICU runtime dependency.
-RUN apt-get update && apt-get install -y --no-install-recommends libicu-dev && rm -rf /var/lib/apt/lists/*
-
-ARG BEADS_VERSION=d6fdab011f0d20e5e52addce8906251e46d6a5e1
-
-# Build bd via `go install` to an explicit GOBIN instead of relying on
-# beads' Makefile install target, so the next stage's COPY doesn't depend
-# on an implementation detail of where `make install` drops the binary.
-# Mirrors beads' build config: CGO enabled (dolt backend needs it),
-# gms_pure_go tag to drop the ICU runtime dep, main.Build stamped with
-# the git short SHA.
-RUN <<EOF
-set -e
-git clone --no-checkout https://github.com/gastownhall/beads.git /src
-cd /src
-git fetch --depth 1 origin ${BEADS_VERSION}
-git checkout FETCH_HEAD
-CGO_ENABLED=1 GOBIN=/out go install \
-  -tags gms_pure_go \
-  -ldflags "-X main.Build=$(git rev-parse --short HEAD)" \
-  ./cmd/bd
-EOF
-
-# --- Stage 2: Build gascity (gc) from local source ---
-# To build from a remote commit instead (e.g. for elan), uncomment and set:
-# ARG GASCITY_VERSION=1af897c4001da28c55369a5a97d4a603fa60190e
-# RUN git clone --no-checkout https://github.com/gastownhall/gascity.git /src \
-#     && cd /src && git fetch --depth 1 origin ${GASCITY_VERSION} \
-#     && git checkout FETCH_HEAD && make install
-FROM golang:1-trixie AS gascity-build
-
-# Version metadata injected from the host (where .git is available).
-# .dockerignore excludes .git, so git-based version detection inside the
-# container falls back to dev/unknown. The Makefile passes these at build time.
-ARG GC_VERSION=dev
-ARG GC_COMMIT=unknown
-
-COPY go.mod go.sum /src/
-WORKDIR /src
-RUN go mod download
-
-COPY . /src/
-RUN make install VERSION=${GC_VERSION} COMMIT=${GC_COMMIT}
-
-# --- Stage 3: Agent image ---
 FROM ${BASE_IMAGE}
 
-USER root
+# bd (beads) CLI — copied from build context.
+# Build with: cp $(which bd) . && docker build ...
+COPY bd /usr/local/bin/bd
 
-# Developer tools — search, git, shell.
-RUN <<EOF
-set -e
-apt-get update && apt-get install -y --no-install-recommends \
-    bat \
-    eza \
-    fd-find \
-    fzf \
-    openssh-client \
-    python3 \
-    ripgrep \
-    zsh
-rm -rf /var/lib/apt/lists/*
-EOF
+# br (beads_rust) CLI — copied from build context.
+# Build with: cp $(which br) . && docker build ...
+COPY br /usr/local/bin/br
 
-# Tools installed from binaries with checksum verification.
-# ARGs placed after apt layer so version bumps don't bust its cache.
-# renovate: datasource=github-releases depName=dandavison/delta
-ARG DELTA_VERSION=0.19.2
-ARG DELTA_SHA256_AMD64=ea4f0222950ee750a3d38dd80d03bce4cee07a3f63928fc47548383bcaf23093
-ARG DELTA_SHA256_ARM64=0edc36cf514f1bd84becac3e94ee8ae9f8818c6a1f99f7b2ee67b362afa253d3
-# renovate: datasource=github-releases depName=mikefarah/yq
-ARG YQ_VERSION=4.52.5
-ARG YQ_SHA256_AMD64=75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9
-ARG YQ_SHA256_ARM64=90fa510c50ee8ca75544dbfffed10c88ed59b36834df35916520cddc623d9aaa
-# renovate: datasource=github-releases depName=Dicklesworthstone/beads_rust
-ARG BR_VERSION=v0.1.37
-ARG BR_SHA256_AMD64=4ab2e168ccd744023dac593a679f19c34bc579fe8553b5fefdb2fa4a3850581f
-ARG BR_SHA256_ARM64=390e646f08b80d973863af95cd8b707235fc04a2a13b7554a1d399367513aff8
+# gc binary — copied from build context.
+COPY gc /usr/local/bin/gc
 
-RUN <<EOF
-set -e
-ARCH=$(dpkg --print-architecture)
-
-YQ_SHA256=$([ "$ARCH" = "amd64" ] && echo "$YQ_SHA256_AMD64" || echo "$YQ_SHA256_ARM64")
-curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${ARCH}" -o /usr/local/bin/yq
-echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
-chmod +x /usr/local/bin/yq
-
-DELTA_SHA256=$([ "$ARCH" = "amd64" ] && echo "$DELTA_SHA256_AMD64" || echo "$DELTA_SHA256_ARM64")
-curl -fsSL "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/git-delta_${DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb
-echo "${DELTA_SHA256}  /tmp/git-delta.deb" | sha256sum -c -
-dpkg -i /tmp/git-delta.deb
-rm /tmp/git-delta.deb
-
-# br (beads_rust) — pre-built release binary.
-BR_ARCH=$([ "$ARCH" = "amd64" ] && echo "amd64" || echo "arm64")
-BR_SHA256=$([ "$ARCH" = "amd64" ] && echo "$BR_SHA256_AMD64" || echo "$BR_SHA256_ARM64")
-curl -fsSL "https://github.com/Dicklesworthstone/beads_rust/releases/download/${BR_VERSION}/br-${BR_VERSION}-linux_${BR_ARCH}.tar.gz" -o /tmp/br.tar.gz
-echo "${BR_SHA256}  /tmp/br.tar.gz" | sha256sum -c -
-tar xzf /tmp/br.tar.gz -C /usr/local/bin br
-chmod +x /usr/local/bin/br
-rm /tmp/br.tar.gz
-EOF
-
-# Binaries from build stages.
-COPY --from=beads-build /out/bd /usr/local/bin/bd
-COPY --from=gascity-build /go/bin/gc /usr/local/bin/gc
-
-# Exec provider scripts.
+# gc-beads-br script for the exec:beads protocol.
 COPY contrib/beads-scripts/gc-beads-br /usr/local/bin/gc-beads-br
+
+# gc-mail-mcp-agent-mail script for the exec:mail protocol.
 COPY contrib/mail-scripts/gc-mail-mcp-agent-mail /usr/local/bin/gc-mail-mcp-agent-mail
 
 # Claude credentials are injected at runtime via K8s Secret volume mount,
 # not baked into the image. See contrib/k8s/README-credentials.md.
-# The CLAUDE_CONFIG_DIR env var (set by the k8s provider) points to the mount.
+# The CLAUDE_CONFIG_DIR env var (set by gc-session-k8s) points to the mount.
 
 WORKDIR /workspace
 RUN chown gcagent:gcagent /workspace
@@ -140,7 +45,5 @@ RUN chown gcagent:gcagent /workspace
 # (UID 0) via securityContext so the entrypoint can create the dynamic user
 # before dropping privileges.
 USER gcagent
-
-RUN touch ~/.zshrc
 
 CMD ["/bin/bash"]

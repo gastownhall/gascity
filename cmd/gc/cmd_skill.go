@@ -1,85 +1,301 @@
 package main
 
 import (
-	"embed"
 	"fmt"
 	"io"
-	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/spf13/cobra"
 )
 
-//go:embed skills/*.md
-var skillContents embed.FS
-
-// skillTopics defines the available skill topics with their descriptions.
-// Used by both the gc skill command (content lookup) and stub materialization.
-var skillTopics = []struct {
-	Name string // skill name, e.g. "gc-work"
-	Desc string // frontmatter description
-	Arg  string // gc skill argument, e.g. "work"
-}{
-	{"gc-work", "Finding, creating, claiming, and closing work items (beads)", "work"},
-	{"gc-dispatch", "Routing work to agents with gc sling and formulas", "dispatch"},
-	{"gc-agents", "Managing agents — list, peek, nudge, suspend, drain", "agents"},
-	{"gc-rigs", "Managing rigs — add, list, status, suspend, resume", "rigs"},
-	{"gc-mail", "Sending and reading messages between agents", "mail"},
-	{"gc-city", "City lifecycle — status, start, stop, init", "city"},
-	{"gc-dashboard", "API server and web dashboard — config, start, monitor", "dashboard"},
-}
-
 func newSkillCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
-		Use:   "skill [topic]",
-		Short: "Show command reference for a topic",
-		Long: `Show curated command reference for a Gas City topic.
+	var cmd *cobra.Command
+	cmd = &cobra.Command{
+		Use:   "skill",
+		Short: "List visible skills",
+		Long: `List skills visible to the current city.
 
-Without arguments, lists available topics. With a topic name,
-prints the full command reference for that topic.`,
-		Example: `  gc skill work       # beads command reference
-  gc skill dispatch   # sling and formula reference
-  gc skill            # list all topics`,
-		Args: cobra.MaximumNArgs(1),
+Output includes:
+  - City pack skills (skills/<name>/SKILL.md under the city root)
+  - Bootstrap implicit-import pack skills (e.g. core)
+  - With --agent/--session: that agent's agents/<name>/skills/ catalog
+
+The listing is a diagnostic view of what's *available*. It does not
+collapse precedence, filter to agents whose provider has a vendor
+sink, or predict exactly which entries the materializer will pick on
+name collision. For the materialized set, inspect the
+<scope-root>/.<vendor>/skills/ sink after "gc start" or run
+"gc doctor" to surface collisions.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				listSkillTopics(stdout)
-				return nil
+				return cmd.Help()
 			}
-			topic := args[0]
-			content, err := fs.ReadFile(skillContents, "skills/"+topic+".md")
-			if err != nil {
-				fmt.Fprintf(stderr, "gc skill: unknown topic %q\n", topic) //nolint:errcheck // best-effort stderr
-				fmt.Fprintln(stderr, "Available topics:")                  //nolint:errcheck // best-effort stderr
-				listSkillTopics(stderr)
+			fmt.Fprintf(stderr, "gc skill: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			return errExit
+		},
+	}
+	cmd.AddCommand(newSkillListCmd(stdout, stderr))
+	return cmd
+}
+
+func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
+	var agentName string
+	var sessionID string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List visible skills",
+		Long:  "List the current city pack's visible skills, optionally scoped to an agent or session.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if strings.TrimSpace(agentName) != "" && strings.TrimSpace(sessionID) != "" {
+				fmt.Fprintln(stderr, "gc skill list: --agent and --session are mutually exclusive") //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			fmt.Fprint(stdout, string(content)) //nolint:errcheck // best-effort stdout
+			cityPath, err := resolveCity()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			cfg, err := loadCityConfig(cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+
+			var store beads.Store
+			if strings.TrimSpace(sessionID) != "" {
+				store, err = openCityStoreAt(cityPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+			}
+
+			entries, err := listVisibleSkillEntries(cityPath, cfg, store, agentName, sessionID)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			writeVisibilityEntries(stdout, entries)
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&agentName, "agent", "", "show the effective skill view for this agent")
+	cmd.Flags().StringVar(&sessionID, "session", "", "show the effective skill view for this session")
+	return cmd
 }
 
-// listSkillTopics prints available skill topics with descriptions.
-func listSkillTopics(w io.Writer) {
-	// Sort by arg name for stable output.
-	sorted := make([]struct{ Arg, Desc string }, len(skillTopics))
-	for i, t := range skillTopics {
-		sorted[i] = struct{ Arg, Desc string }{t.Arg, t.Desc}
+func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Store, agentName, sessionID string) ([]visibilityEntry, error) {
+	entries := discoverSkillEntries(cityPath, "city")
+	// Per engdocs/proposals/skill-materialization.md: bootstrap implicit-
+	// import pack skills (the `core` catalog) participate in the
+	// materialized skill set. `gc skill list` must surface them so the
+	// listing reflects what the materializer actually delivers.
+	entries = append(entries, discoverBootstrapSkillEntries()...)
+	if strings.TrimSpace(agentName) == "" && strings.TrimSpace(sessionID) == "" {
+		sortVisibilityEntries(entries)
+		return entries, nil
 	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Arg < sorted[j].Arg
-	})
-	// Find max arg length for alignment.
-	maxLen := 0
-	for _, t := range sorted {
-		if len(t.Arg) > maxLen {
-			maxLen = len(t.Arg)
+	agent, err := resolveVisibilityAgent(cityPath, cfg, store, agentName, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	// Every agent sees the entire city+bootstrap catalog plus its own
+	// agent-local skills. No attachment filtering.
+	entries = append(entries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
+	sortVisibilityEntries(entries)
+	return entries, nil
+}
+
+// discoverBootstrapSkillEntries enumerates skills that come from the
+// bootstrap implicit-import packs (e.g., `core`). Returns an empty
+// slice when no bootstrap pack has a populated skills/ directory or
+// when discovery fails (the listing degrades gracefully — a transient
+// I/O error shouldn't empty the city-pack listing).
+//
+// Each returned entry's Source field is the bootstrap pack name
+// (e.g., "core") so the display distinguishes city-pack skills from
+// bootstrap-pack skills. Path is the absolute filesystem path to the
+// SKILL.md file because bootstrap packs live under the user-global
+// cache, not the city directory — there is no shared relative base.
+func discoverBootstrapSkillEntries() []visibilityEntry {
+	// LoadCityCatalog("") skips the city-pack walk and returns just the
+	// bootstrap implicit-import entries. The full LoadCityCatalog call
+	// also lives in cmd/gc/cmd_internal_materialize_skills.go and
+	// BuildDesiredState; using it here keeps the one-source-of-truth
+	// discovery rule the spec establishes.
+	cat, err := materialize.LoadCityCatalog("")
+	if err != nil {
+		return nil
+	}
+	out := make([]visibilityEntry, 0, len(cat.Entries))
+	for _, e := range cat.Entries {
+		out = append(out, visibilityEntry{
+			Name:   e.Name,
+			Source: e.Origin,
+			Path:   filepath.ToSlash(filepath.Join(e.Source, "SKILL.md")),
+		})
+	}
+	return out
+}
+
+type visibilityEntry struct {
+	Name   string
+	Source string
+	Path   string
+}
+
+func resolveVisibilityAgent(cityPath string, cfg *config.City, store beads.Store, agentName, sessionID string) (*config.Agent, error) {
+	switch {
+	case strings.TrimSpace(agentName) != "":
+		resolved, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
+		if !ok {
+			return nil, fmt.Errorf("unknown agent %q", agentName)
 		}
+		template := resolveAgentTemplate(resolved.QualifiedName(), cfg)
+		agent := findAgentByTemplate(cfg, template)
+		if agent == nil {
+			return nil, fmt.Errorf("unknown agent %q", agentName)
+		}
+		return agent, nil
+	case strings.TrimSpace(sessionID) != "":
+		if store == nil {
+			return nil, fmt.Errorf("session store unavailable")
+		}
+		id, err := resolveSessionIDAllowClosedWithConfig(cityPath, cfg, store, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		bead, err := store.Get(id)
+		if err != nil {
+			return nil, fmt.Errorf("loading session %q: %w", sessionID, err)
+		}
+		template := normalizedSessionTemplate(bead, cfg)
+		if template == "" {
+			template = strings.TrimSpace(bead.Metadata["agent_name"])
+		}
+		template = resolveAgentTemplate(template, cfg)
+		agent := findAgentByTemplate(cfg, template)
+		if agent == nil {
+			return nil, fmt.Errorf("session %q maps to unknown agent template %q", sessionID, template)
+		}
+		return agent, nil
+	default:
+		return nil, nil
 	}
-	for _, t := range sorted {
-		pad := strings.Repeat(" ", maxLen-len(t.Arg))
-		fmt.Fprintf(w, "  %s%s  %s\n", t.Arg, pad, t.Desc) //nolint:errcheck // best-effort
+}
+
+func agentAssetRoot(cityPath string, agent *config.Agent) string {
+	if agent != nil && strings.TrimSpace(agent.SourceDir) != "" {
+		return agent.SourceDir
 	}
+	return cityPath
+}
+
+func discoverSkillEntries(root, source string) []visibilityEntry {
+	return discoverSkillDirEntries(filepath.Join(root, "skills"), "skills", source)
+}
+
+func discoverAgentSkillEntries(root, agentName, source string) []visibilityEntry {
+	return discoverSkillDirEntries(filepath.Join(root, "agents", agentName, "skills"), filepath.Join("agents", agentName, "skills"), source)
+}
+
+func discoverSkillDirEntries(dir, relBase, source string) []visibilityEntry {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []visibilityEntry
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		skillPath := filepath.Join(dir, name, "SKILL.md")
+		if info, err := os.Stat(skillPath); err != nil || info.IsDir() {
+			continue
+		}
+		out = append(out, visibilityEntry{
+			Name:   name,
+			Source: source,
+			Path:   filepath.ToSlash(filepath.Join(relBase, name, "SKILL.md")),
+		})
+	}
+	sortVisibilityEntries(out)
+	return out
+}
+
+func discoverMcpEntries(root, source string) []visibilityEntry {
+	return discoverMcpDirEntries(filepath.Join(root, "mcp"), "mcp", source)
+}
+
+func discoverAgentMcpEntries(root, agentName, source string) []visibilityEntry {
+	return discoverMcpDirEntries(filepath.Join(root, "agents", agentName, "mcp"), filepath.Join("agents", agentName, "mcp"), source)
+}
+
+func discoverMcpDirEntries(dir, relBase, source string) []visibilityEntry {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []visibilityEntry
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name, ok := mcpIdentityForFilename(entry.Name())
+		if !ok {
+			continue
+		}
+		out = append(out, visibilityEntry{
+			Name:   name,
+			Source: source,
+			Path:   filepath.ToSlash(filepath.Join(relBase, entry.Name())),
+		})
+	}
+	sortVisibilityEntries(out)
+	return out
+}
+
+func mcpIdentityForFilename(name string) (string, bool) {
+	switch {
+	case strings.HasSuffix(name, ".template.toml"):
+		return strings.TrimSuffix(name, ".template.toml"), true
+	case strings.HasSuffix(name, ".toml"):
+		return strings.TrimSuffix(name, ".toml"), true
+	default:
+		return "", false
+	}
+}
+
+func sortVisibilityEntries(entries []visibilityEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Source != entries[j].Source {
+			return entries[i].Source < entries[j].Source
+		}
+		if entries[i].Name != entries[j].Name {
+			return entries[i].Name < entries[j].Name
+		}
+		return entries[i].Path < entries[j].Path
+	})
+}
+
+func writeVisibilityEntries(w io.Writer, entries []visibilityEntry) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tFROM\tPATH") //nolint:errcheck // best-effort
+	for _, entry := range entries {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", entry.Name, entry.Source, entry.Path) //nolint:errcheck // best-effort
+	}
+	_ = tw.Flush()
 }

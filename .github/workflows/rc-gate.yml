@@ -112,8 +112,8 @@ jobs:
       - name: Run make test-acceptance-c
         run: make test-acceptance-c
 
-  ubuntu_make_test_integration:
-    name: ubuntu / make test-integration
+  ubuntu_test_integration_packages:
+    name: ubuntu / integration packages
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -139,8 +139,98 @@ jobs:
           test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
           test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
           test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
-      - name: Run make test-integration
-        run: make test-integration
+      - name: Run integration packages shard
+        run: make test-integration-packages
+
+  ubuntu_test_integration_review_formulas:
+    name: ubuntu / integration review-formulas
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+      - name: Run integration review-formulas shard
+        run: make test-integration-review-formulas
+
+  ubuntu_test_integration_bdstore:
+    name: ubuntu / integration bdstore
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+      - name: Run integration bdstore shard
+        run: make test-integration-bdstore
+
+  ubuntu_test_integration_rest:
+    name: ubuntu / integration rest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+      - name: Run integration rest shard
+        run: make test-integration-rest
 
   ubuntu_make_test_tutorial:
     name: ubuntu / make test-tutorial
@@ -236,7 +326,10 @@ jobs:
       - ubuntu_make_test_acceptance
       - ubuntu_make_test_acceptance_b
       - ubuntu_make_test_acceptance_c
-      - ubuntu_make_test_integration
+      - ubuntu_test_integration_packages
+      - ubuntu_test_integration_review_formulas
+      - ubuntu_test_integration_bdstore
+      - ubuntu_test_integration_rest
       - ubuntu_make_test_tutorial
       - ubuntu_goreleaser_snapshot
       - macos_make_test
@@ -246,7 +339,10 @@ jobs:
       UBUNTU_MAKE_TEST_ACCEPTANCE: ${{ needs.ubuntu_make_test_acceptance.result }}
       UBUNTU_MAKE_TEST_ACCEPTANCE_B: ${{ needs.ubuntu_make_test_acceptance_b.result }}
       UBUNTU_MAKE_TEST_ACCEPTANCE_C: ${{ needs.ubuntu_make_test_acceptance_c.result }}
-      UBUNTU_MAKE_TEST_INTEGRATION: ${{ needs.ubuntu_make_test_integration.result }}
+      UBUNTU_TEST_INTEGRATION_PACKAGES: ${{ needs.ubuntu_test_integration_packages.result }}
+      UBUNTU_TEST_INTEGRATION_REVIEW_FORMULAS: ${{ needs.ubuntu_test_integration_review_formulas.result }}
+      UBUNTU_TEST_INTEGRATION_BDSTORE: ${{ needs.ubuntu_test_integration_bdstore.result }}
+      UBUNTU_TEST_INTEGRATION_REST: ${{ needs.ubuntu_test_integration_rest.result }}
       UBUNTU_MAKE_TEST_TUTORIAL: ${{ needs.ubuntu_make_test_tutorial.result }}
       UBUNTU_GORELEASER_SNAPSHOT: ${{ needs.ubuntu_goreleaser_snapshot.result }}
       MACOS_MAKE_TEST: ${{ needs.macos_make_test.result }}
@@ -265,7 +361,10 @@ jobs:
           | ubuntu / make test-acceptance | ${UBUNTU_MAKE_TEST_ACCEPTANCE} |
           | ubuntu / make test-acceptance-b | ${UBUNTU_MAKE_TEST_ACCEPTANCE_B} |
           | ubuntu / make test-acceptance-c | ${UBUNTU_MAKE_TEST_ACCEPTANCE_C} |
-          | ubuntu / make test-integration | ${UBUNTU_MAKE_TEST_INTEGRATION} |
+          | ubuntu / integration packages | ${UBUNTU_TEST_INTEGRATION_PACKAGES} |
+          | ubuntu / integration review-formulas | ${UBUNTU_TEST_INTEGRATION_REVIEW_FORMULAS} |
+          | ubuntu / integration bdstore | ${UBUNTU_TEST_INTEGRATION_BDSTORE} |
+          | ubuntu / integration rest | ${UBUNTU_TEST_INTEGRATION_REST} |
           | ubuntu / make test-tutorial | ${UBUNTU_MAKE_TEST_TUTORIAL} |
           | ubuntu / goreleaser snapshot | ${UBUNTU_GORELEASER_SNAPSHOT} |
           | macOS / make test | ${MACOS_MAKE_TEST} |
@@ -278,7 +377,10 @@ jobs:
             "$UBUNTU_MAKE_TEST_ACCEPTANCE" \
             "$UBUNTU_MAKE_TEST_ACCEPTANCE_B" \
             "$UBUNTU_MAKE_TEST_ACCEPTANCE_C" \
-            "$UBUNTU_MAKE_TEST_INTEGRATION" \
+            "$UBUNTU_TEST_INTEGRATION_PACKAGES" \
+            "$UBUNTU_TEST_INTEGRATION_REVIEW_FORMULAS" \
+            "$UBUNTU_TEST_INTEGRATION_BDSTORE" \
+            "$UBUNTU_TEST_INTEGRATION_REST" \
             "$UBUNTU_MAKE_TEST_TUTORIAL" \
             "$UBUNTU_GORELEASER_SNAPSHOT" \
             "$MACOS_MAKE_TEST"

@@ -14,8 +14,8 @@ import (
 func newSessionWakeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "wake <session-id-or-alias>",
-		Short: "Wake a session (clear hold and quarantine)",
-		Long: `Release a user hold and/or crash-loop quarantine on a session.
+		Short: "Wake a session (request start and clear holds)",
+		Long: `Request wake for a session and release user hold or crash-loop quarantine metadata.
 
 After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
@@ -62,13 +62,12 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	session.RepairEmptyType(store, &b)
-	if b.Status == "closed" {
-		fmt.Fprintf(stderr, "gc session wake: session %s is closed\n", id) //nolint:errcheck
-		return 1
-	}
-
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
+		if state, conflict := session.WakeConflictState(err); conflict {
+			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -83,6 +82,6 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintf(stdout, "Session %s: hold and quarantine cleared.\n", id) //nolint:errcheck
+	fmt.Fprintf(stdout, "Session %s: wake requested.\n", id) //nolint:errcheck
 	return 0
 }

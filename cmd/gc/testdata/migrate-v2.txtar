@@ -1,0 +1,59 @@
+# gc import migrate rewrites legacy layouts via the CLI.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+cd $WORK/legacy-city
+
+# Dry-run reports changes without writing files.
+exec gc import migrate --dry-run
+stdout 'Planned changes for'
+stdout 'rewrite city.toml'
+stdout 'rewrite pack.toml'
+stdout 'No side effects executed \x28--dry-run\x29\.'
+! exists $WORK/legacy-city/pack.toml
+! exists $WORK/legacy-city/agents
+exec grep '\[\[agent\]\]' $WORK/legacy-city/city.toml
+
+# Real migration rewrites config and moves assets.
+exec gc import migrate
+stdout 'Applied changes for'
+stdout 'warning: dropped fallback field'
+exists $WORK/legacy-city/pack.toml
+exists $WORK/legacy-city/agents/mayor/agent.toml
+exists $WORK/legacy-city/agents/mayor/prompt.template.md
+exists $WORK/legacy-city/agents/mayor/overlay/CLAUDE.md
+exists $WORK/legacy-city/agents/mayor/namepool.txt
+! exists $WORK/legacy-city/prompts/mayor.md
+! exists $WORK/legacy-city/overlays/mayor
+! exists $WORK/legacy-city/namepools/mayor.txt
+exec grep '\[imports.gastown\]' $WORK/legacy-city/pack.toml
+exec grep '\[defaults.rig.imports.default-rig\]' $WORK/legacy-city/pack.toml
+! exec grep '\[\[agent\]\]' $WORK/legacy-city/city.toml
+! exec grep 'includes =' $WORK/legacy-city/city.toml
+! exec grep 'default_rig_includes' $WORK/legacy-city/city.toml
+
+-- legacy-city/city.toml --
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+default_rig_includes = ["../packs/default rig"]
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+prompt_template = "prompts/mayor.md"
+overlay_dir = "overlays/mayor"
+namepool = "namepools/mayor.txt"
+fallback = true
+
+-- legacy-city/prompts/mayor.md --
+Hello {{.Agent}}
+
+-- legacy-city/overlays/mayor/CLAUDE.md --
+overlay
+
+-- legacy-city/namepools/mayor.txt --
+Ada
+Grace

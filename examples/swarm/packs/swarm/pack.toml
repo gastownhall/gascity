@@ -11,66 +11,17 @@
 
 [pack]
 name = "swarm"
-schema = 1
-
-# ── MAYOR — Global coordinator. One per city. ──────────────────────────
-[[agent]]
-name = "mayor"
-scope = "city"
-prompt_template = "prompts/mayor.md.tmpl"
-nudge = "Check mail and hook status, then act accordingly."
-overlay_dir = "overlays/default"
-idle_timeout = "1h"
+schema = 2
 
 [[named_session]]
 template = "mayor"
 scope = "city"
 mode = "on_demand"
 
-# ── DEACON — Daemon beacon / patrol executor. One per city. ────────────
-[[agent]]
-name = "deacon"
-scope = "city"
-prompt_template = "prompts/deacon.md.tmpl"
-nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
-overlay_dir = "overlays/default"
-idle_timeout = "1h"
-
 [[named_session]]
 template = "deacon"
 scope = "city"
 mode = "always"
-
-# ── DOG — City-level infrastructure workers. ──────────────────────────
-[[agent]]
-name = "dog"
-scope = "city"
-prompt_template = "prompts/dog.md.tmpl"
-nudge = "Check your hook for work assignments."
-overlay_dir = "overlays/default"
-idle_timeout = "2h"
-min_active_sessions = 0
-max_active_sessions = 3
-
-# ── CODER — peer worker. Up to 5 concurrent sessions. Rig-scoped. ────
-[[agent]]
-name = "coder"
-scope = "rig"
-prompt_template = "prompts/coder.md.tmpl"
-nudge = "Run bd ready --unassigned, check mail, then claim and work on a task."
-overlay_dir = "overlays/default"
-idle_timeout = "2h"
-min_active_sessions = 1
-max_active_sessions = 5
-
-# ── COMMITTER — dedicated commit agent. Singleton. Rig-scoped. ────────
-[[agent]]
-name = "committer"
-scope = "rig"
-prompt_template = "prompts/committer.md.tmpl"
-nudge = "Check for uncommitted changes and commit them in logical groupings."
-overlay_dir = "overlays/default"
-idle_timeout = "2h"
 
 [[named_session]]
 template = "committer"

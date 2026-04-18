@@ -660,6 +660,59 @@ func TestClose_ConfiguredNamedSessionRetiresIdentifiers(t *testing.T) {
 	}
 }
 
+func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
+		context.Background(),
+		"mayor",
+		"test-city--mayor",
+		"reviewer",
+		"Mayor",
+		"claude",
+		"/tmp",
+		"claude",
+		"",
+		map[string]string{"GC_AGENT": "stale"},
+		ProviderResume{},
+		runtime.Config{},
+		map[string]string{
+			"configured_named_session":  "true",
+			"configured_named_identity": "mayor",
+			"session_origin":            "named",
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+	}
+
+	var start *runtime.Call
+	for i := range sp.Calls {
+		if sp.Calls[i].Method == "Start" {
+			start = &sp.Calls[i]
+			break
+		}
+	}
+	if start == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	env := start.Config.Env
+	for key, want := range map[string]string{
+		"GC_SESSION_ID":     info.ID,
+		"GC_SESSION_NAME":   "test-city--mayor",
+		"GC_ALIAS":          "mayor",
+		"GC_TEMPLATE":       "reviewer",
+		"GC_SESSION_ORIGIN": "named",
+		"GC_AGENT":          "mayor",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
+		}
+	}
+}
+
 func TestCloseSuspended(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

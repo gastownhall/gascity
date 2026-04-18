@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type wakeEvaluation struct {
@@ -153,7 +154,7 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 		// sessions when namedWorkReady is true.
 		return agent, namedSessionMode(session) == "always" || poolDesired[template] > 0
 	}
-	if session.Metadata["manual_session"] == "true" && isMultiSessionCfgAgent(agent) {
+	if isManualSessionBead(session) {
 		// Manual sessions on multi-session (implicit) agents are always
 		// config-eligible — they were created by the user and should stay
 		// alive until explicitly closed or idle-suspended.
@@ -235,7 +236,7 @@ func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[st
 		}
 		// Manual sessions (user-created via API/UI) bypass pool demand — they
 		// should stay alive until explicitly closed.
-		if session.Metadata["manual_session"] == "true" {
+		if isManualSessionBead(session) {
 			continue
 		}
 		template := normalizedSessionTemplate(session, cfg)
@@ -372,7 +373,8 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 		containsWakeReason(reasons, WakeCreate) ||
 		containsWakeReason(reasons, WakeSession) ||
 		containsWakeReason(reasons, WakeAttached) ||
-		containsWakeReason(reasons, WakePending)
+		containsWakeReason(reasons, WakePending) ||
+		containsWakeReason(reasons, WakePin)
 }
 
 // computeWorkSet runs each agent's work_query command and returns the set
@@ -394,6 +396,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		qn  string
 		wq  string
 		dir string
+		env map[string]string
 	}
 	var probes []probeWork
 	work := make(map[string]bool)
@@ -405,11 +408,12 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, a)
+		probeEnv := controllerQueryRuntimeEnv(cityDir, cfg, a)
+		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a)
 		if wq == "" {
 			continue
 		}
-		probes = append(probes, probeWork{qn: qn, wq: wq, dir: agentCommandDir(cityDir, a, cfg.Rigs)})
+		probes = append(probes, probeWork{qn: qn, wq: wq, dir: agentCommandDir(cityDir, a, cfg.Rigs), env: probeEnv})
 	}
 
 	sem := make(chan struct{}, cfg.Daemon.ProbeConcurrencyOrDefault())
@@ -421,7 +425,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out, err := runner(probes[idx].wq, probes[idx].dir)
+			out, err := runner(probes[idx].wq, probes[idx].dir, probes[idx].env)
 			if err != nil {
 				return // command failed — treat as no work
 			}
@@ -459,10 +463,7 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) {
 	if h := session.Metadata["held_until"]; h != "" {
 		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := map[string]string{"held_until": ""}
-			if session.Metadata["sleep_reason"] == "user-hold" {
-				batch["sleep_reason"] = ""
-			}
+			batch := sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])
 			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
@@ -472,14 +473,7 @@ func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	}
 	if q := session.Metadata["quarantined_until"]; q != "" {
 		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := map[string]string{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-			}
-			if session.Metadata["sleep_reason"] == "quarantine" || session.Metadata["sleep_reason"] == "context-churn" {
-				batch["sleep_reason"] = ""
-			}
+			batch := sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])
 			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
@@ -743,7 +737,7 @@ func sessionIsQuarantined(session beads.Bead, clk clock.Clock) bool {
 func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]int) bool {
 	template := normalizedSessionTemplate(session, cfg)
 	agent := findAgentByTemplate(cfg, template)
-	if agent == nil || !isMultiSessionCfgAgent(agent) {
+	if agent == nil || !isEphemeralSessionBead(session) {
 		return false
 	}
 	// A session is excess when demand is zero.
@@ -752,61 +746,83 @@ func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]i
 
 // healState updates advisory state metadata only when changed (dirty check).
 func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock) {
-	if session != nil && !alive && strings.TrimSpace(session.Metadata["state"]) == "drained" {
-		batch := map[string]string{"state": "asleep"}
-		if strings.TrimSpace(session.Metadata["sleep_reason"]) == "" {
-			batch["sleep_reason"] = "drained"
-		}
-		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
-			if session.Metadata == nil {
-				session.Metadata = make(map[string]string, len(batch))
-			}
-			for k, v := range batch {
-				session.Metadata[k] = v
-			}
-		}
+	if session == nil {
 		return
 	}
-	target := "asleep"
-	if alive {
-		target = "awake"
-	} else if session != nil && sessionStartRequested(*session, clk) {
-		target = "creating"
+	batch := healStatePatch(*session, alive, clk)
+	if len(batch) == 0 {
+		return
 	}
 	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
+		session.Metadata = make(map[string]string, len(batch))
 	}
-	if session.Metadata["state"] != target {
-		batch := map[string]string{"state": target}
-		// When a session with a resume key dies unexpectedly (no drain
-		// in progress), clear the resume identity so the next start uses a
-		// fresh conversation instead of retrying stale resume metadata.
-		// Skip this for deliberate drains where the key is still valid for
-		// future resume.
-		//
-		// Default is "clear key" (safe for crash loops). Any new sleep_reason
-		// that represents a deliberate drain must be added here to preserve
-		// the resume key. See sleep_reason assignment sites across the codebase.
-		if target == "asleep" && (session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "") {
-			prevState := session.Metadata["state"]
-			sleepReason := session.Metadata["sleep_reason"]
-			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
-				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
-				sleepReason == "drained" ||
-				sleepReason == "user-hold" || sleepReason == "wait-hold"
-			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
-				batch["session_key"] = ""
-				batch["started_config_hash"] = ""
-				batch["continuation_reset_pending"] = "true"
-			}
+	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
+	}
+	for k, v := range batch {
+		session.Metadata[k] = v
+	}
+}
+
+func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]string {
+	meta := session.Metadata
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	var now time.Time
+	var staleCreatingAfter time.Duration
+	if clk != nil {
+		now = clk.Now()
+		staleCreatingAfter = staleCreatingStateTimeout
+	}
+	view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInput{
+		Status:             session.Status,
+		Metadata:           meta,
+		Runtime:            sessionpkg.RuntimeFacts{Observed: true, Alive: alive},
+		CreatedAt:          session.CreatedAt,
+		StaleCreatingAfter: staleCreatingAfter,
+		Now:                now,
+	})
+
+	batch := make(map[string]string)
+	if !alive && view.BaseState == sessionpkg.BaseStateDrained {
+		if strings.TrimSpace(meta["state"]) != string(sessionpkg.StateAsleep) {
+			batch["state"] = string(sessionpkg.StateAsleep)
 		}
-		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
-			fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
+		if strings.TrimSpace(meta["sleep_reason"]) == "" {
+			batch["sleep_reason"] = "drained"
 		}
-		for k, v := range batch {
-			session.Metadata[k] = v
+		return emptyNil(batch)
+	}
+
+	target := string(view.ReconciledState)
+	if target == "" && view.BaseState == sessionpkg.BaseStateNone {
+		target = string(sessionpkg.StateAsleep)
+		if alive {
+			target = string(sessionpkg.StateAwake)
+		} else if sessionStartRequested(session, clk) {
+			target = string(sessionpkg.StateCreating)
 		}
 	}
+	if target == "" {
+		return nil
+	}
+	if meta["state"] != target {
+		batch["state"] = target
+	}
+	if target == string(sessionpkg.StateAsleep) && view.ResetContinuation {
+		batch["session_key"] = ""
+		batch["started_config_hash"] = ""
+		batch["continuation_reset_pending"] = "true"
+	}
+	return emptyNil(batch)
+}
+
+func emptyNil(batch map[string]string) map[string]string {
+	if len(batch) == 0 {
+		return nil
+	}
+	return batch
 }
 
 func staleCreatingState(session beads.Bead, clk clock.Clock) bool {

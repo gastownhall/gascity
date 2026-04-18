@@ -102,21 +102,27 @@ func cmdConvoyCreateWithOptions(args []string, opts convoyCreateOptions, stdout,
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	readDoltPort(cityPath)
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
+	issueIDs := []string(nil)
+	if len(args) > 1 {
+		issueIDs = args[1:]
+		if err := validateConvoyCreateStoreScope(cfg, cityPath, issueIDs); err != nil {
+			fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	// Determine which store to use: if children are provided, use the
 	// first child's rig store so convoy and children share a database.
 	// This avoids cross-store parent references that bd can't resolve.
 	storeDir := cityPath
-	if len(args) > 1 {
-		if rd := rigDirForBead(cfg, args[1]); rd != "" {
-			storeDir = rd
-		}
+	if len(issueIDs) > 0 {
+		storeDir = convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
@@ -124,7 +130,7 @@ func cmdConvoyCreateWithOptions(args []string, opts convoyCreateOptions, stdout,
 		return 1
 	}
 
-	rec := openCityRecorder(stderr)
+	rec := openCityRecorderAt(cityPath, stderr)
 	return doConvoyCreateWithOptions(store, cfg, cityPath, rec, args, opts, stdout, stderr)
 }
 
@@ -134,6 +140,29 @@ func doConvoyCreate(store beads.Store, rec events.Recorder, args []string, stdou
 	return doConvoyCreateWithOptions(store, nil, "", rec, args, convoyCreateOptions{}, stdout, stderr)
 }
 
+func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
+	if cfg != nil {
+		if rd := rigDirForBead(cfg, beadID); rd != "" {
+			return resolveStoreScopeRoot(cityPath, rd)
+		}
+	}
+	return cityPath
+}
+
+func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs []string) error {
+	if cfg == nil || cityPath == "" || len(issueIDs) < 2 {
+		return nil
+	}
+	want := convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+	for _, id := range issueIDs[1:] {
+		got := convoyCreateStoreRoot(cfg, cityPath, id)
+		if !samePath(got, want) {
+			return fmt.Errorf("issues span multiple stores; create separate convoys per scope")
+		}
+	}
+	return nil
+}
+
 func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath string, rec events.Recorder, args []string, opts convoyCreateOptions, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc convoy create: missing convoy name") //nolint:errcheck // best-effort stderr
@@ -141,6 +170,10 @@ func doConvoyCreateWithOptions(store beads.Store, cfg *config.City, cityPath str
 	}
 	name := args[0]
 	issueIDs := args[1:]
+	if err := validateConvoyCreateStoreScope(cfg, cityPath, issueIDs); err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	b := beads.Bead{Title: name, Type: "convoy"}
 	if opts.Owned {
@@ -228,7 +261,7 @@ func cmdConvoyList(stdout, stderr io.Writer) int {
 }
 
 func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
-	if rawBeadsProvider(cityPath) == "file" {
+	if rawBeadsProvider(cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
 		return []string{cityPath}
 	}
 	capacity := 2
@@ -249,13 +282,13 @@ func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
 	}
 	if cfg != nil {
 		if rd := rigDirForBead(cfg, beadID); rd != "" {
-			add(rd)
+			add(resolveStoreScopeRoot(cityPath, rd))
 		}
 	}
 	add(cityPath)
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
-			add(rig.Path)
+			add(resolveStoreScopeRoot(cityPath, rig.Path))
 		}
 	}
 	return candidates
@@ -323,7 +356,6 @@ func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, i
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	readDoltPort(cityPath)
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
@@ -371,7 +403,6 @@ func openConvoyStoreByID(convoyID string, stderr io.Writer, cmdName string) (bea
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	readDoltPort(cityPath)
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
@@ -1049,16 +1080,37 @@ func newConvoyAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // doConvoyAutoclose is the CLI entry point for convoy autoclose.
-// It creates a cwd-rooted BdStore (matching the bd process that invoked
-// the hook) and delegates to the testable core.
+// It opens the cwd-rooted store through the provider-aware resolver and
+// delegates to the testable core.
 func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return
 	}
-	store := bdStoreForDir(cwd)
-	rec := openCityRecorder(stderr)
+	storeRoot := convoyAutocloseStoreRoot(cwd)
+	cityPath := cityForStoreDir(storeRoot)
+	store, err := openStoreAtForCity(storeRoot, cityPath)
+	if err != nil {
+		return
+	}
+	rec := openCityRecorderAt(cityPath, stderr)
 	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+}
+
+func convoyAutocloseStoreRoot(cwd string) string {
+	if root := strings.TrimSpace(os.Getenv("GC_STORE_ROOT")); root != "" {
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(cwd, root)
+		}
+		return filepath.Clean(root)
+	}
+	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
+		if !filepath.IsAbs(beadsDir) {
+			beadsDir = filepath.Join(cwd, beadsDir)
+		}
+		return filepath.Clean(filepath.Dir(beadsDir))
+	}
+	return cwd
 }
 
 // doConvoyAutocloseWith checks whether the closed bead's parent is a

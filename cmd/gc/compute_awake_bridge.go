@@ -7,11 +7,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // buildAwakeInputFromReconciler constructs AwakeInput from the reconciler's
-// existing data. Runtime state (running, attached) is populated from the
-// already-computed wakeTargets to avoid redundant tmux calls.
+// existing data. Runtime liveness is populated from the already-computed
+// wakeTargets; attachment and pending interactions come from provider
+// capability probes.
 func buildAwakeInputFromReconciler(
 	cfg *config.City,
 	sessionBeads []beads.Bead,
@@ -53,7 +55,7 @@ func buildAwakeInputFromReconciler(
 		ns := &cfg.NamedSessions[i]
 		input.NamedSessions = append(input.NamedSessions, AwakeNamedSession{
 			Identity: ns.QualifiedName(),
-			Template: ns.QualifiedName(),
+			Template: ns.TemplateQualifiedName(),
 			Mode:     ns.Mode,
 		})
 	}
@@ -78,25 +80,27 @@ func buildAwakeInputFromReconciler(
 		if name == "" {
 			continue
 		}
+		lifecycle := session.ProjectLifecycle(session.LifecycleInput{
+			Status:   b.Status,
+			Metadata: b.Metadata,
+			Now:      clk,
+		})
 		bead := AwakeSessionBead{
 			ID:             b.ID,
 			SessionName:    name,
 			Template:       b.Metadata["template"],
-			State:          normalizeBeadState(b.Metadata["state"]),
+			State:          string(lifecycle.CompatState),
 			SleepReason:    b.Metadata["sleep_reason"],
-			ManualSession:  b.Metadata["manual_session"] == "true",
-			PendingCreate:  b.Metadata["pending_create_claim"] == "true",
+			ManualSession:  isManualSessionBead(*b),
+			PendingCreate:  lifecycle.HasWakeCause(session.WakeCausePendingCreate),
 			DependencyOnly: b.Metadata["dependency_only"] == "true",
-			NamedIdentity:  namedSessionIdentity(*b),
-			Drained:        isDrainedSessionMetadata(b.Metadata),
+			NamedIdentity:  lifecycle.NamedIdentity,
+			Pinned:         lifecycle.HasWakeCause(session.WakeCausePinned),
+			Drained:        lifecycle.BaseState == session.BaseStateDrained,
 			WaitHold:       b.Metadata["wait_hold"] == "true",
 		}
-		if t, err := time.Parse(time.RFC3339, b.Metadata["held_until"]); err == nil && !t.IsZero() {
-			bead.HeldUntil = t
-		}
-		if t, err := time.Parse(time.RFC3339, b.Metadata["quarantined_until"]); err == nil && !t.IsZero() {
-			bead.QuarantinedUntil = t
-		}
+		bead.HeldUntil = lifecycle.HeldUntil
+		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
 		if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
 			bead.IdleSince = t
 		}
@@ -105,12 +109,18 @@ func buildAwakeInputFromReconciler(
 
 	// Runtime state from wakeTargets (already computed, no extra tmux calls)
 	for _, target := range wakeTargets {
-		name := target.session.Metadata["session_name"]
+		name := strings.TrimSpace(target.session.Metadata["session_name"])
+		if name == "" {
+			continue
+		}
 		if target.alive {
 			input.RunningSessions[name] = true
 		}
 		if sp != nil && sp.IsAttached(name) {
 			input.AttachedSessions[name] = true
+		}
+		if pendingInteractionReady(sp, name) {
+			input.PendingSessions[name] = true
 		}
 	}
 
@@ -135,6 +145,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakeAttached}
 			case "pending":
 				reasons = []WakeReason{WakePending}
+			case "pin":
+				reasons = []WakeReason{WakePin}
 			case "wait-ready":
 				reasons = []WakeReason{WakeWait}
 			case "work-query":
@@ -149,17 +161,6 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 		}
 	}
 	return evals
-}
-
-func normalizeBeadState(state string) string {
-	switch state {
-	case "awake":
-		return "active"
-	case "drained":
-		return "asleep"
-	default:
-		return state
-	}
 }
 
 func parseSleepDuration(s string) time.Duration {

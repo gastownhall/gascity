@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type prefixedAliasStore struct {
@@ -729,6 +730,294 @@ func TestBeadAssign(t *testing.T) {
 	if got.Assignee != "worker-1" {
 		t.Errorf("Assignee = %q, want %q", got.Assignee, "worker-1")
 	}
+}
+
+func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/assign", bytes.NewBufferString(`{"assignee":"worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != sessionBead.ID {
+		t.Fatalf("assignee = %q, want alias normalized to session bead ID %q", got.Assignee, sessionBead.ID)
+	}
+
+	listReq := httptest.NewRequest("GET", "/v0/beads?assignee=worker", nil)
+	listRec := httptest.NewRecorder()
+	srv.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list by alias status = %d, want %d; body: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listed struct {
+		Items []beads.Bead `json:"items"`
+	}
+	if err := json.NewDecoder(listRec.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.Items) != 1 || listed.Items[0].ID != work.ID {
+		t.Fatalf("list by alias items = %#v, want only %s", listed.Items, work.ID)
+	}
+}
+
+func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.stores["otherrig"] = beads.NewMemStore()
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig"})
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	workA, _ := state.stores["myrig"].Create(beads.Bead{Title: "Task A", Assignee: sessionBead.ID})
+	workB, _ := state.stores["otherrig"].Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
+	if workA.ID != workB.ID {
+		t.Fatalf("test setup expected duplicate local IDs, got %q and %q", workA.ID, workB.ID)
+	}
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/v0/beads?assignee=worker", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list by alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var listed struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if listed.Total != 2 || len(listed.Items) != 2 {
+		t.Fatalf("list by alias total/items = %d/%d, want 2/2: %#v", listed.Total, len(listed.Items), listed.Items)
+	}
+}
+
+func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/assign", bytes.NewBufferString(`{"assignee":"test-city--worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign session_name status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != sessionBead.ID {
+		t.Fatalf("assignee = %q, want session_name normalized to session bead ID %q", got.Assignee, sessionBead.ID)
+	}
+}
+
+func TestPhase2BeadAssignMaterializesExactConfiguredNamedIdentity(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/assign", bytes.NewBufferString(`{"assignee":"myrig/worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign configured named identity status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee == "" || got.Assignee == "myrig/worker" {
+		t.Fatalf("assignee = %q, want materialized concrete session bead ID", got.Assignee)
+	}
+	gotSession, err := state.cityBeadStore.Get(got.Assignee)
+	if err != nil {
+		t.Fatalf("Get(materialized session %q): %v", got.Assignee, err)
+	}
+	if gotSession.Metadata[apiNamedSessionMetadataKey] != "true" {
+		t.Fatalf("configured_named_session = %q, want true", gotSession.Metadata[apiNamedSessionMetadataKey])
+	}
+	if gotSession.Metadata[apiNamedSessionIdentityKey] != "myrig/worker" {
+		t.Fatalf("configured_named_identity = %q, want myrig/worker", gotSession.Metadata[apiNamedSessionIdentityKey])
+	}
+}
+
+func TestPhase2BeadAssignDoesNotMaterializeNamedSessionForMissingBead(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/missing/assign", bytes.NewBufferString(`{"assignee":"myrig/worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("assign missing bead status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	items, err := state.cityBeadStore.List(beads.ListQuery{Label: session.LabelSession})
+	if err != nil {
+		t.Fatalf("List(sessions): %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("materialized %d session(s) for missing bead, want 0: %#v", len(items), items)
+	}
+}
+
+func TestPhase2BeadAssignRejectsUnknownAssigneeAlias(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	createPhase2APISessionBead(t, state.cityBeadStore)
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/assign", bytes.NewBufferString(`{"assignee":"missing-worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("assign unknown alias status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != "" {
+		t.Fatalf("assignee after rejected unknown alias = %q, want empty", got.Assignee)
+	}
+}
+
+func TestPhase2BeadAssignRejectsClosedSessionBeadID(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	closed := "closed"
+	if err := state.cityBeadStore.Update(sessionBead.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("Update(session status): %v", err)
+	}
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/assign", bytes.NewBufferString(`{"assignee":"`+sessionBead.ID+`"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("assign closed session status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != "" {
+		t.Fatalf("assignee after rejected closed session = %q, want empty", got.Assignee)
+	}
+}
+
+func TestPhase2BeadAssignAcceptsRepairableSessionBeadID(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	empty := ""
+	if err := state.cityBeadStore.Update(sessionBead.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatalf("Update(session type): %v", err)
+	}
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/assign", bytes.NewBufferString(`{"assignee":"`+sessionBead.ID+`"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign repairable session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != sessionBead.ID {
+		t.Fatalf("assignee = %q, want repairable session bead ID %q", got.Assignee, sessionBead.ID)
+	}
+	gotSession, _ := state.cityBeadStore.Get(sessionBead.ID)
+	if gotSession.Type != session.BeadType {
+		t.Fatalf("repaired session type = %q, want %q", gotSession.Type, session.BeadType)
+	}
+}
+
+func TestPhase2BeadUpdateNormalizesRawAssigneeAlias(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	store := state.stores["myrig"]
+	_, _ = store.Create(beads.Bead{Title: "ID offset"})
+	work, _ := store.Create(beads.Bead{Title: "Task"})
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	srv := New(state)
+
+	req := newPostRequest("/v0/bead/"+work.ID+"/update", bytes.NewBufferString(`{"assignee":"worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != sessionBead.ID {
+		t.Fatalf("assignee = %q, want alias normalized to session bead ID %q", got.Assignee, sessionBead.ID)
+	}
+}
+
+func TestPhase2BeadCreateNormalizesRawAssigneeAlias(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
+	srv := New(state)
+
+	req := newPostRequest("/v0/beads", bytes.NewBufferString(`{"rig":"myrig","title":"Task","assignee":"worker"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create alias status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	items, err := state.stores["myrig"].List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("created %d beads, want 1", len(items))
+	}
+	if items[0].Assignee != sessionBead.ID {
+		t.Fatalf("created assignee = %q, want alias normalized to session bead ID %q", items[0].Assignee, sessionBead.ID)
+	}
+}
+
+func createPhase2APISessionBead(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "Worker session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "test-city--worker",
+			"alias":        "worker",
+			"template":     "myrig/worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	return b
 }
 
 func TestBeadDelete(t *testing.T) {

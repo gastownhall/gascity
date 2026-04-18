@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
@@ -21,7 +22,8 @@ func isRemoteInclude(s string) bool {
 		strings.HasPrefix(s, "ssh://") ||
 		strings.HasPrefix(s, "https://") ||
 		strings.HasPrefix(s, "http://") ||
-		strings.HasPrefix(s, "file://")
+		strings.HasPrefix(s, "file://") ||
+		strings.HasPrefix(s, "github.com/")
 }
 
 // parseRemoteInclude splits a remote include string into source, subpath,
@@ -151,6 +153,16 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 	}
 	if isRemoteInclude(ref) {
 		source, subpath, gitRef := parseRemoteInclude(ref)
+		if gitRef == "" {
+			if cacheDir, ok, err := resolveLockedRemoteImport(ref, cityRoot); err != nil {
+				return "", err
+			} else if ok {
+				if subpath != "" {
+					return filepath.Join(cacheDir, subpath), nil
+				}
+				return cacheDir, nil
+			}
+		}
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
 		if err != nil {
 			return "", err
@@ -163,24 +175,90 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 	return resolveConfigPath(ref, declDir, cityRoot), nil
 }
 
-// fetchRemoteInclude ensures a remote pack include is cached locally.
-// Returns the path to the cached pack directory (including subpath
-// resolution). Clones on first access, updates on subsequent calls.
+type remoteImportLockfile struct {
+	Packs map[string]remoteImportLockEntry `toml:"packs"`
+}
+
+type remoteImportLockEntry struct {
+	Commit string `toml:"commit"`
+}
+
+func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
+	lockPath := filepath.Join(cityRoot, "packs.lock")
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("reading packs.lock: %w", err)
+	}
+
+	var lock remoteImportLockfile
+	if _, err := toml.Decode(string(data), &lock); err != nil {
+		return "", false, fmt.Errorf("parsing packs.lock: %w", err)
+	}
+	entry, ok := lock.Packs[source]
+	if !ok || entry.Commit == "" {
+		return "", false, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false, fmt.Errorf("resolving home dir: %w", err)
+	}
+
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, entry.Commit))
+	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, fmt.Errorf("remote import %s is locked but not cached at %s", source, cacheDir)
+		}
+		return "", false, fmt.Errorf("checking cached import %s: %w", source, err)
+	}
+	return cacheDir, true, nil
+}
+
+// RepoCacheKey computes the sha256 cache key for a remote source+commit pair.
+// This is the canonical implementation — packman.RepoCacheKey must produce
+// identical results. The key is sha256(normalizedCloneURL + commit).
+func RepoCacheKey(source, commit string) string {
+	sum := sha256.Sum256([]byte(NormalizeRemoteSource(source) + commit))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+// NormalizeRemoteSource extracts the clone URL from a source string,
+// stripping subpath and ref suffixes. This is the canonical normalization
+// for cache key computation — packman must use the same logic.
+func NormalizeRemoteSource(source string) string {
+	switch {
+	case isGitHubTreeURL(source):
+		cloneURL, _, _ := parseGitHubTreeURL(source)
+		return cloneURL
+	case isRemoteInclude(source):
+		cloneURL, _, _ := parseRemoteInclude(source)
+		if strings.HasPrefix(cloneURL, "github.com/") {
+			return "https://" + cloneURL
+		}
+		return cloneURL
+	default:
+		return source
+	}
+}
+
+// fetchRemoteInclude resolves a remote pack include from the local cache.
+// The loader is a pure reader: git operations must happen ahead of time.
 // Cache location: <cityRoot>/.gc/cache/includes/<cache-name>/
 func fetchRemoteInclude(source, ref, cityRoot string) (string, error) {
 	cacheName := includeCacheName(source)
 	cacheDir := filepath.Join(cityRoot, includeCacheDir, cacheName)
 
 	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
-		// Not yet cloned.
-		if err := clonePack(source, cacheDir, ref); err != nil {
-			return "", fmt.Errorf("fetching include %s: %w", source, err)
+		if os.IsNotExist(err) {
+			if ref != "" {
+				return "", fmt.Errorf("remote include %s#%s is not cached at %s", source, ref, cacheDir)
+			}
+			return "", fmt.Errorf("remote include %s is not cached at %s", source, cacheDir)
 		}
-	} else {
-		// Already cloned — update.
-		if err := updatePack(cacheDir, ref); err != nil {
-			return "", fmt.Errorf("updating include %s: %w", source, err)
-		}
+		return "", fmt.Errorf("checking cached include %s: %w", source, err)
 	}
 
 	return cacheDir, nil

@@ -11,9 +11,10 @@
 #   gastown      — domain-specific coding workflow: mayor, deacon, boot,
 #                  witness, refinery, polecat, crew + digest orders
 #
-# City-scoped agents come from both packs: dog (maintenance) + mayor,
-# deacon, boot (gastown). Rig-scoped agents (witness, refinery, polecat)
-# are stamped per-rig.
+# City-scoped agents come from both packs: mayor, deacon, boot, plus the
+# effective dog definition from gastown. Maintenance still supplies the
+# fallback dog shape and shared dog formulas/prompts that gastown reuses.
+# Rig-scoped agents (witness, refinery, polecat) are stamped per-rig.
 #
 # To use: gc start examples/gastown/
 # Requires rigs to be registered: gc rig add <path>
@@ -34,16 +35,15 @@ shutdown_timeout = "5s"
 # [[rigs]]
 # name = "myproject"
 # path = "/path/to/your/project"
-# includes = ["packs/gastown"]
 
 # Crew members are individually named, so they can't be pack-stamped:
 # [[agent]]
 # name = "wolf"
 # dir = "myproject"
 # pre_start = ["packs/gastown/scripts/worktree-setup.sh /path/to/myproject /path/to/city/.gc/worktrees/myproject/wolf wolf --sync"]
-# prompt_template = "packs/gastown/prompts/crew.md.tmpl"
+# prompt_template = "packs/gastown/assets/prompts/crew.template.md"
 # nudge = "Check your hook and mail, then act accordingly."
-# overlay_dir = "packs/gastown/overlays/crew"
+# overlay_dir = "packs/gastown/agents/wolf/overlay"
 # idle_timeout = "4h"
 # session_setup_script = "packs/gastown/scripts/tmux-theme.sh"
 # session_setup = [

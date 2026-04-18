@@ -363,6 +363,33 @@ func TestMeta_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestMetaPath_HashesUntrustedNameAndKey(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "acp")
+	p := NewProviderWithDir(dir, Config{})
+
+	path := p.metaPath("../escape", "../key")
+	if filepath.Dir(path) != dir {
+		t.Fatalf("metaPath escaped provider dir: %q", path)
+	}
+	if base := filepath.Base(path); strings.Contains(base, "..") || strings.ContainsAny(base, `/\`) {
+		t.Fatalf("metaPath base = %q, want hashed file name without path tokens", base)
+	}
+
+	if err := p.SetMeta("../escape", "../key", "secret"); err != nil {
+		t.Fatalf("SetMeta with untrusted tokens: %v", err)
+	}
+	got, err := p.GetMeta("../escape", "../key")
+	if err != nil {
+		t.Fatalf("GetMeta with untrusted tokens: %v", err)
+	}
+	if got != "secret" {
+		t.Fatalf("GetMeta = %q, want secret", got)
+	}
+	if err := p.RemoveMeta("../escape", "../key"); err != nil {
+		t.Fatalf("RemoveMeta with untrusted tokens: %v", err)
+	}
+}
+
 func TestAttach_ReturnsError(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Attach("any"); err == nil {

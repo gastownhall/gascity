@@ -743,6 +743,41 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListOmitsExpiredLifecycleReason(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Expired Hold")
+	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"held_until": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v0/sessions", nil)
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var raw struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(raw.Items))
+	}
+	var item sessionResponse
+	if err := json.Unmarshal(raw.Items[0], &item); err != nil {
+		t.Fatalf("unmarshal item: %v", err)
+	}
+	if item.Reason != "" {
+		t.Errorf("got reason %q, want empty after expired hold", item.Reason)
+	}
+}
+
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1111,7 +1146,7 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
+func TestHandleSessionCreateRejectsBareRigScopedTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -1119,19 +1154,8 @@ func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
-	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Template != "myrig/worker" {
-		t.Errorf("Template = %q, want %q", resp.Template, "myrig/worker")
-	}
-	if resp.Title != "myrig/worker" {
-		t.Errorf("Title = %q, want %q", resp.Title, "myrig/worker")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusNotFound, w.Body.String())
 	}
 }
 
@@ -1352,7 +1376,7 @@ func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest("/v0/session/myrig%2Fworker/messages", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -1404,7 +1428,7 @@ func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := srv.resolveSessionIDMaterializingNamedWithContext(ctx, fs.cityBeadStore, "worker")
+	_, err := srv.resolveSessionIDMaterializingNamedWithContext(ctx, fs.cityBeadStore, "myrig/worker")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("resolveSessionIDMaterializingNamedWithContext: %v, want context canceled", err)
 	}
@@ -1424,7 +1448,7 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
@@ -1508,12 +1532,12 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	}
 }
 
-func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
+func TestHandleSessionCloseAllowsAlwaysNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg.NamedSessions[0].Mode = "always"
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
@@ -1529,8 +1553,8 @@ func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 	req := newPostRequest("/v0/session/"+id+"/close", nil)
 	srv.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 
@@ -1546,8 +1570,8 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 	}
 	srv := New(fs)
 
-	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err == nil || ok {
-		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want ambiguous error", ok, err)
+	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err != nil || ok {
+		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want not found without qualified target", ok, err)
 	}
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "rig-a/worker")
@@ -1578,7 +1602,7 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 		t.Fatalf("create ordinary session bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -1601,7 +1625,7 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -1622,12 +1646,51 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 		t.Fatalf("create canonical runtime bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
 	if id != bead.ID {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want adopted bead %q", id, bead.ID)
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_AdoptsArchivedContinuityEligibleNamedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	bead, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: spec.Identity,
+			apiNamedSessionModeKey:     spec.Mode,
+			"session_name":             spec.SessionName,
+			"alias":                    spec.Identity,
+			"template":                 spec.Identity,
+			"agent_name":               spec.Identity,
+			"state":                    "archived",
+			"continuity_eligible":      "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create archived continuity-eligible named bead: %v", err)
+	}
+
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
+	}
+	if id != bead.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want archived continuity bead %q", id, bead.ID)
 	}
 }
 
@@ -1649,7 +1712,7 @@ func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSa
 		t.Fatalf("create ordinary pool worker: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -1684,7 +1747,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -1704,7 +1767,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 		t.Fatalf("create wrong-template runtime bead: %v", err)
 	}
 
-	_, err = srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	_, err = srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
 	if err == nil || !strings.Contains(err.Error(), "conflicts with configured named session") {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker) error = %v, want configured named session conflict", err)
 	}
@@ -1715,7 +1778,7 @@ func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T)
 	srv := New(fs)
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/wake", nil)
+	req := newPostRequest("/v0/session/myrig%2Fworker/wake", nil)
 	srv.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -1758,7 +1821,7 @@ func TestHandleSessionWakeCanceledNamedCreateRollsBack(t *testing.T) {
 	cancel()
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/wake", nil).WithContext(ctx)
+	req := newPostRequest("/v0/session/myrig%2Fworker/wake", nil).WithContext(ctx)
 	srv.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {

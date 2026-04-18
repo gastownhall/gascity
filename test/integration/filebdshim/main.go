@@ -147,10 +147,11 @@ func runFileStore(cityDir string, args []string, stdout io.Writer) (int, bool, e
 		if err != nil {
 			return 0, true, err
 		}
-		items, err := store.List(q)
+		items, err := store.Ready()
 		if err != nil {
 			return 0, true, err
 		}
+		items = beads.ApplyListQuery(items, q)
 		return 0, true, writeList(stdout, items, jsonOut)
 	case "close":
 		id, jsonOut, err := parseCloseArgs(args[1:])

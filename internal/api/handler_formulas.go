@@ -468,10 +468,13 @@ func discoverFormulaNames(paths []string) []string {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".formula.toml") {
+			if entry.IsDir() {
 				continue
 			}
-			name := strings.TrimSuffix(entry.Name(), ".formula.toml")
+			name, ok := formula.TrimTOMLFilename(entry.Name())
+			if !ok {
+				continue
+			}
 			winners[name] = struct{}{}
 		}
 	}

@@ -27,16 +27,11 @@ import (
 // env vars → isExternalDolt → skip managed Dolt). This test verifies
 // the real network + bd stack that the wiring feeds into.
 //
-// Requires: dolt and bd installed.
+// Requires: Dolt and bd binaries configured via PATH or the integration
+// override env vars.
 func TestDoltConfigWiringExternalHost(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -45,7 +40,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 	// Start a Dolt server on 0.0.0.0 so it's reachable beyond localhost.
 	doltDataDir := filepath.Join(t.TempDir(), "dolt-data")
-	port := startDoltServerOnAllInterfaces(t, doltDataDir)
+	port := startDoltServerOnAllInterfaces(t, env, doltDataDir)
 
 	// Phase 1: Verify hostname resolves and server is reachable via it.
 	// This proves the network path that a cross-machine setup would use.
@@ -77,12 +72,12 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 	// Use the port we started the server on — NOT a port from a local
 	// state file. This proves the "config port → env → bd" path works.
-	bdEnv := append(os.Environ(),
+	bdEnv := append(append([]string(nil), env...),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+port,
 	)
 
-	runBDInitCompat(t, wsDir, "dc", port)
+	runBDInitCompat(t, env, wsDir, "dc", port)
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -124,7 +119,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 	// Init with same prefix and server — simulates a second machine's
 	// agent sharing the same bead store.
-	runBDInitCompat(t, wsDir2, "dc", port)
+	runBDInitCompat(t, env, wsDir2, "dc", port)
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -143,7 +138,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 // runBDInitCompat initializes beads against a shared server, compatible
 // with bd v0.60.0 (which lacks --skip-agents).
-func runBDInitCompat(t *testing.T, dir, prefix, port string) {
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -151,6 +146,7 @@ func runBDInitCompat(t *testing.T, dir, prefix, port string) {
 		"--server-host", "127.0.0.1", "--server-port", port,
 		"-p", prefix, "--skip-hooks")
 	cmd.Dir = dir
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out: %s", out)
@@ -163,7 +159,7 @@ func runBDInitCompat(t *testing.T, dir, prefix, port string) {
 // startDoltServerOnAllInterfaces starts a Dolt server bound to 0.0.0.0
 // on an ephemeral port and returns the port string. The server is killed
 // when the test ends.
-func startDoltServerOnAllInterfaces(t *testing.T, dataDir string) string {
+func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) string {
 	t.Helper()
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -186,8 +182,9 @@ func startDoltServerOnAllInterfaces(t *testing.T, dataDir string) string {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "dolt", "sql-server",
+	cmd := exec.CommandContext(ctx, doltBinary, "sql-server",
 		"-H", "0.0.0.0", "-P", port, "--data-dir", dataDir)
+	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

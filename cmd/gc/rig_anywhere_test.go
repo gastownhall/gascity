@@ -1556,6 +1556,20 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 			t.Errorf("rigFromCwdDir with relative path = %q, want %q", got, "relrig")
 		}
 	})
+
+	t.Run("matches_symlink_alias_of_rig_path", func(t *testing.T) {
+		cityPath := setupCity(t, "cwd-symlink")
+		rigDir, aliasRigDir := makeRigSymlinkAliasFixture(t)
+		toml := "[workspace]\nname = \"cwd-symlink\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"aliasrig\"\npath = \"" + rigDir + "\"\n"
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := rigFromCwdDir(cityPath, filepath.Join(aliasRigDir, "src"))
+		if got != "aliasrig" {
+			t.Errorf("rigFromCwdDir via symlink alias = %q, want %q", got, "aliasrig")
+		}
+	})
 }
 
 // ===========================================================================

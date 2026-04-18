@@ -402,8 +402,8 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if len(b.Needs) > 0 {
 		args = append(args, "--deps", strings.Join(b.Needs, ","))
 	}
-	for _, l := range b.Labels {
-		args = append(args, "--labels", l)
+	if len(b.Labels) > 0 {
+		args = append(args, "--labels", strings.Join(b.Labels, ","))
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
@@ -650,7 +650,7 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")
 	}
-	args = append(args, "--include-infra", "--limit", fmt.Sprintf("%d", limit))
+	args = append(args, "--include-infra", "--include-gates", "--limit", fmt.Sprintf("%d", limit))
 	if query.ParentID != "" {
 		args = append(args, "--parent", query.ParentID)
 	}
@@ -738,9 +738,13 @@ func (s *BdStore) Ready() ([]Bead, error) {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
 	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
+	result := make([]Bead, 0, len(issues))
 	for i := range issues {
-		result[i] = issues[i].toBead()
+		bead := issues[i].toBead()
+		if IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		result = append(result, bead)
 	}
 	return result, nil
 }

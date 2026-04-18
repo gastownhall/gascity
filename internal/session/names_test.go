@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -146,7 +147,7 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasCollisions(t *testing.T) {
 	}
 }
 
-func TestEnsureSessionNameAvailable_RejectsLiveAliasHistoryCollisions(t *testing.T) {
+func TestEnsureSessionNameAvailable_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -160,8 +161,8 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasHistoryCollisions(t *testing
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "mayor"); !errors.Is(err, ErrSessionNameExists) {
-		t.Fatalf("ensureSessionNameAvailable(alias history collision) error = %v, want %v", err, ErrSessionNameExists)
+	if err := ensureSessionNameAvailable(store, "mayor"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(alias history reuse) = %v, want nil", err)
 	}
 }
 
@@ -217,7 +218,7 @@ func TestEnsureSessionNameAvailable_RejectsClosedAdHocSession(t *testing.T) {
 	}
 }
 
-func TestEnsureAliasAvailableWithConfig_RejectsLiveAliasHistoryCollision(t *testing.T) {
+func TestEnsureAliasAvailableWithConfig_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -231,8 +232,8 @@ func TestEnsureAliasAvailableWithConfig_RejectsLiveAliasHistoryCollision(t *test
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := EnsureAliasAvailable(store, "mayor", ""); !errors.Is(err, ErrSessionAliasExists) {
-		t.Fatalf("EnsureAliasAvailable(history collision) error = %v, want %v", err, ErrSessionAliasExists)
+	if err := EnsureAliasAvailable(store, "mayor", ""); err != nil {
+		t.Fatalf("EnsureAliasAvailable(history reuse) = %v, want nil", err)
 	}
 }
 
@@ -403,6 +404,31 @@ func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testin
 	}
 	if _, err := os.Stat(filepath.Join(tmp, ".gc")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf(".gc should not be created for empty cityPath, got err=%v", err)
+	}
+}
+
+func TestWithCitySessionNameLock_HashesUntrustedIdentifier(t *testing.T) {
+	cityPath := t.TempDir()
+	identifier := "../escape"
+
+	if err := WithCitySessionNameLock(cityPath, identifier, func() error { return nil }); err != nil {
+		t.Fatalf("WithCitySessionNameLock: %v", err)
+	}
+
+	lockDir := citylayout.SessionNameLocksDir(cityPath)
+	entries, err := os.ReadDir(lockDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", lockDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("lock files = %d, want 1", len(entries))
+	}
+	name := entries[0].Name()
+	if strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
+		t.Fatalf("lock file name = %q, want hashed file name without path tokens", name)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(lockDir), "escape.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock escaped lock dir, stat err=%v", err)
 	}
 }
 
@@ -692,9 +718,10 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasCollisionDespiteLe
 	}
 }
 
-// TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasHistoryCollisionDespiteLegacyBypass
-// verifies that a live bead's alias history blocks the legacy bypass.
-func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasHistoryCollisionDespiteLegacyBypass(t *testing.T) {
+// TestEnsureConfiguredSessionNameAvailable_AllowsLiveAliasHistoryReuseDespiteLegacyBypass
+// verifies that historical aliases do not reserve namespace for configured
+// named session creation.
+func TestEnsureConfiguredSessionNameAvailable_AllowsLiveAliasHistoryReuseDespiteLegacyBypass(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		ResolvedWorkspaceName: "gc-management",
@@ -732,8 +759,8 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasHistoryCollisionDe
 		t.Fatalf("Create live alias history: %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
-		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live alias history collision) = %v, want ErrSessionNameExists", err)
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live alias history reuse) = %v, want nil", err)
 	}
 }
 

@@ -1,0 +1,2 @@
+description = "Verify bd (beads) binary is available"
+run = "../check-bd.sh"

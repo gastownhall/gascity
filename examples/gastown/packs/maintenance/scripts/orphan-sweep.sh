@@ -8,13 +8,6 @@
 #
 # Does NOT do worktree salvage — that's the witness's job.
 #
-# NOTE on `bd batch` (beads#6): this script loops `bd update` to reset
-# orphaned beads, which IS in the batch grammar. However, each iteration
-# requires an `is_known_agent` check that mixes read logic with mutation
-# decisions. Batching is feasible (build a tempfile after filtering, like
-# cross-rig-deps.sh) but was not converted in the initial refactor due
-# to scope. Candidate for a follow-up.
-#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 

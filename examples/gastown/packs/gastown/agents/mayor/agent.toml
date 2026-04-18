@@ -1,0 +1,6 @@
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/mayor"
+nudge = "Check mail and hook status, then act accordingly."
+idle_timeout = "1h"
+max_active_sessions = 1

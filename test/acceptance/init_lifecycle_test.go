@@ -96,8 +96,8 @@ func TestInitGastown(t *testing.T) {
 	}
 
 	// Verify gastown-specific artifacts exist.
-	if !c.HasFile("packs/gastown/prompts") {
-		t.Fatal("gastown prompts not materialized")
+	if !c.HasFile("packs/gastown/agents") {
+		t.Fatal("gastown agents not materialized")
 	}
 	if !c.HasFile("packs/gastown/formulas") {
 		t.Fatal("gastown formulas not materialized")

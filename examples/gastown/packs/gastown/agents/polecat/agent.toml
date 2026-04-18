@@ -1,0 +1,8 @@
+scope = "rig"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}"
+nudge = "Run gc hook; it checks assigned work first, then routed pool work."
+pre_start = ["{{.ConfigDir}}/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 5

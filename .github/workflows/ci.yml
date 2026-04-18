@@ -46,7 +46,7 @@ jobs:
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
 
-  # Always runs: lint, fmt, vet, unit tests, integration tests, coverage.
+  # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -107,17 +107,49 @@ jobs:
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
 
-      - name: Integration tests
-        continue-on-error: true  # requires provider binaries (claude/codex) not available in CI
-        timeout-minutes: 35
-        run: make test-integration
-
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
         with:
           files: coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
+
+  # Runs always, but remains non-blocking while integration/provider paths are still stabilizing.
+  integration-shards:
+    name: Integration / ${{ matrix.shard_name }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: packages
+            timeout_minutes: 35
+            command: make test-integration-packages
+          - shard_name: review-formulas
+            timeout_minutes: 45
+            command: make test-integration-review-formulas
+          - shard_name: bdstore
+            timeout_minutes: 15
+            command: make test-integration-bdstore
+          - shard_name: rest
+            timeout_minutes: 35
+            command: make test-integration-rest
+    env:
+      DOLT_VERSION: "1.86.1"
+      BD_VERSION: "v1.0.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run integration shard
+        run: ${{ matrix.command }}
 
   # Runs when pack-related files change — full gastown integration suite.
   pack-gate:

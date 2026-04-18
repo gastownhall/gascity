@@ -150,6 +150,67 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T
 	}
 }
 
+func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configText := strings.Join([]string{
+		"[workspace]",
+		`name = "bright-lights"`,
+		"[session]",
+		`startup_timeout = "5s"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(configText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aliveChecks := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int {
+			aliveChecks++
+			if aliveChecks <= 1 {
+				return 4242
+			}
+			return 0
+		},
+		func(string) (bool, string, bool) { return false, "", false },
+		5*time.Second,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	started := time.Now()
+	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
+	if code != 1 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "supervisor stopped before city became ready") {
+		t.Fatalf("stderr = %q, want supervisor-stopped message", stderr.String())
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("registerCityWithSupervisor took %v, want fast failure when supervisor stops", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "keeping registration") {
+		t.Fatalf("stderr = %q, want keep-registration message", stderr.String())
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || canonicalTestPath(entries[0].Path) != canonicalTestPath(cityPath) {
+		t.Fatalf("expected registry to retain %s, got %v", cityPath, entries)
+	}
+}
+
 func TestRegisterCityWithSupervisorWaitsForConfiguredStartupTimeout(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)

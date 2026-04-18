@@ -19,7 +19,8 @@ import (
 var errTemplateTargetNotFound = errors.New("template target not found")
 
 type ensureSessionForTemplateOptions struct {
-	forceFresh bool
+	forceFresh          bool
+	materializeMetadata map[string]string
 }
 
 func ensureSessionForTemplate(
@@ -74,7 +75,7 @@ func materializeSessionForTemplateWithOptions(
 	)
 	if !opts.forceFresh {
 		var err error
-		spec, hasNamed, err = findNamedSessionSpecForTarget(cfg, cityName, store, templateName)
+		spec, hasNamed, err = findNamedSessionSpecForTarget(cfg, cityName, templateName)
 		if err != nil {
 			return "", err
 		}
@@ -104,7 +105,7 @@ func materializeSessionForTemplateWithOptions(
 			// This preserves the bead ID so existing references (slings,
 			// convoys, messages) continue to work. Supersedes PR #204.
 			if bead, ok := reopenClosedConfiguredNamedSessionBead(
-				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), stderr,
+				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, stderr,
 			); ok {
 				if sn := strings.TrimSpace(bead.Metadata["session_name"]); sn != "" {
 					snapshot.add(bead)
@@ -125,10 +126,15 @@ func materializeSessionForTemplateWithOptions(
 		sp := newSessionProvider()
 		mgr := newSessionManager(store, sp)
 		title := spec.Identity
+		templateIdentity := namedSessionBackingTemplate(spec)
 		extraMeta := map[string]string{
 			namedSessionMetadataKey:      boolMetadata(true),
 			namedSessionIdentityMetadata: spec.Identity,
 			namedSessionModeMetadata:     spec.Mode,
+			"session_origin":             "named",
+		}
+		for k, v := range opts.materializeMetadata {
+			extraMeta[k] = v
 		}
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind
@@ -154,7 +160,7 @@ func materializeSessionForTemplateWithOptions(
 					info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
 						spec.Identity,
 						spec.SessionName,
-						spec.Identity,
+						templateIdentity,
 						title,
 						resolved.CommandString(),
 						workDir,
@@ -201,7 +207,7 @@ func materializeSessionForTemplateWithOptions(
 				context.Background(),
 				spec.Identity,
 				spec.SessionName,
-				spec.Identity,
+				templateIdentity,
 				title,
 				resolved.CommandString(),
 				workDir,
@@ -230,16 +236,6 @@ func materializeSessionForTemplateWithOptions(
 	}
 
 	return materializeSessionForAgentConfig(cityPath, cfg, store, &found)
-}
-
-func ensureSessionIDForTemplate(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	templateName string,
-	stderr io.Writer,
-) (string, error) {
-	return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, templateName, stderr, ensureSessionForTemplateOptions{})
 }
 
 func ensureSessionIDForTemplateWithOptions(
@@ -293,15 +289,17 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			info, createErr := mgr.CreateBeadOnly(
+			info, createErr := mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+				"",
+				"",
 				agentCfg.QualifiedName(),
 				title,
 				resolved.CommandString(),
 				workDir,
 				resolved.Name,
 				agentCfg.Session,
-				resolved.Env,
 				resume,
+				map[string]string{"session_origin": "ephemeral"},
 			)
 			if createErr == nil {
 				_ = pokeController(cityPath)
@@ -317,8 +315,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 	}
-	info, err := mgr.CreateWithTransport(
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
 		context.Background(),
+		"",
+		"",
 		agentCfg.QualifiedName(),
 		title,
 		resolved.CommandString(),
@@ -328,6 +328,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		resolved.Env,
 		resume,
 		hints,
+		map[string]string{"session_origin": "ephemeral"},
 	)
 	if err == nil {
 		return info.SessionName, nil

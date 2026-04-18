@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -87,6 +90,34 @@ func TestCityOrderRootsUseLocalFormulaLayerForVisibleRoot(t *testing.T) {
 	t.Fatalf("cityOrderRoots() missing %q", visibleRoot)
 }
 
+func TestCityOrderRootsUseTopLevelPackOrders(t *testing.T) {
+	cityDir := t.TempDir()
+	packDir := filepath.Join(cityDir, "packs", "alpha")
+	formulasDir := filepath.Join(packDir, "formulas")
+	ordersDir := filepath.Join(packDir, "orders")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{formulasDir}
+
+	roots := cityOrderRoots(cityDir, cfg)
+	for _, root := range roots {
+		if root.Dir != ordersDir {
+			continue
+		}
+		if root.FormulaLayer != formulasDir {
+			t.Fatalf("FormulaLayer = %q, want %q", root.FormulaLayer, formulasDir)
+		}
+		return
+	}
+	t.Fatalf("cityOrderRoots() missing %q", ordersDir)
+}
+
 func TestCityOrderRootsDedupesLegacyLocalRoot(t *testing.T) {
 	cityDir := t.TempDir()
 	legacyRoot := filepath.Join(cityDir, ".gc", "formulas", "orders")
@@ -100,12 +131,12 @@ func TestCityOrderRootsDedupesLegacyLocalRoot(t *testing.T) {
 
 	var count int
 	for _, root := range roots {
-		if root.Dir == legacyRoot {
+		if root.Dir == citylayout.OrdersPath(cityDir) {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Fatalf("legacy order root appeared %d times, want 1", count)
+		t.Fatalf("visible order root appeared %d times, want 1", count)
 	}
 }
 
@@ -130,7 +161,7 @@ func TestCityOrderRootsPackDirsDedupe(t *testing.T) {
 
 	roots := cityOrderRoots(cityDir, cfg)
 
-	ordersDir := filepath.Join(formulasDir, "orders")
+	ordersDir := filepath.Join(packDir, "orders")
 	var count int
 	for _, root := range roots {
 		if root.Dir == ordersDir {
@@ -139,6 +170,161 @@ func TestCityOrderRootsPackDirsDedupe(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("pack order root appeared %d times, want 1 (dedup)", count)
+	}
+}
+
+func TestScanAllOrdersCityFlatFile(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "formulas"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "health-check.order.toml"), []byte(`
+[order]
+formula = "health-check"
+gate = "cron"
+schedule = "*/5 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{filepath.Join(cityDir, "formulas")}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].Name != "health-check" {
+		t.Fatalf("Name = %q, want %q", aa[0].Name, "health-check")
+	}
+	if aa[0].Source != filepath.Join(cityDir, "orders", "health-check.order.toml") {
+		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "orders", "health-check.order.toml"))
+	}
+}
+
+func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cityDir := t.TempDir()
+	source := "https://github.com/example/orders-pack.git"
+	commit := "abc123def456"
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cacheDir, "formulas"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cacheDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cacheDir, "pack.toml"), []byte(`
+[pack]
+name = "ops"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "orders", "health-check.order.toml"), []byte(`
+[order]
+formula = "health-check"
+gate = "cron"
+schedule = "*/5 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`
+[pack]
+name = "test"
+schema = 1
+
+[imports.ops]
+source = "https://github.com/example/orders-pack.git"
+version = "^1.2"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte(`
+schema = 1
+
+[packs."https://github.com/example/orders-pack.git"]
+version = "1.2.3"
+commit = "abc123def456"
+fetched = "2026-04-10T00:00:00Z"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].Name != "health-check" {
+		t.Fatalf("Name = %q, want %q", aa[0].Name, "health-check")
+	}
+	if aa[0].Source != filepath.Join(cacheDir, "orders", "health-check.order.toml") {
+		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cacheDir, "orders", "health-check.order.toml"))
+	}
+}
+
+func TestScanAllOrdersCityLegacyFormulaOrdersWarns(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "formulas", "orders", "health-check"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"), []byte(`
+[order]
+formula = "health-check"
+gate = "cron"
+schedule = "*/5 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{filepath.Join(cityDir, "formulas")}
+
+	var stderr bytes.Buffer
+	logs := captureCmdOrderLogs(t, func() {
+		aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+		if err != nil {
+			t.Fatalf("scanAllOrders: %v", err)
+		}
+		if len(aa) != 1 {
+			t.Fatalf("got %d orders, want 1", len(aa))
+		}
+		if aa[0].Source != filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml") {
+			t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"))
+		}
+	})
+
+	if !strings.Contains(logs, "move to orders/health-check.toml") {
+		t.Fatalf("logs = %q, want move warning", logs)
 	}
 }
 
@@ -168,6 +354,26 @@ func TestOrderShow(t *testing.T) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
+}
+
+func captureCmdOrderLogs(t *testing.T, fn func()) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	origPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	defer func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+		log.SetPrefix(origPrefix)
+	}()
+
+	fn()
+	return buf.String()
 }
 
 func TestOrderShowExec(t *testing.T) {
@@ -324,28 +530,21 @@ func TestOrderRun(t *testing.T) {
 
 	store := beads.NewMemStore()
 
-	// SlingRunner still handles the route command.
-	calls := []string{}
-	fakeRunner := func(_, cmd string, _ map[string]string) (string, error) {
-		calls = append(calls, cmd)
-		return "", nil
-	}
-
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "digest", "", "/city", fakeRunner, store, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
+	results, err := store.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
 	}
-	// Should include both order-run tracking and routed_to metadata in a single bd update.
-	if !strings.Contains(calls[0], "--add-label=order-run:digest") {
-		t.Errorf("call[0] = %q, want --add-label=order-run:digest", calls[0])
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	if !strings.Contains(calls[0], "--set-metadata gc.routed_to=dog") {
-		t.Errorf("call[0] = %q, want --set-metadata gc.routed_to=dog", calls[0])
+	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
+		t.Fatalf("gc.routed_to = %q, want dog", got)
 	}
 }
 
@@ -356,28 +555,21 @@ func TestOrderRunNoPool(t *testing.T) {
 
 	store := beads.NewMemStore()
 
-	calls := []string{}
-	fakeRunner := func(_, cmd string, _ map[string]string) (string, error) {
-		calls = append(calls, cmd)
-		return "", nil
-	}
-
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "cleanup", "", "/city", fakeRunner, store, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "cleanup", "", "/city", store, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// Order with no pool still gets an order-run label via bd update.
-	if len(calls) != 1 {
-		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
+	results, err := store.ListByLabel("order-run:cleanup", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
 	}
-	if !strings.Contains(calls[0], "--add-label=order-run:cleanup") {
-		t.Errorf("call[0] = %q, want --add-label=order-run:cleanup", calls[0])
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	// Should NOT contain routed_to metadata.
-	if strings.Contains(calls[0], "--set-metadata gc.routed_to=") {
-		t.Errorf("call[0] = %q, should not contain routed_to metadata", calls[0])
+	if got := results[0].Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty", got)
 	}
 	// Verify wisp ID appears in stdout (MemStore generates gc-N IDs).
 	if !strings.Contains(stdout.String(), "gc-1") {
@@ -420,21 +612,11 @@ title = "Do work"
 	}
 	store := beads.NewMemStore()
 
-	calls := []string{}
-	fakeRunner := func(_, cmd string, _ map[string]string) (string, error) {
-		calls = append(calls, cmd)
-		return "", nil
-	}
-
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "acceptance-patrol", "", cityDir, fakeRunner, store, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "acceptance-patrol", "", cityDir, store, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if len(calls) != 1 {
-		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
-	}
-
 	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.ListOpen(): %v", err)
@@ -476,12 +658,73 @@ title = "Do work"
 
 func TestOrderRunNotFound(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(nil, "nonexistent", "", "/city", nil, nil, nil, &stdout, &stderr)
+	code := doOrderRun(nil, "nonexistent", "", "/city", nil, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doOrderRun = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "not found") {
 		t.Errorf("stderr = %q, want 'not found'", stderr.String())
+	}
+}
+
+func TestOrderRunExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	outPath := filepath.Join(cityDir, "exec-env.txt")
+	a := orders.Order{
+		Name:     "poll",
+		Rig:      "frontend",
+		Gate:     "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`pwd > %q && printf '%%s\n%%s\n%%s\n%%s\n%%s\n' "$GC_STORE_ROOT" "$GC_STORE_SCOPE" "$GC_BEADS_PREFIX" "$GC_RIG" "$GC_RIG_ROOT" >> %q`, outPath, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile(exec-env): %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("exec env lines = %d, want 6 (%q)", len(lines), string(data))
+	}
+	if lines[0] != rigDir {
+		t.Fatalf("pwd = %q, want %q", lines[0], rigDir)
+	}
+	if lines[1] != rigDir {
+		t.Fatalf("GC_STORE_ROOT = %q, want %q", lines[1], rigDir)
+	}
+	if lines[2] != "rig" {
+		t.Fatalf("GC_STORE_SCOPE = %q, want rig", lines[2])
+	}
+	if lines[3] != "fe" {
+		t.Fatalf("GC_BEADS_PREFIX = %q, want fe", lines[3])
+	}
+	if lines[4] != "frontend" {
+		t.Fatalf("GC_RIG = %q, want frontend", lines[4])
+	}
+	if lines[5] != rigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want %q", lines[5], rigDir)
 	}
 }
 
@@ -703,27 +946,49 @@ func TestOrderRunRigQualifiesPool(t *testing.T) {
 
 	store := beads.NewMemStore()
 
-	calls := []string{}
-	fakeRunner := func(_, cmd string, _ map[string]string) (string, error) {
-		calls = append(calls, cmd)
-		return "", nil
-	}
-
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "db-health", "demo-repo", "/city", fakeRunner, store, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "db-health", "demo-repo", "/city", store, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
+	results, err := store.ListByLabel("order-run:db-health:rig:demo-repo", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
 	}
-	// Scoped order-run label.
-	if !strings.Contains(calls[0], "--add-label=order-run:db-health:rig:demo-repo") {
-		t.Errorf("call[0] = %q, want --add-label=order-run:db-health:rig:demo-repo", calls[0])
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	// Auto-qualified routed_to target.
-	if !strings.Contains(calls[0], "--set-metadata gc.routed_to=demo-repo/polecat") {
-		t.Errorf("call[0] = %q, want --set-metadata gc.routed_to=demo-repo/polecat", calls[0])
+	if got := results[0].Metadata["gc.routed_to"]; got != "demo-repo/polecat" {
+		t.Fatalf("gc.routed_to = %q, want demo-repo/polecat", got)
+	}
+}
+
+func TestOpenCityOrderStoreUsesProviderAwareStore(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := setupCity(t, "orders-city")
+	store, err := openScopeLocalFileStore(cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStore(city): %v", err)
+	}
+	created, err := store.Create(beads.Bead{Title: "digest run", Labels: []string{"order-run:digest"}})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	setCwd(t, cityDir)
+	var stderr bytes.Buffer
+	resolved, code := openCityOrderStore(&stderr, "gc order history")
+	if code != 0 {
+		t.Fatalf("openCityOrderStore() = %d, stderr = %s", code, stderr.String())
+	}
+	results, err := resolved.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("resolved.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 || results[0].ID != created.ID {
+		t.Fatalf("order history results = %#v, want bead %q", results, created.ID)
 	}
 }

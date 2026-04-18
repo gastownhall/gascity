@@ -1,6 +1,7 @@
 package workdir
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -72,5 +73,27 @@ func TestResolveWorkDirPathStrictRejectsInvalidTemplate(t *testing.T) {
 	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}})
 	if err == nil {
 		t.Fatal("ResolveWorkDirPathStrict() error = nil, want invalid template error")
+	}
+}
+
+func TestConfiguredRigNameMatchesSymlinkAliasPath(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	rigPath := filepath.Join(realRoot, "demo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+
+	aliasRigPath := filepath.Join(aliasRoot, "demo")
+	got := ConfiguredRigName(t.TempDir(), config.Agent{
+		Name: "worker",
+		Dir:  aliasRigPath,
+	}, []config.Rig{{Name: "demo", Path: rigPath}})
+	if got != "demo" {
+		t.Fatalf("ConfiguredRigName() = %q, want %q", got, "demo")
 	}
 }

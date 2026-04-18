@@ -64,6 +64,9 @@ func TestCityStatusWithAgents(t *testing.T) {
 	}
 	out := stdout.String()
 
+	if !strings.Contains(out, "/home/user/city") {
+		t.Errorf("stdout missing city path, got:\n%s", out)
+	}
 	if !strings.Contains(out, "Agents:") {
 		t.Errorf("stdout missing 'Agents:', got:\n%s", out)
 	}
@@ -123,9 +126,9 @@ func TestCityStatusPoolExpansion(t *testing.T) {
 	}
 	out := stdout.String()
 
-	// Pool header line.
-	if !strings.Contains(out, "pool (min=1, max=3)") {
-		t.Errorf("stdout missing pool header, got:\n%s", out)
+	// Scaled header line.
+	if !strings.Contains(out, "scaled (min=1, max=3)") {
+		t.Errorf("stdout missing scaled header, got:\n%s", out)
 	}
 	// Instance lines.
 	if !strings.Contains(out, "polecat-1") {
@@ -269,18 +272,15 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 		t.Error("agents[0].pool should be nil for singleton")
 	}
 
-	// Second agent: polecat-1 (pool, not running).
+	// Second agent: polecat-1 (scaled, not running).
 	if status.Agents[1].QualifiedName != "myrig/polecat-1" {
 		t.Errorf("agents[1].qualified_name = %q, want %q", status.Agents[1].QualifiedName, "myrig/polecat-1")
 	}
 	if status.Agents[1].Scope != "rig" {
 		t.Errorf("agents[1].scope = %q, want %q", status.Agents[1].Scope, "rig")
 	}
-	if status.Agents[1].Pool == nil {
-		t.Fatal("agents[1].pool should not be nil")
-	}
-	if status.Agents[1].Pool.Max != 3 {
-		t.Errorf("agents[1].pool.max = %d, want 3", status.Agents[1].Pool.Max)
+	if status.Agents[1].Pool != nil {
+		t.Fatal("agents[1].pool should be nil for scaled session output")
 	}
 
 	// Rigs.
@@ -314,98 +314,6 @@ func TestCityStatusAgentSuspendedByRig(t *testing.T) {
 	// Agent in suspended rig should show "stopped  (suspended)".
 	if !strings.Contains(out, "stopped  (suspended)") {
 		t.Errorf("stdout missing 'stopped  (suspended)' for rig-suspended agent, got:\n%s", out)
-	}
-}
-
-func TestCityStatusHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	dops := newFakeDrainOps()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city", MaxActiveSessions: intPtr(1)},
-		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
-	}
-
-	// Write halt file so isCityHalted returns true.
-	if err := writeHaltFile(cityPath); err != nil {
-		t.Fatalf("writeHaltFile: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "Halted:     yes") {
-		t.Errorf("stdout missing 'Halted:     yes', got:\n%s", out)
-	}
-}
-
-func TestCityStatusNotHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	dops := newFakeDrainOps()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city"},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "Halted:     no") {
-		t.Errorf("stdout missing 'Halted:     no', got:\n%s", out)
-	}
-}
-
-func TestCityStatusJSONHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city"},
-	}
-
-	if err := writeHaltFile(cityPath); err != nil {
-		t.Fatalf("writeHaltFile: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-
-	var status StatusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
-	}
-	if !status.Halted {
-		t.Error("halted should be true")
-	}
-}
-
-func TestCityStatusJSONNotHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city"},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-
-	var status StatusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
-	}
-	if status.Halted {
-		t.Error("halted should be false")
 	}
 }
 

@@ -16,6 +16,8 @@
 #   GC_K8S_CONTROLLER_IMAGE   — Controller image (default: gc-controller:latest)
 #   GC_K8S_CONTEXT            — kubectl context (default: current)
 #   GC_K8S_IMAGE              — Agent image (passed to controller env)
+#   GC_DOLT_HOST              — Canonical explicit Dolt host override for controller bootstrap
+#   GC_DOLT_PORT              — Canonical explicit Dolt port override for controller bootstrap
 #
 # Prerequisites:
 #   - kubectl configured with cluster access
@@ -37,8 +39,9 @@ shift || true
 NS="${GC_K8S_NAMESPACE:-gc}"
 CTRL_IMAGE="${GC_K8S_CONTROLLER_IMAGE:-gc-controller:latest}"
 AGENT_IMAGE="${GC_K8S_IMAGE:-gc-agent:latest}"
-DOLT_HOST="${GC_K8S_DOLT_HOST:-dolt.gc.svc.cluster.local}"
-DOLT_PORT="${GC_K8S_DOLT_PORT:-3307}"
+EXPLICIT_DOLT_HOST="${GC_DOLT_HOST:-}"
+EXPLICIT_DOLT_PORT="${GC_DOLT_PORT:-}"
+GC_BIN="${GC_BIN:-gc}"
 POD_NAME="gc-controller"
 SA_NAME="gc-controller"
 
@@ -54,6 +57,13 @@ if [ -n "${GC_K8S_CONTEXT:-}" ]; then
   KUBECTL+=(--context "$GC_K8S_CONTEXT")
 fi
 KUBECTL+=(-n "$NS")
+
+validate_explicit_dolt_target() {
+  if { [ -n "$EXPLICIT_DOLT_HOST" ] && [ -z "$EXPLICIT_DOLT_PORT" ]; } || { [ -z "$EXPLICIT_DOLT_HOST" ] && [ -n "$EXPLICIT_DOLT_PORT" ]; }; then
+    echo "controller bootstrap requires both GC_DOLT_HOST and GC_DOLT_PORT when either is set" >&2
+    exit 1
+  fi
+}
 
 # --- Operations ---
 
@@ -112,46 +122,65 @@ derive_prefix() {
   fi
 }
 
+bootstrap_controller_scope() {
+  local label="$1"
+  local command="$2"
+  local output=""
+
+  for attempt in $(seq 1 30); do
+    if output=$("${KUBECTL[@]}" exec "$POD_NAME" -- sh -c "$command" 2>&1); then
+      return 0
+    fi
+    if [ "$attempt" -lt 30 ]; then
+      sleep 2
+    fi
+  done
+
+  echo "deploy: failed to bootstrap $label on controller after 30 attempts" >&2
+  if [ -n "$output" ]; then
+    echo "$output" >&2
+  fi
+  return 1
+}
+
 # init_controller_beads initializes bd databases on the controller pod so
 # scale_check commands can query beads via the dolt server directly.
 # Local tmux/docker deploys don't need this — bd uses local .beads/ dirs.
-# Parses city.toml from the HOST side to find workspace name and rig info.
+# Prefix resolution comes from host-side `gc config show`, so includes and
+# pack expansion are applied before this shell script parses the composed TOML.
+# Bootstrap runs through gc bd after the controller starts so scope-local
+# endpoint resolution stays inside GC rather than this shell script.
 init_controller_beads() {
-  local city_toml="$1"
+  local city_path="$1"
+  local resolved_config
 
-  # Parse workspace name.
-  local ws_name
-  ws_name=$(sed -n '/^\[workspace\]/,/^\[/{ s/^name *= *"\([^"]*\)".*/\1/p; }' "$city_toml" | head -1)
-  if [ -z "$ws_name" ]; then
-    ws_name=$(basename "$(dirname "$city_toml")")
+  if ! resolved_config=$("$GC_BIN" config show --city "$city_path" 2>&1); then
+    echo "deploy: failed to resolve city config for controller bootstrap" >&2
+    echo "$resolved_config" >&2
+    return 1
   fi
 
-  # Check for explicit workspace prefix; fall back to derived.
-  # NOTE: This only reads the root city.toml. Prefixes supplied via config
-  # includes (LoadWithIncludes) are not resolved here. If prefix resolution
-  # needs full include support, replace with: gc config get workspace.prefix
+  local ws_name
+  ws_name=$(printf '%s\n' "$resolved_config" | sed -n '/^\[workspace\]/,/^\[/{ s/^name *= *"\([^"]*\)".*/\1/p; }' | head -1)
+  if [ -z "$ws_name" ]; then
+    ws_name=$(basename "$city_path")
+  fi
+
   local hq_prefix
-  hq_prefix=$(sed -n '/^\[workspace\]/,/^\[/{ s/^prefix *= *"\([^"]*\)".*/\1/p; }' "$city_toml" | head -1)
+  hq_prefix=$(printf '%s\n' "$resolved_config" | sed -n '/^\[workspace\]/,/^\[/{ s/^prefix *= *"\([^"]*\)".*/\1/p; }' | head -1)
   if [ -z "$hq_prefix" ]; then
     hq_prefix=$(derive_prefix "$ws_name")
   fi
   echo "  HQ (prefix: $hq_prefix)..."
-  "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
-    "cd /city && bd init --server --server-host '$DOLT_HOST' --server-port '$DOLT_PORT' -p '$hq_prefix' --skip-hooks" \
-    >/dev/null 2>&1 || true
+  bootstrap_controller_scope "HQ" "cd /city && gc bd init -p '$hq_prefix' --skip-hooks"
 
-  # Parse [[rigs]] and init each rig's beads on the controller.
-  local in_rig=false rig_name="" rig_path="" rig_prefix=""
+  local in_rig=false rig_name="" rig_prefix=""
   flush_rig() {
     [ -z "$rig_name" ] && return
-    [ -z "$rig_path" ] && rig_path="$rig_name"
     [ -z "$rig_prefix" ] && rig_prefix=$(derive_prefix "$rig_name")
     echo "  rig '$rig_name' (prefix: $rig_prefix)..."
-    "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
-      "mkdir -p '/city/$rig_path' && cd '/city/$rig_path' && \
-       bd init --server --server-host '$DOLT_HOST' --server-port '$DOLT_PORT' -p '$rig_prefix' --skip-hooks" \
-      >/dev/null 2>&1 || true
-    rig_name="" rig_path="" rig_prefix=""
+    bootstrap_controller_scope "rig '$rig_name'" "cd /city && gc bd --rig '$rig_name' init -p '$rig_prefix' --skip-hooks"
+    rig_name="" rig_prefix=""
   }
 
   while IFS= read -r line; do
@@ -161,7 +190,6 @@ init_controller_beads() {
       in_rig=true
       continue
     fi
-    # New section header ends current rig block.
     case "$line" in
       "["*)
         if $in_rig; then flush_rig; in_rig=false; fi
@@ -170,12 +198,12 @@ init_controller_beads() {
     if $in_rig; then
       case "$line" in
         name\ =*|name=*) rig_name=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
-        path\ =*|path=*) rig_path=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
+        prefix\ =*|prefix=*) rig_prefix=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
         beads_prefix\ =*|beads_prefix=*) rig_prefix=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
       esac
     fi
-  done < "$city_toml"
-  flush_rig  # Flush last rig if file ends without another section.
+  done <<< "$resolved_config"
+  flush_rig
 }
 
 case "$op" in
@@ -193,6 +221,8 @@ case "$op" in
       echo "deploy: $city_path/city.toml not found" >&2
       exit 1
     fi
+
+    validate_explicit_dolt_target
 
     # Sync credentials before deploying.
     sync_creds
@@ -212,6 +242,8 @@ case "$op" in
       --arg mem_req "$CTRL_MEM_REQ" \
       --arg cpu_lim "$CTRL_CPU_LIM" \
       --arg mem_lim "$CTRL_MEM_LIM" \
+      --arg dolt_host "$EXPLICIT_DOLT_HOST" \
+      --arg dolt_port "$EXPLICIT_DOLT_PORT" \
       --arg prebaked "${GC_K8S_PREBAKED:-false}" \
       --arg agent_sa "${GC_K8S_SERVICE_ACCOUNT:-}" \
       '{
@@ -232,20 +264,24 @@ case "$op" in
             image: $image,
             imagePullPolicy: "Always",
             workingDir: "/city",
-            env: [
-              {name: "GC_SESSION", value: "k8s"},
-              {name: "GC_BEADS", value: "exec:gc-beads-k8s"},
-              {name: "GC_EVENTS", value: "exec:gc-events-k8s"},
-              {name: "GC_K8S_IMAGE", value: $agent_image},
-              {name: "GC_K8S_NAMESPACE", value: $ns},
-              {name: "GC_K8S_PREBAKED", value: $prebaked},
-              {name: "GC_K8S_SERVICE_ACCOUNT", value: $agent_sa},
-              {name: "GC_K8S_MCP_MAIL_HOST", value: "mcp-mail.gc.svc.cluster.local"},
-              {name: "GC_K8S_MCP_MAIL_PORT", value: "8765"},
-              {name: "GC_MAIL", value: "exec:gc-mail-mcp-agent-mail"},
-              {name: "GC_MCP_MAIL_URL", value: "http://mcp-mail.gc.svc.cluster.local:8765"},
-              {name: "GC_MCP_MAIL_PROJECT", value: "/workspace"}
-            ],
+            env: (
+              [
+                {name: "GC_SESSION", value: "k8s"},
+                {name: "GC_BEADS", value: "exec:gc-beads-k8s"},
+                {name: "GC_EVENTS", value: "exec:gc-events-k8s"},
+                {name: "GC_K8S_IMAGE", value: $agent_image},
+                {name: "GC_K8S_NAMESPACE", value: $ns},
+                {name: "GC_K8S_PREBAKED", value: $prebaked},
+                {name: "GC_K8S_SERVICE_ACCOUNT", value: $agent_sa},
+                {name: "GC_K8S_MCP_MAIL_HOST", value: "mcp-mail.gc.svc.cluster.local"},
+                {name: "GC_K8S_MCP_MAIL_PORT", value: "8765"},
+                {name: "GC_MAIL", value: "exec:gc-mail-mcp-agent-mail"},
+                {name: "GC_MCP_MAIL_URL", value: "http://mcp-mail.gc.svc.cluster.local:8765"},
+                {name: "GC_MCP_MAIL_PROJECT", value: "/workspace"}
+              ]
+              + (if $dolt_host != "" then [{name: "GC_DOLT_HOST", value: $dolt_host}] else [] end)
+              + (if $dolt_port != "" then [{name: "GC_DOLT_PORT", value: $dolt_port}] else [] end)
+            ),
             resources: {
               requests: {cpu: $cpu_req, memory: $mem_req},
               limits: {cpu: $cpu_lim, memory: $mem_lim}
@@ -274,20 +310,12 @@ case "$op" in
       sleep 1
     done
 
-    # Stage city directory into a temp location inside the pod.
-    # CMD will gc init --from here into /city/ (which must be clean for init).
-    # kubectl cp runs tar xmf inside the pod and will not create the parent
-    # directory, so create /tmp/city-src explicitly before copying.
-    # A .copy-done sentinel is written after the copy completes so the CMD
-    # waits for the full directory, not just city.toml (which tar may
-    # extract before other files).
+    # Copy city directory into the controller pod.
     echo "Copying city directory..."
-    "${KUBECTL[@]}" exec "$POD_NAME" -- mkdir -p /tmp/city-src
-    "${KUBECTL[@]}" cp "$city_path/." "$POD_NAME:/tmp/city-src/" || {
+    "${KUBECTL[@]}" cp "$city_path/." "$POD_NAME:/city/" || {
       echo "deploy: failed to copy city directory" >&2
       exit 1
     }
-    "${KUBECTL[@]}" exec "$POD_NAME" -- touch /tmp/city-src/.copy-done
 
     # Wait for gc init to complete (sentinel written by Dockerfile CMD).
     echo "Waiting for gc init..."
@@ -302,33 +330,27 @@ case "$op" in
       sleep 1
     done
 
-    # Initialize bd databases on the controller pod so scale_check commands
-    # can query beads via the dolt server. This is K8s-specific — local
-    # tmux/docker deploys don't need it (bd uses local .beads/ dirs).
-    echo "Initializing beads on controller..."
-    init_controller_beads "$city_path/city.toml"
-
-    # Recreate beads runner pod to pick up latest image.
-    echo "Starting beads runner..."
-    GC_K8S_NAMESPACE="$NS" GC_K8S_IMAGE="$AGENT_IMAGE" \
-      "$(dirname "$0")/../beads-scripts/gc-beads-k8s" shutdown 2>/dev/null || true
-    GC_K8S_NAMESPACE="$NS" GC_K8S_IMAGE="$AGENT_IMAGE" \
-      "$(dirname "$0")/../beads-scripts/gc-beads-k8s" ensure-ready
-
     # Signal gc start to begin.
     "${KUBECTL[@]}" exec "$POD_NAME" -- touch /city/.gc-start
 
     # Wait for controller to start (gc start enters reconcile loop).
     echo "Waiting for controller startup..."
+    controller_started=false
     for i in $(seq 1 30); do
-      logs=$("${KUBECTL[@]}" logs "$POD_NAME" --tail=5 2>/dev/null || true)
-      if echo "$logs" | grep -q "City started\.\|reconcil"; then
-        echo "Controller deployed successfully."
-        exit 0
+      logs=$("${KUBECTL[@]}" logs "$POD_NAME" --tail=50 2>/dev/null || true)
+      if echo "$logs" | grep -Eq "Controller started\.|City started\."; then
+        controller_started=true
+        break
       fi
       sleep 2
     done
-    echo "Controller pod is running (check logs for startup status)."
+    if ! $controller_started; then
+      echo "Controller logs did not confirm startup; attempting bootstrap anyway."
+    fi
+
+    echo "Initializing beads on controller..."
+    init_controller_beads "$city_path"
+    echo "Controller deployed successfully."
     ;;
 
   stop)

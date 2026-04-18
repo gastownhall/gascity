@@ -397,6 +397,163 @@ func (s *bindingService) Unbind(ctx context.Context, caller Caller, input Unbind
 	return closed, nil
 }
 
+// ReassignSessionBindings moves active bindings from one session bead ID to
+// another during canonical session repair.
+func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionID, newSessionID string, now time.Time) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if store == nil {
+		return nil
+	}
+	oldSessionID = strings.TrimSpace(oldSessionID)
+	newSessionID = strings.TrimSpace(newSessionID)
+	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
+		return nil
+	}
+	items, err := store.List(beads.ListQuery{Label: bindingSessionLabel(oldSessionID)})
+	if err != nil {
+		return fmt.Errorf("list bindings by retired session label: %w", err)
+	}
+	locks := sharedBindingLockPool(store)
+	transcript := newTranscriptService(store, locks)
+	delivery := deliveryCleaner{store: store, locks: locks}
+	caller := Caller{Kind: CallerController, ID: "session-retirement"}
+	now = zeroNow(now)
+	for _, item := range items {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
+		if !hasLabel(item, labelBindingBase) || item.Status == "closed" {
+			continue
+		}
+		seed, err := decodeBindingBead(item)
+		if err != nil {
+			return fmt.Errorf("decode binding %s: %w", item.ID, err)
+		}
+		if seed.Status != BindingActive || seed.SessionID != oldSessionID {
+			continue
+		}
+		if err := withBindingLock(locks, seed.Conversation, func() error {
+			latest, err := store.Get(seed.ID)
+			if err != nil {
+				return fmt.Errorf("get binding %s: %w", seed.ID, err)
+			}
+			if !hasLabel(latest, labelBindingBase) || latest.Status == "closed" {
+				return nil
+			}
+			record, err := decodeBindingBead(latest)
+			if err != nil {
+				return fmt.Errorf("decode binding %s: %w", latest.ID, err)
+			}
+			if record.Status != BindingActive || record.SessionID != oldSessionID {
+				return nil
+			}
+			hasTargetBinding, err := activeBindingExistsForSession(store, record.Conversation, record.ID, newSessionID)
+			if err != nil {
+				return err
+			}
+			if hasTargetBinding {
+				if err := transcript.removeMembershipLocked(RemoveMembershipInput{
+					Caller:       caller,
+					Conversation: record.Conversation,
+					SessionID:    oldSessionID,
+					Owner:        MembershipOwnerBinding,
+					Now:          now,
+				}); err != nil {
+					return wrapTranscriptSyncError("remove transcript membership after duplicate binding repair", err)
+				}
+				if err := delivery.ClearForConversation(ctx, oldSessionID, record.Conversation); err != nil {
+					return err
+				}
+				if err := store.Close(record.ID); err != nil {
+					return fmt.Errorf("close duplicate binding %s during session reassignment: %w", record.ID, err)
+				}
+				return nil
+			}
+			if _, err := transcript.ensureMembershipLocked(EnsureMembershipInput{
+				Caller:         caller,
+				Conversation:   record.Conversation,
+				SessionID:      newSessionID,
+				BackfillPolicy: MembershipBackfillSinceJoin,
+				Owner:          MembershipOwnerBinding,
+				Now:            now,
+			}); err != nil {
+				return wrapTranscriptSyncError("ensure transcript membership after binding reassignment", err)
+			}
+			labelsToAdd, labelsToRemove := recordLabels(latest.Labels, []string{bindingSessionLabel(oldSessionID)}, []string{bindingSessionLabel(newSessionID)})
+			if err := store.Update(record.ID, beads.UpdateOpts{
+				Labels:       labelsToAdd,
+				RemoveLabels: labelsToRemove,
+				Metadata: map[string]string{
+					"session_id":      newSessionID,
+					"last_touched_at": formatTime(now),
+				},
+			}); err != nil {
+				return fmt.Errorf("reassign binding %s from session %s to %s: %w", record.ID, oldSessionID, newSessionID, err)
+			}
+			if err := transcript.removeMembershipLocked(RemoveMembershipInput{
+				Caller:       caller,
+				Conversation: record.Conversation,
+				SessionID:    oldSessionID,
+				Owner:        MembershipOwnerBinding,
+				Now:          now,
+			}); err != nil {
+				return wrapTranscriptSyncError("remove transcript membership after binding reassignment", err)
+			}
+			if err := delivery.ClearForConversation(ctx, oldSessionID, record.Conversation); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CloseSessionBindings terminates active bindings for a retired session bead ID.
+func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID string, now time.Time) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if store == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	_, err := NewServices(store).Bindings.Unbind(ctx, Caller{Kind: CallerController, ID: "session-retirement"}, UnbindInput{
+		SessionID: sessionID,
+		Now:       now,
+	})
+	return err
+}
+
+func activeBindingExistsForSession(store beads.Store, ref ConversationRef, currentID, sessionID string) (bool, error) {
+	items, err := store.List(beads.ListQuery{
+		Label:         bindingConversationLabel(ref),
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("list bindings by conversation label: %w", err)
+	}
+	for _, item := range items {
+		if item.ID == currentID || !hasLabel(item, labelBindingBase) || item.Status == "closed" {
+			continue
+		}
+		record, err := decodeBindingBead(item)
+		if err != nil {
+			return false, err
+		}
+		if record.Status == BindingActive && sameConversationRef(record.Conversation, ref) && record.SessionID == sessionID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *bindingService) listBindingsForConversation(ref ConversationRef) ([]SessionBindingRecord, error) {
 	items, err := s.store.List(beads.ListQuery{
 		Label:         bindingConversationLabel(ref),

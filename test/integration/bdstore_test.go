@@ -33,23 +33,16 @@ const (
 // dolt server on a unique port. This avoids port conflicts and lets bd
 // manage the server lifecycle.
 //
-// Requires: dolt and bd installed.
+// Requires: Dolt and bd binaries configured via PATH or the integration
+// override env vars.
 func TestBdStoreConformance(t *testing.T) {
-	// Skip if dolt or bd not installed.
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	// Ensure dolt identity is configured (mirrors git user.name/email).
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
 
 	rootDir := t.TempDir()
 	doltDataDir := filepath.Join(rootDir, "dolt")
 	workspacesDir := filepath.Join(rootDir, "workspaces")
-	serverPort := startSharedDoltServer(t, doltDataDir)
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
 	var dbCounter atomic.Int64
 
 	// Factory: each call creates a fresh workspace bound to the shared Dolt
@@ -72,19 +65,9 @@ func TestBdStoreConformance(t *testing.T) {
 			t.Fatalf("git init: %v: %s", err, out)
 		}
 
-		runBDInit(t, wsDir, prefix, serverPort)
+		runBDInit(t, env, wsDir, prefix, serverPort)
 
-		// Explicitly set issue_prefix (required for bd create).
-		bdConfig := exec.Command("bd", "config", "set", "issue_prefix", prefix)
-		bdConfig.Dir = wsDir
-		if out, err := bdConfig.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set: %v: %s", err, out)
-		}
-		customTypes := exec.Command("bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ","))
-		customTypes.Dir = wsDir
-		if out, err := customTypes.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set types.custom: %v: %s", err, out)
-		}
+		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
 		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())
 	}
@@ -98,7 +81,7 @@ func TestBdStoreConformance(t *testing.T) {
 // startSharedDoltServer starts one explicit Dolt SQL server for the test and
 // returns its port. Using a shared server keeps bd commands fast and avoids
 // the embedded local-server shutdown delays seen in CI.
-func startSharedDoltServer(t *testing.T, dataDir string) string {
+func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 	t.Helper()
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -121,7 +104,8 @@ func startSharedDoltServer(t *testing.T, dataDir string) string {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "dolt", "sql-server", "-H", "127.0.0.1", "-P", port, "--data-dir", dataDir)
+	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "-H", "127.0.0.1", "-P", port, "--data-dir", dataDir)
+	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -159,14 +143,15 @@ func startSharedDoltServer(t *testing.T, dataDir string) string {
 }
 
 // runBDInit initializes beads against the shared Dolt server with a bounded wait.
-func runBDInit(t *testing.T, dir, prefix, port string) {
+func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 
-	bdInit := exec.CommandContext(ctx, "bd", "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
+	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
 	bdInit.Dir = dir
+	bdInit.Env = env
 	out, err := bdInit.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
@@ -176,34 +161,20 @@ func runBDInit(t *testing.T, dir, prefix, port string) {
 	}
 }
 
-// ensureDoltIdentity ensures dolt has user.name and user.email set.
-// Copies from git config if available, otherwise sets defaults.
-func ensureDoltIdentity(t *testing.T) {
+func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes []string) {
 	t.Helper()
 
-	// Check if dolt identity is already set.
-	name, _ := exec.Command("dolt", "config", "--global", "--get", "user.name").Output()
-	email, _ := exec.Command("dolt", "config", "--global", "--get", "user.email").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
+	defer cancel()
 
-	if len(name) > 0 && len(email) > 0 {
-		return
+	cmd := exec.CommandContext(ctx, bdBinary, "config", "set", "types.custom", strings.Join(customTypes, ","))
+	cmd.Dir = wsDir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)
 	}
-
-	// Copy from git config.
-	if len(name) == 0 {
-		gitName, _ := exec.Command("git", "config", "--global", "user.name").Output()
-		if len(gitName) > 0 {
-			exec.Command("dolt", "config", "--global", "--add", "user.name", string(gitName)).Run()
-		} else {
-			exec.Command("dolt", "config", "--global", "--add", "user.name", "test").Run()
-		}
-	}
-	if len(email) == 0 {
-		gitEmail, _ := exec.Command("git", "config", "--global", "user.email").Output()
-		if len(gitEmail) > 0 {
-			exec.Command("dolt", "config", "--global", "--add", "user.email", string(gitEmail)).Run()
-		} else {
-			exec.Command("dolt", "config", "--global", "--add", "user.email", "test@test.com").Run()
-		}
+	if err != nil {
+		t.Fatalf("bd config set types.custom: %v: %s", err, out)
 	}
 }

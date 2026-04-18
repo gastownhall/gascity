@@ -65,7 +65,8 @@ type ConditionEnv struct {
 }
 
 // Environ returns the environment variable slice for exec.Cmd.
-// Only whitelisted variables: PATH (safe default), HOME, TMPDIR, and convergence vars.
+// Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
+// vars, and GC_INTEGRATION_REAL_BD when present for integration-test bd shims.
 func (ce ConditionEnv) Environ() []string {
 	// Use CityPath as HOME to sandbox gate scripts from the
 	// controller's home directory (which may contain .ssh, .gnupg, etc).
@@ -103,6 +104,9 @@ func (ce ConditionEnv) Environ() []string {
 	}
 	if ce.WorkDir != "" {
 		env = append(env, "GC_WORK_DIR="+ce.WorkDir)
+	}
+	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
+		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
 	}
 
 	return env

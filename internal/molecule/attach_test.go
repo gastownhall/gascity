@@ -130,6 +130,28 @@ func TestAttachBasic(t *testing.T) {
 	assertBlockingDep(t, store, leaf.ID, result.RootID)
 }
 
+func TestAttachBasicGraphApplyPreservesWorkflowRootID(t *testing.T) {
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
+
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	leaf := setupWorkflowChild(t, store, root.ID, "Leaf bead")
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if result.WorkflowRootID != root.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (parent workflow root)", result.WorkflowRootID, root.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
+	assertBlockingDep(t, store, leaf.ID, result.RootID)
+}
+
 // Test 2: Attach to workflow root itself (bead with no gc.root_bead_id)
 func TestAttachToWorkflowRoot(t *testing.T) {
 	store := beads.NewMemStore()
@@ -485,6 +507,32 @@ func TestAttachDifferentKeysCreateSeparate(t *testing.T) {
 	}
 	if result2.Duplicate {
 		t.Error("second attach with different key should not be duplicate")
+	}
+}
+
+func TestAttachPreservesExecutableTaskRootType(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	attachedRoot, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(attached root): %v", err)
+	}
+	if attachedRoot.Type != "task" {
+		t.Fatalf("attached root type = %q, want task", attachedRoot.Type)
 	}
 }
 

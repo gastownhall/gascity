@@ -6,11 +6,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -80,6 +82,41 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
+	}
+}
+
+func TestCollectOwnershipWorkBeads_IncludesBlockedOpenAssignedHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocker",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me later",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	if err := store.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add blocking dep: %v", err)
+	}
+
+	got, partial := collectOwnershipWorkBeads(&config.City{}, store, nil, nil)
+	if partial {
+		t.Fatal("collectOwnershipWorkBeads unexpectedly reported partial results")
+	}
+	if len(got) != 1 {
+		t.Fatalf("collectOwnershipWorkBeads returned %d beads, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != handoff.ID {
+		t.Fatalf("collectOwnershipWorkBeads returned %q, want %q", got[0].ID, handoff.ID)
 	}
 }
 
@@ -159,6 +196,7 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 			Name:              "hookoverride",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
 			InstallAgentHooks: []string{"claude"},
 		}},
 	}
@@ -178,6 +216,9 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store := beads.NewMemStore()
 	for i := 0; i < 12; i++ {
 		if _, err := store.Create(beads.Bead{
@@ -451,10 +492,58 @@ func TestMergeNamedSessionDemand_NilPoolDesiredNoPanic(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckMaterializes(t *testing.T) {
-	// When a named-session agent has an explicit scale_check that returns
-	// demand > 0, the session should materialize even without assigned work
-	// or work_query results. This tests the fix for #508.
+func TestBuildDesiredState_PlainTemplateMaxOneDoesNotMaterializeWithoutDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 0",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 0 {
+		t.Fatalf("plain max=1 template should not auto-materialize without demand: %+v", dsResult.State)
+	}
+}
+
+func TestBuildDesiredState_PlainTemplateMaxOneScaleCheckCreatesEphemeralDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired session count = %d, want 1", len(dsResult.State))
+	}
+	for _, tp := range dsResult.State {
+		if tp.TemplateName != "worker" {
+			t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
+		}
+		if tp.ConfiguredNamedIdentity != "" {
+			t.Fatalf("ConfiguredNamedIdentity = %q, want empty", tp.ConfiguredNamedIdentity)
+		}
+		if got := tp.Env["GC_SESSION_ORIGIN"]; got != "ephemeral" {
+			t.Fatalf("GC_SESSION_ORIGIN = %q, want ephemeral", got)
+		}
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckCreatesEphemeralDemandOnly(t *testing.T) {
+	// Phase 1 treats scale_check as generic ephemeral demand only. It must not
+	// materialize on-demand named identities without direct named continuity.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -474,21 +563,23 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckMaterializes(t *testin
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
+	dogCount := 0
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			dogCount++
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("scale_check materialized configured named identity: %+v", tp)
+			}
+			if tp.ConfiguredNamedMode != "" {
+				t.Fatalf("scale_check materialized configured named mode: %+v", tp)
+			}
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session with scale_check > 0 should materialize")
+	if dogCount != 2 {
+		t.Fatalf("dog ephemeral desired count = %d, want 2", dogCount)
 	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' when scale_check returns demand")
-	}
-	if dsResult.ScaleCheckCounts["dog"] != 2 {
-		t.Fatalf("ScaleCheckCounts[dog] = %d, want 2", dsResult.ScaleCheckCounts["dog"])
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should not include 'dog' from scale_check alone")
 	}
 }
 
@@ -525,8 +616,8 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckZeroDoesNotMaterialize
 }
 
 func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuery(t *testing.T) {
-	// Without an explicit ScaleCheck, the named-session path should fall
-	// back to EffectiveWorkQuery() as before. Regression guard.
+	// work_query is session-local introspection in Phase 1 and must not drive
+	// controller-side named materialization.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -535,7 +626,7 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 			Name:              "mayor",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			WorkQuery:         "printf ''",
+			WorkQuery:         `echo '["ready"]'`,
 		}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
@@ -546,14 +637,17 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" {
-			t.Fatalf("empty work_query should not materialize on-demand named session: %+v", tp)
+			t.Fatalf("work_query should not materialize on-demand named session: %+v", tp)
 		}
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should not include mayor from work_query")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreatePoolSessions(t *testing.T) {
-	// A named-session agent with scale_check should only create a named
-	// session, not pool-managed sessions. Verifies no pool contamination.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckCreatesEphemeralSessions(t *testing.T) {
+	// A named-session agent with scale_check should create generic ephemeral
+	// capacity only, not the configured named session.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -573,22 +667,23 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreatePoolSessi
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	// Should have exactly one session (the named session), not 3 pool instances.
 	dogCount := 0
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
 			dogCount++
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("scale_check materialized configured named identity: %+v", tp)
+			}
 		}
 	}
-	if dogCount != 1 {
-		t.Fatalf("expected 1 named session for dog, got %d (pool contamination?)", dogCount)
+	if dogCount != 3 {
+		t.Fatalf("expected 3 ephemeral sessions for dog from scale_check, got %d", dogCount)
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(t *testing.T) {
-	// When scale_check fails (non-zero exit) but work_query returns ready
-	// work, the session should still materialize via the work_query fallback.
-	// This tests the defense-in-depth path.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorDoesNotFallToWorkQuery(t *testing.T) {
+	// Controller-side work_query is no longer a named-session materialization
+	// signal, even when scale_check fails.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -608,25 +703,19 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			t.Fatalf("on-demand named session materialized from work_query fallback after scale_check error: %+v", tp)
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session should materialize via work_query when scale_check fails")
-	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback")
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should not include 'dog' via work_query fallback")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQuery(t *testing.T) {
-	// When scale_check outputs a non-integer string (e.g. "ready"), the
-	// parse error should be recorded and the path should fall through to
-	// work_query for demand detection — not silently treat it as zero.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerDoesNotFallToWorkQuery(t *testing.T) {
+	// A malformed scale_check must not re-enable controller-side work_query
+	// materialization for named sessions.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -646,22 +735,82 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQ
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
+			t.Fatalf("on-demand named session materialized from work_query fallback after scale_check parse error: %+v", tp)
+		}
+	}
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should not include 'dog' via work_query fallback after parse error")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_WorkQueryUsesExplicitRigPassword(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "demo")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeRigEndpointCanonicalConfig(t, rigPath, contract.ConfigState{
+		IssuePrefix:    "dm",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "3308",
+		DoltUser:       "rig-user",
+	})
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "demo",
+			Path:   rigPath,
+			Prefix: "dm",
+		}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "demo",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Dir:      "demo",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "demo/worker" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatal("on-demand named session should materialize via work_query when scale_check outputs non-integer")
-	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback after parse error")
-	}
-	// scale_check parse error should record 0 in ScaleCheckCounts
-	if dsResult.ScaleCheckCounts["dog"] != 0 {
-		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (parse error should not produce demand)", dsResult.ScaleCheckCounts["dog"])
+		t.Fatal("on-demand rig named session should materialize when work_query sees rig-scoped password")
 	}
 }
 
@@ -841,7 +990,7 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 			"template":       "api",
 			"session_name":   "s-gc-200",
 			"state":          "creating",
-			"manual_session": "true",
+			"session_origin": "manual",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -1001,6 +1150,39 @@ func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing
 	}
 	if claudeSessions != 1 {
 		t.Fatalf("claude desired sessions = %d, want 1", claudeSessions)
+	}
+}
+
+func TestBuildDesiredState_LegacyNamepoolPoolSessionWithoutMetadataDoesNotBypassScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:furiosa"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"agent_name":   "furiosa",
+			"session_name": "worker-live",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			NamepoolNames:     []string{"furiosa", "nux"},
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	desired := dsResult.State
+
+	if _, ok := desired["worker-live"]; ok {
+		t.Fatalf("legacy themed pool session should not be rediscovered when scale_check demand is 0")
 	}
 }
 
@@ -1195,6 +1377,9 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 		if tp.PoolSlot != slot {
 			t.Fatalf("PoolSlot(%q) = %d, want %d", tp.InstanceName, tp.PoolSlot, slot)
 		}
+		if tp.Alias != tp.InstanceName {
+			t.Fatalf("Alias(%q) = %q, want %q", tp.InstanceName, tp.Alias, tp.InstanceName)
+		}
 		if got := tp.Env["GC_AGENT"]; got != tp.InstanceName {
 			t.Fatalf("GC_AGENT(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
 		}
@@ -1205,6 +1390,59 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing expected instance identities: %v", want)
+	}
+}
+
+func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "ops worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:ops.worker"},
+		Metadata: map[string]string{
+			"template":     "ops.worker",
+			"session_name": "ops-worker-1",
+			"agent_name":   "ops.worker",
+			"state":        "active",
+			"pool_managed": "true",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			BindingName:       "ops",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var got TemplateParams
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "ops.worker" {
+			got = tp
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("desired state missing binding-qualified pool session: keys=%v", mapKeys(dsResult.State))
+	}
+
+	wantInstance := cfg.Agents[0].QualifiedInstanceName("worker-1")
+	if got.InstanceName != wantInstance {
+		t.Fatalf("InstanceName = %q, want %q", got.InstanceName, wantInstance)
+	}
+	if got.Alias != wantInstance {
+		t.Fatalf("Alias = %q, want %q", got.Alias, wantInstance)
+	}
+	if got.Env["GC_AGENT"] != wantInstance {
+		t.Fatalf("GC_AGENT = %q, want %q", got.Env["GC_AGENT"], wantInstance)
 	}
 }
 
@@ -1333,11 +1571,29 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 	}
 }
 
-func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T) {
+func TestBuildDesiredState_PoolCheckUsesCityDoltPortForCityScopedAgent(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
-	// Same check command but for a city-scoped agent (no rig). BEADS_DOLT_SERVER_PORT
-	// should NOT be injected, so the check outputs 0.
+	writeRigEndpointCanonicalConfig(t, cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	ln := listenOnRandomPort(t)
+	defer func() { _ = ln.Close() }()
+	_, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", ln.Addr().String(), err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("Atoi(%q): %v", portText, err)
+	}
+	if err := writeDoltState(cityPath, doltRuntimeState{Running: true, PID: os.Getpid(), Port: port, DataDir: filepath.Join(cityPath, ".beads", "dolt"), StartedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatalf("writeDoltState: %v", err)
+	}
+	// Same check command but for a city-scoped agent (no rig). The canonical
+	// projected Dolt port should still be present, so the check outputs 2.
 	checkCmd := `sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -1355,8 +1611,64 @@ func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T
 			workerSlots++
 		}
 	}
-	if workerSlots != 0 {
-		t.Fatalf("worker desired slots = %d, want 0 (no DoltPort for city-scoped agent)", workerSlots)
+	if workerSlots != 2 {
+		t.Fatalf("worker desired slots = %d, want 2 (projected DoltPort for city-scoped agent)", workerSlots)
+	}
+}
+
+func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "demo")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, rigPath, contract.ConfigState{
+		IssuePrefix:    "dm",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "3308",
+		DoltUser:       "rig-user",
+	})
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	checkCmd := `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf 2 || printf 0'`
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name: "demo",
+			Path: rigPath,
+		}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "demo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        checkCmd,
+		}},
+	}
+
+	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	workerSlots := 0
+	for _, tp := range desired.State {
+		if tp.TemplateName == "demo/worker" {
+			workerSlots++
+		}
+	}
+	if workerSlots != 2 {
+		t.Fatalf("worker desired slots = %d, want 2 when explicit rig scale_check sees rig-scoped password", workerSlots)
 	}
 }
 

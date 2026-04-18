@@ -32,23 +32,16 @@ func TestTutorial07Orders(t *testing.T) {
 		t,
 		cityToml,
 		fmt.Sprintf("name = %q\npath = %q\n", "my-api", myAPI),
-		fmt.Sprintf("name = %q\npath = %q\nincludes = [\"packs/dev-ops\"]\n", "my-api", myAPI),
+		fmt.Sprintf("name = %q\npath = %q\n\n[rigs.imports.dev_ops]\nsource = \"./packs/dev-ops\"\n", "my-api", myAPI),
 	)
-	appendFile(t, cityToml, `
 
-[[agent]]
-name = "worker"
-dir = "my-api"
-prompt_template = "prompts/worker.md"
-`)
-
-	writeFile(t, filepath.Join(myCity, "formulas", "review.formula.toml"), `formula = "review"
+	writeFile(t, filepath.Join(myCity, "formulas", "review.toml"), `formula = "review"
 
 [[steps]]
 id = "check"
 title = "Check open PRs that need review"
 `, 0o644)
-	writeFile(t, filepath.Join(myCity, "formulas", "release-notes.formula.toml"), `formula = "release-notes"
+	writeFile(t, filepath.Join(myCity, "formulas", "release-notes.toml"), `formula = "release-notes"
 
 [[steps]]
 id = "gather"
@@ -66,12 +59,9 @@ needs = ["summarize"]
 `, 0o644)
 	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "pack.toml"), `[pack]
 name = "dev-ops"
-schema = 1
-
-[formulas]
-dir = "formulas"
+schema = 2
 `, 0o644)
-	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "formulas", "test-suite.formula.toml"), `formula = "test-suite"
+	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "formulas", "test-suite.toml"), `formula = "test-suite"
 
 [[steps]]
 id = "run"
@@ -107,18 +97,10 @@ interval = "5m"
 pool = "worker"
 `
 
-	// Canonical prose uses top-level orders/. Current discovery still expects
-	// formulas/orders/, so materialize the docs path and mirror it with a logged
-	// workaround to keep the page executable until prose/product converge.
-	ws.noteWarning("tutorial 07 workaround: mirrored docs-style orders/ into current formulas/orders discovery path")
-	writeFile(t, filepath.Join(myCity, "orders", "review-check", "order.toml"), reviewOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "orders", "dep-update", "order.toml"), depUpdateOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "orders", "release-notes", "order.toml"), releaseNotesOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "formulas", "orders", "review-check", "order.toml"), reviewOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "formulas", "orders", "dep-update", "order.toml"), depUpdateOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "formulas", "orders", "release-notes", "order.toml"), releaseNotesOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "orders", "test-suite", "order.toml"), testSuiteOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "formulas", "orders", "test-suite", "order.toml"), testSuiteOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "review-check.toml"), reviewOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "dep-update.toml"), depUpdateOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "release-notes.toml"), releaseNotesOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "orders", "test-suite.toml"), testSuiteOrder, 0o644)
 
 	t.Run("gc order list", func(t *testing.T) {
 		out, err := ws.runShell("gc order list", "")

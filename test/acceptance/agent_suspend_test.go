@@ -9,6 +9,8 @@
 package acceptance_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -29,26 +31,40 @@ func TestAgentAddCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc agent add failed: %v\n%s", err, out)
 		}
+		if !strings.Contains(out, "Scaffolded agent 'reviewer'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
 
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "reviewer") {
-			t.Errorf("city.toml should contain agent 'reviewer':\n%s", toml)
+		if !c.HasFile("agents/reviewer/prompt.template.md") {
+			t.Fatal("agents/reviewer/prompt.template.md missing after add")
+		}
+		showOut, err := c.GC("config", "show")
+		if err != nil {
+			t.Fatalf("gc config show: %v\n%s", err, showOut)
+		}
+		if !strings.Contains(showOut, "reviewer") {
+			t.Errorf("gc config show should list reviewer:\n%s", showOut)
 		}
 	})
 
 	t.Run("WithPromptTemplate", func(t *testing.T) {
+		srcPath := filepath.Join(c.Dir, "prompts", "planner.md")
+		if err := os.WriteFile(srcPath, []byte("You are the planner.\n"), 0o644); err != nil {
+			t.Fatalf("writing prompt template source: %v", err)
+		}
+
 		out, err := c.GC("agent", "add", "--name", "planner",
 			"--prompt-template", "prompts/planner.md")
 		if err != nil {
 			t.Fatalf("gc agent add failed: %v\n%s", err, out)
 		}
-
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "planner") {
-			t.Errorf("city.toml missing agent name:\n%s", toml)
+		if !strings.Contains(out, "Scaffolded agent 'planner'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
 		}
-		if !strings.Contains(toml, "prompts/planner.md") {
-			t.Errorf("city.toml missing prompt_template:\n%s", toml)
+
+		got := c.ReadFile("agents/planner/prompt.template.md")
+		if got != "You are the planner.\n" {
+			t.Errorf("copied prompt template mismatch:\n%s", got)
 		}
 	})
 
@@ -84,10 +100,13 @@ func TestAgentAddCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc agent add --suspended failed: %v\n%s", err, out)
 		}
+		if !strings.Contains(out, "Scaffolded agent 'dormant'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
 
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "suspended") {
-			t.Errorf("city.toml should contain 'suspended' for the agent:\n%s", toml)
+		agentToml := c.ReadFile("agents/dormant/agent.toml")
+		if !strings.Contains(agentToml, "suspended = true") {
+			t.Errorf("agent.toml should contain suspended = true:\n%s", agentToml)
 		}
 	})
 }

@@ -59,7 +59,7 @@ func resolveLiveProbeSessionID(cityPath string, cfg *config.City, store beads.St
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	return ensureSessionIDForTemplate(cityPath, cfg, store, target, nil)
+	return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, target, nil, ensureSessionForTemplateOptions{})
 }
 
 func TestLiveClaudeInterruptNow(t *testing.T) {
@@ -79,7 +79,6 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig(%q): %v", cityPath, err)
 	}
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
@@ -97,7 +96,7 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(cfg, info, "")
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name
@@ -156,7 +155,6 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig(%q): %v", cityPath, err)
 	}
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
@@ -174,7 +172,7 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(cfg, info, "")
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name

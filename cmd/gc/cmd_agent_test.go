@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,30 +44,6 @@ func TestDoAgentResumeBadConfig(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// doAgentAdd — qualified name with dir component (no existing coverage)
-// ---------------------------------------------------------------------------
-
-func TestDoAgentAddQualifiedName(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`[workspace]
-name = "test-city"
-`)
-
-	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(fs, "/city", "myrig/worker", "", "", false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	data := string(fs.Files["/city/city.toml"])
-	if !strings.Contains(data, "worker") {
-		t.Errorf("city.toml should contain agent name: %s", data)
-	}
-	if !strings.Contains(data, "myrig") {
-		t.Errorf("city.toml should contain dir from qualified name: %s", data)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Pack-preservation tests: write-back must NOT expand includes
 // ---------------------------------------------------------------------------
 
@@ -103,22 +80,6 @@ func assertConfigPreserved(t *testing.T, fs *fsys.Fake, tomlPath string) {
 	}
 	if strings.Contains(data, "pack-worker") {
 		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
-	}
-}
-
-func TestDoAgentAddPreservesConfig(t *testing.T) {
-	fs := packConfigWithFragment(t)
-
-	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(&fs, "/city", "new-agent", "", "", false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	assertConfigPreserved(t, &fs, "/city/city.toml")
-	// New agent should be present.
-	data := string(fs.Files["/city/city.toml"])
-	if !strings.Contains(data, "new-agent") {
-		t.Errorf("city.toml should contain new agent:\n%s", data)
 	}
 }
 
@@ -170,6 +131,170 @@ func TestDoAgentResumePackDerivedError(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "[[patches]]") {
 		t.Errorf("stderr should mention patches: %s", errMsg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// doAgentAdd — v2 scaffold behavior
+// ---------------------------------------------------------------------------
+
+func v2CityWithPack(t *testing.T) *fsys.Fake {
+	t.Helper()
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+`)
+	return fs
+}
+
+func TestDoAgentAddScaffoldsAgentDirectory(t *testing.T) {
+	fs := v2CityWithPack(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentAdd(fs, "/city", "worker", "", "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Scaffolded agent 'worker'") {
+		t.Errorf("stdout = %q, want scaffold message", stdout.String())
+	}
+
+	if _, ok := fs.Files["/city/city.toml"]; !ok {
+		t.Fatal("city.toml missing")
+	}
+	if strings.Contains(string(fs.Files["/city/city.toml"]), "worker") {
+		t.Errorf("city.toml should not be rewritten:\n%s", fs.Files["/city/city.toml"])
+	}
+
+	promptPath := filepath.Join("/city", "agents", "worker", "prompt.template.md")
+	gotPrompt, ok := fs.Files[promptPath]
+	if !ok {
+		t.Fatalf("%s missing", promptPath)
+	}
+	if !strings.Contains(string(gotPrompt), "{{ .AgentName }}") {
+		t.Errorf("prompt scaffold = %q, want template placeholder", gotPrompt)
+	}
+
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
+	}
+	explicit := explicitAgents(cfg.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name != "worker" {
+			continue
+		}
+		found = true
+		if !strings.HasSuffix(a.PromptTemplate, "agents/worker/prompt.template.md") {
+			t.Errorf("PromptTemplate = %q, want agents/worker/prompt.template.md", a.PromptTemplate)
+		}
+	}
+	if !found {
+		t.Fatalf("explicit agents = %#v, want worker", explicit)
+	}
+}
+
+func TestDoAgentAddCopiesPromptTemplate(t *testing.T) {
+	fs := v2CityWithPack(t)
+	fs.Files["/city/templates/worker.md"] = []byte("You are the worker.\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentAdd(fs, "/city", "worker", "templates/worker.md", "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got, ok := fs.Files["/city/agents/worker/prompt.template.md"]
+	if !ok {
+		t.Fatal("copied prompt template missing")
+	}
+	if string(got) != "You are the worker.\n" {
+		t.Errorf("copied prompt = %q, want source contents", got)
+	}
+}
+
+func TestDoAgentAddWritesAgentTomlForDirAndSuspended(t *testing.T) {
+	fs := v2CityWithPack(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentAdd(fs, "/city", "hello-world/worker", "", "", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	agentToml, ok := fs.Files["/city/agents/worker/agent.toml"]
+	if !ok {
+		t.Fatal("agent.toml missing")
+	}
+	if !strings.Contains(string(agentToml), "dir = \"hello-world\"") {
+		t.Errorf("agent.toml = %q, want dir", agentToml)
+	}
+	if !strings.Contains(string(agentToml), "suspended = true") {
+		t.Errorf("agent.toml = %q, want suspended", agentToml)
+	}
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
+	}
+	explicit := explicitAgents(cfg.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name != "worker" {
+			continue
+		}
+		found = true
+		if a.Dir != "hello-world" {
+			t.Errorf("Dir = %q, want hello-world", a.Dir)
+		}
+		if !a.Suspended {
+			t.Error("Suspended = false, want true")
+		}
+	}
+	if !found {
+		t.Fatalf("explicit agents = %#v, want worker", explicit)
+	}
+}
+
+func TestDoAgentAddDuplicateScaffold(t *testing.T) {
+	fs := v2CityWithPack(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doAgentAdd(fs, "/city", "worker", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("first doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	stderr.Reset()
+	stdout.Reset()
+	if code := doAgentAdd(fs, "/city", "worker", "", "", false, &stdout, &stderr); code != 1 {
+		t.Fatalf("second doAgentAdd = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "already exists") {
+		t.Errorf("stderr = %q, want 'already exists'", stderr.String())
+	}
+}
+
+func TestDoAgentAddRequiresPackToml(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentAdd(fs, "/city", "worker", "", "", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, "city directory with pack.toml") {
+		t.Errorf("stderr = %q, want pack.toml city requirement", errMsg)
+	}
+	if !strings.Contains(errMsg, `gc doctor`) || !strings.Contains(errMsg, `gc doctor --fix`) {
+		t.Errorf("stderr = %q, want migration hint to gc doctor / gc doctor --fix", errMsg)
 	}
 }
 
