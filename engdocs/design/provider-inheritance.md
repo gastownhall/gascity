@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — revised after design-review round 1 |
+| Status | Draft — revised after design-review round 2 |
 | Date | 2026-04-18 |
 | Author(s) | Julian, Claude |
 | Issue | — |
@@ -36,394 +36,414 @@ args = ["run", "codex", "--", "-m", "gpt-5.3-codex-spark",
         "-c", "model_reasoning_effort=\"medium\""]
 ```
 
-Neither rule matches here. `codex-mini` is not a built-in name; `aimux` is
-not a built-in command. The provider loads without the built-in's
-defaults, so:
+Neither rule matches. `codex-mini` is not a built-in name; `aimux` is not
+a built-in command. The provider loads without the built-in's defaults,
+so:
 
 - codex boots in its default `suggest` permission mode instead of
   `unrestricted` → every agent run prompts for approval on the first
-  sandboxed command and hangs forever waiting for a non-existent human.
-- `ReadyDelayMs` is unset → the pool worker is considered ready before
-  the TUI has finished bootstrapping; the first prompt races the UI.
-- `ResumeFlag` / `ResumeStyle` / `SessionIDFlag` are unset → crash
-  recovery cannot reattach to the previous session; the agent restarts
-  from a cold context.
-- `SupportsHooks`, `SupportsACP`, `PrintArgs`, `InstructionsFile` are all
-  empty → hooks aren't installed, headless mode is broken, the agent
-  can't find its instructions file.
+  sandboxed command and hangs forever.
+- `ReadyDelayMs` is unset → pool workers marked ready before TUI
+  bootstraps; first prompt races the UI.
+- `ResumeFlag` / `ResumeStyle` / `SessionIDFlag` unset → crash recovery
+  fails.
+- `SupportsHooks`, `SupportsACP`, `PrintArgs`, `InstructionsFile` empty →
+  hooks don't install, headless mode is broken, the agent can't find
+  its instructions file.
 
-The code itself flags this as a deferred decision
+The code flags this as deferred
 ([`resolve.go:273-278`](../../internal/config/resolve.go#L273)):
-
-> Limitation: wrapper aliases that use an intermediary launcher (e.g.,
-> `command = "aimux"`, `args = ["run", "gemini"]`) are not resolved to
-> the underlying builtin provider. [...] Fixing this requires a deeper
-> design decision about how to parse args for wrapped providers and is
-> deferred.
-
-This design is that deferred decision.
+"wrapper aliases that use an intermediary launcher [...] Fixing this
+requires a deeper design decision [...] and is deferred."
 
 ## Goals
 
 1. Give users a way to opt a custom provider into inheriting from any
    other provider — built-in or custom — via a single explicit field.
-2. Allow chaining, so users can build shared intermediate ancestors
-   (e.g. `claude-reasoning` feeding `claude-max` and `claude-mid`)
-   without copy-pasting fields across siblings.
-3. Remove the existing silent auto-inheritance rules so behavior is
-   always explicit and never depends on coincidental name collisions —
-   **while providing a deprecation window that prevents the fix from
-   reintroducing the same silent-failure mode at a different trigger.**
-4. Surface inheritance misconfigurations at config load rather than at
-   session spawn time.
+2. Allow chaining so users can build shared intermediate ancestors.
+3. Remove the silent auto-inheritance rules without reintroducing the
+   same silent-failure mode at a different trigger (explicit
+   deprecation window; hard error in phase B).
+4. Surface inheritance misconfigurations at config load, not session
+   spawn.
 5. Make inherited ancestry a first-class resolved property used
    consistently across every runtime surface that branches on provider
-   family (hook install, settings injection, skill materialization,
-   session kind metadata, HTTP `/v0/providers` view, `/v0/config/explain`).
+   family.
 
 ### Non-goals
 
-- Inheriting anything about an agent (`[[agent]]` entries) — this design
-  is scoped to `[providers.*]`.
-- Multiple inheritance / mixins — single-inheritance chain only.
-- Introspection UI beyond extending `gc config show` / `gc config
-  explain` to surface the resolved chain.
+- Inheriting anything about an agent (`[[agent]]` entries).
+- Multiple inheritance / mixins.
+- **Outer-wrapper composition.** A child cannot insert tokens **before**
+  its inherited `Command`. Cases like `timeout 300s ...`, `env VAR=x ...`,
+  `nice -n 10 ...` around an inherited invocation require mechanics this
+  design does not supply. Users who need that MUST set `command` and
+  `args` explicitly in the child and may use `base` solely to inherit
+  non-argv fields. (Round-2 reviewers correctly observed that a naive
+  `args_prepend` design would land tokens between the child's inherited
+  `Command` and inherited `Args`, producing silently wrong command
+  lines. The cleanest resolution is to forbid outer wrapping in v1.
+  See "Deferred: outer-wrapper composition" at the bottom.)
 
 ## Design
 
 ### TOML schema additions
 
-Four new fields on `[providers.X]` blocks (up from two in round 1):
+Three new fields on `[providers.X]` blocks:
 
 ```toml
 [providers.codex-max]
-base = "codex"
-args_append = [
-  "-m", "gpt-5.4",
-  "-c", "model_reasoning_effort=\"xhigh\"",
-]
-args_prepend = []                                 # optional; e.g., outer wrappers
-supports_hooks = false                            # optional; tri-state override
+base = "builtin:codex"
+args_append = ["-m", "gpt-5.4",
+               "-c", "model_reasoning_effort=\"xhigh\""]
+supports_hooks = false          # optional tri-state override
 ```
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `base` | `string` | no | Name of the parent provider. When unset (or empty), this provider has no parent and uses only the fields it declares plus minimal framework defaults. Accepts `"<name>"` (looks up custom first, then built-in) or the namespaced form `"builtin:<name>"` to force the built-in lookup unconditionally. |
-| `args_append` | `[]string` | no | String list appended to the effective `args` of the resolved chain. Applied after that layer's `args` replacement. |
-| `args_prepend` | `[]string` | no | String list prepended to the effective `args` of the resolved chain. Applied before that layer's `args` replacement. Enables outer-wrapper composition (`timeout 30s …`, `env VAR=x …`, `nice -n 10 …`). |
-| capability-bool overrides (`supports_hooks`, `supports_acp`, `emits_permission_warning`) | `*bool` | no | Tri-state: absent = inherit from parent; `true` = enable; `false` = explicitly disable. Represented internally as `*bool`. |
+| `base` | `string` | no | Name of the parent provider. `""` or absent = no inheritance. `"<name>"` looks up custom first, then built-in (self-exclusion applies). `"builtin:<name>"` forces built-in lookup. `"provider:<name>"` forces custom lookup. |
+| `args_append` | `[]string` | no | String list appended to the effective `args` of the resolved chain. Applied after that layer's `args` replacement. Inner-argv composition only — cannot wrap `Command`. |
+| capability-bool overrides (`supports_hooks`, `supports_acp`, `emits_permission_warning`) | `*bool` | no | Tri-state: absent = inherit; `true` = enable; `false` = explicitly disable. Serialized as optional TOML bool; internal representation is `*bool`. |
 
-All existing fields retain their current types and TOML tags. `Args`,
-`ProcessNames`, `PrintArgs`, and `OptionsSchema` get a pinned nil-vs-empty
-contract (see Nil-vs-empty semantics below).
+Plus one changed field:
+
+| Field | Change |
+|---|---|
+| `options_schema` | Merge mode controlled by new `options_schema_merge` field (see below). Defaults to **replace** (unchanged from today) for backward compat. |
+
+New opt-in:
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `options_schema_merge` | `string` | no | `"replace"` (default, today's semantics) or `"by_key"`. When `"by_key"`, child entries with matching `Key` replace parent entries; new keys append; `omit = true` removes inherited entries. |
+
+And an existing field gets a clarifying partner:
+
+| Field | Type | Semantics |
+|---|---|---|
+| `resume_command` | `string` | Explicit resume invocation template. When set, overrides the `ResumeFlag`/`ResumeStyle`/`SessionIDFlag` heuristic. Supports `{{session_id}}` placeholder. Required for wrapper descendants of subcommand-style resume built-ins (see Resume below). |
 
 ### Name resolution for `base`
 
 Resolving `base = "X"` for a provider named `P`:
 
-1. **Namespaced prefix:** if `X` starts with `builtin:` (`base = "builtin:codex"`),
-   look up the suffix in `BuiltinProviders()` only. If not found → error.
-   This is the unambiguous form for users who want to refer to a built-in
-   even when a custom provider shadows the name.
-2. **Namespaced prefix:** if `X` starts with `provider:` (`base = "provider:codex-wrap"`),
-   look up the suffix in custom providers only. If not found → error.
-3. **Bare name** (`base = "codex"`):
-   - Look up `X` in the custom providers table, **excluding `P` itself**.
+1. **Namespaced built-in** (`base = "builtin:X"`): look up `X` in
+   `BuiltinProviders()` only. Miss → error `unknown builtin "X" for
+   provider "P"`.
+2. **Namespaced custom** (`base = "provider:X"`): look up `X` in
+   custom providers. `X == P` → self-cycle error. Miss → error
+   `unknown custom provider "X" for provider "P"`.
+3. **Bare name** (`base = "X"`):
+   - Look up `X` in custom providers, excluding `P` itself.
    - If not found, look up `X` in `BuiltinProviders()`.
-   - If still not found → error: `unknown base "X" for provider "P"
-     (no custom provider or built-in with that name)`.
+   - Both miss → error `unknown base "X" for provider "P" (no custom
+     provider or built-in with that name)`.
+4. **Empty / absent** (`base = ""` or field omitted): no inheritance.
+   `""` and absent are equivalent at resolution time.
 
-Self-exclusion is the mechanism that lets a shadowing custom provider
-inherit from the built-in it shares a name with. It only scopes to the
-declaring hop, not the whole walk: `codex-max → codex → builtin codex`
-resolves correctly because at each hop self-exclusion only hides the
-current hop's declarer.
+Self-exclusion scopes to the declaring hop only, not the whole walk.
+Colons (`:`) are reserved in `base` values: a custom provider name
+containing `:` is rejected at parse time. Built-in provider names
+cannot contain `:`. The `builtin:` and `provider:` prefixes are
+reserved.
 
-`base = "P"` inside `[providers.P]` when no built-in named `P` exists is
-a **self-cycle error**, not "unknown base" — the user's clear intent was
-to reference themselves.
-
-`gc config show` output renders every resolution through the annotation:
-
-```
-# inherited chain: codex-max → codex → builtin:codex (via self-exclusion)
-[providers.codex-max]
-...
-```
-
-The self-exclusion annotation is required output so the resolution is
-never invisible to someone reading the config dump. Users who want
-zero-ambiguity authoring can use `base = "builtin:codex"` directly.
+`base = "P"` inside `[providers.P]` when no built-in named `P` exists
+is a self-cycle error.
 
 ### Resolution semantics
 
 Resolution happens **eagerly, post-compose, post-patch**. The full chain
-is walked once; the fully merged `ProviderSpec` is cached on the `City`
-struct alongside per-field / per-key provenance metadata (see
-Provenance data model). Subsequent `lookupProvider` calls return the
-cached spec by value (immutable from caller's perspective).
+is walked once; the fully merged `ResolvedProvider` is cached on the
+`City` struct alongside provenance metadata. Subsequent lookups return
+a **deep-copied** `ResolvedProvider` — all slice and map fields are
+cloned on return so caller mutation cannot corrupt the cache. Mutation-
+isolation tests are required per reference field.
 
-#### Chain walk
+#### Chain walk + hop identity
 
-Walk `base` links leaf → root. Collect ancestors in a list. Terminate
-when a provider has no `base` set (that provider is the root — either a
-built-in or a user-declared standalone provider).
+Walk `base` links leaf → root. At each hop, record:
 
-Cycle detection: maintain a `visited` set scoped to this walk only. If
-a name reappears, emit an error:
+- **Identity kind**: `builtin` or `custom` (determined by which lookup
+  path found the hop — `builtin:` prefix / fallthrough-to-builtin → `builtin`;
+  `provider:` prefix / bare-name-match-in-custom → `custom`).
+- **Identity name**: the canonical name (with prefix stripped).
 
-```
-config error: provider "A" has inheritance cycle: A → B → A
-```
+Cycle detection uses this **identity tuple** `(kind, name)` as the
+visited-set key — not the bare string `base` value. This prevents
+false positives between a custom `codex` and built-in `codex` with the
+same bare name.
 
-The error message names the chain as walked, so the user can see where
-the walker turned around.
+Chain terminates when a provider has no `base` set.
+
+#### `BuiltinAncestor` derivation
+
+`ResolvedProvider.BuiltinAncestor` is computed during the walk: the
+first hop whose **identity kind is `builtin`**. Not name-matching — a
+fully custom chain that happens to contain a hop named `codex` but
+which resolved through `provider:` or bare-name-matched-a-custom does
+**not** set `BuiltinAncestor`. If no hop in the chain is a built-in,
+`BuiltinAncestor = ""`.
+
+Test (required): `alias → custom-codex → provider:wrapper` chain, where
+the middle hop is literally named `codex` but is a custom provider.
+Assertion: `resolved.BuiltinAncestor == ""`.
 
 #### Merge direction
 
 Merge **root first**. Starting with an empty `ProviderSpec`, apply each
-ancestor in order from root to leaf. Each layer runs through the same
-merge function (a rename of the existing
-[`MergeProviderOverBuiltin`](../../internal/config/resolve.go#L164)).
+ancestor root→leaf through the same merge function.
 
 ### Cache, compose, and patch interaction
 
-Chain resolution must see the fully composed and patched provider
-table, not the raw TOML parse output. Order:
+1. **Compose** (pack fragments + city overrides in
+   [`compose.go`](../../internal/config/compose.go)): `Base`,
+   `ArgsAppend`, tri-state capability bools, `ResumeCommand`,
+   `OptionsSchemaMerge` participate in `deepMergeProvider`.
+2. **Patch** ([`patch.go`](../../internal/config/patch.go)): all new
+   fields added to `ProviderPatch`, `applyProviderPatch`, deep-copy.
+3. **Resolve**: walk chains, build merged specs + provenance, cache on
+   `City`.
+4. **Lookup**: `lookupProvider(name)` returns a deep-copied
+   `ResolvedProvider`.
 
-1. **Compose:** pack fragments + city overrides merged in
-   [`compose.go`](../../internal/config/compose.go). `Base`,
-   `ArgsAppend`, `ArgsPrepend`, and tri-state capability booleans
-   participate in `deepMergeProvider` — they deep-copy and overlay like
-   every other field.
-2. **Patch:** `[[patches.providers]]` patches apply via
-   [`patch.go`](../../internal/config/patch.go). Add `Base`,
-   `ArgsAppend`, `ArgsPrepend`, tri-state booleans to `ProviderPatch`,
-   to `applyProviderPatch`, and to deep-copy paths.
-3. **Resolve:** walk each provider's `base` chain, build final
-   `ProviderSpec`, record per-field provenance. Cache on `City`.
-4. **Lookup:** `lookupProvider` returns the cached resolved spec **by
-   value** — callers receive an independent copy so mutation cannot
-   corrupt the cache.
+On reload, the full table is rebuilt atomically. Old cache retained
+until new one materializes (or reload fails). Reload rejection leaves
+old cache intact.
 
-On config reload, the full table is rebuilt atomically. The old cache
-is retained until the new one is fully materialized (or errors); on
-error the old cache stays in place and the reload is rejected.
+**Quick-parse paths** that pre-compose
+([`cmd_config.go:77-85`](../../cmd/gc/cmd_config.go#L77)) must NOT run
+chain resolution and must NOT expose their output to runtime spawn
+paths. A separate Go type (`RawProviderSpec`) is introduced for
+pre-compose representations — runtime code paths only accept
+`*ResolvedProvider`, enforced at the type level. A test enumerates
+every caller of the quick-parse path and asserts none feed reconciler
+spawn, crash recovery, readiness probes, or session creation.
 
-Paths that use "quick" pre-compose parsing (like
-[`cmd_config.go:77-85`](../../cmd/gc/cmd_config.go#L77)) **do not run
-chain resolution**. They return raw parsed providers, flagged so
-downstream callers know the cache is not populated.
+#### Phase A: cache reproduces legacy behavior
+
+During Phase A (warning window — legacy auto-inheritance still fires),
+the resolved cache must produce the **same merged spec** it would have
+produced under the legacy rules. Concretely: when materializing a
+provider whose `base` is unset, if its name or command matches a
+built-in, the cache layer **synthesizes** the equivalent `base =
+"builtin:<name>"` merge. The warning is emitted separately on the
+config-load channel; the resolution result is unchanged.
+
+Phase B removes the synthesis. Any previously-quiet provider now fails
+loudly.
 
 ### Field-level merge rules
 
-Rules are applied at each merge layer (parent → accumulated) and again
-when the leaf merges on top.
-
 | Field | Merge rule | Change? |
 |---|---|---|
-| Scalar strings (`DisplayName`, `Command`, `PromptMode`, etc.) | Non-zero child replaces parent. | Unchanged |
+| Scalar strings | Non-zero child replaces parent. | Unchanged |
 | Scalar integers (`ReadyDelayMs`) | Non-zero child replaces parent. | Unchanged |
-| Tri-state capability booleans (`SupportsHooks`, `SupportsACP`, `EmitsPermissionWarning`) | `*bool`: nil = inherit; non-nil replaces. Enables explicit disable. | **Changed** |
-| `Args` | Non-nil child replaces parent entirely. Explicit empty list (`args = []`) clears. Absent inherits. | Nil-vs-empty pinned |
-| `ArgsAppend` | Accumulated across chain: each layer's append extends the running list, applied after that layer's `args` replace. | **New** |
-| `ArgsPrepend` | Accumulated across chain (outermost-first): each layer's prepend inserts before accumulated, applied before that layer's `args` replace. | **New** |
-| `ProcessNames`, `PrintArgs` | Non-nil child replaces parent. Explicit empty clears. Absent inherits. | Nil-vs-empty pinned |
+| Tri-state capability booleans | `*bool`: nil = inherit; non-nil replaces. | **Changed (new `*bool`)** |
+| `Args` | Non-nil child replaces parent. `[] = clear`. Absent inherits. | Nil-vs-empty pinned |
+| `ArgsAppend` | Accumulated across chain: each layer's `args_append` extends the running list, applied after that layer's `args` replace. `[] = append nothing` (not a clear). | **New** |
+| `ProcessNames`, `PrintArgs` | Non-nil child replaces. `[]` clears. Absent inherits. | Nil-vs-empty pinned |
 | `Env`, `PermissionModes`, `OptionDefaults` | Additive map merge; child keys win on collision. | Unchanged |
-| `OptionsSchema` | **Merge by `Key`**: child entries with matching keys replace the parent's entry entirely; child entries with new keys append; `omit = true` on a key-only child entry removes the inherited entry. | **Changed** |
+| `OptionsSchema` | Merge mode per `options_schema_merge`: `"replace"` (default) = current slice-replace; `"by_key"` = merge by `Key` with `omit = true` removal. | **New opt-in** |
+| `ResumeCommand` | Non-zero child replaces. Inherited by default. | Unchanged (field semantic new) |
 
-#### `args_prepend`, `args`, and `args_append` interaction
+#### `args` + `args_append` interaction
 
-Resolution proceeds layer by layer, root first. For each layer:
+Same-layer order: `args ++ args_append`. Per-layer accumulation across
+the chain:
 
-1. Apply layer's `args_prepend` to accumulated args (insert before).
-2. If layer declares `args`: replace accumulated with layer's args
-   (but preserve already-applied prepends by restoring them at the front).
-3. Else: keep accumulated args unchanged.
-4. Apply layer's `args_append` to accumulated args.
+1. If layer declares `args`: accumulated = layer.args (replace).
+2. If layer declares `args_append`: accumulated ++= layer.args_append.
 
-**Same-layer ordering:** `args_prepend` + `args` + `args_append` on one
-layer resolves as `args_prepend ++ args ++ args_append`. No layer-level
-ambiguity, no rejection. (Round 1's "ambiguous" rationale was
-self-contradictory once the cross-layer algorithm was defined; dropped.)
+No mutual-exclusion rejection. Both on the same layer resolve as
+`args ++ args_append` in declared order.
 
-Worked example — outer wrapper case:
+Worked example:
+
+```
+builtin codex:         args = nil,    args_append = nil     → []
+[providers.codex]:     args = ["run","codex","--"]           → ["run","codex","--"]
+                       args_append = nil
+[providers.codex-max]: args = nil,    args_append = ["-m","gpt-5.4"]
+                                                             → ["run","codex","--","-m","gpt-5.4"]
+```
+
+#### `options_schema` merge modes
+
+Default: `options_schema_merge = "replace"` — today's behavior. Setting
+a child's `options_schema` replaces the parent's entirely. No migration
+required for any existing config.
+
+Opt-in: `options_schema_merge = "by_key"`. Each
+`[[providers.X.options_schema]]` entry is identified by its non-empty
+`Key`. Rules:
+
+- Child entry with matching `Key` replaces parent entry entirely.
+- Child entry with new `Key` appends.
+- Child entry with `omit = true` and matching `Key` removes parent
+  entry. `OptionDefaults[Key]` is also pruned.
+- Child entry with `omit = true` and no matching parent entry: **no-op**
+  (not an error — permits forward-compatible config where a parent
+  might or might not declare the key).
+- Child entry with `omit = true` alongside any other non-`Key` fields:
+  **load error** (omit is key-only).
+- Empty `Key` or duplicate `Key` within one layer: load error.
+- `options_schema = []` under `by_key` mode: clear inherited schema.
+
+Opt-in model avoids the round-2 "silent semantic drift" blocker — no
+existing config's resolution changes unless the user explicitly sets
+`options_schema_merge = "by_key"`.
+
+#### Tri-state capability booleans
+
+TOML form:
 
 ```toml
-[providers.codex]                            # mid-tier wrapper
+supports_hooks = false   # explicit disable
+supports_hooks = true    # explicit enable (or inherit-if-parent-enabled)
+# omitted                 # inherit from parent
+```
+
+Internal representation: `*bool` (`nil` = inherit). The existing
+non-pointer form in older configs must continue to work — `true` and
+`false` decode into `*bool` identically. Regression test required:
+pre-existing `supports_hooks = false` config continues to disable hooks
+after the `*bool` migration.
+
+Compose-order test required: fragment sets `supports_hooks = false`,
+override omits the field → final `*bool == &false`.
+
+#### `ResumeCommand` — wrapper-aware resume
+
+Built-in codex uses `ResumeStyle = "subcommand"`, which today inserts
+`resume <id>` after the first token of the invocation. For a bare
+`codex` invocation this works; for the aimux-wrapped form
+(`aimux run codex -- ...`) it produces `aimux resume <id> run codex --
+...`, which is not a valid resume command.
+
+Solution: `ResumeCommand string` field on `ProviderSpec`. When set, it
+overrides `ResumeFlag`/`ResumeStyle`/`SessionIDFlag` heuristics. Uses
+`{{session_id}}` as the substitution token.
+
+**Required for wrapper descendants**: a provider whose inherited
+`ResumeStyle == "subcommand"` and whose `command` differs from its
+inherited `command` (i.e., a wrapper) MUST declare `resume_command`.
+If not, config load fails with:
+
+```
+config error: provider "codex-mini" wraps a subcommand-style resume
+  provider (codex) but does not declare `resume_command`. Wrapper
+  providers must specify their own resume invocation.
+```
+
+For the aimux-codex case:
+
+```toml
+[providers.codex-mini]
 base = "builtin:codex"
 command = "aimux"
-args = ["run", "codex", "--"]
-
-[providers.codex-max-timeout]                # leaf adds outer timeout
-base = "codex"
-args_prepend = ["timeout", "300s"]
-args_append = ["-m", "gpt-5.4"]
+args = ["run", "codex", "--", ...]
+resume_command = "aimux run codex -- resume {{session_id}}"
 ```
 
-Effective args: `["timeout", "300s", "run", "codex", "--", "-m", "gpt-5.4"]`.
-
-Worked example — append-only:
-
-```
-builtin codex:        args=nil                  → acc = []
-[providers.codex]:    args=["run","codex","--"] → acc = ["run","codex","--"]
-[providers.codex-max]: args_append=["-m","gpt-5.4",...]
-                      → acc = ["run","codex","--","-m","gpt-5.4",...]
-```
-
-#### `options_schema` merge with removal
-
-Each `[[providers.X.options_schema]]` entry is identified by its `Key`
-field. During merge:
-
-- A leaf entry with `key` matching a parent entry replaces that entry
-  entirely.
-- A leaf entry with `omit = true` and a `key` matching a parent entry
-  removes that entry.
-- A leaf entry with a new `key` appends.
-- Parent entries not mentioned by the leaf remain unchanged.
-- Within a single layer: `Key` must be non-empty and unique. Empty or
-  duplicate `Key` on the same layer is a config error.
-- `options_schema = []` on a child explicitly clears inherited schema.
-
-#### Nil-vs-empty semantics
-
-Authoritative contract, pinned end-to-end through parse → compose →
-patch → cache:
-
-| TOML form | Meaning |
-|---|---|
-| Field absent | Inherit from parent / use built-in default |
-| Field present, empty list (e.g. `args = []`) | Clear inherited value; final is empty list |
-| Field present, non-empty list | Replace (slice fields) or merge (map fields) per field-level rule |
-
-A per-field clear test is required for every slice-typed field: load a
-child with `args = []` / `process_names = []` / `options_schema = []`,
-assert the resolved spec has empty (not inherited) values.
-
-### Provenance data model
-
-The resolved-spec cache stores provenance alongside the merged values.
-Data shape:
-
-```go
-type ResolvedProvider struct {
-    ProviderSpec                          // final merged values
-    Provenance ProviderProvenance          // source attribution
-}
-
-type ProviderProvenance struct {
-    Chain          []string               // ["codex-max", "codex", "builtin:codex"]
-    FieldLayer     map[string]string      // "Command" -> "providers.codex"
-    MapKeyLayer    map[string]map[string]string
-        // "OptionDefaults" -> {"permission_mode": "builtin:codex", ...}
-    SchemaEntryLayer []SchemaProvenance   // per OptionsSchema entry: layer + action (inherited|replaced|appended|omitted)
-    ArgsSegments   []ArgsSegment          // each arg string tagged with layer + origin (args|args_prepend|args_append)
-}
-
-type ArgsSegment struct {
-    Layer  string                         // "providers.codex-max"
-    Origin string                         // "args_prepend" | "args" | "args_append"
-    Start  int                            // index into effective args
-    End    int
-}
-```
-
-Provenance is populated during chain resolution, not reconstructed by
-`gc config explain`. The existing `Provenance` type in
-[`compose.go:18-33`](../../internal/config/compose.go#L18) tracks only
-`Agents`/`Rigs`/`Workspace` — add a `Providers` field.
+End-to-end test required: spawn wrapped codex → kill → reconcile →
+assert actual executed resume command matches the declared template.
 
 ### Kind / provider-family propagation
 
-Gas City today branches on `provider_kind` (= resolved built-in name)
-in many places. When inheritance is chained, the leaf must know what
-built-in ancestor it derives from, not just what it literally declared.
+Every site that branches on provider name/kind MUST consume
+`ResolvedProvider.BuiltinAncestor`, not the raw name. Phase 4 audits
+and updates every listed call site; Phase 4 tests cover each.
 
-Add to `ResolvedProvider`:
+- `resolveProviderKind` ([`resolve.go:269-291`](../../internal/config/resolve.go#L269))
+- Hook install/enable ([`build_desired_state.go:1061-1063`](../../cmd/gc/build_desired_state.go#L1061), [`hooks.go:32-90`](../../internal/hooks/hooks.go#L32))
+- Claude `--settings` injection ([`cmd_start.go:699`](../../cmd/gc/cmd_start.go#L699))
+- Skill materialization ([`skills.go:57`](../../internal/materialize/skills.go#L57))
+- Session submit/interrupt ([`submit.go:192`](../../internal/session/submit.go#L192))
+- Named session creation ([`session_template_start.go:292`](../../cmd/gc/session_template_start.go#L292))
+- API session creation ([`session_resolution.go:215`](../../internal/api/session_resolution.go#L215))
+- Session chat handlers ([`handler_session_chat.go:381,521`](../../internal/api/handler_session_chat.go#L381))
+- Provider readiness init ([`init_provider_readiness.go:338`](../../cmd/gc/init_provider_readiness.go#L338))
+- Template resolve ([`template_resolve.go:251`](../../cmd/gc/template_resolve.go#L251))
+- Skill integration ([`skill_integration.go:172`](../../cmd/gc/skill_integration.go#L172))
 
-```go
-BuiltinAncestor string   // nearest built-in in the chain, or "" if none
-```
+Per-site regression tests: Claude `--settings` injection for
+`claude-max base="builtin:claude"`; skill materialization for same;
+session submit/interrupt; readiness probe; hook install; named-session
+creation. Each test asserts the behavior matches what the built-in
+would have gotten, not what a raw-name match would give.
 
-Definition: walk the chain from leaf to root; the first name resolvable
-to `BuiltinProviders()` wins. If no built-in is in the chain, empty
-string.
+Session beads stamp `provider_kind = BuiltinAncestor` at creation;
+downstream consumers read it from the bead, not re-derive.
 
-**All sites that currently branch on provider name/kind must consume
-`BuiltinAncestor`, not the raw name:**
+### HTTP / API surface consistency
 
-- `resolveProviderKind`
-  ([`resolve.go:269-291`](../../internal/config/resolve.go#L269))
-- hook install/enable logic
-  ([`cmd/gc/build_desired_state.go:1061-1063`](../../cmd/gc/build_desired_state.go#L1061),
-  [`internal/hooks/hooks.go:32-90`](../../internal/hooks/hooks.go#L32))
-- Claude `--settings` injection
-  ([`cmd/gc/cmd_start.go:699`](../../cmd/gc/cmd_start.go#L699))
-- skill materialization
-  ([`internal/materialize/skills.go:57`](../../internal/materialize/skills.go#L57))
-- session submit/interrupt provider_kind branching
-  ([`internal/session/submit.go:192`](../../internal/session/submit.go#L192))
-
-Phase 4 includes an audit pass grepping for each of these patterns and
-routing them through `BuiltinAncestor`.
-
-### HTTP and API surface consistency
-
-All provider-aware HTTP and API endpoints must consume the same
-resolved cache, not re-derive provider behavior independently:
+All provider-aware HTTP / API / CRUD paths must consume the same
+resolved cache:
 
 - `/v0/providers?view=public`
   ([`handler_providers.go:91-100`](../../internal/api/handler_providers.go#L91))
 - `/v0/config/explain`
   ([`handler_config.go:124`](../../internal/api/handler_config.go#L124))
-- Provider CRUD / patches
+- Provider CRUD
   ([`handler_provider_crud.go:10`](../../internal/api/handler_provider_crud.go#L10),
   [`configedit.go:647`](../../internal/configedit/configedit.go#L647))
+- `/v0/config/explain` per-provider form (new: `--provider <name>`
+  query parameter)
 
-Phase 3 updates each handler to read from the cache. The CRUD validation
-is relaxed: a provider with `base` set is authorable without `command`
-or `args` — those can be inherited.
+CRUD validation relaxed: a provider with `base` set is authorable
+without `command` / `args` — those may be inherited. CRUD round-trip
+test for base-only descendants is required.
+
+Response DTOs strip internal fields not intended for external
+consumption (`omit = true` sentinel in schema entries is stripped
+from public JSON via `json:"-"`).
 
 ### Migration & deprecation window
 
-**Round 1 specified docs-only migration. Review blocked that** because
-silent field loss reproduces the original bug at a different trigger.
-Revised plan:
+#### Phase A (this release) — load-time detector
 
-#### Phase A (this release) — load-time detector, no behavior change
+A custom provider meeting ANY of these without explicit `base` set
+(including `base = ""` opt-out):
 
-A custom provider that meets ANY of these conditions generates a
-**load-time warning** without changing resolution behavior:
+- Provider name equals a built-in name.
+- Provider `command` equals a built-in name.
 
-- provider name equals a built-in name AND `base` is unset
-- provider `command` equals a built-in name AND `base` is unset
+emits a **load-time warning**. Resolution behavior unchanged (cache
+synthesizes legacy merge per the Phase A cache rule above).
 
-Warning text names the exact line to add:
+Warning text primarily recommends the unambiguous `builtin:` form:
 
 ```
-config warning: provider "codex" in pack.toml may be relying on legacy
-  name-match auto-inheritance (matches built-in "codex").
-  Add `base = "codex"` to make inheritance explicit. This warning
-  becomes an error in the next release.
+config warning: provider "codex" in pack.toml is relying on legacy
+  name-match auto-inheritance (matches built-in "codex"). This becomes
+  a hard error in the next release.
+
+  Fix: add `base = "builtin:codex"` to the provider block.
+
+  If this provider should NOT inherit from the built-in, add
+  `base = ""` to explicitly opt out.
 ```
 
-Legacy auto-inheritance continues to fire in Phase A so existing
-configs keep working. The warning also surfaces in `gc doctor`, so
-operators have a proactive check.
+`base = "<name>"` (bare, resolving via self-exclusion) is a valid but
+secondary recommendation — the `builtin:` form is preferred because it
+reads unambiguously without knowing the self-exclusion rule.
+
+`base = ""` is the documented **opt-out path** for standalone
+providers that happen to collide with a built-in name. Silences the
+warning; cache does not synthesize legacy merge; the provider stands
+alone with only its declared fields.
+
+Warnings surface on three channels:
+
+- Config load returns a structured warnings list alongside errors.
+- `gc doctor` renders them for operator-initiated checks.
+- `gc config explain <provider>` includes them in its output.
 
 #### Phase B (next release) — auto-inheritance removed
 
-Next release: legacy auto-inheritance is deleted. Warnings from Phase A
-become hard load-time errors with the same "add `base = "X"`" message.
-
-Users who migrated during Phase A experience no break. Users who ignored
-the warnings get a clear actionable error at upgrade.
-
-This two-phase approach is scoped to this design; it does not block
-shipping Phase 1–6 in a single release other than gating legacy removal
-to Phase B.
+Legacy auto-inheritance deleted. Phase A warnings become hard errors
+with the same text. Cache synthesis of legacy merge is also removed
+(since there's nothing to preserve).
 
 ### Errors (all at config load)
 
@@ -434,275 +454,376 @@ config error: provider "codex-max" has inheritance cycle:
 config error: provider "codex-mini" has unknown base: "codex-foo"
     (no custom provider or built-in with that name)
 
+config error: provider "codex-mini" base "builtin:aimux": no built-in
+    with that name exists
+
+config error: provider "codex-mini" wraps a subcommand-style resume
+    provider (codex) but does not declare `resume_command`. Wrapper
+    providers must specify their own resume invocation.
+
 config error: provider "codex-max" options_schema entry 2 has empty Key
 
 config error: provider "codex-max" options_schema entry 2 duplicates
     Key "permission_mode" (also at entry 0)
 
-config error: provider "codex-mini" base "builtin:aimux": no built-in
-    with that name exists
+config error: provider "codex-max" options_schema entry 2 declares both
+    `omit = true` and other fields; omit entries must be key-only
 
-config warning: provider "codex" in pack.toml may be relying on legacy
-    name-match auto-inheritance. Add `base = "codex"` to make
-    inheritance explicit. (Phase A — becomes error in next release)
+config error: custom provider name "codex:foo" contains reserved
+    character ":" — reserved for namespace prefixes
 ```
 
 ### Observability
 
-Extend `gc config show` to render, as a comment above each
-`[providers.X]` block, the resolved chain:
+`gc config show` renders, as a comment above each `[providers.X]`
+block:
 
 ```
-# inherited chain: codex-max → codex → builtin:codex
+# inherited chain: codex-max → codex → builtin:codex (via self-exclusion)
 [providers.codex-max]
 ...
-```
 
-Custom-rooted chains (no built-in in lineage):
+# no inheritance (stands alone)
+[providers.my-standalone]
+...
 
-```
 # inherited chain: my-alias → my-base (no built-in ancestor)
 [providers.my-alias]
 ...
 ```
 
-No-base providers:
+The annotation is produced by a dedicated annotated renderer
+(`cfg.MarshalShow()`) — `cfg.Marshal()` (plain TOML encoding) cannot
+produce comments.
 
-```
-# no inheritance (stands alone)
-[providers.my-standalone]
-...
-```
+`gc config explain` (and `/v0/config/explain`):
 
-Round-trip: this output is **not** produced by `cfg.Marshal()` (which
-strips comments). A dedicated annotated renderer — `cfg.MarshalShow()`
-or similar — is required. Annotated output is intended for human
-reading; re-parsing it discards the comments but is otherwise a valid
-TOML round-trip.
+- Default view: per-agent resolved view including provider chain.
+- `--provider <name>`: focused view on one provider's resolved spec
+  and full provenance.
+- `--json`: structured output. Provenance includes:
+  - `chain`: ordered hop list with identity kind + name.
+  - `fields`: per-field source layer.
+  - `option_defaults` / `permission_modes` / `env`: per-map-key source
+    layer (`MapKeyLayer`).
+  - `options_schema`: per-entry `{key, action, layer}` where `action` ∈
+    `{inherited, replaced, appended, omitted, cleared}`.
+  - `args_effective` + `args_segments`: half-open `[start, end)` ranges
+    tagged with `{layer, origin}` where `origin` ∈ `{args, args_append}`.
+- Phase A warnings surface on `gc config explain`, not just
+  `gc doctor`.
 
-`gc config explain` extends to show per-field / per-key / per-segment
-provenance from the cache. Structured JSON output (`--json`) emits the
-full `Provenance` struct for diffing or tooling:
+### Provenance data model
 
-```json
-{
-  "provider": "codex-max",
-  "chain": ["codex-max", "codex", "builtin:codex"],
-  "fields": {
-    "Command":      {"layer": "providers.codex"},
-    "PromptMode":   {"layer": "builtin:codex"},
-    "ReadyDelayMs": {"layer": "builtin:codex"}
-  },
-  "option_defaults": {
-    "permission_mode": {"layer": "builtin:codex"},
-    "effort":          {"layer": "providers.codex-max"}
-  },
-  "args_effective":       ["run","codex","--","-m","gpt-5.4"],
-  "args_segments": [
-    {"layer":"providers.codex","origin":"args","start":0,"end":3},
-    {"layer":"providers.codex-max","origin":"args_append","start":3,"end":5}
-  ],
-  "options_schema": [
-    {"key":"permission_mode","action":"inherited","layer":"builtin:codex"},
-    {"key":"effort","action":"replaced","layer":"providers.codex-max"}
-  ]
+```go
+type ResolvedProvider struct {
+    ProviderSpec
+    BuiltinAncestor string
+    Provenance      ProviderProvenance
+}
+
+type ProviderProvenance struct {
+    Chain            []HopIdentity            // ordered, root → leaf
+    FieldLayer       map[string]string        // "Command" → "providers.codex"
+    MapKeyLayer      map[string]map[string]string
+                                              // "OptionDefaults" → {"permission_mode": "builtin:codex", ...}
+    SchemaEntryLayer []SchemaProvenance
+    ArgsSegments     []ArgsSegment
+    Warnings         []string                 // Phase A warnings
+}
+
+type HopIdentity struct {
+    Kind string   // "builtin" | "custom"
+    Name string   // canonical name
+}
+
+type SchemaProvenance struct {
+    Key    string
+    Action string   // "inherited" | "replaced" | "appended" | "omitted" | "cleared"
+    Layer  string
+}
+
+type ArgsSegment struct {
+    Layer  string   // e.g. "providers.codex"
+    Origin string   // "args" | "args_append"
+    Start  int      // half-open [Start, End)
+    End    int
 }
 ```
 
-## Built-in spec completeness
+`MapKeyLayer` covers `Env`, `PermissionModes`, `OptionDefaults`.
+`SchemaProvenance.Action = "cleared"` applies when a layer set
+`options_schema = []` under `by_key` mode.
 
-The built-in codex spec
-([`provider.go:286-310`](../../internal/config/provider.go#L286))
-currently does not define `ResumeFlag`, `ResumeStyle`, or
-`SessionIDFlag`. Without adding them, `base = "codex"` does not restore
-crash recovery for aimux-wrapped codex. Phase 1 adds these fields to
-the built-in codex spec so the motivating use case works end-to-end.
+### `pack_format` — decision
+
+**Dropped.** Round-2 review flagged this as underspecified scope creep.
+This design does not introduce a new schema discriminator. The existing
+`[pack].schema` contract
+([`config.go:551`](../../internal/config/config.go#L551),
+[`pack.go:22`](../../internal/config/pack.go#L22)) is unchanged; if a
+future breaking change needs a discriminator, that's a separate design.
+
+### Built-in codex fields
+
+Add `ResumeFlag`, `ResumeStyle`, `SessionIDFlag` to the built-in codex
+spec ([`provider.go:286`](../../internal/config/provider.go#L286)) so
+that `base = "builtin:codex"` restores the resume capability for
+non-wrapper descendants. Wrapper descendants still must declare
+`resume_command` per the Resume section.
+
+## Deferred: outer-wrapper composition
+
+Inserting tokens before the inherited `Command` is deliberately
+**out of scope for v1**. Users who need outer wrapping (`timeout 300s
+aimux run codex ...`, `env FOO=bar ...`, `nice -n 10 ...`) must
+declare their own `command` and `args`. They can still use `base` to
+inherit non-argv fields (permission modes, ready delay, hooks,
+settings).
+
+This restriction exists because the runtime's `sh -c` line concatenates
+`Command + Args`. A naive "args_prepend" would insert tokens between
+the child's inherited `Command` and inherited `Args`, producing
+silently-wrong invocations. The correct model is to treat the wrapper
+itself as a new provider identity (its own `command` + `args` + `base`
+for field inheritance) — which is what users already write for such
+cases and what this design leaves unchanged.
+
+Future extension (not in this design): a `command_wrap` field or
+placeholder-based args (`args = ["timeout", "300s", "@inherit"]`) that
+substitutes the resolved parent argv. Requires design work on
+ergonomics and runtime-layer changes beyond the config package.
 
 ## Implementation plan
+
+Phases 1–7 ship in the **same release**. Phase 8 (hard cutover) ships
+in the next release. Phase 9 docs update ships alongside Phase 1–7.
 
 ### Phase 1 — data model + built-in spec gaps
 
 - Add to `ProviderSpec` in
-  [`internal/config/provider.go`](../../internal/config/provider.go):
-  `Base string`, `ArgsAppend []string`, `ArgsPrepend []string`,
-  `SupportsHooksPtr *bool` (and similar for other capability booleans),
-  TOML tags `base`, `args_append`, `args_prepend`, `supports_hooks`, etc.
+  [`provider.go`](../../internal/config/provider.go): `Base string`,
+  `ArgsAppend []string`, `ResumeCommand string`, `OptionsSchemaMerge
+  string`, capability `*bool` overrides, TOML tags.
 - **Simultaneously** add all new fields to `ProviderPatch`
-  ([`patch.go:160`](../../internal/config/patch.go#L160)), patch apply
-  functions, and deep-copy paths. Add `TestProviderFieldSync` analogous
-  to `TestAgentFieldSync` to enforce parallel updates for future
-  additions.
-- Add missing built-in codex fields (`ResumeFlag`, `ResumeStyle`,
-  `SessionIDFlag`) so the motivating example works end-to-end.
-- Add top-level schema version discriminator (`pack_format = 1` or
-  equivalent) to pack.toml / city.toml parsing.
-- Unit tests: parse a provider with each new field, nil-vs-empty
-  contract for each slice field, tri-state capability bool round-trip.
+  ([`patch.go:160`](../../internal/config/patch.go#L160)),
+  `applyProviderPatch`, deep-copy paths. Patch-side presence-awareness
+  for `[]` preservation.
+- `TestProviderFieldSync` analogous to `TestAgentFieldSync`.
+- Add `ResumeFlag`, `ResumeStyle`, `SessionIDFlag` to built-in codex.
+- Introduce `RawProviderSpec` type for pre-compose quick-parse paths;
+  refactor quick-parse callers.
+- Parser rejects `:` in custom provider names and rejects `builtin:` /
+  `provider:` reserved-prefix misuse.
+- Unit tests: parse each new field; nil-vs-empty contract per slice
+  field; tri-state bool round-trip with old-form back-compat
+  (`supports_hooks = false` on old schema still disables hooks);
+  `RawProviderSpec` / `ResolvedProvider` type isolation.
 
-### Phase 2 — chain resolver
+### Phase 2 — chain resolver + hop identity
 
-- Add `resolveProviderChain(name string, allProviders)
-  (ResolvedProvider, error)` to
-  [`internal/config/resolve.go`](../../internal/config/resolve.go).
-- Implement namespaced prefixes (`builtin:`, `provider:`) + bare-name
-  lookup with self-exclusion.
-- Cycle detection with walk-scoped visited set. Self-cycle variant
-  distinguished from unknown-base.
-- Populate provenance during walk.
-- Compute `BuiltinAncestor`.
-- Emit error messages specified in Errors section.
-- Unit tests: chain depth 1–3, self-exclusion to built-in via shadowing,
-  `builtin:`/`provider:` prefixes, self-cycle (with and without built-in
-  shadow), transitive cycle, unknown base, transitive unknown base,
-  multiple descendants sharing an ancestor (shared-ancestor DAG).
+- Add `resolveProviderChain(name, allProviders) (ResolvedProvider,
+  error)` to
+  [`resolve.go`](../../internal/config/resolve.go).
+- Implement namespaced prefixes (`builtin:`, `provider:`) +
+  self-exclusion bare-name lookup.
+- Cycle detection with walk-scoped visited set keyed on `(kind, name)`.
+- Populate `BuiltinAncestor` from hop identity.
+- Emit all error messages in Errors.
+- Wrapper-resume check: detect subcommand-style inherited `ResumeStyle`
+  with differing `command` and demand `resume_command`.
+- Unit tests (per Test inventory below).
 
-### Phase 3 — remove legacy auto-inheritance (Phase A — warning only)
+### Phase 3 — legacy auto-inheritance detector (Phase A)
 
-- Legacy auto-inheritance blocks at
-  [`resolve.go:131-138`](../../internal/config/resolve.go#L131) remain
-  in place but now emit load-time warnings.
+- Legacy auto-inheritance blocks at `resolve.go:131-138` stay; now
+  emit warnings through `config.Warnings` return channel.
+- Cache materialization synthesizes `base = "builtin:<name>"` merge for
+  each same-name / command-match provider lacking `base`.
 - `gc doctor` runs the same check.
-- Warning surfaces via `config.Warnings` — a new per-load warning
-  channel that the loader returns alongside errors.
-- No breaking behavior change in this release.
 
 ### Phase 4 — merge rule updates + runtime propagation
 
-- Rename `MergeProviderOverBuiltin` to `mergeChainLayer`; extend for
-  `ArgsAppend`, `ArgsPrepend`, tri-state capability booleans,
-  `options_schema` merge-by-`Key` with `omit` sentinel.
-- Refactor every site branching on provider name/kind to consume
-  `ResolvedProvider.BuiltinAncestor` instead of the raw name. Audit via
-  grep for hook install, settings injection, overlay selection, skill
-  materialization, session provider_kind branches.
-- Tests: golden-file resolved `ProviderSpec` per realistic chain;
-  explicit negative test that legacy auto-inheritance does not fire
-  when `base` is unset (in Phase B); 3-layer `args_append` /
-  `args_prepend` accumulation; `options_schema` by-key merge with
-  replace/append/omit; transitive cycle through shadowed built-in;
-  end-to-end integration: pack.toml with aimux-wrapped codex →
-  resolved provider has `PermissionModes["unrestricted"]`, correct
-  `ReadyDelayMs`, `BuiltinAncestor="codex"`, hooks install.
+- Rename `MergeProviderOverBuiltin` → `mergeChainLayer`; extend for
+  `ArgsAppend`, tri-state capabilities, `options_schema` by-key +
+  `omit`.
+- Audit every site branching on provider name/kind; route through
+  `BuiltinAncestor`. Sites listed in Kind/provider-family section.
+- Per-site regression tests.
 
 ### Phase 5 — eager cache + provenance
 
-- After compose + patch, walk every `[providers.X]` and materialize
-  `ResolvedProvider` with provenance.
-- Store cache on `City`. `lookupProvider` returns by value.
-- Cycle and missing-base errors fire here.
-- Atomic reload: build new cache before swapping; on error keep old.
-- Tests: cache contains expected providers; mutation of returned value
-  does not affect subsequent lookups; reload with broken config
-  preserves previous cache; Level 0 ("no agents, no providers") loads
-  unchanged.
+- Post-compose + post-patch resolution; cache on `City`.
+- `lookupProvider` returns deep-copied `ResolvedProvider`. Mutation-
+  isolation tests per reference field.
+- Atomic reload; failed reload preserves old cache.
+- Quick-parse path test: enumerate callers, assert none feed runtime.
 
-### Phase 6 — HTTP / API surface consistency
+### Phase 6 — HTTP / API / CRUD consistency
 
-- Route `/v0/providers?view=public`, `/v0/config/explain`, `/v0/config`,
-  and provider CRUD / patch handlers through the resolved cache.
-- Relax CRUD validation to allow `base`-only descendants (no `command`
-  / `args` required if inherited).
-- Tests: `/v0/providers` returns the same resolved spec the runtime
-  uses; `/v0/config/explain` returns per-field provenance; provider
-  CRUD accepts `base`-only definitions.
+- Route `/v0/providers`, `/v0/config/explain`, provider CRUD handlers
+  through the cache.
+- Relax CRUD validation for `base`-only descendants.
+- `/v0/config/explain` `--provider <name>` form.
+- `omit` sentinel stripped from public DTOs (`json:"-"`).
 
 ### Phase 7 — observability
 
-- Extend `gc config show` with the annotated chain comment. Render
-  edge cases (no-base, custom-rooted, 4+ layer) from unit tests.
-- Extend `gc config explain` with per-field / per-key / per-segment
-  provenance annotation. Add `--json` structured output.
-- Golden-file tests for each rendering case.
+- `gc config show` annotated renderer (`cfg.MarshalShow()`) with
+  comment line per provider. Cover no-base / custom-rooted / deep
+  chains as explicit test cases.
+- `gc config explain` provenance annotation, per-map-key resolution,
+  `--json` output with full `ProviderProvenance`.
+- Phase A warnings surface on explain path.
+- Golden-file tests for both text and JSON outputs.
 
-### Phase 8 — hard cutover (next release, Phase B)
+### Phase 8 — hard cutover (next release)
 
-- Delete the legacy auto-inheritance blocks at `resolve.go:131-138`.
-- Promote Phase A warnings to hard load-time errors.
-- Release notes name the cutover; migration instructions already
-  surfaced in Phase A warnings.
+- Delete legacy auto-inheritance blocks.
+- Delete cache legacy-merge synthesis.
+- Promote warnings to errors.
 
-### Phase 9 — docs and changelog
+### Phase 9 — docs and changelog (ships with 1–7)
 
-- Short user-facing doc under `engdocs/` summarising the TOML schema
-  and behavior (separate from this design, which is for maintainers).
-- Update README / pack.toml examples to use explicit `base` lines.
-- Changelog entry naming this release's behavior (warning window) and
-  the next release's cutover.
-- Enumerate the `options_schema` merge semantic change as a breaking
-  change with a worked migration example — distinct from the `base`
-  migration.
-
-Phases 1–2 can parallelize internally; Phase 3 gates Phase 4; Phases
-5–7 gate on Phase 4; Phase 8 is scheduled in the next release.
+- User-facing doc under `engdocs/` for the TOML schema.
+- Pair `args_append` wrapper guidance with `process_names` override
+  guidance (a wrapper provider needs to override `process_names` for
+  supervision / PID tracking).
+- Changelog entry covering this release's detector window + next
+  release's cutover.
+- `options_schema` merge mode is documented as opt-in; no migration
+  needed unless users explicitly enable.
 
 ## Test case inventory
 
-Golden-file tests per chain depth asserting every field of the
-resolved `ProviderSpec` + full `Provenance`. Named scenarios:
+Organized by phase; every check asserts specific field values, not
+category coverage.
 
-- **Built-in only lookup** (no `[providers.X]` shadowing): behavior
-  unchanged.
-- **Shadowing custom provider with `base = "<same-name>"`**: self-
-  exclusion fires, resolves to built-in via bare-name path, inherits
-  every built-in field.
-- **Shadowing custom provider with `base = "builtin:<same-name>"`**:
-  resolves identically to above via explicit namespaced form.
-- **Self-cycle without shadow** (`[providers.foo] base = "foo"` with no
-  built-in `foo`): error, cycle message.
-- **Two-layer chain** (`codex-max → codex-custom → codex-builtin`):
-  scalars, args, args_append, args_prepend, tri-state bools,
-  options_schema merge each assert-by-field.
-- **Three-layer chain**: same as above, deeper.
-- **Shared-ancestor DAG** (`A → C`, `B → C`): both resolve
-  independently; walks do not cross-contaminate visited sets.
-- **Unknown base**: load fails with named error.
-- **Transitive unknown base** (`A → B → <missing>`): error names both.
-- **Transitive cycle through shadowed built-in** (`A → B → A` where A
-  shadows a built-in): error, not resolved-to-built-in.
-- **`args` + `args_append` + `args_prepend` on one layer**: resolves
-  in the documented order.
-- **Same-layer order across chain**: leaf prepend, middle replace,
-  root append — exact expected final args.
-- **options_schema replace**: leaf entry with matching key replaces.
-- **options_schema append**: leaf entry with new key appends.
-- **options_schema omit**: leaf entry with `omit = true` removes
-  inherited entry.
-- **options_schema = []**: leaf clears inherited schema.
-- **options_schema empty / duplicate Key**: load error.
-- **Nil-vs-empty per slice field**: absent vs `[]` vs non-empty for
-  `Args`, `ProcessNames`, `PrintArgs`, `OptionsSchema`.
-- **Tri-state capability bool**: absent vs `true` vs `false` for
-  `SupportsHooks`, asserting runtime hook install fires/does-not-fire
-  accordingly.
-- **Negative auto-inheritance test (Phase B)**: `[providers.codex]
-  command = "claude"` with no `base` → resolved spec has zero
-  built-in-claude fields.
-- **End-to-end aimux-wrapper integration**: pack.toml identical to the
-  maintainer-city config → resolved provider for `codex-mini` has
-  `PermissionModes["unrestricted"]`, `ReadyDelayMs=3000`,
-  `ResumeFlag` set, `SupportsHooks=true`, `BuiltinAncestor="codex"`.
-  Hook install actually fires for this provider.
-- **Compose/patch coverage**: pack fragment defines parent; city-level
-  child overrides; `[[patches.providers]]` patches the child → final
-  cache reflects all three.
-- **`TestProviderFieldSync`**: mirror of `TestAgentFieldSync`,
-  asserting every `ProviderSpec` field has a corresponding entry in
-  `ProviderPatch`, apply function, and deep-copy path.
-- **Cache immutability**: mutate returned `ResolvedProvider`; re-lookup
-  returns clean value.
-- **Atomic reload**: reload with broken chain; cache unchanged.
-- **Level 0 invariant**: city with no agents, no providers loads
-  unchanged.
-- **Phase A warning**: custom provider matching legacy name-match
-  without `base` emits the expected warning.
-- **Round-trip `gc config show`**: annotated output re-parses as valid
-  TOML (comments stripped on re-parse is acceptable).
+### Chain resolution
+
+- Built-in only lookup: behavior unchanged.
+- Shadowing custom with `base = "<same-name>"` (self-exclusion → built-in).
+- Shadowing custom with `base = "builtin:<same-name>"` — same result.
+- Shadowing custom with `base = "provider:<same-name>"` → self-cycle error.
+- Self-cycle without shadow (`base = "foo"` in `[providers.foo]`, no
+  built-in `foo`) → cycle error.
+- Transitive 3-node cycle `A → B → C → A` with error message naming
+  the full chain.
+- Unknown base; transitive unknown base (A → B → missing) with error
+  naming both.
+- Shared-ancestor DAG (`A → C`, `B → C`) — both walks independent.
+
+### `BuiltinAncestor` correctness
+
+- Direct chain to built-in → `BuiltinAncestor = <builtin>`.
+- Two-layer chain with built-in root → `BuiltinAncestor = <builtin>`.
+- Fully-custom chain whose hop happens to be named `codex` but
+  resolves through `provider:` → `BuiltinAncestor = ""`.
+- Bare-name-matched-custom with same name as a built-in, chain
+  continues to built-in → `BuiltinAncestor` is the built-in (because
+  the chain reaches it).
+- Chain passing through `custom codex (base="builtin:codex")` → leaf
+  `BuiltinAncestor = "codex"`.
+
+### Merge rules
+
+- Scalars: 3-layer override (root sets, mid inherits, leaf overrides).
+- `args` replace + `args_append` accumulate across 3 layers.
+- Same-layer `args` + `args_append`: `args ++ args_append`.
+- `args = []` on leaf clears inherited.
+- `args_append = []` on leaf: appends nothing (distinct from `args = []`).
+- Tri-state `*bool`:
+  - absent → inherits parent `true`.
+  - `false` → explicit disable (parent `true` overridden).
+  - `true` → explicit enable.
+  - Pre-existing old-schema `supports_hooks = false` config decodes
+    correctly into `*bool`.
+  - Compose-order: fragment `false`, override absent → final `false`.
+- `options_schema` replace mode: child slice replaces.
+- `options_schema` by-key mode: child replace by key / append new /
+  omit existing.
+- `options_schema` by-key + omit-nonexistent: no-op.
+- `options_schema` by-key + `omit` with siblings: load error.
+- `options_schema` by-key + empty/duplicate Key: load error.
+- `options_schema = []` (by-key mode): clears inherited; schema entry
+  provenance marked `cleared`.
+- `OptionDefaults[omitted_key]` is pruned after `omit`.
+
+### Resume
+
+- Non-wrapper `base = "builtin:codex"`: resume uses inherited
+  subcommand style.
+- Wrapper (`command = "aimux"`, inherits subcommand-style resume)
+  without `resume_command` → load error.
+- Wrapper with `resume_command` → end-to-end resume succeeds
+  (integration test: spawn → kill → reconcile → actual executed
+  command matches template).
+
+### Cache & provenance
+
+- Deep-copy: mutate returned `ResolvedProvider.Args` → subsequent
+  `lookupProvider` unaffected (same for each reference field).
+- Atomic reload: second load with broken chain keeps first cache.
+- Level 0 ("no agents, no providers") loads unchanged.
+- Quick-parse path: enumerate callers; assert none feed reconciler
+  spawn, crash recovery, readiness, or session creation.
+
+### Phase A detector
+
+- Name-match without `base`: warning fires; resolution unchanged.
+- Command-match without `base`: warning fires; resolution unchanged.
+- `base = ""` on same provider: warning silenced; resolution bypasses
+  legacy merge.
+- `base = "builtin:<name>"`: warning silenced; explicit merge.
+- `base = "<name>"` (bare self-exclusion): warning silenced; equivalent
+  to builtin form.
+- Cache during Phase A: for a name-matching provider without `base`,
+  resolved spec equals the Phase B `base = "builtin:<name>"` spec.
+
+### HTTP / API
+
+- `/v0/providers` returns the same `ResolvedProvider` the runtime uses.
+- `/v0/config/explain --provider <name>` returns full provenance.
+- `/v0/config/explain --json` round-trips provenance.
+- CRUD accepts `base`-only provider, round-trip reads it back.
+- Public DTOs do not expose `omit` sentinel.
+
+### Observability
+
+- `gc config show` annotation for: no-base, custom-rooted, 4+ layer
+  chain. Round-trip as valid TOML (comments stripped on re-parse OK).
+- `gc config explain` golden-file text and JSON outputs.
+- Phase A warning shows up in explain output.
+
+### End-to-end integration
+
+- **Aimux-wrapped codex regression**: pack.toml matching the
+  maintainer-city config → resolved `codex-mini` has
+  `PermissionModes["unrestricted"]`, `ReadyDelayMs = 3000`,
+  `ResumeCommand` set, `SupportsHooks = true`,
+  `BuiltinAncestor = "codex"`. Spawn an agent; assert it does not hang
+  on first sandboxed command, hooks install, `--settings` injection
+  works for wrapper-derived Claude.
+
+### Sync enforcement
+
+- `TestProviderFieldSync` — new fields present in `ProviderSpec` also
+  present in `ProviderPatch`, `applyProviderPatch`, and deep-copy
+  paths.
+
+### Namespace / parse
+
+- Custom provider name containing `:` → parse error.
+- `base = "builtin:"` (empty suffix) → error.
+- `base = "provider:"` (empty suffix) → error.
 
 ## Open questions
 
 None blocking implementation. Surfaces to revisit if demand emerges:
 
-- `_append` / `_prepend` variants for `ProcessNames`, `PrintArgs`.
-- Multi-inheritance / mixins (deliberately excluded from v1).
-- Further `omit = true` semantics for other keyed collections
-  (currently `options_schema` only).
+- Multi-inheritance / mixins.
+- `_append` variants for `ProcessNames`, `PrintArgs`.
+- `command_wrap` / placeholder-based args for outer-wrapper
+  composition.
+- Schema discriminator for future provider-schema migrations.
+- `_append` for other keyed collections beyond `options_schema`.
