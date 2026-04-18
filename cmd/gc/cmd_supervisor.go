@@ -850,6 +850,7 @@ func reconcileCities(
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
+		emitLoadCityConfigWarnings(stderr, prov)
 
 		// Use registered name as authoritative identity. Warn if live
 		// config has a different workspace.name (name drift).
