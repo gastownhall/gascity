@@ -198,6 +198,36 @@ append_fragments = []
 	}
 }
 
+func TestParseAgentDefaultsMergesNonOverlappingAgentsAliasFields(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agent_defaults]
+append_fragments = ["canonical-fragment"]
+
+[agents]
+default_sling_formula = "mol-legacy"
+skills = ["shared-skill"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.AgentDefaults.DefaultSlingFormula; got != "mol-legacy" {
+		t.Errorf("AgentDefaults.DefaultSlingFormula = %q, want %q", got, "mol-legacy")
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.AppendFragments, []string{"canonical-fragment"}) {
+		t.Errorf("AgentDefaults.AppendFragments = %v, want %v", cfg.AgentDefaults.AppendFragments, []string{"canonical-fragment"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"shared-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"shared-skill"})
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+}
+
 func TestParseNoAgents(t *testing.T) {
 	data := []byte(`
 [workspace]
