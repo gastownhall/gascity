@@ -232,6 +232,21 @@ Use an exec order before inventing a plugin, helper role, or hidden session.
 
 That is the direct Gas City answer to many old Town automation tasks.
 
+### "How do I get to my mayor?"
+
+```bash
+gc session attach mayor
+```
+
+The Mayor session is the primary Gas Town experience — an interactive Claude
+session with full city context that coordinates everything. The CLI is
+plumbing; this is the product.
+
+City-scoped agents from the Gastown pack — `mayor`, `deacon`, `boot` — are all
+accessible the same way. Use `gc session list` to see what is running.
+
+This replaces `gt session at mayor/` or `tmux attach -t gt-mayor` from Gas Town.
+
 ## Common Gastown Overrides In `city.toml`
 
 If you are using the Gastown pack, these are the most common local changes.
