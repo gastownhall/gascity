@@ -230,7 +230,7 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 		"GC_CITY_PATH="+cityDir,
 		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 	)
-	if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+	if port, ok := ensureManagedDoltPortForTest(cityDir); ok {
 		env = append(env, "GC_DOLT_PORT="+port)
 	}
 	return env

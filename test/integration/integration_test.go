@@ -408,12 +408,21 @@ func bdDolt(dir string, args ...string) (string, error) {
 			"GC_CITY_PATH="+dir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)
-		if port, ok := currentManagedDoltPortForTest(dir); ok {
+		if port, ok := ensureManagedDoltPortForTest(dir); ok {
 			env = filterEnv(env, "GC_DOLT_PORT")
 			env = append(env, "GC_DOLT_PORT="+port)
 		}
 	}
-	return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	if err == nil || dir == "" || !managedDoltTransportRetryable(out) {
+		return out, err
+	}
+	if port, ok := ensureManagedDoltPortForTest(dir); ok {
+		env = filterEnv(env, "GC_DOLT_PORT")
+		env = append(env, "GC_DOLT_PORT="+port)
+		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	}
+	return out, err
 }
 
 func runGCWithEnv(env []string, dir string, args ...string) (string, error) {
@@ -847,6 +856,44 @@ func currentManagedDoltPortForTest(cityDir string) (string, bool) {
 		return "", false
 	}
 	return port, true
+}
+
+func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
+	if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+		return port, true
+	}
+	if cityDir == "" {
+		return "", false
+	}
+	startOut, startErr := runGCDoltWithEnv(commandEnvForDir(cityDir, true), "", "start", cityDir)
+	if startErr != nil && !isGCStartAlreadyRunning(startOut) {
+		return "", false
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			return port, true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return "", false
+}
+
+func managedDoltTransportRetryable(out string) bool {
+	msg := strings.ToLower(out)
+	for _, marker := range []string{
+		"dolt server unreachable",
+		"dial tcp",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"bad connection",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func testPortReachable(port string) bool {
