@@ -27,6 +27,7 @@ type Handle interface {
 	StartResolved(context.Context, string, runtime.Config) error
 	Attach(context.Context) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
+	Reset(context.Context) error
 	Stop(context.Context) error
 	Kill(context.Context) error
 	Close(context.Context) error
@@ -348,6 +349,15 @@ func (h *SessionHandle) Create(ctx context.Context, mode CreateMode) (sessionpkg
 	default:
 		return sessionpkg.Info{}, fmt.Errorf("%w: unknown create mode %q", ErrHandleConfig, mode)
 	}
+}
+
+// Reset requests a fresh restart for the worker while preserving the bead.
+func (h *SessionHandle) Reset(context.Context) error {
+	id, err := h.ensureSessionID()
+	if err != nil {
+		return err
+	}
+	return h.manager.RequestFreshRestart(id)
 }
 
 // Stop suspends the worker runtime while preserving conversation state.

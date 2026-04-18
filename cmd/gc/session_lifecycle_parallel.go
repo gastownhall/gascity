@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -551,7 +552,15 @@ func startPreparedStartCandidate(
 	cfg *config.City,
 ) (bool, error) {
 	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
-		return false, sp.Start(ctx, item.candidate.name(), item.cfg)
+		handle, err := worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
+			Provider:     sp,
+			SessionName:  item.candidate.name(),
+			ProviderName: item.candidate.name(),
+		})
+		if err != nil {
+			return false, err
+		}
+		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
 	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, item.candidate.session.ID)
 	if err != nil {

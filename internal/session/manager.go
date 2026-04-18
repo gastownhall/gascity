@@ -629,6 +629,20 @@ func (m *Manager) Suspend(id string) error {
 	})
 }
 
+// RequestFreshRestart marks a session for a controller-owned fresh restart
+// without closing its bead or clearing resume metadata immediately.
+func (m *Manager) RequestFreshRestart(id string) error {
+	return withSessionMutationLock(id, func() error {
+		if _, _, err := m.sessionBead(id); err != nil {
+			return err
+		}
+		return m.store.SetMetadataBatch(id, map[string]string{
+			"restart_requested":          "true",
+			"continuation_reset_pending": "true",
+		})
+	})
+}
+
 // Close ends a conversation permanently.
 func (m *Manager) Close(id string) error {
 	return withSessionMutationLock(id, func() error {

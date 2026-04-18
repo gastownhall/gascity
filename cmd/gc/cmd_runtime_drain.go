@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strconv"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -393,23 +393,34 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
 	rec := openCityRecorderAt(current.cityPath, stderr)
-	return doRuntimeRequestRestart(dops, store, rec, current.display, current.sessionName, stdout, stderr)
+	cfg, _ := loadCityConfig(current.cityPath)
+	var persistRestart func() error
+	if store != nil {
+		persistRestart = func() error {
+			handle, err := workerHandleForSessionTargetWithConfig(current.cityPath, store, sp, cfg, current.sessionName)
+			if err != nil {
+				return err
+			}
+			return handle.Reset(context.Background())
+		}
+	}
+	return doRuntimeRequestRestart(dops, persistRestart, rec, current.display, current.sessionName, stdout, stderr)
 }
 
 // doRuntimeRequestRestart sets the restart-requested flag and blocks forever.
 // The controller will kill and restart the session on its next tick.
-func doRuntimeRequestRestart(dops drainOps, store beads.Store, rec events.Recorder,
+func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Also persist the flag in bead metadata so it survives tmux session death.
-	if store != nil {
-		if err := setBeadRestartRequested(store, sn); err != nil {
+	// Also persist the request through the worker boundary so it survives
+	// tmux session death. Non-fatal: the runtime flag above is primary.
+	if persistRestart != nil {
+		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Non-fatal: the tmux flag is already set as primary.
 		}
 	}
 	rec.Record(events.Event{

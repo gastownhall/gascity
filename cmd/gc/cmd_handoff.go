@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -65,8 +67,10 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
 	rec := openCityRecorderAt(current.cityPath, stderr)
+	cfg, _ := loadCityConfig(current.cityPath)
+	persistRestart := sessionRestartPersister(current.cityPath, store, sp, cfg, current.sessionName)
 
-	code := doHandoff(store, rec, dops, current.display, current.sessionName, args, stdout, stderr)
+	code := doHandoff(store, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr)
 	if code != 0 {
 		return code
 	}
@@ -94,9 +98,22 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 	return doHandoffRemote(store, rec, sp, targetInfo.sessionName, targetInfo.display, defaultMailIdentity(), args, stdout, stderr)
 }
 
+func sessionRestartPersister(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
+	if store == nil {
+		return nil
+	}
+	return func() error {
+		handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+		if err != nil {
+			return err
+		}
+		return handle.Reset(context.Background())
+	}
+}
+
 // doHandoff sends a handoff mail to self and sets the restart-requested flag.
 // Testable: does not block.
-func doHandoff(store beads.Store, rec events.Recorder, dops drainOps,
+func doHandoff(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) int {
 	subject := args[0]
@@ -129,10 +146,12 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps,
 		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Also persist the flag in bead metadata so it survives tmux session death.
-	if err := setBeadRestartRequested(store, sessionName); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal: the tmux flag is already set as primary.
+	// Also persist the request through the worker boundary so it survives
+	// tmux session death. Non-fatal: the runtime flag above is primary.
+	if persistRestart != nil {
+		if err := persistRestart(); err != nil {
+			fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
