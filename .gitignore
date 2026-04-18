@@ -30,3 +30,17 @@ reports/
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
 .cache/
+# >>> sidekick
+.sidekick/logs/
+.sidekick/sessions/
+.sidekick/state/
+.sidekick/setup-status.json
+.sidekick/.env
+.sidekick/.env.local
+.sidekick/sidekick*.pid
+.sidekick/sidekick*.token
+.sidekick/*.local.yaml
+# <<< sidekick
+
+# Worktrees
+.worktrees/
