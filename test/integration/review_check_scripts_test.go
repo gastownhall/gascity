@@ -62,11 +62,20 @@ func (c reviewCheckCase) checkStepRef(attempt int) string {
 	return fmt.Sprintf("%s.%s.check.%d", c.formula, c.ralphStepID, attempt)
 }
 
+// Each subtest below calls setupReviewCheckScriptCity inside t.Run so
+// every case gets its own managed-Dolt instance with a fresh state
+// file. Sharing one city across the three cases caused intermittent
+// "Dolt server unreachable at 127.0.0.1:0" failures in `Integration /
+// rest` on main: when the parent city's managed Dolt raced between
+// subtests (crash, auto-stop, or a state-file write that left port 0
+// or an unreachable port), the test helper silently dropped
+// GC_DOLT_PORT and bd's own discovery fell through to port 0. See the
+// failure analysis on PR that introduced this test isolation.
 func TestReviewCheckScriptsDetectVerdictAcrossRalphStep(t *testing.T) {
-	cityDir := setupReviewCheckScriptCity(t)
-
 	for _, tc := range reviewCheckCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupReviewCheckScriptCity(t)
+
 			rootID := createJSONBead(t, cityDir, "workflow-root")
 			verdictID := createJSONBead(t, cityDir, "apply")
 			checkID := createJSONBead(t, cityDir, "check")
@@ -98,10 +107,10 @@ func TestReviewCheckScriptsDetectVerdictAcrossRalphStep(t *testing.T) {
 }
 
 func TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep(t *testing.T) {
-	cityDir := setupReviewCheckScriptCity(t)
-
 	for _, tc := range reviewCheckCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupReviewCheckScriptCity(t)
+
 			rootID := createJSONBead(t, cityDir, "workflow-root")
 			oldVerdictID := createJSONBead(t, cityDir, "apply-old")
 			updateBeadMetadata(t, cityDir, oldVerdictID,
