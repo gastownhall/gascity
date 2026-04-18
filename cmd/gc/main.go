@@ -668,7 +668,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 func resolveStoreScopeRoot(cityPath, storePath string) string {
 	scopeRoot := strings.TrimSpace(storePath)
 	if scopeRoot == "" {
-		scopeRoot = cityPath
+		return ""
 	}
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)

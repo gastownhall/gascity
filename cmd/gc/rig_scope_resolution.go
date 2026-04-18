@@ -18,6 +18,9 @@ func resolveRigForDir(cfg *config.City, cityPath, dir string) (config.Rig, bool,
 	dir = normalizePathForCompare(dir)
 	resolveRigPaths(cityPath, cfg.Rigs)
 	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
 		rigPath := normalizePathForCompare(resolveStoreScopeRoot(cityPath, rig.Path))
 		if pathWithinScope(dir, rigPath) {
 			return rig, true, nil
@@ -38,6 +41,9 @@ func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.R
 			continue
 		}
 		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			rigBeadsDir := normalizePathForCompare(filepath.Join(resolveStoreScopeRoot(cityPath, rig.Path), ".beads"))
 			if targetBeadsDir == rigBeadsDir {
 				return rig, true, nil
@@ -49,6 +55,9 @@ func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.R
 }
 
 func pathWithinScope(path, scopeRoot string) bool {
+	if scopeRoot == "" {
+		return false
+	}
 	if path == scopeRoot {
 		return true
 	}

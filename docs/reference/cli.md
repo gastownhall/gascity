@@ -2042,7 +2042,8 @@ gc rig
 Register an external project directory as a rig.
 
 Initializes beads database, installs agent hooks if configured,
-generates cross-rig routes, and appends the rig to city.toml.
+generates cross-rig routes, writes the rig declaration to city.toml,
+and writes the machine-local rig path binding to `.gc/site.toml`.
 If the target directory doesn't exist, it is created. Use --include
 to apply a pack directory that defines the rig's agent configuration.
 
@@ -2121,10 +2122,11 @@ gc rig list [flags]
 
 Remove a rig from the current city's configuration.
 
-Removes the rig entry from city.toml and updates the global rig index
-in cities.toml. If the rig no longer belongs to any city, it is removed
-from the global index entirely. If this city was the rig's default,
-the default is cleared.
+Removes the rig entry from city.toml, removes its machine-local path
+binding from `.gc/site.toml`, and updates the global rig index in
+cities.toml. If the rig no longer belongs to any city, it is removed
+from the global index entirely. If this city was the rig's default, the
+default is cleared.
 
 ```
 gc rig remove <name>
@@ -3080,4 +3082,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

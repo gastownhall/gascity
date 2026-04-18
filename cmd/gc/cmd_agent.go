@@ -50,7 +50,28 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 // expansion. Use for commands that modify city.toml and write it back —
 // preserves include directives, pack references, and patches.
 func loadCityConfigForEditFS(fs fsys.FS, tomlPath string) (*config.City, error) {
-	return config.Load(fs, tomlPath)
+	cfg, err := config.Load(fs, tomlPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := config.ApplySiteBindingsForEdit(fs, filepath.Dir(tomlPath), cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// writeCityConfigForEditFS persists machine-local rig bindings to .gc/site.toml
+// and writes the checked-in city.toml form without rig.path entries.
+func writeCityConfigForEditFS(fs fsys.FS, tomlPath string, cfg *config.City) error {
+	cityPath := filepath.Dir(tomlPath)
+	if err := config.PersistRigSiteBindings(fs, cityPath, cfg.Rigs); err != nil {
+		return err
+	}
+	content, err := cfg.MarshalForWrite()
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileAtomic(fs, tomlPath, content, 0o644)
 }
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
@@ -404,12 +425,7 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 				break
 			}
 		}
-		content, err := cfg.Marshal()
-		if err != nil {
-			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -505,12 +521,7 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 				break
 			}
 		}
-		content, err := cfg.Marshal()
-		if err != nil {
-			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

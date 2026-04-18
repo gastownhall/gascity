@@ -200,9 +200,9 @@ All Import fields match spec. No changes needed.
 | Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|----|
 | 🟢 | `name` | Required | **Keep in city.toml.** | |
-| 🟢 | `path` | Required | **Keep in city.toml.** | `.gc/site.toml` (#588) |
-| 🟢 | `prefix` | String | **Keep in city.toml.** | `.gc/` (#588) |
-| 🟢 | `suspended` | Boolean | **Keep in city.toml.** | `.gc/` (#588) |
+| 🟢 | `path` | Optional during migration | **Loader/runtime use `.gc/site.toml`; `gc doctor --fix` migrates legacy values out of `city.toml`.** | |
+| 🟢 | `prefix` | String | **Keep in city.toml.** | `.gc/` (post-Phase A only, not in #588) |
+| 🟢 | `suspended` | Boolean | **Keep in city.toml.** | `.gc/` (post-Phase A only, not in #588) |
 | 🟡 | `includes` | []string | **Loud warning on schema 2.** Use `[rigs.imports]`. | Removed |
 | 🟢 | `imports` | map[string]Import | **Keep in city.toml.** | |
 | 🟢 | `max_active_sessions` | Integer | **Keep in city.toml.** | |
@@ -256,7 +256,7 @@ All Import fields match spec. No changes needed.
 | 🔴 | `patches/` directory convention | doc-agent-v2 | Not implemented |
 | 🔴 | `skills/` pack discovery | doc-agent-v2 | First slice is current-city-pack only with list-only visibility; imported-pack catalogs are later |
 | 🔴 | `mcp/` TOML abstraction | doc-agent-v2 | First slice is current-city-pack only with list-only visibility; provider projection is later |
-| 🔵 | `.gc/site.toml` for rig bindings | doc-pack-v2 | #588 (may slip to a later wave) |
+| 🟢 | `.gc/site.toml` for rig path bindings | doc-pack-v2 | Implemented in #588 Phase A (`rig.path` only) |
 | 🔵 | Pack/Deployment/SiteBinding struct separation | doc-loader-v2 | Loader composes into one City struct |
 | 🔵 | Pack-defined `[[service]]` | — | #657 |
 | 🔵 | Expansion of `[agent_defaults]` to all agent fields | — | later wave |

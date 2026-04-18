@@ -8,6 +8,7 @@ package configedit
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -52,9 +53,9 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	cfg, err := config.Load(e.fs, e.tomlPath)
+	cfg, err := e.loadForEdit()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
 
 	if err := fn(cfg); err != nil {
@@ -77,12 +78,7 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 		return fmt.Errorf("validating providers: %w", err)
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshaling config: %w", err)
-	}
-
-	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
+	return e.write(cfg)
 }
 
 // EditExpanded loads both raw and expanded configs, calls fn with both,
@@ -97,7 +93,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	raw, err := config.Load(e.fs, e.tomlPath)
+	raw, err := e.loadForEdit()
 	if err != nil {
 		return fmt.Errorf("loading raw config: %w", err)
 	}
@@ -127,11 +123,29 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 		return fmt.Errorf("validating providers: %w", err)
 	}
 
-	content, err := raw.Marshal()
+	return e.write(raw)
+}
+
+func (e *Editor) loadForEdit() (*config.City, error) {
+	cfg, err := config.Load(e.fs, e.tomlPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	if _, err := config.ApplySiteBindingsForEdit(e.fs, filepath.Dir(e.tomlPath), cfg); err != nil {
+		return nil, fmt.Errorf("loading site binding: %w", err)
+	}
+	return cfg, nil
+}
+
+func (e *Editor) write(cfg *config.City) error {
+	cityPath := filepath.Dir(e.tomlPath)
+	if err := config.PersistRigSiteBindings(e.fs, cityPath, cfg.Rigs); err != nil {
+		return fmt.Errorf("writing site binding: %w", err)
+	}
+	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-
 	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
 }
 

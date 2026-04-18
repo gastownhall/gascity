@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/migrate"
 )
 
@@ -49,6 +51,7 @@ scope = "city"
 		"v2-agent-format",
 		"v2-import-format",
 		"v2-default-rig-import-format",
+		"v2-rig-path-site-binding",
 		"v2-scripts-layout",
 		"v2-workspace-name",
 		"v2-prompt-template-suffix",
@@ -68,6 +71,91 @@ scope = "city"
 	}
 	if !strings.Contains(out, ".template.md") {
 		t.Fatalf("doctor output missing .template.md guidance:\n%s", out)
+	}
+}
+
+func TestV2DeprecationChecksWarnAndFixLegacyRigPath(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	rigPath := filepath.Join(cityDir, "..", "frontend")
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[rigs]]
+name = "frontend"
+path = "`+rigPath+`"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "v2-rig-path-site-binding") {
+		t.Fatalf("doctor output missing rig-path migration warning:\n%s", out)
+	}
+	if !strings.Contains(out, ".gc/site.toml") {
+		t.Fatalf("doctor output missing site binding guidance:\n%s", out)
+	}
+
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	rawData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	if strings.Contains(string(rawData), "path = ") {
+		t.Fatalf("city.toml should no longer store rig.path:\n%s", rawData)
+	}
+
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != rigPath {
+		t.Fatalf("binding = %+v, want frontend=%s", binding.Rigs, rigPath)
+	}
+
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+	out = buf.String()
+	if strings.Contains(out, "⚠ v2-rig-path-site-binding") {
+		t.Fatalf("rig-path warning should clear after fix:\n%s", out)
+	}
+}
+
+func TestV2DeprecationChecksWarnOnStaleSiteBindingName(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[rigs]]
+name = "frontend"
+`)
+	writeDoctorFile(t, cityDir, ".gc/site.toml", `
+[[rig]]
+name = "old-name"
+path = "/tmp/frontend"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "v2-rig-path-site-binding") {
+		t.Fatalf("doctor output missing stale site binding warning:\n%s", out)
+	}
+	if !strings.Contains(out, "old-name") {
+		t.Fatalf("doctor output missing stale rig name detail:\n%s", out)
 	}
 }
 

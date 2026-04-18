@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -171,6 +172,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 				continue
 			}
 			d.Register(doctor.NewRigPathCheck(rig))
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			d.Register(doctor.NewRigDoltServerCheck(cityPath, rig, skipDolt))

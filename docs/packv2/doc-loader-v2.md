@@ -205,9 +205,9 @@ type DeploymentRig struct {
 }
 ```
 
-Notably absent from `city.toml`: identity (`workspace.name`), site
-binding (`rig.path`, `rig.prefix`, `rig.suspended`), or any `[pack]`
-content.
+Notably absent from `city.toml`: identity (`workspace.name`), the
+machine-local `rig.path` binding, or any `[pack]` content. In the current
+Phase A rollout, `rig.prefix` and `rig.suspended` remain in `city.toml`.
 
 ### `SiteBinding` (`.gc/`)
 
@@ -223,8 +223,6 @@ type SiteBinding struct {
 type RigBinding struct {
     Name      string
     Path      string
-    Prefix    string
-    Suspended bool
 }
 ```
 
@@ -262,8 +260,6 @@ type Rig struct {
 
     // From .gc/ site binding
     Path       string
-    Prefix     string
-    Suspended  bool
     Bound      bool   // true if .gc/ has a binding for this rig
 
     // Derived
@@ -666,7 +662,8 @@ to that pack's own agents (already handled in step 11).
 ### 19. Bind site state
 
 For each declared rig, look up its binding in `SiteBinding`. Populate
-`Path`, `Prefix`, `Suspended`, set `Bound = true`. Unbound rigs get
+`Path` and set `Bound = true`. In the current Phase A rollout,
+`Prefix` and `Suspended` still come from `city.toml`. Unbound rigs get
 `Bound = false` and a warning.
 
 For workspace identity: `City.ResolvedWorkspaceName = SiteBinding.WorkspaceName`
@@ -776,8 +773,9 @@ The migration is sequenced in two steps matching the implementation order:
      sources are pinned with an exact SHA (`version = "sha:<commit>"`).
 2. **`workspace.name` → `.gc/`.** Run `gc init` against the existing
    directory; populate `.gc/` with the workspace name and prefix.
-3. **`rig.path`, `rig.prefix`, `rig.suspended` → `.gc/`.** For each
-   rig, write a binding file under `.gc/rigs/<name>.toml`.
+3. **`rig.path` → `.gc/site.toml`.** For each rig, move the machine-local
+   path binding into `.gc/site.toml`. `rig.prefix` and `rig.suspended`
+   stay in `city.toml` in the current Phase A rollout.
 4. **`workspace.default_rig_includes` → `[defaults.rig.imports]`.** Same
    mapping as `includes` → `[imports]`.
 5. **`fallback = true` agents.** Drop the field; warn the user about

@@ -10,12 +10,14 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func registerV2DeprecationChecks(d *doctor.Doctor) {
 	d.Register(v2AgentFormatCheck{})
 	d.Register(v2ImportFormatCheck{})
 	d.Register(v2DefaultRigImportFormatCheck{})
+	d.Register(v2RigPathSiteBindingCheck{})
 	d.Register(v2ScriptsLayoutCheck{})
 	d.Register(v2WorkspaceNameCheck{})
 	d.Register(v2PromptTemplateSuffixCheck{})
@@ -67,6 +69,90 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 		"workspace.default_rig_includes is deprecated; migrate to [rig_defaults] imports = [...]",
 		v2MigrationHint(),
 		cfg.Workspace.DefaultRigIncludes)
+}
+
+type v2RigPathSiteBindingCheck struct{}
+
+func (v2RigPathSiteBindingCheck) Name() string { return "v2-rig-path-site-binding" }
+
+func (v2RigPathSiteBindingCheck) CanFix() bool { return true }
+
+func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
+	if err != nil {
+		return err
+	}
+	if _, err := config.ApplySiteBindingsForEdit(fsys.OSFS{}, ctx.CityPath, cfg); err != nil {
+		return err
+	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, ctx.CityPath, cfg.Rigs); err != nil {
+		return err
+	}
+	content, err := cfg.MarshalForWrite()
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileAtomic(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"), content, 0o644)
+}
+
+func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	if !ok {
+		return okCheck("v2-rig-path-site-binding", "rig path migration skipped until city.toml parses")
+	}
+
+	var legacy []string
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) != "" {
+			legacy = append(legacy, rig.Name)
+		}
+	}
+
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, ctx.CityPath)
+	if err != nil {
+		return warnCheck("v2-rig-path-site-binding",
+			fmt.Sprintf("failed to read .gc/site.toml: %v", err),
+			"repair or remove the malformed .gc/site.toml file, then rerun gc doctor",
+			nil)
+	}
+	declared := make(map[string]struct{}, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		declared[rig.Name] = struct{}{}
+	}
+	var orphan []string
+	for _, rig := range binding.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := declared[name]; ok {
+			continue
+		}
+		orphan = append(orphan, name)
+	}
+	sort.Strings(legacy)
+	sort.Strings(orphan)
+
+	switch {
+	case len(legacy) > 0 && len(orphan) > 0:
+		details := append(append([]string{}, legacy...), orphan...)
+		return warnCheck("v2-rig-path-site-binding",
+			"rig path bindings need migration and .gc/site.toml contains stale rig names",
+			"run `gc doctor --fix` to migrate unambiguous rig paths, then clean up stale .gc/site.toml entries manually",
+			details)
+	case len(legacy) > 0:
+		return warnCheck("v2-rig-path-site-binding",
+			"rig path bindings still live in city.toml; move them to .gc/site.toml",
+			"run `gc doctor --fix` to migrate rig paths into .gc/site.toml",
+			legacy)
+	case len(orphan) > 0:
+		return warnCheck("v2-rig-path-site-binding",
+			".gc/site.toml contains bindings for unknown rig names",
+			"remove or rename the stale .gc/site.toml entries to match city.toml",
+			orphan)
+	default:
+		return okCheck("v2-rig-path-site-binding", "rig paths already managed in .gc/site.toml")
+	}
 }
 
 type v2ScriptsLayoutCheck struct{}
