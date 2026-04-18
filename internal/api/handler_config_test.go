@@ -243,10 +243,11 @@ func TestHandleConfigGet_V2BindingNameIncludedInAgentName(t *testing.T) {
 		{Name: "worker", Dir: "myrig", Provider: "claude"},
 	}
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -292,10 +293,11 @@ func TestHandleConfigExplain_V2BindingNameIncludedInAgentName(t *testing.T) {
 		{Name: "mayor", BindingName: "gastown", Provider: "claude"},
 	}
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/explain"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())

@@ -18,10 +18,11 @@ func TestBeadCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	state.stores["beta"] = beads.NewMemStore()
 	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "beta", Path: "/tmp/beta"})
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := newPostRequest("/v0/beads", bytes.NewBufferString(`{"title":"city task","type":"task"}`))
+	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(`{"title":"city task","type":"task"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -52,6 +53,7 @@ func TestConvoyCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	state.stores["beta"] = beads.NewMemStore()
 	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "beta", Path: "/tmp/beta"})
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	item, err := state.cityBeadStore.Create(beads.Bead{Title: "city item", Type: "task"})
 	if err != nil {
@@ -59,7 +61,7 @@ func TestConvoyCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	}
 	body := `{"title":"city convoy","items":["` + item.ID + `"]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoys", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoys"), strings.NewReader(body)))
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())

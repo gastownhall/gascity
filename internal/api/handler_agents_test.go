@@ -296,9 +296,10 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	}
 
 	srv := New(state)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
