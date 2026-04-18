@@ -224,9 +224,9 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 	return deduped
 }
 
-// beadGraphResponseJSON is the response shape for GET /v0/beads/graph/{rootID}.
+// BeadGraphResponse is the response shape for GET /v0/beads/graph/{rootID}.
 // Returns raw beads and deps — no status mapping, no presentation logic.
-type beadGraphResponseJSON struct {
+type BeadGraphResponse struct {
 	Root  beads.Bead            `json:"root"`
 	Beads []beads.Bead          `json:"beads"`
 	Deps  []workflowDepResponse `json:"deps"`

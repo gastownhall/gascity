@@ -17,6 +17,24 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for BindingStatus.
+const (
+	Active BindingStatus = "active"
+	Ended  BindingStatus = "ended"
+)
+
+// Valid indicates whether the value is a known member of the BindingStatus enum.
+func (e BindingStatus) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case Ended:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CityCreateRequestBootstrapProfile.
 const (
 	K8sCell          CityCreateRequestBootstrapProfile = "k8s-cell"
@@ -41,21 +59,78 @@ func (e CityCreateRequestBootstrapProfile) Valid() bool {
 	}
 }
 
-// Defines values for SessionSubmitInputBodyIntent.
+// Defines values for ConversationKind.
 const (
-	Default      SessionSubmitInputBodyIntent = "default"
-	FollowUp     SessionSubmitInputBodyIntent = "follow_up"
-	InterruptNow SessionSubmitInputBodyIntent = "interrupt_now"
+	Dm     ConversationKind = "dm"
+	Room   ConversationKind = "room"
+	Thread ConversationKind = "thread"
 )
 
-// Valid indicates whether the value is a known member of the SessionSubmitInputBodyIntent enum.
-func (e SessionSubmitInputBodyIntent) Valid() bool {
+// Valid indicates whether the value is a known member of the ConversationKind enum.
+func (e ConversationKind) Valid() bool {
+	switch e {
+	case Dm:
+		return true
+	case Room:
+		return true
+	case Thread:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SubmitIntent.
+const (
+	Default      SubmitIntent = "default"
+	FollowUp     SubmitIntent = "follow_up"
+	InterruptNow SubmitIntent = "interrupt_now"
+)
+
+// Valid indicates whether the value is a known member of the SubmitIntent enum.
+func (e SubmitIntent) Valid() bool {
 	switch e {
 	case Default:
 		return true
 	case FollowUp:
 		return true
 	case InterruptNow:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TranscriptMessageKind.
+const (
+	Inbound  TranscriptMessageKind = "inbound"
+	Outbound TranscriptMessageKind = "outbound"
+)
+
+// Valid indicates whether the value is a known member of the TranscriptMessageKind enum.
+func (e TranscriptMessageKind) Valid() bool {
+	switch e {
+	case Inbound:
+		return true
+	case Outbound:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TranscriptProvenance.
+const (
+	Hydrated TranscriptProvenance = "hydrated"
+	Live     TranscriptProvenance = "live"
+)
+
+// Valid indicates whether the value is a known member of the TranscriptProvenance enum.
+func (e TranscriptProvenance) Valid() bool {
+	switch e {
+	case Hydrated:
+		return true
+	case Live:
 		return true
 	default:
 		return false
@@ -346,8 +421,8 @@ type BeadDepsResponse struct {
 	Children *[]Bead `json:"children"`
 }
 
-// BeadGraphResponseJSON defines model for BeadGraphResponseJSON.
-type BeadGraphResponseJSON struct {
+// BeadGraphResponse defines model for BeadGraphResponse.
+type BeadGraphResponse struct {
 	Beads *[]Bead                `json:"beads"`
 	Deps  *[]WorkflowDepResponse `json:"deps"`
 	Root  Bead                   `json:"root"`
@@ -382,6 +457,9 @@ type BeadUpdateBody struct {
 	// Type Bead type.
 	Type *string `json:"type,omitempty"`
 }
+
+// BindingStatus Lifecycle state of a session binding.
+type BindingStatus string
 
 // CityCreateRequest defines model for CityCreateRequest.
 type CityCreateRequest struct {
@@ -434,6 +512,49 @@ type CityInfo struct {
 type CityPatchInputBody struct {
 	// Suspended Whether the city is suspended.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// CodexEventMsg defines model for CodexEventMsg.
+type CodexEventMsg struct {
+	// Message Message text for user_message/agent_message entries.
+	Message *string `json:"message,omitempty"`
+
+	// Text Text for agent_reasoning entries.
+	Text *string `json:"text,omitempty"`
+
+	// Type user_message, agent_message, agent_reasoning, token_count.
+	Type string `json:"type"`
+}
+
+// CodexRawEntry defines model for CodexRawEntry.
+type CodexRawEntry struct {
+	Payload   interface{} `json:"payload"`
+	Timestamp string      `json:"timestamp"`
+	Type      string      `json:"type"`
+}
+
+// CodexResponseItem defines model for CodexResponseItem.
+type CodexResponseItem struct {
+	CallId  *string             `json:"call_id,omitempty"`
+	Content *[]CodexTextContent `json:"content,omitempty"`
+	Name    *string             `json:"name,omitempty"`
+	Output  *string             `json:"output,omitempty"`
+	Role    *string             `json:"role,omitempty"`
+	Summary *[]CodexTextContent `json:"summary,omitempty"`
+
+	// Type message, reasoning, function_call, function_call_output.
+	Type string `json:"type"`
+}
+
+// CodexTextContent defines model for CodexTextContent.
+type CodexTextContent struct {
+	Text string `json:"text"`
+}
+
+// CompactMeta defines model for CompactMeta.
+type CompactMeta struct {
+	PreTokens int64  `json:"preTokens"`
+	Trigger   string `json:"trigger"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -496,6 +617,18 @@ type ConfigValidateOutputBody struct {
 	Warnings *[]string `json:"warnings"`
 }
 
+// ContentBlock defines model for ContentBlock.
+type ContentBlock struct {
+	Content   interface{} `json:"content,omitempty"`
+	Id        *string     `json:"id,omitempty"`
+	Input     interface{} `json:"input,omitempty"`
+	IsError   *bool       `json:"is_error,omitempty"`
+	Name      *string     `json:"name,omitempty"`
+	Text      *string     `json:"text,omitempty"`
+	ToolUseId *string     `json:"tool_use_id,omitempty"`
+	Type      string      `json:"type"`
+}
+
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
 type ConversationGroupParticipant struct {
 	GroupID   string            `json:"GroupID"`
@@ -518,33 +651,42 @@ type ConversationGroupRecord struct {
 	SchemaVersion       int64             `json:"SchemaVersion"`
 }
 
+// ConversationKind Shape of a conversation.
+type ConversationKind string
+
 // ConversationRef defines model for ConversationRef.
 type ConversationRef struct {
-	AccountId            string  `json:"account_id"`
-	ConversationId       string  `json:"conversation_id"`
-	Kind                 string  `json:"kind"`
-	ParentConversationId *string `json:"parent_conversation_id,omitempty"`
-	Provider             string  `json:"provider"`
-	ScopeId              string  `json:"scope_id"`
+	AccountId      string `json:"account_id"`
+	ConversationId string `json:"conversation_id"`
+
+	// Kind Shape of a conversation.
+	Kind                 ConversationKind `json:"kind"`
+	ParentConversationId *string          `json:"parent_conversation_id,omitempty"`
+	Provider             string           `json:"provider"`
+	ScopeId              string           `json:"scope_id"`
 }
 
 // ConversationTranscriptRecord defines model for ConversationTranscriptRecord.
 type ConversationTranscriptRecord struct {
-	Actor             ExternalActor         `json:"Actor"`
-	Attachments       *[]ExternalAttachment `json:"Attachments"`
-	Conversation      ConversationRef       `json:"Conversation"`
-	CreatedAt         time.Time             `json:"CreatedAt"`
-	ExplicitTarget    string                `json:"ExplicitTarget"`
-	ID                string                `json:"ID"`
-	Kind              string                `json:"Kind"`
-	Metadata          map[string]string     `json:"Metadata"`
-	Provenance        string                `json:"Provenance"`
-	ProviderMessageID string                `json:"ProviderMessageID"`
-	ReplyToMessageID  string                `json:"ReplyToMessageID"`
-	SchemaVersion     int64                 `json:"SchemaVersion"`
-	Sequence          int64                 `json:"Sequence"`
-	SourceSessionID   string                `json:"SourceSessionID"`
-	Text              string                `json:"Text"`
+	Actor          ExternalActor         `json:"Actor"`
+	Attachments    *[]ExternalAttachment `json:"Attachments"`
+	Conversation   ConversationRef       `json:"Conversation"`
+	CreatedAt      time.Time             `json:"CreatedAt"`
+	ExplicitTarget string                `json:"ExplicitTarget"`
+	ID             string                `json:"ID"`
+
+	// Kind Direction of a transcript entry.
+	Kind     TranscriptMessageKind `json:"Kind"`
+	Metadata map[string]string     `json:"Metadata"`
+
+	// Provenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
+	Provenance        TranscriptProvenance `json:"Provenance"`
+	ProviderMessageID string               `json:"ProviderMessageID"`
+	ReplyToMessageID  string               `json:"ReplyToMessageID"`
+	SchemaVersion     int64                `json:"SchemaVersion"`
+	Sequence          int64                `json:"Sequence"`
+	SourceSessionID   string               `json:"SourceSessionID"`
+	Text              string               `json:"Text"`
 }
 
 // ConvoyAddInputBody defines model for ConvoyAddInputBody.
@@ -638,6 +780,21 @@ type Dep struct {
 	Type        string `json:"type"`
 }
 
+// Entry defines model for Entry.
+type Entry struct {
+	CompactMetadata   *CompactMeta `json:"compactMetadata,omitempty"`
+	IsCompactSummary  *bool        `json:"isCompactSummary,omitempty"`
+	LogicalParentUuid *string      `json:"logicalParentUuid,omitempty"`
+	Message           interface{}  `json:"message"`
+	ParentUuid        string       `json:"parentUuid"`
+	SessionId         *string      `json:"sessionId,omitempty"`
+	Subtype           string       `json:"subtype"`
+	Timestamp         time.Time    `json:"timestamp"`
+	ToolUseID         *string      `json:"toolUseID,omitempty"`
+	Type              string       `json:"type"`
+	Uuid              string       `json:"uuid"`
+}
+
 // ErrorDetail defines model for ErrorDetail.
 type ErrorDetail struct {
 	// Location Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -682,8 +839,14 @@ type Event struct {
 	Type    string      `json:"type"`
 }
 
-// EventEmitInputBody defines model for EventEmitInputBody.
-type EventEmitInputBody struct {
+// EventEmitOutputBody defines model for EventEmitOutputBody.
+type EventEmitOutputBody struct {
+	// Status Operation result.
+	Status string `json:"status"`
+}
+
+// EventEmitRequest defines model for EventEmitRequest.
+type EventEmitRequest struct {
 	// Actor Actor that produced the event.
 	Actor string `json:"actor"`
 
@@ -695,12 +858,6 @@ type EventEmitInputBody struct {
 
 	// Type Event type.
 	Type string `json:"type"`
-}
-
-// EventEmitOutputBody defines model for EventEmitOutputBody.
-type EventEmitOutputBody struct {
-	// Status Operation result.
-	Status string `json:"status"`
 }
 
 // EventStreamEnvelope defines model for EventStreamEnvelope.
@@ -910,19 +1067,13 @@ type FanoutPolicy struct {
 
 // FormulaDetailResponse defines model for FormulaDetailResponse.
 type FormulaDetailResponse struct {
-	Deps        *[]FormulaPreviewEdgeResponse      `json:"deps"`
-	Description string                             `json:"description"`
-	Name        string                             `json:"name"`
-	Preview     FormulaDetailResponsePreviewStruct `json:"preview"`
-	Steps       *[]map[string]interface{}          `json:"steps"`
-	VarDefs     *[]FormulaVarDefResponse           `json:"var_defs"`
-	Version     string                             `json:"version"`
-}
-
-// FormulaDetailResponsePreviewStruct defines model for FormulaDetailResponsePreviewStruct.
-type FormulaDetailResponsePreviewStruct struct {
-	Edges *[]FormulaPreviewEdgeResponse `json:"edges"`
-	Nodes *[]FormulaPreviewNodeResponse `json:"nodes"`
+	Deps        *[]FormulaPreviewEdgeResponse `json:"deps"`
+	Description string                        `json:"description"`
+	Name        string                        `json:"name"`
+	Preview     FormulaPreviewResponse        `json:"preview"`
+	Steps       *[]map[string]interface{}     `json:"steps"`
+	VarDefs     *[]FormulaVarDefResponse      `json:"var_defs"`
+	Version     string                        `json:"version"`
 }
 
 // FormulaFeedBody defines model for FormulaFeedBody.
@@ -954,6 +1105,12 @@ type FormulaPreviewNodeResponse struct {
 	Kind     string  `json:"kind"`
 	ScopeRef *string `json:"scope_ref,omitempty"`
 	Title    string  `json:"title"`
+}
+
+// FormulaPreviewResponse defines model for FormulaPreviewResponse.
+type FormulaPreviewResponse struct {
+	Edges *[]FormulaPreviewEdgeResponse `json:"edges"`
+	Nodes *[]FormulaPreviewNodeResponse `json:"nodes"`
 }
 
 // FormulaRecentRunResponse defines model for FormulaRecentRunResponse.
@@ -993,6 +1150,36 @@ type FormulaVarDefResponse struct {
 	Pattern     *string     `json:"pattern,omitempty"`
 	Required    *bool       `json:"required,omitempty"`
 	Type        string      `json:"type"`
+}
+
+// GeminiFunctionResponse defines model for GeminiFunctionResponse.
+type GeminiFunctionResponse struct {
+	Id       string                       `json:"id"`
+	Response GeminiFunctionResponseOutput `json:"response"`
+}
+
+// GeminiFunctionResponseOutput defines model for GeminiFunctionResponseOutput.
+type GeminiFunctionResponseOutput struct {
+	Output string `json:"output"`
+}
+
+// GeminiThought defines model for GeminiThought.
+type GeminiThought struct {
+	Description string `json:"description"`
+	Subject     string `json:"subject"`
+}
+
+// GeminiToolCall defines model for GeminiToolCall.
+type GeminiToolCall struct {
+	Args   interface{}                  `json:"args"`
+	Id     string                       `json:"id"`
+	Name   string                       `json:"name"`
+	Result *[]GeminiToolCallResultEntry `json:"result"`
+}
+
+// GeminiToolCallResultEntry defines model for GeminiToolCallResultEntry.
+type GeminiToolCallResultEntry struct {
+	FunctionResponse GeminiFunctionResponse `json:"functionResponse"`
 }
 
 // GitStatus defines model for GitStatus.
@@ -1113,18 +1300,6 @@ type ListBodyExtmsgAdapterInfo struct {
 	Total int64 `json:"total"`
 }
 
-// ListBodyMessage defines model for ListBodyMessage.
-type ListBodyMessage struct {
-	// Items The list of items.
-	Items *[]Message `json:"items"`
-
-	// NextCursor Cursor for the next page of results.
-	NextCursor *string `json:"next_cursor,omitempty"`
-
-	// Total Total number of items matching the query.
-	Total int64 `json:"total"`
-}
-
 // ListBodyProviderPatch defines model for ListBodyProviderPatch.
 type ListBodyProviderPatch struct {
 	// Items The list of items.
@@ -1218,6 +1393,18 @@ type MailCountOutputBody struct {
 	Unread int64 `json:"unread"`
 }
 
+// MailListBody defines model for MailListBody.
+type MailListBody struct {
+	// Items The list of messages.
+	Items *[]Message `json:"items"`
+
+	// NextCursor Cursor for the next page of results.
+	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Total Total number of messages matching the query.
+	Total int64 `json:"total"`
+}
+
 // MailReplyInputBody defines model for MailReplyInputBody.
 type MailReplyInputBody struct {
 	// Body Reply body.
@@ -1264,6 +1451,12 @@ type Message struct {
 	To        string    `json:"to"`
 }
 
+// MessageContent defines model for MessageContent.
+type MessageContent struct {
+	Content interface{} `json:"content"`
+	Role    string      `json:"role"`
+}
+
 // MonitorFeedItemResponse defines model for MonitorFeedItemResponse.
 type MonitorFeedItemResponse struct {
 	AttachedBeadId     *string `json:"attached_bead_id,omitempty"`
@@ -1306,8 +1499,8 @@ type OptionChoiceDTO struct {
 	Value string `json:"value"`
 }
 
-// OrderCheckBody defines model for OrderCheckBody.
-type OrderCheckBody struct {
+// OrderCheckListBody defines model for OrderCheckListBody.
+type OrderCheckListBody struct {
 	// Checks Order gate evaluations.
 	Checks *[]OrderCheckResponse `json:"checks"`
 }
@@ -1346,6 +1539,12 @@ type OrderHistoryEntry struct {
 	ScopedName    string    `json:"scoped_name"`
 	Signal        *string   `json:"signal,omitempty"`
 	WispRootId    *string   `json:"wisp_root_id,omitempty"`
+}
+
+// OrderHistoryListBody defines model for OrderHistoryListBody.
+type OrderHistoryListBody struct {
+	// Entries Order history entries.
+	Entries *[]OrderHistoryEntry `json:"entries"`
 }
 
 // OrderListBody defines model for OrderListBody.
@@ -1539,6 +1738,28 @@ type ProviderPatchSetInputBody struct {
 
 	// ReadyDelayMs Override ready delay in milliseconds.
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
+}
+
+// ProviderPublicListBody defines model for ProviderPublicListBody.
+type ProviderPublicListBody struct {
+	// Items The list of browser-safe provider summaries.
+	Items *[]ProviderPublicResponse `json:"items"`
+
+	// NextCursor Cursor for the next page of results.
+	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Total Total number of providers in the list.
+	Total int64 `json:"total"`
+}
+
+// ProviderPublicResponse defines model for ProviderPublicResponse.
+type ProviderPublicResponse struct {
+	Builtin           bool                 `json:"builtin"`
+	CityLevel         bool                 `json:"city_level"`
+	DisplayName       *string              `json:"display_name,omitempty"`
+	EffectiveDefaults *map[string]string   `json:"effective_defaults,omitempty"`
+	Name              string               `json:"name"`
+	OptionsSchema     *[]ProviderOptionDTO `json:"options_schema,omitempty"`
 }
 
 // ProviderReadiness defines model for ProviderReadiness.
@@ -1742,7 +1963,9 @@ type SessionBindingRecord struct {
 	Metadata          map[string]string `json:"Metadata"`
 	SchemaVersion     int64             `json:"SchemaVersion"`
 	SessionID         string            `json:"SessionID"`
-	Status            string            `json:"Status"`
+
+	// Status Lifecycle state of a session binding.
+	Status BindingStatus `json:"Status"`
 }
 
 // SessionCreateBody defines model for SessionCreateBody.
@@ -1812,15 +2035,9 @@ type SessionPendingResponse struct {
 	Supported bool                `json:"supported"`
 }
 
-// SessionRawTranscriptResponse defines model for SessionRawTranscriptResponse.
-type SessionRawTranscriptResponse struct {
-	Format string `json:"format"`
-	Id     string `json:"id"`
-
-	// Messages Provider-native transcript frames (arbitrary JSON).
-	Messages   *[]interface{}  `json:"messages"`
-	Pagination *PaginationInfo `json:"pagination,omitempty"`
-	Template   string          `json:"template"`
+// SessionRawMessageFrame Provider-native transcript frame. The shape is whatever the provider wrote to its session log; the oneOf covers the currently recognized shapes.
+type SessionRawMessageFrame struct {
+	union json.RawMessage
 }
 
 // SessionRenameInputBody defines model for SessionRenameInputBody.
@@ -1883,17 +2100,34 @@ type SessionResponse struct {
 	Title                  string                  `json:"title"`
 }
 
+// SessionStreamMessageEvent defines model for SessionStreamMessageEvent.
+type SessionStreamMessageEvent struct {
+	Format     string          `json:"format"`
+	Id         string          `json:"id"`
+	Pagination *PaginationInfo `json:"pagination,omitempty"`
+	Template   string          `json:"template"`
+	Turns      *[]OutputTurn   `json:"turns"`
+}
+
+// SessionStreamRawMessageEvent defines model for SessionStreamRawMessageEvent.
+type SessionStreamRawMessageEvent struct {
+	Format string `json:"format"`
+	Id     string `json:"id"`
+
+	// Messages Provider-native transcript frames.
+	Messages   *[]SessionRawMessageFrame `json:"messages"`
+	Pagination *PaginationInfo           `json:"pagination,omitempty"`
+	Template   string                    `json:"template"`
+}
+
 // SessionSubmitInputBody defines model for SessionSubmitInputBody.
 type SessionSubmitInputBody struct {
-	// Intent Submit intent; empty defaults to "default".
-	Intent *SessionSubmitInputBodyIntent `json:"intent,omitempty"`
+	// Intent Semantic delivery choice for a user message on a session submit request.
+	Intent *SubmitIntent `json:"intent,omitempty"`
 
 	// Message Message text to submit.
 	Message string `json:"message"`
 }
-
-// SessionSubmitInputBodyIntent Submit intent; empty defaults to "default".
-type SessionSubmitInputBodyIntent string
 
 // SessionSubmitOutputBody defines model for SessionSubmitOutputBody.
 type SessionSubmitOutputBody struct {
@@ -1916,22 +2150,13 @@ type SessionTranscriptGetResponse struct {
 	Format string `json:"format"`
 	Id     string `json:"id"`
 
-	// Messages Populated for raw format; provider-native frames (arbitrary JSON).
-	Messages   *[]interface{}  `json:"messages,omitempty"`
-	Pagination *PaginationInfo `json:"pagination,omitempty"`
-	Template   string          `json:"template"`
+	// Messages Populated for raw format; provider-native frames.
+	Messages   *[]SessionRawMessageFrame `json:"messages,omitempty"`
+	Pagination *PaginationInfo           `json:"pagination,omitempty"`
+	Template   string                    `json:"template"`
 
 	// Turns Populated for conversation/text formats.
 	Turns *[]OutputTurn `json:"turns,omitempty"`
-}
-
-// SessionTranscriptResponse defines model for SessionTranscriptResponse.
-type SessionTranscriptResponse struct {
-	Format     string          `json:"format"`
-	Id         string          `json:"id"`
-	Pagination *PaginationInfo `json:"pagination,omitempty"`
-	Template   string          `json:"template"`
-	Turns      *[]OutputTurn   `json:"turns"`
 }
 
 // SlingInputBody defines model for SlingInputBody.
@@ -2078,6 +2303,9 @@ type SubmissionCapabilities struct {
 	SupportsInterruptNow bool `json:"supports_interrupt_now"`
 }
 
+// SubmitIntent Semantic delivery choice for a user message on a session submit request.
+type SubmitIntent string
+
 // SupervisorCitiesOutputBody defines model for SupervisorCitiesOutputBody.
 type SupervisorCitiesOutputBody struct {
 	// Items Managed cities with status info.
@@ -2148,6 +2376,12 @@ type TaggedEventStreamEnvelope struct {
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
+
+// TranscriptMessageKind Direction of a transcript entry.
+type TranscriptMessageKind string
+
+// TranscriptProvenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
+type TranscriptProvenance string
 
 // WorkflowBeadResponse defines model for WorkflowBeadResponse.
 type WorkflowBeadResponse struct {
@@ -2565,8 +2799,8 @@ type GetV0CityByCityNameOrdersFeedParams struct {
 	Limit *string `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
-// ListV0CityByCityNameOrdersHistoryParams defines parameters for ListV0CityByCityNameOrdersHistory.
-type ListV0CityByCityNameOrdersHistoryParams struct {
+// GetV0CityByCityNameOrdersHistoryParams defines parameters for GetV0CityByCityNameOrdersHistory.
+type GetV0CityByCityNameOrdersHistoryParams struct {
 	// ScopedName Scoped order name.
 	ScopedName *string `form:"scoped_name,omitempty" json:"scoped_name,omitempty"`
 
@@ -2588,7 +2822,7 @@ type GetV0CityByCityNameProviderReadinessParams struct {
 
 // GetV0CityByCityNameProvidersParams defines parameters for GetV0CityByCityNameProviders.
 type GetV0CityByCityNameProvidersParams struct {
-	// View Response view: 'public' omits command/args/env details.
+	// View Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view.
 	View *string `form:"view,omitempty" json:"view,omitempty"`
 }
 
@@ -2773,7 +3007,7 @@ type PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody = ConvoyRemoveInputBody
 type CreateConvoyJSONRequestBody = ConvoyCreateInputBody
 
 // EmitEventJSONRequestBody defines body for EmitEvent for application/json ContentType.
-type EmitEventJSONRequestBody = EventEmitInputBody
+type EmitEventJSONRequestBody = EventEmitRequest
 
 // DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody defines body for DeleteV0CityByCityNameExtmsgAdapters for application/json ContentType.
 type DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody = ExtMsgAdapterUnregisterInputBody
@@ -2852,6 +3086,250 @@ type CreateSessionJSONRequestBody = SessionCreateBody
 
 // PostV0CityByCityNameSlingJSONRequestBody defines body for PostV0CityByCityNameSling for application/json ContentType.
 type PostV0CityByCityNameSlingJSONRequestBody = SlingInputBody
+
+// AsCodexRawEntry returns the union data inside the SessionRawMessageFrame as a CodexRawEntry
+func (t SessionRawMessageFrame) AsCodexRawEntry() (CodexRawEntry, error) {
+	var body CodexRawEntry
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCodexRawEntry overwrites any union data inside the SessionRawMessageFrame as the provided CodexRawEntry
+func (t *SessionRawMessageFrame) FromCodexRawEntry(v CodexRawEntry) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCodexRawEntry performs a merge with any union data inside the SessionRawMessageFrame, using the provided CodexRawEntry
+func (t *SessionRawMessageFrame) MergeCodexRawEntry(v CodexRawEntry) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCodexEventMsg returns the union data inside the SessionRawMessageFrame as a CodexEventMsg
+func (t SessionRawMessageFrame) AsCodexEventMsg() (CodexEventMsg, error) {
+	var body CodexEventMsg
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCodexEventMsg overwrites any union data inside the SessionRawMessageFrame as the provided CodexEventMsg
+func (t *SessionRawMessageFrame) FromCodexEventMsg(v CodexEventMsg) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCodexEventMsg performs a merge with any union data inside the SessionRawMessageFrame, using the provided CodexEventMsg
+func (t *SessionRawMessageFrame) MergeCodexEventMsg(v CodexEventMsg) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCodexResponseItem returns the union data inside the SessionRawMessageFrame as a CodexResponseItem
+func (t SessionRawMessageFrame) AsCodexResponseItem() (CodexResponseItem, error) {
+	var body CodexResponseItem
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCodexResponseItem overwrites any union data inside the SessionRawMessageFrame as the provided CodexResponseItem
+func (t *SessionRawMessageFrame) FromCodexResponseItem(v CodexResponseItem) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCodexResponseItem performs a merge with any union data inside the SessionRawMessageFrame, using the provided CodexResponseItem
+func (t *SessionRawMessageFrame) MergeCodexResponseItem(v CodexResponseItem) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsGeminiThought returns the union data inside the SessionRawMessageFrame as a GeminiThought
+func (t SessionRawMessageFrame) AsGeminiThought() (GeminiThought, error) {
+	var body GeminiThought
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromGeminiThought overwrites any union data inside the SessionRawMessageFrame as the provided GeminiThought
+func (t *SessionRawMessageFrame) FromGeminiThought(v GeminiThought) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeGeminiThought performs a merge with any union data inside the SessionRawMessageFrame, using the provided GeminiThought
+func (t *SessionRawMessageFrame) MergeGeminiThought(v GeminiThought) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsGeminiToolCall returns the union data inside the SessionRawMessageFrame as a GeminiToolCall
+func (t SessionRawMessageFrame) AsGeminiToolCall() (GeminiToolCall, error) {
+	var body GeminiToolCall
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromGeminiToolCall overwrites any union data inside the SessionRawMessageFrame as the provided GeminiToolCall
+func (t *SessionRawMessageFrame) FromGeminiToolCall(v GeminiToolCall) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeGeminiToolCall performs a merge with any union data inside the SessionRawMessageFrame, using the provided GeminiToolCall
+func (t *SessionRawMessageFrame) MergeGeminiToolCall(v GeminiToolCall) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsEntry returns the union data inside the SessionRawMessageFrame as a Entry
+func (t SessionRawMessageFrame) AsEntry() (Entry, error) {
+	var body Entry
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEntry overwrites any union data inside the SessionRawMessageFrame as the provided Entry
+func (t *SessionRawMessageFrame) FromEntry(v Entry) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEntry performs a merge with any union data inside the SessionRawMessageFrame, using the provided Entry
+func (t *SessionRawMessageFrame) MergeEntry(v Entry) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsMessageContent returns the union data inside the SessionRawMessageFrame as a MessageContent
+func (t SessionRawMessageFrame) AsMessageContent() (MessageContent, error) {
+	var body MessageContent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromMessageContent overwrites any union data inside the SessionRawMessageFrame as the provided MessageContent
+func (t *SessionRawMessageFrame) FromMessageContent(v MessageContent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeMessageContent performs a merge with any union data inside the SessionRawMessageFrame, using the provided MessageContent
+func (t *SessionRawMessageFrame) MergeMessageContent(v MessageContent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsContentBlock returns the union data inside the SessionRawMessageFrame as a ContentBlock
+func (t SessionRawMessageFrame) AsContentBlock() (ContentBlock, error) {
+	var body ContentBlock
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromContentBlock overwrites any union data inside the SessionRawMessageFrame as the provided ContentBlock
+func (t *SessionRawMessageFrame) FromContentBlock(v ContentBlock) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeContentBlock performs a merge with any union data inside the SessionRawMessageFrame, using the provided ContentBlock
+func (t *SessionRawMessageFrame) MergeContentBlock(v ContentBlock) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCompactMeta returns the union data inside the SessionRawMessageFrame as a CompactMeta
+func (t SessionRawMessageFrame) AsCompactMeta() (CompactMeta, error) {
+	var body CompactMeta
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCompactMeta overwrites any union data inside the SessionRawMessageFrame as the provided CompactMeta
+func (t *SessionRawMessageFrame) FromCompactMeta(v CompactMeta) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCompactMeta performs a merge with any union data inside the SessionRawMessageFrame, using the provided CompactMeta
+func (t *SessionRawMessageFrame) MergeCompactMeta(v CompactMeta) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionRawMessageFrame) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionRawMessageFrame) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
 
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -3222,8 +3700,8 @@ type ClientInterface interface {
 	// GetV0CityByCityNameOrdersFeed request
 	GetV0CityByCityNameOrdersFeed(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersFeedParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ListV0CityByCityNameOrdersHistory request
-	ListV0CityByCityNameOrdersHistory(ctx context.Context, cityName string, params *ListV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// GetV0CityByCityNameOrdersHistory request
+	GetV0CityByCityNameOrdersHistory(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePacks request
 	GetV0CityByCityNamePacks(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3297,6 +3775,9 @@ type ClientInterface interface {
 	CreateProviderWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateProvider(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameProvidersPublic request
+	GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameReadiness request
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4709,8 +5190,8 @@ func (c *Client) GetV0CityByCityNameOrdersFeed(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) ListV0CityByCityNameOrdersHistory(ctx context.Context, cityName string, params *ListV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewListV0CityByCityNameOrdersHistoryRequest(c.Server, cityName, params)
+func (c *Client) GetV0CityByCityNameOrdersHistory(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameOrdersHistoryRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5023,6 +5504,18 @@ func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, co
 
 func (c *Client) CreateProvider(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateProviderRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameProvidersPublicRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -10457,8 +10950,8 @@ func NewGetV0CityByCityNameOrdersFeedRequest(server string, cityName string, par
 	return req, nil
 }
 
-// NewListV0CityByCityNameOrdersHistoryRequest generates requests for ListV0CityByCityNameOrdersHistory
-func NewListV0CityByCityNameOrdersHistoryRequest(server string, cityName string, params *ListV0CityByCityNameOrdersHistoryParams) (*http.Request, error) {
+// NewGetV0CityByCityNameOrdersHistoryRequest generates requests for GetV0CityByCityNameOrdersHistory
+func NewGetV0CityByCityNameOrdersHistoryRequest(server string, cityName string, params *GetV0CityByCityNameOrdersHistoryParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11471,6 +11964,40 @@ func NewCreateProviderRequestWithBody(server string, cityName string, contentTyp
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameProvidersPublicRequest generates requests for GetV0CityByCityNameProvidersPublic
+func NewGetV0CityByCityNameProvidersPublicRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/providers/public", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -13926,8 +14453,8 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameOrdersFeedWithResponse request
 	GetV0CityByCityNameOrdersFeedWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersFeedParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersFeedResponse, error)
 
-	// ListV0CityByCityNameOrdersHistoryWithResponse request
-	ListV0CityByCityNameOrdersHistoryWithResponse(ctx context.Context, cityName string, params *ListV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*ListV0CityByCityNameOrdersHistoryResponse, error)
+	// GetV0CityByCityNameOrdersHistoryWithResponse request
+	GetV0CityByCityNameOrdersHistoryWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersHistoryResponse, error)
 
 	// GetV0CityByCityNamePacksWithResponse request
 	GetV0CityByCityNamePacksWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePacksResponse, error)
@@ -14001,6 +14528,9 @@ type ClientWithResponsesInterface interface {
 	CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
 
 	CreateProviderWithResponse(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
+
+	// GetV0CityByCityNameProvidersPublicWithResponse request
+	GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error)
 
 	// GetV0CityByCityNameReadinessWithResponse request
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
@@ -14797,7 +15327,7 @@ func (r CreateBeadResponse) StatusCode() int {
 type GetV0CityByCityNameBeadsGraphByRootIdResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *BeadGraphResponseJSON
+	JSON200                       *BeadGraphResponse
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -15624,7 +16154,7 @@ func (r GetV0CityByCityNameHealthResponse) StatusCode() int {
 type GetV0CityByCityNameMailResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *ListBodyMessage
+	JSON200                       *MailListBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -15693,7 +16223,7 @@ func (r GetV0CityByCityNameMailCountResponse) StatusCode() int {
 type GetV0CityByCityNameMailThreadByIdResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *ListBodyMessage
+	JSON200                       *MailListBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -15969,7 +16499,7 @@ func (r GetV0CityByCityNameOrdersResponse) StatusCode() int {
 type GetV0CityByCityNameOrdersCheckResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *OrderCheckBody
+	JSON200                       *OrderCheckListBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -16012,15 +16542,15 @@ func (r GetV0CityByCityNameOrdersFeedResponse) StatusCode() int {
 	return 0
 }
 
-type ListV0CityByCityNameOrdersHistoryResponse struct {
+type GetV0CityByCityNameOrdersHistoryResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *[]OrderHistoryEntry
+	JSON200                       *OrderHistoryListBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
-func (r ListV0CityByCityNameOrdersHistoryResponse) Status() string {
+func (r GetV0CityByCityNameOrdersHistoryResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -16028,7 +16558,7 @@ func (r ListV0CityByCityNameOrdersHistoryResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r ListV0CityByCityNameOrdersHistoryResponse) StatusCode() int {
+func (r GetV0CityByCityNameOrdersHistoryResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -16512,6 +17042,29 @@ func (r CreateProviderResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateProviderResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameProvidersPublicResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ProviderPublicListBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameProvidersPublicResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameProvidersPublicResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -18282,13 +18835,13 @@ func (c *ClientWithResponses) GetV0CityByCityNameOrdersFeedWithResponse(ctx cont
 	return ParseGetV0CityByCityNameOrdersFeedResponse(rsp)
 }
 
-// ListV0CityByCityNameOrdersHistoryWithResponse request returning *ListV0CityByCityNameOrdersHistoryResponse
-func (c *ClientWithResponses) ListV0CityByCityNameOrdersHistoryWithResponse(ctx context.Context, cityName string, params *ListV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*ListV0CityByCityNameOrdersHistoryResponse, error) {
-	rsp, err := c.ListV0CityByCityNameOrdersHistory(ctx, cityName, params, reqEditors...)
+// GetV0CityByCityNameOrdersHistoryWithResponse request returning *GetV0CityByCityNameOrdersHistoryResponse
+func (c *ClientWithResponses) GetV0CityByCityNameOrdersHistoryWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersHistoryParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersHistoryResponse, error) {
+	rsp, err := c.GetV0CityByCityNameOrdersHistory(ctx, cityName, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseListV0CityByCityNameOrdersHistoryResponse(rsp)
+	return ParseGetV0CityByCityNameOrdersHistoryResponse(rsp)
 }
 
 // GetV0CityByCityNamePacksWithResponse request returning *GetV0CityByCityNamePacksResponse
@@ -18518,6 +19071,15 @@ func (c *ClientWithResponses) CreateProviderWithResponse(ctx context.Context, ci
 		return nil, err
 	}
 	return ParseCreateProviderResponse(rsp)
+}
+
+// GetV0CityByCityNameProvidersPublicWithResponse request returning *GetV0CityByCityNameProvidersPublicResponse
+func (c *ClientWithResponses) GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error) {
+	rsp, err := c.GetV0CityByCityNameProvidersPublic(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameProvidersPublicResponse(rsp)
 }
 
 // GetV0CityByCityNameReadinessWithResponse request returning *GetV0CityByCityNameReadinessResponse
@@ -19874,7 +20436,7 @@ func ParseGetV0CityByCityNameBeadsGraphByRootIdResponse(rsp *http.Response) (*Ge
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest BeadGraphResponseJSON
+		var dest BeadGraphResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -21055,7 +21617,7 @@ func ParseGetV0CityByCityNameMailResponse(rsp *http.Response) (*GetV0CityByCityN
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ListBodyMessage
+		var dest MailListBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -21154,7 +21716,7 @@ func ParseGetV0CityByCityNameMailThreadByIdResponse(rsp *http.Response) (*GetV0C
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ListBodyMessage
+		var dest MailListBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -21550,7 +22112,7 @@ func ParseGetV0CityByCityNameOrdersCheckResponse(rsp *http.Response) (*GetV0City
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OrderCheckBody
+		var dest OrderCheckListBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -21601,22 +22163,22 @@ func ParseGetV0CityByCityNameOrdersFeedResponse(rsp *http.Response) (*GetV0CityB
 	return response, nil
 }
 
-// ParseListV0CityByCityNameOrdersHistoryResponse parses an HTTP response from a ListV0CityByCityNameOrdersHistoryWithResponse call
-func ParseListV0CityByCityNameOrdersHistoryResponse(rsp *http.Response) (*ListV0CityByCityNameOrdersHistoryResponse, error) {
+// ParseGetV0CityByCityNameOrdersHistoryResponse parses an HTTP response from a GetV0CityByCityNameOrdersHistoryWithResponse call
+func ParseGetV0CityByCityNameOrdersHistoryResponse(rsp *http.Response) (*GetV0CityByCityNameOrdersHistoryResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &ListV0CityByCityNameOrdersHistoryResponse{
+	response := &GetV0CityByCityNameOrdersHistoryResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest []OrderHistoryEntry
+		var dest OrderHistoryListBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -22314,6 +22876,39 @@ func ParseCreateProviderResponse(rsp *http.Response) (*CreateProviderResponse, e
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameProvidersPublicResponse parses an HTTP response from a GetV0CityByCityNameProvidersPublicWithResponse call
+func ParseGetV0CityByCityNameProvidersPublicResponse(rsp *http.Response) (*GetV0CityByCityNameProvidersPublicResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameProvidersPublicResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ProviderPublicListBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel

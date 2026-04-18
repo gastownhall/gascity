@@ -9,6 +9,7 @@ cmd/gc/.runtime/
 /bd
 /br
 /tmp/
+.runtime/
 *.test
 **/.beads/*
 !**/.beads/config.yaml

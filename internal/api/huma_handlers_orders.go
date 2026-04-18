@@ -50,18 +50,18 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 	}{Body: toOrderResponse(*a)}, nil
 }
 
-// OrderCheckBody is the response body for GET /v0/orders/check.
-type OrderCheckBody struct {
+// OrderCheckListBody is the response body for GET /v0/orders/check.
+type OrderCheckListBody struct {
 	Checks []orderCheckResponse `json:"checks" doc:"Order gate evaluations."`
 }
 
-// OrderCheckOutput is the response envelope for GET /v0/orders/check.
-type OrderCheckOutput struct {
-	Body OrderCheckBody
+// OrderCheckListOutput is the response envelope for GET /v0/orders/check.
+type OrderCheckListOutput struct {
+	Body OrderCheckListBody
 }
 
 // humaHandleOrderCheck is the Huma-typed handler for GET /v0/orders/check.
-func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*OrderCheckOutput, error) {
+func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*OrderCheckListOutput, error) {
 	aa := s.state.Orders()
 
 	store := s.state.CityBeadStore()
@@ -125,7 +125,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*O
 		checks = []orderCheckResponse{}
 	}
 
-	out := &OrderCheckOutput{}
+	out := &OrderCheckListOutput{}
 	out.Body.Checks = checks
 	return out, nil
 }
@@ -141,10 +141,18 @@ type orderCheckResponse struct {
 	LastRunOutcome *string `json:"last_run_outcome,omitempty"`
 }
 
+// OrderHistoryListBody is the response body for GET /v0/orders/history.
+type OrderHistoryListBody struct {
+	Entries []orderHistoryEntry `json:"entries" doc:"Order history entries."`
+}
+
+// OrderHistoryListOutput is the response envelope for GET /v0/orders/history.
+type OrderHistoryListOutput struct {
+	Body OrderHistoryListBody
+}
+
 // humaHandleOrderHistory is the Huma-typed handler for GET /v0/orders/history.
-func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryInput) (*struct {
-	Body []orderHistoryEntry
-}, error) {
+func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryInput) (*OrderHistoryListOutput, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -236,9 +244,9 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 	}
 
-	return &struct {
-		Body []orderHistoryEntry
-	}{Body: entries}, nil
+	out := &OrderHistoryListOutput{}
+	out.Body.Entries = entries
+	return out, nil
 }
 
 // orderHistoryEntry is a single entry in the order history response.

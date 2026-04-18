@@ -81,6 +81,48 @@ func (s *Server) humaHandleProviderList(_ context.Context, input *ProviderListIn
 	}, nil
 }
 
+// humaHandleProviderPublicList is the Huma-typed handler for
+// GET /v0/city/{cityName}/providers/public. It returns the browser-safe
+// projection of every provider — city-level first, then built-ins — and
+// never exposes command/args/env or prompt-delivery details.
+func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPublicListInput) (*ProviderPublicListOutput, error) {
+	cfg := s.state.Config()
+	builtins := config.BuiltinProviders()
+	builtinOrder := config.BuiltinProviderOrder()
+
+	seen := make(map[string]bool)
+	var providers []ProviderPublicResponse
+
+	var cityNames []string
+	for name := range cfg.Providers {
+		cityNames = append(cityNames, name)
+	}
+	sort.Strings(cityNames)
+	for _, name := range cityNames {
+		spec := cfg.Providers[name]
+		_, isBuiltin := builtins[name]
+		merged := spec
+		if base, ok := builtins[name]; ok {
+			merged = config.MergeProviderOverBuiltin(base, spec)
+		} else if base, ok := builtins[spec.Command]; ok {
+			merged = config.MergeProviderOverBuiltin(base, spec)
+		}
+		providers = append(providers, toProviderPublicResponse(name, merged, isBuiltin, true))
+		seen[name] = true
+	}
+	for _, name := range builtinOrder {
+		if seen[name] {
+			continue
+		}
+		providers = append(providers, toProviderPublicResponse(name, builtins[name], true, false))
+	}
+
+	return &ProviderPublicListOutput{
+		Index: s.latestIndex(),
+		Body:  ProviderPublicListBody{Items: providers, Total: len(providers)},
+	}, nil
+}
+
 // humaHandleProviderGet is the Huma-typed handler for GET /v0/provider/{name}.
 func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInput) (*IndexOutput[providerResponse], error) {
 	name := input.Name

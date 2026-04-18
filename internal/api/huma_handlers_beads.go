@@ -126,7 +126,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 }
 
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.
-func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[beadGraphResponseJSON], error) {
+func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
 	rootID := input.RootID
 	if rootID == "" {
 		return nil, huma.Error400BadRequest("rootID is required")
@@ -170,9 +170,9 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 	deps, _ := collectWorkflowDeps(foundStore, beadIndex)
 
-	return &IndexOutput[beadGraphResponseJSON]{
+	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),
-		Body: beadGraphResponseJSON{
+		Body: BeadGraphResponse{
 			Root:  root,
 			Beads: graphBeads,
 			Deps:  deps,
@@ -200,7 +200,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 }
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
-func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*IndexOutput[beadDepsResponse], error) {
+func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*IndexOutput[BeadDepsResponse], error) {
 	id := input.ID
 	for _, store := range s.beadStoresForID(id) {
 		parent, err := store.Get(id)
@@ -221,16 +221,16 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 		if children == nil {
 			children = []beads.Bead{}
 		}
-		return &IndexOutput[beadDepsResponse]{
+		return &IndexOutput[BeadDepsResponse]{
 			Index: s.latestIndex(),
-			Body:  beadDepsResponse{Children: children},
+			Body:  BeadDepsResponse{Children: children},
 		}, nil
 	}
 	return nil, huma.Error404NotFound("bead " + id + " not found")
 }
 
-// beadDepsResponse is the response shape for GET /v0/bead/{id}/deps.
-type beadDepsResponse struct {
+// BeadDepsResponse is the response shape for GET /v0/bead/{id}/deps.
+type BeadDepsResponse struct {
 	Children []beads.Bead `json:"children"`
 }
 

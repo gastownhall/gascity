@@ -287,7 +287,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	}
 	body := genclient.SubmitSessionJSONRequestBody{Message: message}
 	if intent != "" {
-		i := genclient.SessionSubmitInputBodyIntent(intent)
+		i := genclient.SubmitIntent(intent)
 		body.Intent = &i
 	}
 	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, body)

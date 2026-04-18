@@ -813,7 +813,7 @@
         ],
         "type": "object"
       },
-      "BeadGraphResponseJSON": {
+      "BeadGraphResponse": {
         "additionalProperties": false,
         "properties": {
           "beads": {
@@ -902,6 +902,14 @@
           }
         },
         "type": "object"
+      },
+      "BindingStatus": {
+        "description": "Lifecycle state of a session binding.",
+        "enum": [
+          "active",
+          "ended"
+        ],
+        "type": "string"
       },
       "CityCreateRequest": {
         "additionalProperties": false,
@@ -1038,6 +1046,117 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "CodexEventMsg": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "description": "Message text for user_message/agent_message entries.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Text for agent_reasoning entries.",
+            "type": "string"
+          },
+          "type": {
+            "description": "user_message, agent_message, agent_reasoning, token_count.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "CodexRawEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "payload": {},
+          "timestamp": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "CodexResponseItem": {
+        "additionalProperties": false,
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/CodexTextContent"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "summary": {
+            "items": {
+              "$ref": "#/components/schemas/CodexTextContent"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "type": {
+            "description": "message, reasoning, function_call, function_call_output.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "CodexTextContent": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "CompactMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "preTokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "trigger": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger",
+          "preTokens"
+        ],
         "type": "object"
       },
       "ConfigAgentResponse": {
@@ -1242,6 +1361,35 @@
         ],
         "type": "object"
       },
+      "ContentBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {},
+          "id": {
+            "type": "string"
+          },
+          "input": {},
+          "is_error": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tool_use_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
       "ConversationGroupParticipant": {
         "additionalProperties": false,
         "properties": {
@@ -1321,6 +1469,15 @@
         ],
         "type": "object"
       },
+      "ConversationKind": {
+        "description": "Shape of a conversation.",
+        "enum": [
+          "dm",
+          "room",
+          "thread"
+        ],
+        "type": "string"
+      },
       "ConversationRef": {
         "additionalProperties": false,
         "properties": {
@@ -1331,7 +1488,7 @@
             "type": "string"
           },
           "kind": {
-            "type": "string"
+            "$ref": "#/components/schemas/ConversationKind"
           },
           "parent_conversation_id": {
             "type": "string"
@@ -1381,7 +1538,7 @@
             "type": "string"
           },
           "Kind": {
-            "type": "string"
+            "$ref": "#/components/schemas/TranscriptMessageKind"
           },
           "Metadata": {
             "additionalProperties": {
@@ -1390,7 +1547,7 @@
             "type": "object"
           },
           "Provenance": {
-            "type": "string"
+            "$ref": "#/components/schemas/TranscriptProvenance"
           },
           "ProviderMessageID": {
             "type": "string"
@@ -1664,6 +1821,52 @@
         ],
         "type": "object"
       },
+      "Entry": {
+        "additionalProperties": false,
+        "properties": {
+          "compactMetadata": {
+            "$ref": "#/components/schemas/CompactMeta"
+          },
+          "isCompactSummary": {
+            "type": "boolean"
+          },
+          "logicalParentUuid": {
+            "type": "string"
+          },
+          "message": {},
+          "parentUuid": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "subtype": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "toolUseID": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uuid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "parentUuid",
+          "type",
+          "subtype",
+          "message",
+          "timestamp"
+        ],
+        "type": "object"
+      },
       "ErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -1770,7 +1973,23 @@
         ],
         "type": "object"
       },
-      "EventEmitInputBody": {
+      "EventEmitOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "description": "Operation result.",
+            "examples": [
+              "recorded"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "EventEmitRequest": {
         "additionalProperties": false,
         "properties": {
           "actor": {
@@ -1795,22 +2014,6 @@
         "required": [
           "type",
           "actor"
-        ],
-        "type": "object"
-      },
-      "EventEmitOutputBody": {
-        "additionalProperties": false,
-        "properties": {
-          "status": {
-            "description": "Operation result.",
-            "examples": [
-              "recorded"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "status"
         ],
         "type": "object"
       },
@@ -2309,7 +2512,7 @@
             "type": "string"
           },
           "preview": {
-            "$ref": "#/components/schemas/FormulaDetailResponsePreviewStruct"
+            "$ref": "#/components/schemas/FormulaPreviewResponse"
           },
           "steps": {
             "items": {
@@ -2342,34 +2545,6 @@
           "steps",
           "deps",
           "preview"
-        ],
-        "type": "object"
-      },
-      "FormulaDetailResponsePreviewStruct": {
-        "additionalProperties": false,
-        "properties": {
-          "edges": {
-            "items": {
-              "$ref": "#/components/schemas/FormulaPreviewEdgeResponse"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "nodes": {
-            "items": {
-              "$ref": "#/components/schemas/FormulaPreviewNodeResponse"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "nodes",
-          "edges"
         ],
         "type": "object"
       },
@@ -2467,6 +2642,34 @@
           "id",
           "title",
           "kind"
+        ],
+        "type": "object"
+      },
+      "FormulaPreviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/FormulaPreviewEdgeResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/FormulaPreviewNodeResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "nodes",
+          "edges"
         ],
         "type": "object"
       },
@@ -2615,6 +2818,90 @@
         "required": [
           "name",
           "type"
+        ],
+        "type": "object"
+      },
+      "GeminiFunctionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "response": {
+            "$ref": "#/components/schemas/GeminiFunctionResponseOutput"
+          }
+        },
+        "required": [
+          "id",
+          "response"
+        ],
+        "type": "object"
+      },
+      "GeminiFunctionResponseOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "output": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "type": "object"
+      },
+      "GeminiThought": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "description"
+        ],
+        "type": "object"
+      },
+      "GeminiToolCall": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {},
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "result": {
+            "items": {
+              "$ref": "#/components/schemas/GeminiToolCallResultEntry"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "args",
+          "result"
+        ],
+        "type": "object"
+      },
+      "GeminiToolCallResultEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "functionResponse": {
+            "$ref": "#/components/schemas/GeminiFunctionResponse"
+          }
+        },
+        "required": [
+          "functionResponse"
         ],
         "type": "object"
       },
@@ -2914,35 +3201,6 @@
         ],
         "type": "object"
       },
-      "ListBodyMessage": {
-        "additionalProperties": false,
-        "properties": {
-          "items": {
-            "description": "The list of items.",
-            "items": {
-              "$ref": "#/components/schemas/Message"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "next_cursor": {
-            "description": "Cursor for the next page of results.",
-            "type": "string"
-          },
-          "total": {
-            "description": "Total number of items matching the query.",
-            "format": "int64",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "items",
-          "total"
-        ],
-        "type": "object"
-      },
       "ListBodyProviderPatch": {
         "additionalProperties": false,
         "properties": {
@@ -3166,6 +3424,35 @@
         ],
         "type": "object"
       },
+      "MailListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of messages.",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total number of messages matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
       "MailReplyInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -3272,6 +3559,20 @@
           "body",
           "created_at",
           "read"
+        ],
+        "type": "object"
+      },
+      "MessageContent": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {},
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
         ],
         "type": "object"
       },
@@ -3395,7 +3696,7 @@
         ],
         "type": "object"
       },
-      "OrderCheckBody": {
+      "OrderCheckListBody": {
         "additionalProperties": false,
         "properties": {
           "checks": {
@@ -3534,6 +3835,25 @@
           "labels",
           "capture_output",
           "has_output"
+        ],
+        "type": "object"
+      },
+      "OrderHistoryListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "description": "Order history entries.",
+            "items": {
+              "$ref": "#/components/schemas/OrderHistoryEntry"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "entries"
         ],
         "type": "object"
       },
@@ -4109,6 +4429,73 @@
         },
         "type": "object"
       },
+      "ProviderPublicListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of browser-safe provider summaries.",
+            "items": {
+              "$ref": "#/components/schemas/ProviderPublicResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total number of providers in the list.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ProviderPublicResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "builtin": {
+            "type": "boolean"
+          },
+          "city_level": {
+            "type": "boolean"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "effective_defaults": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "options_schema": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderOptionDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "builtin",
+          "city_level"
+        ],
+        "type": "object"
+      },
       "ProviderReadiness": {
         "additionalProperties": false,
         "properties": {
@@ -4665,7 +5052,7 @@
             "type": "string"
           },
           "Status": {
-            "type": "string"
+            "$ref": "#/components/schemas/BindingStatus"
           }
         },
         "required": [
@@ -4812,37 +5199,38 @@
         ],
         "type": "object"
       },
-      "SessionRawTranscriptResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "format": {
-            "type": "string"
+      "SessionRawMessageFrame": {
+        "description": "Provider-native transcript frame. The shape is whatever the provider wrote to its session log; the oneOf covers the currently recognized shapes.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CodexRawEntry"
           },
-          "id": {
-            "type": "string"
+          {
+            "$ref": "#/components/schemas/CodexEventMsg"
           },
-          "messages": {
-            "description": "Provider-native transcript frames (arbitrary JSON).",
-            "items": {},
-            "type": [
-              "array",
-              "null"
-            ]
+          {
+            "$ref": "#/components/schemas/CodexResponseItem"
           },
-          "pagination": {
-            "$ref": "#/components/schemas/PaginationInfo"
+          {
+            "$ref": "#/components/schemas/GeminiThought"
           },
-          "template": {
-            "type": "string"
+          {
+            "$ref": "#/components/schemas/GeminiToolCall"
+          },
+          {
+            "$ref": "#/components/schemas/Entry"
+          },
+          {
+            "$ref": "#/components/schemas/MessageContent"
+          },
+          {
+            "$ref": "#/components/schemas/ContentBlock"
+          },
+          {
+            "$ref": "#/components/schemas/CompactMeta"
           }
-        },
-        "required": [
-          "id",
-          "template",
-          "format",
-          "messages"
         ],
-        "type": "object"
+        "title": "Session raw transcript frame"
       },
       "SessionRenameInputBody": {
         "additionalProperties": false,
@@ -5011,17 +5399,99 @@
         ],
         "type": "object"
       },
+      "SessionStreamCommonEvent": {
+        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionActivityEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PendingInteraction"
+          },
+          {
+            "$ref": "#/components/schemas/HeartbeatEvent"
+          }
+        ],
+        "title": "Session stream lifecycle event"
+      },
+      "SessionStreamMessageEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "template": {
+            "type": "string"
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/OutputTurn"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "format",
+          "turns"
+        ],
+        "type": "object"
+      },
+      "SessionStreamRawMessageEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messages": {
+            "description": "Provider-native transcript frames.",
+            "items": {
+              "$ref": "#/components/schemas/SessionRawMessageFrame"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "format",
+          "messages"
+        ],
+        "type": "object"
+      },
       "SessionSubmitInputBody": {
         "additionalProperties": false,
         "properties": {
           "intent": {
+            "$ref": "#/components/schemas/SubmitIntent",
             "description": "Submit intent; empty defaults to \"default\".",
             "enum": [
               "default",
               "follow_up",
               "interrupt_now"
-            ],
-            "type": "string"
+            ]
           },
           "message": {
             "description": "Message text to submit.",
@@ -5077,8 +5547,10 @@
             "type": "string"
           },
           "messages": {
-            "description": "Populated for raw format; provider-native frames (arbitrary JSON).",
-            "items": {},
+            "description": "Populated for raw format; provider-native frames.",
+            "items": {
+              "$ref": "#/components/schemas/SessionRawMessageFrame"
+            },
             "type": [
               "array",
               "null"
@@ -5105,39 +5577,6 @@
           "id",
           "template",
           "format"
-        ],
-        "type": "object"
-      },
-      "SessionTranscriptResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "format": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "pagination": {
-            "$ref": "#/components/schemas/PaginationInfo"
-          },
-          "template": {
-            "type": "string"
-          },
-          "turns": {
-            "items": {
-              "$ref": "#/components/schemas/OutputTurn"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "template",
-          "format",
-          "turns"
         ],
         "type": "object"
       },
@@ -5475,6 +5914,15 @@
         ],
         "type": "object"
       },
+      "SubmitIntent": {
+        "description": "Semantic delivery choice for a user message on a session submit request.",
+        "enum": [
+          "default",
+          "follow_up",
+          "interrupt_now"
+        ],
+        "type": "string"
+      },
       "SupervisorCitiesOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -5668,6 +6116,22 @@
           "actor"
         ],
         "type": "object"
+      },
+      "TranscriptMessageKind": {
+        "description": "Direction of a transcript entry.",
+        "enum": [
+          "inbound",
+          "outbound"
+        ],
+        "type": "string"
+      },
+      "TranscriptProvenance": {
+        "description": "Provenance of a transcript entry (freshly observed vs. replayed from persisted history).",
+        "enum": [
+          "live",
+          "hydrated"
+        ],
+        "type": "string"
       },
       "WorkflowBeadResponse": {
         "additionalProperties": false,
@@ -7947,7 +8411,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BeadGraphResponseJSON"
+                  "$ref": "#/components/schemas/BeadGraphResponse"
                 }
               }
             },
@@ -8840,7 +9304,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EventEmitInputBody"
+                "$ref": "#/components/schemas/EventEmitRequest"
               }
             }
           },
@@ -10338,7 +10802,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyMessage"
+                  "$ref": "#/components/schemas/MailListBody"
                 }
               }
             },
@@ -10541,7 +11005,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyMessage"
+                  "$ref": "#/components/schemas/MailListBody"
                 }
               }
             },
@@ -11243,7 +11707,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OrderCheckBody"
+                  "$ref": "#/components/schemas/OrderCheckListBody"
                 }
               }
             },
@@ -11337,7 +11801,7 @@
     },
     "/v0/city/{cityName}/orders/history": {
       "get": {
-        "operationId": "list-v0-city-by-city-name-orders-history",
+        "operationId": "get-v0-city-by-city-name-orders-history",
         "parameters": [
           {
             "description": "City name.",
@@ -11387,13 +11851,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/OrderHistoryEntry"
-                  },
-                  "type": [
-                    "array",
-                    "null"
-                  ]
+                  "$ref": "#/components/schemas/OrderHistoryListBody"
                 }
               }
             },
@@ -11410,7 +11868,7 @@
             "description": "Error"
           }
         },
-        "summary": "List v0 city by city name orders history"
+        "summary": "Get v0 city by city name orders history"
       }
     },
     "/v0/city/{cityName}/packs": {
@@ -12480,12 +12938,12 @@
             }
           },
           {
-            "description": "Response view: 'public' omits command/args/env details.",
+            "description": "Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view.",
             "explode": false,
             "in": "query",
             "name": "view",
             "schema": {
-              "description": "Response view: 'public' omits command/args/env details.",
+              "description": "Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view.",
               "type": "string"
             }
           }
@@ -12573,6 +13031,58 @@
           }
         },
         "summary": "Create a provider"
+      }
+    },
+    "/v0/city/{cityName}/providers/public": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-providers-public",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderPublicListBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name providers public"
       }
     },
     "/v0/city/{cityName}/readiness": {
@@ -13980,7 +14490,7 @@
                       {
                         "properties": {
                           "data": {
-                            "$ref": "#/components/schemas/SessionRawTranscriptResponse"
+                            "$ref": "#/components/schemas/SessionStreamRawMessageEvent"
                           },
                           "event": {
                             "const": "message",
@@ -14031,7 +14541,7 @@
                       {
                         "properties": {
                           "data": {
-                            "$ref": "#/components/schemas/SessionTranscriptResponse"
+                            "$ref": "#/components/schemas/SessionStreamMessageEvent"
                           },
                           "event": {
                             "const": "turn",

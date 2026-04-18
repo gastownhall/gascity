@@ -2006,7 +2006,7 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionTranscriptResponse
+	var resp SessionStreamMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2051,7 +2051,7 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionTranscriptResponse
+	var resp SessionStreamMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2444,7 +2444,7 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionRawTranscriptResponse
+	var resp SessionStreamRawMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

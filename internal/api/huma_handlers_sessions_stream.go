@@ -91,11 +91,11 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 		if running {
 			s.streamSessionPeekRaw(reqCtx, send, info)
 		} else {
-			_ = send(sse.Message{ID: 1, Data: sessionRawTranscriptResponse{
+			_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
 				ID:       info.ID,
 				Template: info.Template,
 				Format:   "raw",
-				Messages: []any{},
+				Messages: []SessionRawMessageFrame{},
 			}})
 		}
 	default:

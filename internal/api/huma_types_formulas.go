@@ -85,10 +85,14 @@ type formulaDetailResponse struct {
 	VarDefs     []formulaVarDefResponse      `json:"var_defs"`
 	Steps       []map[string]any             `json:"steps"`
 	Deps        []formulaPreviewEdgeResponse `json:"deps"`
-	Preview     struct {
-		Nodes []formulaPreviewNodeResponse `json:"nodes"`
-		Edges []formulaPreviewEdgeResponse `json:"edges"`
-	} `json:"preview"`
+	Preview     FormulaPreviewResponse       `json:"preview"`
+}
+
+// FormulaPreviewResponse is the compiled-formula graph preview returned with
+// a formula detail response.
+type FormulaPreviewResponse struct {
+	Nodes []formulaPreviewNodeResponse `json:"nodes"`
+	Edges []formulaPreviewEdgeResponse `json:"edges"`
 }
 
 // --- Formula types ---

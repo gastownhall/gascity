@@ -26,7 +26,7 @@ type sessionPendingResponse struct {
 	Pending   *runtime.PendingInteraction `json:"pending,omitempty"`
 }
 
-type sessionTranscriptResponse struct {
+type SessionStreamMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
 	Format     string                     `json:"format"`
@@ -34,11 +34,11 @@ type sessionTranscriptResponse struct {
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
-type sessionRawTranscriptResponse struct {
+type SessionStreamRawMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
 	Format     string                     `json:"format"`
-	Messages   []any                      `json:"messages" doc:"Provider-native transcript frames (arbitrary JSON)."`
+	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
@@ -229,7 +229,7 @@ func (s *Server) emitClosedSessionSnapshot(send sse.Sender, info session.Info, l
 		return
 	}
 
-	if err := send(sse.Message{ID: 1, Data: sessionTranscriptResponse{
+	if err := send(sse.Message{ID: 1, Data: SessionStreamMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
 		Format:   "conversation",
@@ -255,11 +255,11 @@ func (s *Server) emitClosedSessionSnapshotRaw(send sse.Sender, info session.Info
 		return
 	}
 
-	if err := send(sse.Message{ID: 1, Data: sessionRawTranscriptResponse{
+	if err := send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
 		Format:   "raw",
-		Messages: rawMessages,
+		Messages: wrapRawFrames(rawMessages),
 	}}); err != nil {
 		return
 	}
@@ -343,11 +343,11 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sen
 
 			if len(toSend) > 0 {
 				seq++
-				_ = send(sse.Message{ID: seq, Data: sessionRawTranscriptResponse{
+				_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
 					Format:   "raw",
-					Messages: toSend,
+					Messages: wrapRawFrames(toSend),
 				}})
 			}
 
@@ -476,7 +476,7 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender
 
 			if len(toSend) > 0 {
 				seq++
-				_ = send(sse.Message{ID: seq, Data: sessionTranscriptResponse{
+				_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
 					Format:   "conversation",
@@ -542,11 +542,11 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 				{"type": "text", "text": output},
 			},
 		}
-		_ = send(sse.Message{ID: seq, Data: sessionRawTranscriptResponse{
+		_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
-			Messages: []any{fakeMsg},
+			Messages: wrapRawFrames([]any{fakeMsg}),
 		}})
 
 		// Check for approval prompts in the pane output we already have.
@@ -601,7 +601,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info se
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		_ = send(sse.Message{ID: seq, Data: sessionTranscriptResponse{
+		_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "text",

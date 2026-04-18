@@ -9,7 +9,41 @@ package api
 // ProviderListInput is the Huma input for GET /v0/city/{cityName}/providers.
 type ProviderListInput struct {
 	CityScope
-	View string `query:"view" required:"false" doc:"Response view: 'public' omits command/args/env details."`
+	View string `query:"view" required:"false" doc:"Response view: 'public' omits command/args/env details. Prefer GET /providers/public for the browser-safe view."`
+}
+
+// ProviderPublicListInput is the Huma input for GET
+// /v0/city/{cityName}/providers/public.
+type ProviderPublicListInput struct {
+	CityScope
+}
+
+// ProviderPublicResponse is the browser-safe DTO for a single provider.
+// Unlike ProviderResponse it exposes only fields safe for untrusted
+// clients — option schemas and defaults — and omits command/args/env and
+// prompt-delivery details.
+type ProviderPublicResponse struct {
+	Name              string              `json:"name"`
+	DisplayName       string              `json:"display_name,omitempty"`
+	Builtin           bool                `json:"builtin"`
+	CityLevel         bool                `json:"city_level"`
+	OptionsSchema     []providerOptionDTO `json:"options_schema,omitempty"`
+	EffectiveDefaults map[string]string   `json:"effective_defaults,omitempty"`
+}
+
+// ProviderPublicListBody is the response body for GET
+// /v0/city/{cityName}/providers/public.
+type ProviderPublicListBody struct {
+	Items      []ProviderPublicResponse `json:"items" doc:"The list of browser-safe provider summaries."`
+	Total      int                      `json:"total" doc:"Total number of providers in the list."`
+	NextCursor string                   `json:"next_cursor,omitempty" doc:"Cursor for the next page of results."`
+}
+
+// ProviderPublicListOutput is the response envelope for GET
+// /v0/city/{cityName}/providers/public.
+type ProviderPublicListOutput struct {
+	Index uint64 `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Body  ProviderPublicListBody
 }
 
 // ProviderGetInput is the Huma input for GET /v0/city/{cityName}/provider/{name}.

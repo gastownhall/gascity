@@ -12,8 +12,8 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":      sessionTranscriptResponse{},
-		"message":   sessionRawTranscriptResponse{},
+		"turn":      SessionStreamMessageEvent{},
+		"message":   SessionStreamRawMessageEvent{},
 		"activity":  SessionActivityEvent{},
 		"pending":   runtime.PendingInteraction{},
 		"heartbeat": HeartbeatEvent{},
@@ -96,6 +96,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// Providers.
 	cityGet(sm, "/providers", (*Server).humaHandleProviderList)
+	cityGet(sm, "/providers/public", (*Server).humaHandleProviderPublicList)
 	cityGet(sm, "/provider/{name}", (*Server).humaHandleProviderGet)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-provider",

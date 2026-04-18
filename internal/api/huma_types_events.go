@@ -20,15 +20,18 @@ type EventListInput struct {
 	Since string `query:"since" required:"false" doc:"Filter events since duration ago (Go duration string, e.g. 5m)."`
 }
 
+// EventEmitRequest is the request body for POST /v0/city/{cityName}/events.
+type EventEmitRequest struct {
+	Type    string `json:"type" doc:"Event type." minLength:"1"`
+	Actor   string `json:"actor" doc:"Actor that produced the event." minLength:"1"`
+	Subject string `json:"subject,omitempty" doc:"Event subject."`
+	Message string `json:"message,omitempty" doc:"Event message."`
+}
+
 // EventEmitInput is the Huma input for POST /v0/city/{cityName}/events.
 type EventEmitInput struct {
 	CityScope
-	Body struct {
-		Type    string `json:"type" doc:"Event type." minLength:"1"`
-		Actor   string `json:"actor" doc:"Actor that produced the event." minLength:"1"`
-		Subject string `json:"subject,omitempty" doc:"Event subject."`
-		Message string `json:"message,omitempty" doc:"Event message."`
-	}
+	Body EventEmitRequest
 }
 
 // EventEmitOutput is the response body for POST /v0/events.

@@ -11,7 +11,7 @@ import (
 )
 
 // humaHandleMailList is the Huma-typed handler for GET /v0/mail.
-func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (*ListOutput[mail.Message], error) {
+func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (*MailListOutput, error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
@@ -39,9 +39,9 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		if rig != "" {
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
-				return &ListOutput[mail.Message]{
+				return &MailListOutput{
 					Index: index,
-					Body:  ListBody[mail.Message]{Items: []mail.Message{}, Total: 0},
+					Body:  MailListBody{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
 			msgs, err := mailInboxForRecipients(mp, agents)
@@ -57,18 +57,18 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				if pp.Limit < len(msgs) {
 					msgs = msgs[:pp.Limit]
 				}
-				return &ListOutput[mail.Message]{
+				return &MailListOutput{
 					Index: index,
-					Body:  ListBody[mail.Message]{Items: msgs, Total: total},
+					Body:  MailListBody{Items: msgs, Total: total},
 				}, nil
 			}
 			page, total, nextCursor := paginate(msgs, pp)
 			if page == nil {
 				page = []mail.Message{}
 			}
-			return &ListOutput[mail.Message]{
+			return &MailListOutput{
 				Index: index,
-				Body:  ListBody[mail.Message]{Items: page, Total: total, NextCursor: nextCursor},
+				Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor},
 			}, nil
 		}
 
@@ -89,27 +89,27 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			if pp.Limit < len(allMsgs) {
 				allMsgs = allMsgs[:pp.Limit]
 			}
-			return &ListOutput[mail.Message]{
+			return &MailListOutput{
 				Index: index,
-				Body:  ListBody[mail.Message]{Items: allMsgs, Total: total},
+				Body:  MailListBody{Items: allMsgs, Total: total},
 			}, nil
 		}
 		page, total, nextCursor := paginate(allMsgs, pp)
 		if page == nil {
 			page = []mail.Message{}
 		}
-		return &ListOutput[mail.Message]{
+		return &MailListOutput{
 			Index: index,
-			Body:  ListBody[mail.Message]{Items: page, Total: total, NextCursor: nextCursor},
+			Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor},
 		}, nil
 
 	case "all":
 		if rig != "" {
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
-				return &ListOutput[mail.Message]{
+				return &MailListOutput{
 					Index: index,
-					Body:  ListBody[mail.Message]{Items: []mail.Message{}, Total: 0},
+					Body:  MailListBody{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
 			msgs, err := mailAllForRecipients(mp, agents)
@@ -125,18 +125,18 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				if pp.Limit < len(msgs) {
 					msgs = msgs[:pp.Limit]
 				}
-				return &ListOutput[mail.Message]{
+				return &MailListOutput{
 					Index: index,
-					Body:  ListBody[mail.Message]{Items: msgs, Total: total},
+					Body:  MailListBody{Items: msgs, Total: total},
 				}, nil
 			}
 			page, total, nextCursor := paginate(msgs, pp)
 			if page == nil {
 				page = []mail.Message{}
 			}
-			return &ListOutput[mail.Message]{
+			return &MailListOutput{
 				Index: index,
-				Body:  ListBody[mail.Message]{Items: page, Total: total, NextCursor: nextCursor},
+				Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor},
 			}, nil
 		}
 
@@ -157,18 +157,18 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			if pp.Limit < len(allMsgs) {
 				allMsgs = allMsgs[:pp.Limit]
 			}
-			return &ListOutput[mail.Message]{
+			return &MailListOutput{
 				Index: index,
-				Body:  ListBody[mail.Message]{Items: allMsgs, Total: total},
+				Body:  MailListBody{Items: allMsgs, Total: total},
 			}, nil
 		}
 		page, total, nextCursor := paginate(allMsgs, pp)
 		if page == nil {
 			page = []mail.Message{}
 		}
-		return &ListOutput[mail.Message]{
+		return &MailListOutput{
 			Index: index,
-			Body:  ListBody[mail.Message]{Items: page, Total: total, NextCursor: nextCursor},
+			Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor},
 		}, nil
 
 	default:
@@ -299,7 +299,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 }
 
 // humaHandleMailThread is the Huma-typed handler for GET /v0/mail/thread/{id}.
-func (s *Server) humaHandleMailThread(_ context.Context, input *MailThreadInput) (*ListOutput[mail.Message], error) {
+func (s *Server) humaHandleMailThread(_ context.Context, input *MailThreadInput) (*MailListOutput, error) {
 	threadID := input.ID
 	rig := input.Rig
 	index := s.latestIndex()
@@ -317,9 +317,9 @@ func (s *Server) humaHandleMailThread(_ context.Context, input *MailThreadInput)
 			msgs = []mail.Message{}
 		}
 		msgs = tagRig(msgs, rig)
-		return &ListOutput[mail.Message]{
+		return &MailListOutput{
 			Index: index,
-			Body:  ListBody[mail.Message]{Items: msgs, Total: len(msgs)},
+			Body:  MailListBody{Items: msgs, Total: len(msgs)},
 		}, nil
 	}
 
@@ -336,9 +336,9 @@ func (s *Server) humaHandleMailThread(_ context.Context, input *MailThreadInput)
 	if allMsgs == nil {
 		allMsgs = []mail.Message{}
 	}
-	return &ListOutput[mail.Message]{
+	return &MailListOutput{
 		Index: index,
-		Body:  ListBody[mail.Message]{Items: allMsgs, Total: len(allMsgs)},
+		Body:  MailListBody{Items: allMsgs, Total: len(allMsgs)},
 	}, nil
 }
 

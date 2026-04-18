@@ -305,7 +305,7 @@ type sessionTranscriptGetResponse struct {
 	Template   string                     `json:"template"`
 	Format     string                     `json:"format" doc:"conversation, text, or raw."`
 	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages   []any                      `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames (arbitrary JSON)."`
+	Messages   []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 

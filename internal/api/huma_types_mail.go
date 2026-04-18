@@ -1,8 +1,28 @@
 package api
 
+import (
+	"github.com/gastownhall/gascity/internal/mail"
+)
+
 // Per-domain Huma input/output types for the mail handler
 // group. Split out of the original huma_types.go; mirrors the layout
 // of huma_handlers_mail.go.
+
+// MailListBody is the response body for mail list and thread endpoints.
+// Matches the JSON shape of ListBody[mail.Message] so the wire is
+// unchanged; the dedicated Go type gives the spec a mail-specific schema
+// name.
+type MailListBody struct {
+	Items      []mail.Message `json:"items" doc:"The list of messages."`
+	Total      int            `json:"total" doc:"Total number of messages matching the query."`
+	NextCursor string         `json:"next_cursor,omitempty" doc:"Cursor for the next page of results."`
+}
+
+// MailListOutput is the response envelope for mail list and thread endpoints.
+type MailListOutput struct {
+	Index uint64 `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Body  MailListBody
+}
 
 // --- Mail types ---
 

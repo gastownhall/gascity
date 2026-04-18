@@ -126,6 +126,11 @@ func newSupervisorHumaAPI(mux *http.ServeMux, readOnly bool) huma.API {
 	cfg.CreateHooks = nil
 	api := humago.New(mux, cfg)
 
+	registerEnumAliases(api.OpenAPI().Components.Schemas)
+	// Force-register documentation-only union schemas so they appear in
+	// components.schemas even though no handler names them directly.
+	_ = SessionStreamCommonEvent{}.Schema(api.OpenAPI().Components.Schemas)
+
 	api.UseMiddleware(humaCSRFMiddleware(api))
 	if readOnly {
 		api.UseMiddleware(humaReadOnlyMiddleware(api))
