@@ -1114,7 +1114,6 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		return nil, nil, nil, nil, nil, nil, nil, dErr
 	}
 	tc.Agents = append(tc.Agents, discovered...)
-	applyInheritedPackAgentDefaults(tc.Agents, tc.AgentDefaults)
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
 	if err != nil {
@@ -1186,6 +1185,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	includedServices = append(includedServices, services...)
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
+	applyInheritedPackAgentDefaults(includedAgents, tc.AgentDefaults)
 
 	// Apply pack-level patches to the merged agent list.
 	if !tc.Patches.IsEmpty() {

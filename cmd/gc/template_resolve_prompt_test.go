@@ -492,3 +492,92 @@ prompt_template = "agents/mayor/prompt.template.md"
 		t.Fatalf("pack fragment should render before city fragment: %q", tp.Prompt)
 	}
 }
+
+func TestResolveTemplateNestedIncludedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/imported"]
+
+[agent_defaults]
+append_fragments = ["city-footer"]
+`)
+	write("packs/imported/pack.toml", `
+[pack]
+name = "imported"
+schema = 2
+includes = ["../base"]
+
+[agent_defaults]
+append_fragments = ["pack-footer"]
+`)
+	write("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 2
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+prompt_template = "agents/mayor/prompt.template.md"
+`)
+	write("packs/base/agents/mayor/prompt.template.md", "Hello")
+	write("packs/base/agents/mayor/template-fragments/pack-footer.template.md", `{{ define "pack-footer" }}Pack Footer{{ end }}`)
+	write("packs/base/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var agentCfg config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if !a.Implicit && a.Name == "mayor" {
+			agentCfg = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected explicit imported mayor agent, got %v", cfg.Agents)
+	}
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "test",
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		packDirs:        cfg.PackDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	packIdx := strings.Index(tp.Prompt, "Pack Footer")
+	cityIdx := strings.Index(tp.Prompt, "City Footer")
+	if packIdx < 0 || cityIdx < 0 {
+		t.Fatalf("prompt missing inherited fragments: %q", tp.Prompt)
+	}
+	if packIdx > cityIdx {
+		t.Fatalf("pack fragment should render before city fragment: %q", tp.Prompt)
+	}
+}

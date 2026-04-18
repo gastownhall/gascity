@@ -134,6 +134,36 @@ func TestDoAgentResumePackDerivedError(t *testing.T) {
 	}
 }
 
+func TestLoadCityConfigFSEmitsProvenanceWarnings(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[agents]
+append_fragments = ["footer"]
+`)
+
+	var stderr bytes.Buffer
+	prev := loadCityConfigWarningWriter
+	loadCityConfigWarningWriter = &stderr
+	t.Cleanup(func() { loadCityConfigWarningWriter = prev })
+
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("loadCityConfigFS returned nil config")
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		t.Fatalf("expected [agents] alias warning, got %q", stderr.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // doAgentAdd — v2 scaffold behavior
 // ---------------------------------------------------------------------------

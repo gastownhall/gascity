@@ -292,10 +292,13 @@ func TestLoadWithIncludes_ImportedPackAgentDefaultsLayerIntoEffectiveFormula(t *
 	tests := []struct {
 		name        string
 		cityDefault string
+		nested      bool
 		want        string
 	}{
 		{name: "pack default only", want: "mol-pack"},
 		{name: "city override wins", cityDefault: "mol-city", want: "mol-city"},
+		{name: "nested pack include inherits default", nested: true, want: "mol-pack"},
+		{name: "city override wins for nested pack include", cityDefault: "mol-city", nested: true, want: "mol-city"},
 	}
 
 	for _, tt := range tests {
@@ -310,7 +313,28 @@ func TestLoadWithIncludes_ImportedPackAgentDefaultsLayerIntoEffectiveFormula(t *
 name = "test"
 includes = ["packs/imported"]
 ` + cityDefaults)
-			fs.Files["/city/packs/imported/pack.toml"] = []byte(`
+			if tt.nested {
+				fs.Files["/city/packs/imported/pack.toml"] = []byte(`
+[pack]
+name = "imported"
+schema = 2
+includes = ["../base"]
+
+[agent_defaults]
+default_sling_formula = "mol-pack"
+`)
+				fs.Files["/city/packs/base/pack.toml"] = []byte(`
+[pack]
+name = "base"
+schema = 2
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+			} else {
+				fs.Files["/city/packs/imported/pack.toml"] = []byte(`
 [pack]
 name = "imported"
 schema = 2
@@ -323,6 +347,7 @@ name = "mayor"
 provider = "claude"
 scope = "city"
 `)
+			}
 
 			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
 			if err != nil {
@@ -336,6 +361,32 @@ scope = "city"
 				t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadWithIncludes_ImportedPackWarningsSurfaceInProvenanceWithoutRigPacks(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+includes = ["packs/imported"]
+`)
+	fs.Files["/city/packs/imported/pack.toml"] = []byte(`
+[pack]
+name = "imported"
+schema = 2
+
+[agents]
+append_fragments = ["footer"]
+`)
+
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	warnings := strings.Join(prov.Warnings, "\n")
+	if !strings.Contains(warnings, "/city/packs/imported/pack.toml: "+agentsAliasWarning) {
+		t.Fatalf("expected imported-pack alias warning in provenance, got: %v", prov.Warnings)
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var loadCityConfigWarningWriter io.Writer = os.Stderr
+
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
 
 Describe what this agent should do here.
@@ -26,10 +28,11 @@ Describe what this agent should do here.
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string) (*config.City, error) {
 	extras := builtinPackIncludes(cityPath)
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
 	if err != nil {
 		return nil, err
 	}
+	emitLoadCityConfigWarnings(loadCityConfigWarningWriter, prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -38,12 +41,27 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
-	cfg, _, err := config.LoadWithIncludes(fs, tomlPath)
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}
+	emitLoadCityConfigWarnings(loadCityConfigWarningWriter, prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
+}
+
+func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if seen[warning] {
+			continue
+		}
+		seen[warning] = true
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+	}
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include

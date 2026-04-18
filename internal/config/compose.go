@@ -298,6 +298,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		return nil, nil, ctErr
 	}
 	prov.Warnings = append(prov.Warnings, shadowWarnings...)
+	if len(root.LoadWarnings) > 0 {
+		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
+	}
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
