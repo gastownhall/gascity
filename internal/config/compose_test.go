@@ -390,6 +390,54 @@ append_fragments = ["footer"]
 	}
 }
 
+func TestLoadWithIncludes_WrapperPackDefaultsDoNotBleedAcrossImports(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+includes = ["packs/wrapper"]
+`)
+	fs.Files["/city/packs/wrapper/pack.toml"] = []byte(`
+[pack]
+name = "wrapper"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-wrapper"
+
+[imports.dep]
+source = "../dep"
+`)
+	fs.Files["/city/packs/dep/pack.toml"] = []byte(`
+[pack]
+name = "dep"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-dep"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.BindingName != "dep" || a.Name != "mayor" {
+			continue
+		}
+		if got := a.EffectiveDefaultSlingFormula(); got != "mol-dep" {
+			t.Fatalf("dep.mayor EffectiveDefaultSlingFormula = %q, want %q", got, "mol-dep")
+		}
+		return
+	}
+	t.Fatalf("expected dep.mayor agent, got %v", explicitAgents(cfg.Agents))
+}
+
 func TestLoadWithIncludes_ConcatRigs(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

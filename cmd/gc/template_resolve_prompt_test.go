@@ -581,3 +581,96 @@ prompt_template = "agents/mayor/prompt.template.md"
 		t.Fatalf("pack fragment should render before city fragment: %q", tp.Prompt)
 	}
 }
+
+func TestResolveTemplateWrapperPackDefaultsDoNotBleedAcrossImports(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/wrapper"]
+
+[agent_defaults]
+append_fragments = ["city-footer"]
+`)
+	write("packs/wrapper/pack.toml", `
+[pack]
+name = "wrapper"
+schema = 2
+
+[agent_defaults]
+append_fragments = ["wrapper-footer"]
+
+[imports.dep]
+source = "../dep"
+`)
+	write("packs/dep/pack.toml", `
+[pack]
+name = "dep"
+schema = 2
+
+[agent_defaults]
+append_fragments = ["dep-footer"]
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+prompt_template = "agents/mayor/prompt.template.md"
+`)
+	write("packs/dep/agents/mayor/prompt.template.md", "Hello")
+	write("packs/dep/agents/mayor/template-fragments/dep-footer.template.md", `{{ define "dep-footer" }}Dep Footer{{ end }}`)
+	write("packs/dep/agents/mayor/template-fragments/wrapper-footer.template.md", `{{ define "wrapper-footer" }}Wrapper Footer{{ end }}`)
+	write("packs/dep/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var agentCfg config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if !a.Implicit && a.BindingName == "dep" && a.Name == "mayor" {
+			agentCfg = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected explicit imported dep.mayor agent, got %v", cfg.Agents)
+	}
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "test",
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		packDirs:        cfg.PackDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if strings.Contains(tp.Prompt, "Wrapper Footer") {
+		t.Fatalf("wrapper fragment should not bleed across imports: %q", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "Dep Footer") || !strings.Contains(tp.Prompt, "City Footer") {
+		t.Fatalf("prompt missing expected fragments: %q", tp.Prompt)
+	}
+}

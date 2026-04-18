@@ -31,11 +31,25 @@ var (
 
 const cityPackSchema = 1
 
+type cityPackAgentDefaults struct {
+	Model               string   `toml:"model,omitempty"`
+	WakeMode            string   `toml:"wake_mode,omitempty"`
+	DefaultSlingFormula string   `toml:"default_sling_formula,omitempty"`
+	AllowOverlay        []string `toml:"allow_overlay,omitempty"`
+	AllowEnvOverride    []string `toml:"allow_env_override,omitempty"`
+	AppendFragments     []string `toml:"append_fragments,omitempty"`
+	Skills              []string `toml:"skills,omitempty"`
+	MCP                 []string `toml:"mcp,omitempty"`
+	Provider            string   `toml:"provider,omitempty"`
+	Scope               string   `toml:"scope,omitempty"`
+	InstallAgentHooks   []string `toml:"install_agent_hooks,omitempty"`
+}
+
 type cityPackManifest struct {
 	Pack           config.PackMeta                `toml:"pack"`
 	Imports        map[string]config.Import       `toml:"imports,omitempty"`
-	AgentDefaults  config.AgentDefaults           `toml:"agent_defaults,omitempty"`
-	AgentsDefaults config.AgentDefaults           `toml:"agents,omitempty"`
+	AgentDefaults  cityPackAgentDefaults          `toml:"agent_defaults,omitempty"`
+	AgentsDefaults cityPackAgentDefaults          `toml:"agents,omitempty"`
 	Agents         []config.Agent                 `toml:"agent,omitempty"`
 	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
 	Services       []config.Service               `toml:"service,omitempty"`
@@ -566,7 +580,7 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	if manifest.Imports == nil {
 		manifest.Imports = make(map[string]config.Import)
 	}
-	manifest.AgentsDefaults = config.AgentDefaults{}
+	manifest.AgentsDefaults = cityPackAgentDefaults{}
 	return &manifest, nil
 }
 
@@ -583,7 +597,7 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 	if manifest.Imports == nil {
 		manifest.Imports = make(map[string]config.Import)
 	}
-	manifest.AgentsDefaults = config.AgentDefaults{}
+	manifest.AgentsDefaults = cityPackAgentDefaults{}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(manifest); err != nil {
@@ -594,12 +608,12 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 
 func normalizeCityPackManifestAgentDefaultsAlias(manifest *cityPackManifest, meta toml.MetaData) {
 	if meta.IsDefined("agent_defaults") {
-		manifest.AgentsDefaults = config.AgentDefaults{}
+		manifest.AgentsDefaults = cityPackAgentDefaults{}
 		return
 	}
 	if meta.IsDefined("agents") {
 		manifest.AgentDefaults = manifest.AgentsDefaults
-		manifest.AgentsDefaults = config.AgentDefaults{}
+		manifest.AgentsDefaults = cityPackAgentDefaults{}
 	}
 }
 

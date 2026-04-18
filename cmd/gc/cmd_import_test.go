@@ -165,6 +165,9 @@ schema = 1
 [agents]
 default_sling_formula = "mol-legacy"
 append_fragments = ["legacy-fragment"]
+provider = "claude"
+scope = "city"
+install_agent_hooks = ["claude"]
 `)
 
 	prevResolve := resolveImportVersion
@@ -206,6 +209,9 @@ append_fragments = ["legacy-fragment"]
 		`[agent_defaults]`,
 		`default_sling_formula = "mol-legacy"`,
 		`append_fragments = ["legacy-fragment"]`,
+		`provider = "claude"`,
+		`scope = "city"`,
+		`install_agent_hooks = ["claude"]`,
 		`[imports.tools]`,
 	} {
 		if !strings.Contains(text, want) {
