@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -19,6 +20,11 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 	}
 
 	mgr := newSessionManager(store, sp)
+	cityPath, _ := resolveCity()
+	var cfg *config.City
+	if cityPath != "" {
+		cfg, _ = loadCityConfig(cityPath)
+	}
 
 	sessions, err := mgr.List("active", "")
 	if err != nil {
@@ -40,7 +46,12 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 			continue // not idle long enough
 		}
 
-		if err := mgr.Suspend(s.ID); err != nil {
+		handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, s.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if err := handle.Stop(nil); err != nil {
 			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stderr
 		} else {
 			fmt.Fprintf(stdout, "Session %s auto-suspended (idle %s).\n", s.ID, formatDuration(now.Sub(s.LastActive))) //nolint:errcheck // best-effort stdout

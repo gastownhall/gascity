@@ -967,11 +967,15 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Fallback: controller not running — direct suspend via session manager.
+	// Fallback: controller not running — direct suspend via worker handle.
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	if err := mgr.Suspend(sessionID); err != nil {
+	if err := handle.Stop(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
