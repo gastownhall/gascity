@@ -380,62 +380,98 @@ func TestSlingRigScopeE2EReachesFormulaValidation(t *testing.T) {
 // future drift between CLI and API resolution surfaces as a test
 // failure rather than a silent regression (the exact class of bug
 // that motivated this PR). Any case where the two resolvers disagree
-// is either an intentional divergence (document it here) or a bug.
+// is either an intentional divergence (documented below) or a bug.
+//
+// Coverage dimensions:
+//   - simple agents (rig-scoped + city-scoped)
+//   - pool members (bare "polecat-N", qualified "rig/polecat-N")
+//   - V2 BindingName pool prefixes ("pack.name-N")
+//
+// Intentional divergences:
+//
+//   - Bare rig-scoped name with no rig context: apiAgentResolver
+//     deliberately omits the CLI's step-3 unambiguous-bare-name scan
+//     to avoid ambiguity in multi-rig cities. agentutil with
+//     UseAmbientRig=false also declines, so both agree — but the CLI
+//     path (resolveAgentIdentity) would succeed; that's expected.
+//
+//   - Pool-instance shape: findAgent resolves "rig/polecat-N" to the
+//     pool TEMPLATE agent, leaving synthesis to the caller, while
+//     agentutil with AllowPoolMembers=true returns the synthesized
+//     INSTANCE directly. Same shape difference applies to V2
+//     BindingName pool members ("rig/binding.name-N"). Both shapes
+//     are valid; a future unification will need to pick one.
 func TestApiVsAgentutilResolverParity(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 			{Name: "worker", Dir: "otherrig", MaxActiveSessions: intPtr(1)},
 			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // city-scoped, unique
+			// Pool agent (multi-session, unlimited)
+			{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(-1)},
+			// V2 bound pool (BindingName prefix)
+			{Name: "witness", Dir: "myrig", BindingName: "gastown", MaxActiveSessions: intPtr(-1)},
 		},
 	}
 	apiRes := apiAgentResolver{}
 
+	// Each case locks in the expected behavior of BOTH resolvers for
+	// the same input. Where apiWantQName != utilWantQName (or found
+	// values differ), that is an intentional divergence — documented
+	// in the function comment above. Changing either without a
+	// matching update to the other means the parity guarantee has
+	// shifted and the test call site should be audited.
 	cases := []struct {
-		name       string
-		input      string
-		rigContext string
-		wantFound  bool
-		wantQName  string
-		// mustAgree: both resolvers must give the same answer.
-		// When false, this is an intentional divergence documented below.
-		mustAgree bool
+		name          string
+		input         string
+		rigContext    string
+		apiWantFound  bool
+		apiWantQName  string
+		utilWantFound bool
+		utilWantQName string
 	}{
-		{"qualified_name", "myrig/worker", "", true, "myrig/worker", true},
-		{"qualified_name_with_rig_context", "myrig/worker", "otherrig", true, "myrig/worker", true},
-		{"bare_name_with_rig_context", "worker", "myrig", true, "myrig/worker", true},
-		{"bare_name_with_other_rig_context", "worker", "otherrig", true, "otherrig/worker", true},
-		{"city_scoped_bare_name", "mayor", "", true, "mayor", true},
-		{"city_scoped_bare_name_with_rig_context", "mayor", "myrig", true, "mayor", true},
-		// Intentional divergence: API resolver deliberately omits
-		// step-3 unambiguous-bare-name fallback, so a bare rig-scoped
-		// name with no rig context does NOT resolve through the API.
-		// agentutil.ResolveAgent with UseAmbientRig=false also skips
-		// it; enabling it would require AllowPoolMembers=true and
-		// would expose BindingName gaps. See apiAgentResolver doc.
-		{"bare_name_no_context_ambiguous_rig_scoped", "worker", "", false, "", true},
+		// Shared behavior: simple agents, rig context, city-scoped.
+		{"qualified_name", "myrig/worker", "", true, "myrig/worker", true, "myrig/worker"},
+		{"qualified_name_with_rig_context", "myrig/worker", "otherrig", true, "myrig/worker", true, "myrig/worker"},
+		{"bare_name_with_rig_context", "worker", "myrig", true, "myrig/worker", true, "myrig/worker"},
+		{"bare_name_with_other_rig_context", "worker", "otherrig", true, "otherrig/worker", true, "otherrig/worker"},
+		{"city_scoped_bare_name", "mayor", "", true, "mayor", true, "mayor"},
+		{"city_scoped_bare_name_with_rig_context", "mayor", "myrig", true, "mayor", true, "mayor"},
+		{"bare_name_no_context_ambiguous_rig_scoped", "worker", "", false, "", false, ""},
+
+		// Pool-member divergence: findAgent resolves a pool instance
+		// request to the POOL TEMPLATE (caller then synthesizes).
+		// agentutil with AllowPoolMembers=true synthesizes the
+		// INSTANCE directly. Both are valid shapes, but the contract
+		// must not shift silently.
+		{"qualified_pool_member", "myrig/polecat-2", "", true, "myrig/polecat", true, "myrig/polecat-2"},
+
+		// V2 BindingName divergence: both resolvers recognize the
+		// "<binding>.<name>-N" prefix, but with the same template
+		// vs instance shape as the polecat case — findAgent returns
+		// the pool template (binding-qualified), agentutil returns
+		// the synthesized instance.
+		{"v2_binding_pool_member", "myrig/gastown.witness-1", "", true, "myrig/gastown.witness", true, "myrig/gastown.witness-1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			apiAgent, apiOK := apiRes.ResolveAgent(cfg, tc.input, tc.rigContext)
-			if apiOK != tc.wantFound {
-				t.Fatalf("apiAgentResolver found=%v, want %v", apiOK, tc.wantFound)
+			if apiOK != tc.apiWantFound {
+				t.Fatalf("apiAgentResolver found=%v, want %v", apiOK, tc.apiWantFound)
 			}
-			if apiOK && apiAgent.QualifiedName() != tc.wantQName {
-				t.Fatalf("apiAgentResolver QualifiedName = %q, want %q", apiAgent.QualifiedName(), tc.wantQName)
-			}
-			if !tc.mustAgree {
-				return
+			if apiOK && apiAgent.QualifiedName() != tc.apiWantQName {
+				t.Fatalf("apiAgentResolver QualifiedName = %q, want %q", apiAgent.QualifiedName(), tc.apiWantQName)
 			}
 			utilAgent, utilOK := agentutil.ResolveAgent(cfg, tc.input, agentutil.ResolveOpts{
-				UseAmbientRig: tc.rigContext != "",
-				RigContext:    tc.rigContext,
+				UseAmbientRig:    tc.rigContext != "",
+				RigContext:       tc.rigContext,
+				AllowPoolMembers: true,
 			})
-			if apiOK != utilOK {
-				t.Errorf("resolver disagreement: apiAgentResolver found=%v, agentutil.ResolveAgent found=%v", apiOK, utilOK)
+			if utilOK != tc.utilWantFound {
+				t.Fatalf("agentutil.ResolveAgent found=%v, want %v", utilOK, tc.utilWantFound)
 			}
-			if apiOK && utilOK && apiAgent.QualifiedName() != utilAgent.QualifiedName() {
-				t.Errorf("resolver disagreement: api=%q, util=%q", apiAgent.QualifiedName(), utilAgent.QualifiedName())
+			if utilOK && utilAgent.QualifiedName() != tc.utilWantQName {
+				t.Fatalf("agentutil.ResolveAgent QualifiedName = %q, want %q", utilAgent.QualifiedName(), tc.utilWantQName)
 			}
 		})
 	}
