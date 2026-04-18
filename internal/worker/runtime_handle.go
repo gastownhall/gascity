@@ -63,6 +63,7 @@ func (h *RuntimeHandle) Start(context.Context) error {
 	return fmt.Errorf("%w: start requires a bead-backed session", ErrOperationUnsupported)
 }
 
+// StartResolved starts a runtime-only handle using the provided resolved command.
 func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) error {
 	if h.provider.IsRunning(h.sessionName) {
 		return nil
@@ -77,6 +78,7 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 	return h.provider.Start(ctx, h.sessionName, startCfg)
 }
 
+// Attach attaches to the live runtime session if it is currently running.
 func (h *RuntimeHandle) Attach(context.Context) error {
 	if !h.provider.IsRunning(h.sessionName) {
 		return fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
@@ -84,14 +86,17 @@ func (h *RuntimeHandle) Attach(context.Context) error {
 	return h.provider.Attach(h.sessionName)
 }
 
+// Create reports unsupported because runtime-only handles have no bead-backed creation path.
 func (h *RuntimeHandle) Create(context.Context, CreateMode) (sessionpkg.Info, error) {
 	return sessionpkg.Info{}, fmt.Errorf("%w: create requires a bead-backed session", ErrOperationUnsupported)
 }
 
+// Reset reports unsupported because runtime-only handles have no reset path.
 func (h *RuntimeHandle) Reset(context.Context) error {
 	return fmt.Errorf("%w: reset requires a bead-backed session", ErrOperationUnsupported)
 }
 
+// Stop asks the provider to stop the live runtime session.
 func (h *RuntimeHandle) Stop(context.Context) error {
 	return h.provider.Stop(h.sessionName)
 }

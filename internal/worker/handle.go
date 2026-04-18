@@ -56,14 +56,21 @@ type Phase string
 
 const (
 	// PhaseUnknown reports that the worker lifecycle phase is not yet known.
-	PhaseUnknown  Phase = "unknown"
+	PhaseUnknown Phase = "unknown"
+	// PhaseStarting reports that the worker is starting up.
 	PhaseStarting Phase = "starting"
-	PhaseReady    Phase = "ready"
-	PhaseBusy     Phase = "busy"
-	PhaseBlocked  Phase = "blocked"
+	// PhaseReady reports that the worker is idle and ready for input.
+	PhaseReady Phase = "ready"
+	// PhaseBusy reports that the worker is actively processing work.
+	PhaseBusy Phase = "busy"
+	// PhaseBlocked reports that the worker is waiting on an interaction.
+	PhaseBlocked Phase = "blocked"
+	// PhaseStopping reports that shutdown is in progress.
 	PhaseStopping Phase = "stopping"
-	PhaseStopped  Phase = "stopped"
-	PhaseFailed   Phase = "failed"
+	// PhaseStopped reports that the worker is not running.
+	PhaseStopped Phase = "stopped"
+	// PhaseFailed reports that the worker reached a terminal failure.
+	PhaseFailed Phase = "failed"
 )
 
 // State is the worker-level lifecycle view.
@@ -81,8 +88,10 @@ type DeliveryIntent string
 
 const (
 	// DeliveryIntentDefault submits a normal follow-up turn.
-	DeliveryIntentDefault      DeliveryIntent = "default"
-	DeliveryIntentFollowUp     DeliveryIntent = "follow_up"
+	DeliveryIntentDefault DeliveryIntent = "default"
+	// DeliveryIntentFollowUp explicitly marks the turn as a follow-up.
+	DeliveryIntentFollowUp DeliveryIntent = "follow_up"
+	// DeliveryIntentInterruptNow replaces current work immediately if possible.
 	DeliveryIntentInterruptNow DeliveryIntent = "interrupt_now"
 )
 
@@ -103,7 +112,8 @@ type CreateMode string
 const (
 	// CreateModeDeferred creates the session without starting live runtime work.
 	CreateModeDeferred CreateMode = "deferred"
-	CreateModeStarted  CreateMode = "started"
+	// CreateModeStarted creates the session and starts the live runtime.
+	CreateModeStarted CreateMode = "started"
 )
 
 // InterruptRequest is reserved for future interrupt controls.
@@ -114,9 +124,11 @@ type NudgeDelivery string
 
 const (
 	// NudgeDeliveryDefault uses the provider's default nudge path.
-	NudgeDeliveryDefault   NudgeDelivery = "default"
+	NudgeDeliveryDefault NudgeDelivery = "default"
+	// NudgeDeliveryImmediate delivers the nudge as soon as possible.
 	NudgeDeliveryImmediate NudgeDelivery = "immediate"
-	NudgeDeliveryWaitIdle  NudgeDelivery = "wait_idle"
+	// NudgeDeliveryWaitIdle waits for an idle boundary before nudging.
+	NudgeDeliveryWaitIdle NudgeDelivery = "wait_idle"
 )
 
 // NudgeRequest delivers a best-effort wake or redirect message.
@@ -138,6 +150,7 @@ type NudgeWakePolicy string
 const (
 	// NudgeWakeIfNeeded allows the nudge to wake a stopped session first.
 	NudgeWakeIfNeeded NudgeWakePolicy = "wake_if_needed"
+	// NudgeWakeLiveOnly only delivers the nudge to already-live sessions.
 	NudgeWakeLiveOnly NudgeWakePolicy = "live_only"
 )
 
