@@ -1574,6 +1574,13 @@
           "type": "boolean",
           "description": "SupportsACP indicates the binary speaks the Agent Client Protocol\n(JSON-RPC 2.0 over stdio). When an agent sets session = \"acp\",\nits resolved provider must have SupportsACP = true."
         },
+        "acp_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ACPArgs are extra command-line arguments appended when session = \"acp\".\nExample: [\"--acp\"] (copilot). Providers that auto-detect ACP mode\n(e.g., Claude via pipe detection) leave this empty."
+        },
         "supports_hooks": {
           "type": "boolean",
           "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events."
