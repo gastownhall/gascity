@@ -485,22 +485,34 @@ The lock file's keys are **local handles**, not URLs. URLs may repeat across ent
 
 ## Implementation
 
-`gc import` is itself a Gas City pack — pure Python, no Go changes for v1, registered via `[[commands]]` in pack.toml. The pack is published as a git repo (the conventional name is `gc-import`) and installed by users via the existing `gc pack` mechanism (or, after v1 ships, via `gc import add` itself, which is a fun bootstrap).
+`gc import` is itself a Gas City pack — pure Python, no Go changes for v1. Under V2 the commands and doctor check are convention-discovered: each command lives in its own `commands/<name>/` directory with a `command.toml` sidecar pointing at the Python entrypoint (V2 discovery defaults to `run.sh`, so non-shell entrypoints need an explicit `run = "<name>.py"` override). The pack is published as a git repo (the conventional name is `gc-import`) and installed by users via the existing `gc pack` mechanism (or, after v1 ships, via `gc import add` itself, which is a fun bootstrap).
 
 ### Repo layout
 
 ```
 gc-import/
-├── pack.toml                  # declares the [[commands]] entries
+├── pack.toml                  # [pack] schema = 2 — no [[commands]] inventory
 ├── README.md                  # user guide (the canonical entry point)
 ├── doctor/
-│   └── check-python.sh        # verifies Python 3.11+ is available
+│   └── python3.11/
+│       ├── doctor.toml        # description only; run.sh is the V2 default
+│       └── run.sh             # verifies Python 3.11+ is available
 ├── commands/
-│   ├── add.py
-│   ├── remove.py
-│   ├── install.py
-│   ├── upgrade.py
-│   └── list.py
+│   ├── add/
+│   │   ├── command.toml       # description + run = "add.py"
+│   │   └── add.py
+│   ├── remove/
+│   │   ├── command.toml
+│   │   └── remove.py
+│   ├── install/
+│   │   ├── command.toml
+│   │   └── install.py
+│   ├── upgrade/
+│   │   ├── command.toml
+│   │   └── upgrade.py
+│   └── list/
+│       ├── command.toml
+│       └── list.py
 ├── lib/
 │   ├── __init__.py
 │   ├── semver.py              # constraint parsing and matching
