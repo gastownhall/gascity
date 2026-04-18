@@ -32,3 +32,7 @@ reports/
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
 .cache/
+
+# Bugflow policy — strictly local state, configured per operator
+.github/bugflow.toml
+
