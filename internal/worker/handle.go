@@ -110,13 +110,29 @@ const (
 )
 
 type NudgeRequest struct {
-	Text     string        `json:"text"`
-	Delivery NudgeDelivery `json:"delivery,omitempty"`
+	Text     string          `json:"text"`
+	Delivery NudgeDelivery   `json:"delivery,omitempty"`
+	Source   string          `json:"source,omitempty"`
+	Wake     NudgeWakePolicy `json:"wake,omitempty"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
 type NudgeResult struct {
 	Delivered bool `json:"delivered"`
+}
+
+type NudgeWakePolicy string
+
+const (
+	NudgeWakeIfNeeded NudgeWakePolicy = "wake_if_needed"
+	NudgeWakeLiveOnly NudgeWakePolicy = "live_only"
+)
+
+func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
+	if policy == NudgeWakeLiveOnly {
+		return policy
+	}
+	return NudgeWakeIfNeeded
 }
 
 // HistoryRequest scopes transcript loading for a worker.
@@ -480,17 +496,38 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (NudgeResul
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
+		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
+			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text)
+			if err != nil {
+				return NudgeResult{}, err
+			}
+			return NudgeResult{Delivered: delivered}, nil
+		}
 		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
 			return NudgeResult{}, err
 		}
 		return NudgeResult{Delivered: true}, nil
 	case NudgeDeliveryImmediate:
+		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
+			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
+			if err != nil {
+				return NudgeResult{}, err
+			}
+			return NudgeResult{Delivered: delivered}, nil
+		}
 		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
 			return NudgeResult{}, err
 		}
 		return NudgeResult{Delivered: true}, nil
 	case NudgeDeliveryWaitIdle:
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
+			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
+			if err != nil {
+				return NudgeResult{}, err
+			}
+			return NudgeResult{Delivered: delivered}, nil
+		}
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
 			return NudgeResult{}, err
 		}

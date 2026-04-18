@@ -130,7 +130,12 @@ func doRigRestart(
 		if !a.SupportsInstanceExpansion() {
 			// Non-expanding template.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
-			if sp.IsRunning(sn) {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", sn, err) //nolint:errcheck
+				return 1
+			}
+			if running {
 				targets = append(targets, stopTarget{
 					name:     sn,
 					template: a.QualifiedName(),
@@ -142,7 +147,12 @@ func doRigRestart(
 		} else {
 			// Pool agent: resolve live instances from beads first, then legacy discovery.
 			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr) {
-				if !sp.IsRunning(ref.sessionName) {
+				running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", ref.sessionName, err) //nolint:errcheck
+					return 1
+				}
+				if !running {
 					continue
 				}
 				targets = append(targets, stopTarget{

@@ -369,7 +369,15 @@ func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, 
 	return m.sp.Nudge(sessName, content)
 }
 
-func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+func normalizeWaitIdleNudgeSource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "session"
+	}
+	return source
+}
+
+func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	if transportFromMetadata(b) == "acp" {
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 			return false, err
@@ -392,7 +400,33 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
-	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder("session", message), true); err != nil {
+	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
+	if !m.sp.IsRunning(sessName) {
+		return false, nil
+	}
+	if transportFromMetadata(b) == "acp" {
+		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if providerKind(b) != "claude" {
+		return false, nil
+	}
+	waiter, ok := m.sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false, nil
+	}
+	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
+		return false, nil
+	}
+	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
 	}
 	return true, nil
@@ -460,6 +494,26 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 	})
 }
 
+func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		_, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			delivered = false
+			return nil
+		}
+		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+			return err
+		}
+		delivered = true
+		return nil
+	})
+	return delivered, err
+}
+
 // Start ensures the session runtime is live without sending a message.
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal.
@@ -487,19 +541,47 @@ func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand 
 	return m.send(ctx, id, message, resumeCommand, hints, true)
 }
 
+// SendLiveOnly nudges the runtime only when the current session is already
+// running. It never resumes or restarts the session.
+func (m *Manager) SendLiveOnly(ctx context.Context, id, message string) (bool, error) {
+	return m.sendLiveOnly(ctx, id, message, false)
+}
+
+// SendImmediateLiveOnly is like SendLiveOnly but uses the immediate nudge path
+// when the runtime supports it. It never resumes or restarts the session.
+func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string) (bool, error) {
+	return m.sendLiveOnly(ctx, id, message, true)
+}
+
 // TryWaitIdleNudge delivers a best-effort session nudge at a provider-defined
 // safe boundary. It resumes supported runtimes if needed, then reports whether
 // live delivery actually happened. Unsupported providers return (false, nil)
 // so higher layers can fall back to queue semantics without treating that as
 // an operational error.
-func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (bool, error) {
+func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
+		return err
+	})
+	return delivered, err
+}
+
+// TryWaitIdleNudgeLiveOnly delivers a best-effort nudge at a safe boundary
+// only when the runtime is already live. It never resumes or restarts the
+// session.
+func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (bool, error) {
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		delivered, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message)
 		return err
 	})
 	return delivered, err

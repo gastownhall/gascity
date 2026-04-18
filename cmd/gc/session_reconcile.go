@@ -119,7 +119,7 @@ func evaluateWakeReasons(
 	}
 
 	if !waitHold && sp != nil {
-		if name != "" && sp.IsAttached(name) {
+		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
 			reasons = append(reasons, WakeAttached)
 		}
 	}

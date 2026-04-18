@@ -178,7 +178,12 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	})
 
 	// Kill target session (reconciler restarts it).
-	if !sp.IsRunning(sessionName) {
+	running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: observing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !running {
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (session not running; will be delivered on next start)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 		return 0
 	}

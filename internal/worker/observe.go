@@ -44,16 +44,20 @@ func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if err != nil {
 		return LiveObservation{}, err
 	}
+	runtimeObs, err := h.manager.ObserveRuntime(id)
+	if err != nil {
+		return LiveObservation{}, err
+	}
 	obs := LiveObservation{
-		Running:          info.State == sessionpkg.StateActive || info.State == sessionpkg.StateAwake,
+		Running:          runtimeObs.Running,
 		Suspended:        info.State == sessionpkg.StateSuspended,
-		Attached:         info.Attached,
+		Attached:         runtimeObs.Attached,
 		RuntimeSessionID: info.ID,
 		SessionID:        info.ID,
-		SessionName:      info.SessionName,
+		SessionName:      runtimeObs.SessionName,
 	}
-	if !info.LastActive.IsZero() {
-		last := info.LastActive
+	if !runtimeObs.LastActive.IsZero() {
+		last := runtimeObs.LastActive
 		obs.LastActivity = &last
 	}
 	return obs, nil
