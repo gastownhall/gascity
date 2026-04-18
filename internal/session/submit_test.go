@@ -396,6 +396,52 @@ func TestSubmitFollowUpOnSuspendedSessionFallsBackToImmediateSend(t *testing.T) 
 	}
 }
 
+func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "state", string(StateAsleep)); err != nil {
+		t.Fatalf("SetMetadata(state): %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "wake and send", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(follow_up) unexpectedly queued for asleep session")
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after follow_up on asleep session")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("pending queued submits = %d, want 0", len(state.Pending))
+	}
+	found := false
+	for _, call := range sp.Calls {
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "wake and send" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("calls = %#v, want NudgeNow(wake and send)", sp.Calls)
+	}
+}
+
 func TestSubmissionCapabilitiesFollowUpUnsupportedForACP(t *testing.T) {
 	caps := SubmissionCapabilitiesForMetadata(
 		map[string]string{

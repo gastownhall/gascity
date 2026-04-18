@@ -92,14 +92,14 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		}
 		switch intent {
 		case SubmitIntentFollowUp:
-			if err := m.pendingInteractionLocked(sessName); err != nil {
-				return err
-			}
 			if !m.supportsFollowUpLocked(b) {
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 				return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+			}
+			if err := m.pendingInteractionLocked(sessName); err != nil {
+				return err
 			}
 			if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 				return err
