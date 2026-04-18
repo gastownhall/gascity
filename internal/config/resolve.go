@@ -129,10 +129,22 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 				}
 			}
-			// Layer city overrides on top of the built-in if the provider
-			// name or command matches a known builtin. This lets city
-			// configs override command/args while inheriting OptionsSchema,
-			// PromptMode, ResumeFlag, etc. from the builtin defaults.
+			// Phase 2+: if the spec has explicit Base declared (non-empty),
+			// resolve via the chain walker so inherited fields propagate.
+			// Wrapper providers (aimux-wrapped codex) rely on this path to
+			// pick up PermissionModes / OptionsSchema / ReadyDelayMs from
+			// the built-in ancestor. base = "" (explicit empty) is
+			// standalone opt-out — falls through to legacy branches.
+			if spec.Base != nil && strings.TrimSpace(*spec.Base) != "" {
+				resolved, err := ResolveProviderChain(name, spec, cityProviders)
+				if err != nil {
+					return nil, err
+				}
+				merged := resolvedChainToSpec(resolved, spec)
+				return &merged, nil
+			}
+			// Phase A legacy: layer city overrides on top of the built-in
+			// if the provider name or command matches a known builtin.
 			builtins := BuiltinProviders()
 			if base, ok := builtins[name]; ok {
 				merged := MergeProviderOverBuiltin(base, spec)
@@ -164,9 +176,10 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 // when non-nil. Map fields (Env, PermissionModes) merge additively (city keys
 // override base keys).
 //
-// Note: booleans are one-directional (can enable, not disable) due to TOML
-// zero-value ambiguity — city providers cannot override a built-in's true
-// to false for EmitsPermissionWarning, SupportsACP, or SupportsHooks.
+// Capability bools (EmitsPermissionWarning, SupportsACP, SupportsHooks)
+// are tri-state *bool: nil = inherit base, &true = enable, &false =
+// explicit disable. A child that sets `supports_hooks = false` now
+// suppresses the feature even when inherited from a built-in with &true.
 func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	result := base
 
@@ -204,17 +217,19 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.ReadyPromptPrefix != "" {
 		result.ReadyPromptPrefix = city.ReadyPromptPrefix
 	}
-	if city.EmitsPermissionWarning {
-		result.EmitsPermissionWarning = true
+	// Tri-state capability bools: city pointer wins when non-nil,
+	// otherwise base is preserved (including base's own &false).
+	if city.EmitsPermissionWarning != nil {
+		result.EmitsPermissionWarning = city.EmitsPermissionWarning
 	}
 	if city.PathCheck != "" {
 		result.PathCheck = city.PathCheck
 	}
-	if city.SupportsACP {
-		result.SupportsACP = true
+	if city.SupportsACP != nil {
+		result.SupportsACP = city.SupportsACP
 	}
-	if city.SupportsHooks {
-		result.SupportsHooks = true
+	if city.SupportsHooks != nil {
+		result.SupportsHooks = city.SupportsHooks
 	}
 	if city.InstructionsFile != "" {
 		result.InstructionsFile = city.InstructionsFile
@@ -383,9 +398,9 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		PromptFlag:             spec.PromptFlag,
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
-		EmitsPermissionWarning: spec.EmitsPermissionWarning,
-		SupportsACP:            spec.SupportsACP,
-		SupportsHooks:          spec.SupportsHooks,
+		EmitsPermissionWarning: derefBool(spec.EmitsPermissionWarning),
+		SupportsACP:            derefBool(spec.SupportsACP),
+		SupportsHooks:          derefBool(spec.SupportsHooks),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,
@@ -546,4 +561,95 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 			rp.EffectiveDefaults[k] = v
 		}
 	}
+}
+
+// resolvedChainToSpec folds a chain-resolved ResolvedProvider back into
+// a ProviderSpec. Used by lookupProvider so downstream callers (agent
+// merge, specToResolved) see the inherited fields from the chain walk.
+// Preserves the original leaf spec's fields that ResolvedProvider
+// doesn't carry (DisplayName, PathCheck).
+func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
+	out := leaf
+	out.Command = r.Command
+	if r.Args != nil {
+		out.Args = append([]string(nil), r.Args...)
+	}
+	if r.PromptMode != "" {
+		out.PromptMode = r.PromptMode
+	}
+	if r.PromptFlag != "" {
+		out.PromptFlag = r.PromptFlag
+	}
+	if r.ReadyDelayMs != 0 {
+		out.ReadyDelayMs = r.ReadyDelayMs
+	}
+	if r.ReadyPromptPrefix != "" {
+		out.ReadyPromptPrefix = r.ReadyPromptPrefix
+	}
+	if r.ProcessNames != nil {
+		out.ProcessNames = append([]string(nil), r.ProcessNames...)
+	}
+	// Tri-state *bool: preserve from leaf if set; else fold from resolved bool.
+	if leaf.EmitsPermissionWarning == nil && r.EmitsPermissionWarning {
+		t := true
+		out.EmitsPermissionWarning = &t
+	}
+	if leaf.SupportsACP == nil && r.SupportsACP {
+		t := true
+		out.SupportsACP = &t
+	}
+	if leaf.SupportsHooks == nil && r.SupportsHooks {
+		t := true
+		out.SupportsHooks = &t
+	}
+	if r.InstructionsFile != "" {
+		out.InstructionsFile = r.InstructionsFile
+	}
+	if r.ResumeFlag != "" {
+		out.ResumeFlag = r.ResumeFlag
+	}
+	if r.ResumeStyle != "" {
+		out.ResumeStyle = r.ResumeStyle
+	}
+	if r.ResumeCommand != "" {
+		out.ResumeCommand = r.ResumeCommand
+	}
+	if r.SessionIDFlag != "" {
+		out.SessionIDFlag = r.SessionIDFlag
+	}
+	if r.TitleModel != "" {
+		out.TitleModel = r.TitleModel
+	}
+	if r.PrintArgs != nil {
+		out.PrintArgs = append([]string(nil), r.PrintArgs...)
+	}
+	if r.Env != nil {
+		out.Env = make(map[string]string, len(r.Env))
+		for k, v := range r.Env {
+			out.Env[k] = v
+		}
+	}
+	if r.PermissionModes != nil {
+		out.PermissionModes = make(map[string]string, len(r.PermissionModes))
+		for k, v := range r.PermissionModes {
+			out.PermissionModes[k] = v
+		}
+	}
+	if r.OptionsSchema != nil {
+		out.OptionsSchema = append([]ProviderOption(nil), r.OptionsSchema...)
+	}
+	// EffectiveDefaults on ResolvedProvider is the merged defaults; fold
+	// into OptionDefaults on the spec so downstream specToResolved picks
+	// it up when rebuilding.
+	if r.EffectiveDefaults != nil {
+		if out.OptionDefaults == nil {
+			out.OptionDefaults = make(map[string]string, len(r.EffectiveDefaults))
+		}
+		for k, v := range r.EffectiveDefaults {
+			if _, ok := out.OptionDefaults[k]; !ok {
+				out.OptionDefaults[k] = v
+			}
+		}
+	}
+	return out
 }

@@ -560,8 +560,8 @@ func TestLookupProviderCityInheritsBuiltin(t *testing.T) {
 		t.Errorf("Args = %v, want [--yolo --model claude-haiku-4.5]", spec.Args)
 	}
 	// Should inherit SupportsHooks from built-in copilot.
-	if spec.SupportsHooks != builtinCopilot.SupportsHooks {
-		t.Errorf("SupportsHooks = %v, want %v (inherited)", spec.SupportsHooks, builtinCopilot.SupportsHooks)
+	if derefBool(spec.SupportsHooks) != derefBool(builtinCopilot.SupportsHooks) {
+		t.Errorf("SupportsHooks = %v, want %v (inherited)", derefBool(spec.SupportsHooks), derefBool(builtinCopilot.SupportsHooks))
 	}
 }
 
@@ -610,7 +610,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 		PromptFlag:        "--prompt",
 		ReadyDelayMs:      5000,
 		ReadyPromptPrefix: "❯ ",
-		SupportsACP:       true,
+		SupportsACP:       boolPtr(true),
 		Env:               map[string]string{"BASE_KEY": "base_val"},
 		PermissionModes:   map[string]string{"unrestricted": "--yolo"},
 	}
@@ -637,7 +637,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	if result.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", result.ReadyDelayMs)
 	}
-	if !result.SupportsACP {
+	if !derefBool(result.SupportsACP) {
 		t.Error("SupportsACP should be inherited")
 	}
 	// Env merged additively.
@@ -650,6 +650,110 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	// PermissionModes inherited.
 	if result.PermissionModes["unrestricted"] != "--yolo" {
 		t.Error("PermissionModes not inherited")
+	}
+}
+
+// --- Tri-state capability bool tests ---
+//
+// These verify the three-way *bool semantics for SupportsHooks,
+// SupportsACP, and EmitsPermissionWarning per the provider-inheritance
+// design §Tri-state capability bools.
+
+func TestMergeProviderOverBuiltinTriStateChildDisablesParentEnable(t *testing.T) {
+	// Parent sets &true, child explicitly sets &false → final &false.
+	base := ProviderSpec{Command: "x", SupportsHooks: boolPtr(true)}
+	city := ProviderSpec{SupportsHooks: boolPtr(false)}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want &false")
+	}
+	if *result.SupportsHooks != false {
+		t.Errorf("SupportsHooks = %v, want false (child explicit disable wins)", *result.SupportsHooks)
+	}
+}
+
+func TestMergeProviderOverBuiltinTriStateChildNilInheritsParent(t *testing.T) {
+	// Parent sets &true, child absent (nil) → final inherits &true.
+	base := ProviderSpec{Command: "x", SupportsHooks: boolPtr(true)}
+	city := ProviderSpec{}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want inherited &true")
+	}
+	if *result.SupportsHooks != true {
+		t.Errorf("SupportsHooks = %v, want true (inherited)", *result.SupportsHooks)
+	}
+}
+
+func TestMergeProviderOverBuiltinTriStateChildEnablesParentNil(t *testing.T) {
+	// Parent absent (nil), child sets &true → final &true.
+	base := ProviderSpec{Command: "x"}
+	city := ProviderSpec{SupportsHooks: boolPtr(true)}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want &true")
+	}
+	if *result.SupportsHooks != true {
+		t.Errorf("SupportsHooks = %v, want true (child enabled)", *result.SupportsHooks)
+	}
+}
+
+// TestSupportsHooksFalseRegressionTOML verifies that a raw TOML config
+// with supports_hooks = false decodes into *bool = &false and propagates
+// through resolution as a suppression (resolved.SupportsHooks == false).
+// This is the back-compat regression test called out in the migration.
+func TestSupportsHooksFalseRegressionTOML(t *testing.T) {
+	// Parse TOML that sets supports_hooks = false on a custom provider
+	// that inherits from builtin claude (which has SupportsHooks = &true).
+	// The explicit false must win over the inherited true.
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.no-hooks-claude]
+base = "builtin:claude"
+supports_hooks = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	spec, ok := cfg.Providers["no-hooks-claude"]
+	if !ok {
+		t.Fatal("provider no-hooks-claude not loaded")
+	}
+	if spec.SupportsHooks == nil {
+		t.Fatal("SupportsHooks decoded as nil, want &false (TOML explicit)")
+	}
+	if *spec.SupportsHooks != false {
+		t.Errorf("SupportsHooks = %v, want false", *spec.SupportsHooks)
+	}
+
+	// Resolve through the chain and confirm the explicit false survives
+	// inheritance from builtin claude (which has SupportsHooks = &true).
+	resolved, err := ResolveProviderChain("no-hooks-claude", spec, cfg.Providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if resolved.SupportsHooks {
+		t.Error("resolved SupportsHooks = true, want false (explicit disable must win over inherited enable)")
+	}
+}
+
+// TestSupportsHooksComposeFragmentDisables verifies that a fragment with
+// supports_hooks = false, composed over a builtin-derived provider with
+// no local declaration, produces a final &false on the merged spec.
+func TestSupportsHooksComposeFragmentDisables(t *testing.T) {
+	// Fragment that disables hooks on a provider already present in base.
+	base := ProviderSpec{Command: "claude", SupportsHooks: boolPtr(true)}
+	// deepMergeProvider uses fragMeta.IsDefined to detect explicit
+	// presence, so simulate that by merging directly through
+	// MergeProviderOverBuiltin which is the authoritative path.
+	frag := ProviderSpec{SupportsHooks: boolPtr(false)}
+	merged := MergeProviderOverBuiltin(base, frag)
+	if merged.SupportsHooks == nil || *merged.SupportsHooks != false {
+		t.Errorf("merged SupportsHooks = %v, want &false", merged.SupportsHooks)
 	}
 }
 
@@ -913,11 +1017,11 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ReadyDelayMs:           5000,
 		ReadyPromptPrefix:      "$ ",
 		ProcessNames:           []string{"custom"},
-		EmitsPermissionWarning: true,
+		EmitsPermissionWarning: boolPtr(true),
 		Env:                    map[string]string{"K": "V"},
 		PathCheck:              "custom-bin",
-		SupportsACP:            true,
-		SupportsHooks:          true,
+		SupportsACP:            boolPtr(true),
+		SupportsHooks:          boolPtr(true),
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",

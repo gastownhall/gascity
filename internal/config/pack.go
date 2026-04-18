@@ -1293,12 +1293,17 @@ func deepCopyProviderSpecs(in map[string]ProviderSpec) map[string]ProviderSpec {
 func deepCopyProviderSpec(in ProviderSpec) ProviderSpec {
 	out := in
 	out.Args = append([]string(nil), in.Args...)
+	out.ArgsAppend = append([]string(nil), in.ArgsAppend...)
 	out.ProcessNames = append([]string(nil), in.ProcessNames...)
 	out.Env = deepCopyStringMap(in.Env)
 	out.PermissionModes = deepCopyStringMap(in.PermissionModes)
 	out.OptionDefaults = deepCopyStringMap(in.OptionDefaults)
 	out.OptionsSchema = deepCopyProviderOptions(in.OptionsSchema)
 	out.PrintArgs = append([]string(nil), in.PrintArgs...)
+	out.Base = copyStringPtr(in.Base)
+	out.EmitsPermissionWarning = copyBoolPtr(in.EmitsPermissionWarning)
+	out.SupportsACP = copyBoolPtr(in.SupportsACP)
+	out.SupportsHooks = copyBoolPtr(in.SupportsHooks)
 	return out
 }
 

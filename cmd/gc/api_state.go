@@ -542,13 +542,17 @@ func (cs *controllerState) CreateProvider(name string, spec config.ProviderSpec)
 // UpdateProvider partially updates an existing city-level provider.
 func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate) error {
 	return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
-		DisplayName:  patch.DisplayName,
-		Command:      patch.Command,
-		Args:         patch.Args,
-		PromptMode:   patch.PromptMode,
-		PromptFlag:   patch.PromptFlag,
-		ReadyDelayMs: patch.ReadyDelayMs,
-		Env:          patch.Env,
+		DisplayName:        patch.DisplayName,
+		Base:               patch.Base,
+		Command:            patch.Command,
+		Args:               patch.Args,
+		ArgsAppend:         patch.ArgsAppend,
+		PromptMode:         patch.PromptMode,
+		PromptFlag:         patch.PromptFlag,
+		ReadyDelayMs:       patch.ReadyDelayMs,
+		Env:                patch.Env,
+		OptionsSchemaMerge: patch.OptionsSchemaMerge,
+		OptionsSchema:      patch.OptionsSchema,
 	})
 }
 

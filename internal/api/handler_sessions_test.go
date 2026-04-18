@@ -2447,3 +2447,39 @@ func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 		t.Error("command should not be exposed in API response")
 	}
 }
+
+// TestSessionToResponse_BaseOnlyDescendant_InheritsDisplayName mirrors
+// the /v0/agents base-only test for /v0/sessions: the session response
+// must pick up the builtin ancestor's DisplayName when the leaf
+// provider doesn't declare one, routed through the resolved cache.
+func TestSessionToResponse_BaseOnlyDescendant_InheritsDisplayName(t *testing.T) {
+	baseCodex := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"codex-max": {Base: &baseCodex}, // no DisplayName, no Command
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"codex-max": {
+				Name:            "codex-max",
+				BuiltinAncestor: "codex",
+				Command:         "codex",
+			},
+		},
+	}
+
+	info := session.Info{
+		ID:       "sess-1",
+		Template: "myrig/mayor",
+		Provider: "codex-max",
+	}
+	resp := sessionToResponse(info, cfg)
+
+	if resp.Provider != "codex-max" {
+		t.Errorf("Provider = %q, want codex-max", resp.Provider)
+	}
+	// DisplayName inherited from builtin:codex via the resolved cache.
+	if resp.DisplayName != "Codex CLI" {
+		t.Errorf("DisplayName = %q, want %q (inherited)", resp.DisplayName, "Codex CLI")
+	}
+}

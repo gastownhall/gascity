@@ -418,6 +418,7 @@ ProviderOption declares a single configurable option for a provider.
 | `type` | string | **yes** |  | "select" only (v1) |
 | `default` | string | **yes** |  |  |
 | `choices` | []OptionChoice | **yes** |  |  |
+| `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. Round-trippable through CRUD authoring: `omit,omitempty` keeps it out of responses whose entries are resolved rather than raw. |
 
 ## ProviderPatch
 
@@ -426,8 +427,11 @@ ProviderPatch modifies an existing provider identified by Name.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing provider's name. |
+| `base` | string |  |  | Base overrides the provider's inheritance parent (presence-aware). Pointer to a pointer so the patch can distinguish "no change" (double-nil) from "clear to inherit default" (single-nil value in outer pointer) from "set to explicit empty opt-out" (value "" in inner pointer) from "set to &lt;name&gt;". Callers use:   nil          = patch does not touch Base   &(*string)(nil) = patch clears Base to absent   &(&"")       = patch sets Base = "" (explicit opt-out)   &(&"builtin:codex") = patch sets Base to that value |
 | `command` | string |  |  | Command overrides the provider command. |
 | `args` | []string |  |  | Args overrides the provider args. |
+| `args_append` | []string |  |  | ArgsAppend overrides the provider args_append list. |
+| `options_schema_merge` | string |  |  | OptionsSchemaMerge overrides the options_schema merge mode. |
 | `prompt_mode` | string |  |  | PromptMode overrides prompt delivery mode. Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag overrides the prompt flag. |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs overrides the ready delay in milliseconds. |
@@ -441,7 +445,10 @@ ProviderSpec defines a named provider's startup parameters.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `display_name` | string |  |  | DisplayName is the human-readable name shown in UI and logs. |
+| `base` | string |  |  | Base names the parent provider this spec inherits from. Supported forms:   "&lt;name&gt;"         — custom first (self-excluded), then built-in   "builtin:&lt;name&gt;" — force built-in lookup   "provider:&lt;name&gt;" — force custom lookup   ""               — explicit standalone opt-out (suppresses Phase A                      legacy auto-inheritance warning and synthesis)   nil              — field absent; no explicit declaration Presence-aware *string so parse/compose/patch can distinguish "absent" from "explicit empty". See engdocs/design/provider-inheritance.md. |
+| `args_append` | []string |  |  | ArgsAppend is a list of arguments appended to the effective args of the resolved chain after each layer's args replacement. Accumulates across chain layers. |
+| `options_schema_merge` | string |  |  | OptionsSchemaMerge controls how OptionsSchema merges across the chain: "replace" (default, current semantics) or "by_key" (opt-in key-wise merge with omit=true removal). Enum: `replace`, `by_key` |
+| `display_name` | string |  |  | Tri-state capability booleans (SupportsHooks, SupportsACP, EmitsPermissionWarning) are *bool so parse/compose/patch can distinguish absent (inherit) from explicit false (disable) from explicit true (enable). The "can enable, cannot disable" invariant of bool was removed when these migrated to pointers. See engdocs/design/provider-inheritance.md §Tri-state capability.  DisplayName is the human-readable name shown in UI and logs. |
 | `command` | string |  |  | Command is the executable to run for this provider. |
 | `args` | []string |  |  | Args are default command-line arguments passed to the provider. |
 | `prompt_mode` | string |  | `arg` | PromptMode controls how prompts are delivered: "arg", "flag", or "none". Enum: `arg`, `flag`, `none` |
@@ -449,11 +456,11 @@ ProviderSpec defines a named provider's startup parameters.
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs is milliseconds to wait after launch before the provider is considered ready. |
 | `ready_prompt_prefix` | string |  |  | ReadyPromptPrefix is the string prefix that indicates the provider is ready for input. |
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the provider is running. |
-| `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning indicates whether the provider emits permission prompts. |
+| `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning indicates whether the provider emits permission prompts. Tri-state: nil = inherit from base, &true = enable, &false = explicit disable. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the provider process. |
 | `path_check` | string |  |  | PathCheck overrides the binary name used for PATH detection. When set, lookupProvider and detectProviderName use this instead of Command for exec.LookPath checks. Useful when Command is a shell wrapper (e.g. sh -c '...') but we need to verify the real binary is installed. |
-| `supports_acp` | boolean |  |  | SupportsACP indicates the binary speaks the Agent Client Protocol (JSON-RPC 2.0 over stdio). When an agent sets session = "acp", its resolved provider must have SupportsACP = true. |
-| `supports_hooks` | boolean |  |  | SupportsHooks indicates the provider has an executable hook mechanism (settings.json, plugins, etc.) for lifecycle events. |
+| `supports_acp` | boolean |  |  | SupportsACP indicates the binary speaks the Agent Client Protocol (JSON-RPC 2.0 over stdio). When an agent sets session = "acp", its resolved provider must have SupportsACP = true. Tri-state: nil = inherit from base, &true = enable, &false = explicit disable. |
+| `supports_hooks` | boolean |  |  | SupportsHooks indicates the provider has an executable hook mechanism (settings.json, plugins, etc.) for lifecycle events. Tri-state: nil = inherit from base, &true = enable, &false = explicit disable. |
 | `instructions_file` | string |  |  | InstructionsFile is the filename the provider reads for project instructions (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md". |
 | `resume_flag` | string |  |  | ResumeFlag is the CLI flag for resuming a session by ID. Empty means the provider does not support resume. Examples: "--resume" (claude), "resume" (codex) |
 | `resume_style` | string |  |  | ResumeStyle controls how ResumeFlag is applied:   "flag"       → command --resume &lt;key&gt;              (default)   "subcommand" → command resume &lt;key&gt; |

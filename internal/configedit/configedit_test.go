@@ -686,6 +686,50 @@ func TestCreateProvider(t *testing.T) {
 	}
 }
 
+// TestCreateProvider_BaseOnlyNoCommand verifies the relaxed validation:
+// a provider with only `base` set is valid — the chain walk inherits
+// the command from the ancestor.
+func TestCreateProvider_BaseOnlyNoCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	base := "builtin:codex"
+	spec := config.ProviderSpec{Base: &base}
+	if err := ed.CreateProvider("codex-max", spec); err != nil {
+		t.Fatalf("CreateProvider with base and no command: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	got, ok := cfg.Providers["codex-max"]
+	if !ok {
+		t.Fatal("provider 'codex-max' not found after create")
+	}
+	if got.Base == nil {
+		t.Fatal("Base pointer is nil after round-trip")
+	}
+	if *got.Base != "builtin:codex" {
+		t.Errorf("*Base = %q, want builtin:codex", *got.Base)
+	}
+	if got.Command != "" {
+		t.Errorf("Command = %q, want empty (inherited)", got.Command)
+	}
+}
+
+// TestCreateProvider_NoBaseNoCommandRejected ensures that a provider
+// that declares neither command nor base is still rejected by
+// validateProviders.
+func TestCreateProvider_NoBaseNoCommandRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateProvider("nothing", config.ProviderSpec{})
+	if err == nil {
+		t.Fatal("expected error for provider without command or base")
+	}
+}
+
 func TestCreateProvider_Duplicate(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithProvider())

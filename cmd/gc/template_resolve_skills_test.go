@@ -64,7 +64,7 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 			cityPath:  cityPath,
 			workspace: &config.Workspace{Provider: "claude"},
 			providers: map[string]config.ProviderSpec{
-				"claude": {Command: "echo", PromptMode: "none", SupportsACP: true},
+				"claude": {Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)},
 			},
 			lookPath:        func(string) (string, error) { return "/bin/echo", nil },
 			fs:              fsys.OSFS{},
@@ -267,7 +267,7 @@ func TestResolveTemplateAppendsAssignedSkillsPrompt(t *testing.T) {
 		// session = "acp"; the materialization gate is what should
 		// reject it.
 		params := buildParams()
-		params.providers["claude"] = config.ProviderSpec{Command: "echo", PromptMode: "none", SupportsACP: true}
+		params.providers["claude"] = config.ProviderSpec{Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)}
 		a := &config.Agent{Name: "witness", Scope: "city", Provider: "claude", Session: "acp"}
 		tp, err := resolveTemplate(params, a, a.QualifiedName(), nil)
 		if err != nil {

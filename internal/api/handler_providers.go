@@ -8,26 +8,45 @@ import (
 )
 
 type providerResponse struct {
-	Name         string            `json:"name"`
-	DisplayName  string            `json:"display_name,omitempty"`
-	Command      string            `json:"command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	PromptMode   string            `json:"prompt_mode,omitempty"`
-	PromptFlag   string            `json:"prompt_flag,omitempty"`
-	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	Builtin      bool              `json:"builtin"`
-	CityLevel    bool              `json:"city_level"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	// Base reflects the authored base declaration. nil when no Base
+	// was declared (or on a builtin lookup); *"" means explicit
+	// standalone opt-out; otherwise a concrete name or prefixed form.
+	// Marshaled as JSON null when nil so CRUD round-trips preserve
+	// presence, matching the PATCH contract.
+	Base               *string                 `json:"base,omitempty"`
+	Command            string                  `json:"command,omitempty"`
+	Args               []string                `json:"args,omitempty"`
+	ArgsAppend         []string                `json:"args_append,omitempty"`
+	PromptMode         string                  `json:"prompt_mode,omitempty"`
+	PromptFlag         string                  `json:"prompt_flag,omitempty"`
+	ReadyDelayMs       int                     `json:"ready_delay_ms,omitempty"`
+	Env                map[string]string       `json:"env,omitempty"`
+	OptionsSchemaMerge string                  `json:"options_schema_merge,omitempty"`
+	OptionsSchema      []config.ProviderOption `json:"options_schema,omitempty"`
+	Builtin            bool                    `json:"builtin"`
+	CityLevel          bool                    `json:"city_level"`
 }
 
 // providerPublicResponse is the browser-safe DTO. No command, args, env, or flag details.
+//
+// Tri-state capability bools (SupportsHooks, SupportsACP,
+// EmitsPermissionWarning) serialize as JSON null / true / false to match
+// the config model: null = "inherit from base", true = enable, false =
+// "explicit disable". Clients that previously treated absence as false
+// should key off the resolved provider cache entry, which still reports
+// the final post-resolution value.
 type providerPublicResponse struct {
-	Name              string              `json:"name"`
-	DisplayName       string              `json:"display_name,omitempty"`
-	Builtin           bool                `json:"builtin"`
-	CityLevel         bool                `json:"city_level"`
-	OptionsSchema     []providerOptionDTO `json:"options_schema,omitempty"`
-	EffectiveDefaults map[string]string   `json:"effective_defaults,omitempty"`
+	Name                   string              `json:"name"`
+	DisplayName            string              `json:"display_name,omitempty"`
+	Builtin                bool                `json:"builtin"`
+	CityLevel              bool                `json:"city_level"`
+	SupportsHooks          *bool               `json:"supports_hooks"`
+	SupportsACP            *bool               `json:"supports_acp"`
+	EmitsPermissionWarning *bool               `json:"emits_permission_warning"`
+	OptionsSchema          []providerOptionDTO `json:"options_schema,omitempty"`
+	EffectiveDefaults      map[string]string   `json:"effective_defaults,omitempty"`
 }
 
 type providerOptionDTO struct {
@@ -44,18 +63,28 @@ type optionChoiceDTO struct {
 }
 
 func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerResponse {
-	return providerResponse{
-		Name:         name,
-		DisplayName:  spec.DisplayName,
-		Command:      spec.Command,
-		Args:         spec.Args,
-		PromptMode:   spec.PromptMode,
-		PromptFlag:   spec.PromptFlag,
-		ReadyDelayMs: spec.ReadyDelayMs,
-		Env:          spec.Env,
-		Builtin:      builtin,
-		CityLevel:    cityLevel,
+	resp := providerResponse{
+		Name:               name,
+		DisplayName:        spec.DisplayName,
+		Command:            spec.Command,
+		Args:               spec.Args,
+		ArgsAppend:         spec.ArgsAppend,
+		PromptMode:         spec.PromptMode,
+		PromptFlag:         spec.PromptFlag,
+		ReadyDelayMs:       spec.ReadyDelayMs,
+		Env:                spec.Env,
+		OptionsSchemaMerge: spec.OptionsSchemaMerge,
+		OptionsSchema:      spec.OptionsSchema,
+		Builtin:            builtin,
+		CityLevel:          cityLevel,
 	}
+	if spec.Base != nil {
+		// Copy the underlying string so mutations on the response
+		// don't leak into shared config state.
+		b := *spec.Base
+		resp.Base = &b
+	}
+	return resp
 }
 
 // providerPublicFromMerged builds the public DTO from a MERGED provider spec.
@@ -63,10 +92,13 @@ func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel 
 // the correct OptionsSchema and OptionDefaults (including inherited builtins).
 func providerPublicFromMerged(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerPublicResponse {
 	resp := providerPublicResponse{
-		Name:        name,
-		DisplayName: spec.DisplayName,
-		Builtin:     builtin,
-		CityLevel:   cityLevel,
+		Name:                   name,
+		DisplayName:            spec.DisplayName,
+		Builtin:                builtin,
+		CityLevel:              cityLevel,
+		SupportsHooks:          spec.SupportsHooks,
+		SupportsACP:            spec.SupportsACP,
+		EmitsPermissionWarning: spec.EmitsPermissionWarning,
 	}
 	if len(spec.OptionsSchema) > 0 {
 		resp.OptionsSchema = make([]providerOptionDTO, len(spec.OptionsSchema))
@@ -206,9 +238,21 @@ func resolvedProviderToSpec(r config.ResolvedProvider, fallback config.ProviderS
 	out.ReadyDelayMs = r.ReadyDelayMs
 	out.ReadyPromptPrefix = r.ReadyPromptPrefix
 	out.ProcessNames = append([]string(nil), r.ProcessNames...)
-	out.EmitsPermissionWarning = r.EmitsPermissionWarning
-	out.SupportsACP = r.SupportsACP
-	out.SupportsHooks = r.SupportsHooks
+	// ResolvedProvider carries the resolved bool value; fold back into
+	// the *bool tri-state form on ProviderSpec (only non-zero values
+	// propagate — nil means "inherit", matching the tri-state rule).
+	if r.EmitsPermissionWarning {
+		t := true
+		out.EmitsPermissionWarning = &t
+	}
+	if r.SupportsACP {
+		t := true
+		out.SupportsACP = &t
+	}
+	if r.SupportsHooks {
+		t := true
+		out.SupportsHooks = &t
+	}
 	out.InstructionsFile = r.InstructionsFile
 	out.ResumeFlag = r.ResumeFlag
 	out.ResumeStyle = r.ResumeStyle

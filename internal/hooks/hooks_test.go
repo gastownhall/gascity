@@ -638,10 +638,11 @@ func TestSupportsHooksSyncWithProviderSpec(t *testing.T) {
 
 	providers := config.BuiltinProviders()
 	for name, spec := range providers {
-		if spec.SupportsHooks && !sup[name] {
+		supports := spec.SupportsHooks != nil && *spec.SupportsHooks
+		if supports && !sup[name] {
 			t.Errorf("provider %q has SupportsHooks=true but is not in hooks.SupportedProviders()", name)
 		}
-		if !spec.SupportsHooks && sup[name] {
+		if !supports && sup[name] {
 			t.Errorf("provider %q is in hooks.SupportedProviders() but has SupportsHooks=false", name)
 		}
 	}

@@ -343,3 +343,180 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 		t.Errorf("agent origin = %q, want %q", agent0["origin"], "pack-derived")
 	}
 }
+
+// TestHandleConfigExplain_ResolvedProviderAttached ensures every agent
+// entry in the default explain view carries the resolved provider DTO
+// so clients can render chain + inherited fields without a second
+// /v0/provider/<name> roundtrip.
+func TestHandleConfigExplain_ResolvedProviderAttached(t *testing.T) {
+	fs := newFakeState(t)
+	// Seed a base-only descendant in ResolvedProviders — in real life
+	// BuildResolvedProviderCache would populate this from a [providers.codex-max]
+	// block with base = "builtin:codex". The fake bypasses that and
+	// hand-constructs the cache entry. Also override the default agent's
+	// Provider so the explain view picks up the codex-max chain.
+	fs.cfg.Agents[0].Provider = "codex-max"
+	baseCodex := "builtin:codex"
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"codex-max": {Base: &baseCodex, DisplayName: "Codex Max"},
+	}
+	fs.cfg.ResolvedProviders = map[string]config.ResolvedProvider{
+		"codex-max": {
+			Name:            "codex-max",
+			BuiltinAncestor: "codex",
+			Command:         "codex",
+			Args:            []string{},
+			Chain: []config.HopIdentity{
+				{Kind: "custom", Name: "codex-max"},
+				{Kind: "builtin", Name: "codex"},
+			},
+		},
+	}
+	srv := New(fs)
+
+	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	agents := resp["agents"].([]any)
+	if len(agents) == 0 {
+		t.Fatal("expected at least one agent")
+	}
+	agent0 := agents[0].(map[string]any)
+	rp, ok := agent0["resolved_provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected resolved_provider on agent, got %#v", agent0["resolved_provider"])
+	}
+	if rp["builtin_ancestor"] != "codex" {
+		t.Errorf("builtin_ancestor = %q, want %q", rp["builtin_ancestor"], "codex")
+	}
+	// Chain must be present and leaf→root ordered.
+	chain, ok := rp["chain"].([]any)
+	if !ok || len(chain) != 2 {
+		t.Fatalf("expected chain length 2, got %#v", rp["chain"])
+	}
+	leaf := chain[0].(map[string]any)
+	if leaf["kind"] != "custom" || leaf["name"] != "codex-max" {
+		t.Errorf("chain[0] = %#v, want {kind:custom,name:codex-max}", leaf)
+	}
+	root := chain[1].(map[string]any)
+	if root["kind"] != "builtin" || root["name"] != "codex" {
+		t.Errorf("chain[1] = %#v, want {kind:builtin,name:codex}", root)
+	}
+}
+
+// TestHandleConfigExplain_FocusedProvider covers ?provider=<name>.
+func TestHandleConfigExplain_FocusedProvider(t *testing.T) {
+	fs := newFakeState(t)
+	baseCodex := "builtin:codex"
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"codex-max": {Base: &baseCodex, DisplayName: "Codex Max"},
+	}
+	fs.cfg.ResolvedProviders = map[string]config.ResolvedProvider{
+		"codex-max": {
+			Name:            "codex-max",
+			BuiltinAncestor: "codex",
+			Command:         "codex",
+			Args:            []string{"--foo"},
+			Chain: []config.HopIdentity{
+				{Kind: "custom", Name: "codex-max"},
+				{Kind: "builtin", Name: "codex"},
+			},
+		},
+	}
+	srv := New(fs)
+
+	req := httptest.NewRequest("GET", "/v0/config/explain?provider=codex-max", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	// Focused view must NOT include agents/providers.
+	if _, has := resp["agents"]; has {
+		t.Error("focused view should not include agents")
+	}
+	p, ok := resp["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected provider object, got %#v", resp)
+	}
+	if p["name"] != "codex-max" {
+		t.Errorf("provider.name = %q, want codex-max", p["name"])
+	}
+	if p["builtin_ancestor"] != "codex" {
+		t.Errorf("builtin_ancestor = %q, want codex", p["builtin_ancestor"])
+	}
+	chain, ok := p["chain"].([]any)
+	if !ok || len(chain) != 2 {
+		t.Fatalf("expected chain length 2, got %#v", p["chain"])
+	}
+}
+
+// TestHandleConfigExplain_FocusedProvider_Unknown returns 404.
+func TestHandleConfigExplain_FocusedProvider_Unknown(t *testing.T) {
+	fs := newFakeState(t)
+	srv := New(fs)
+
+	req := httptest.NewRequest("GET", "/v0/config/explain?provider=nonexistent", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+// TestHandleConfigExplain_JSONView asserts the structured JSON view is
+// stably keyed to TOML/API names (not Go struct identifiers). The
+// default content type is already JSON; `view=json` is reserved for
+// future use but must not 400.
+func TestHandleConfigExplain_JSONView(t *testing.T) {
+	fs := newFakeState(t)
+	baseClaude := "builtin:claude"
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom-claude": {Base: &baseClaude, DisplayName: "Custom"},
+	}
+	fs.cfg.ResolvedProviders = map[string]config.ResolvedProvider{
+		"custom-claude": {
+			Name:            "custom-claude",
+			BuiltinAncestor: "claude",
+			Command:         "claude",
+			ReadyDelayMs:    10000,
+			Chain: []config.HopIdentity{
+				{Kind: "custom", Name: "custom-claude"},
+				{Kind: "builtin", Name: "claude"},
+			},
+		},
+	}
+	srv := New(fs)
+
+	req := httptest.NewRequest("GET", "/v0/config/explain?view=json", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	body := w.Body.String()
+	// Ensure we emit JSON keys in snake_case (TOML/API form), not
+	// Go struct identifiers.
+	if strings.Contains(body, "\"ReadyDelayMs\"") || strings.Contains(body, "\"Chain\"") || strings.Contains(body, "\"BuiltinAncestor\"") {
+		t.Errorf("response leaks Go identifier casing: %s", body)
+	}
+	// snake_case keys we expect.
+	for _, k := range []string{"ready_delay_ms", "chain", "builtin_ancestor"} {
+		if !strings.Contains(body, "\""+k+"\"") {
+			t.Errorf("missing snake_case key %q in body", k)
+		}
+	}
+}

@@ -737,3 +737,111 @@ func TestComputeAgentState(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentList_BaseOnlyDescendantUsesResolvedCache covers the
+// base-only descendant contract: a [providers.codex-max] declared
+// with `base = "builtin:codex"` and no explicit command must still
+// report `display_name` + `available=true` in /v0/agents, because
+// the resolved-provider cache carries the inherited Command and the
+// display name comes from the builtin ancestor.
+func TestAgentList_BaseOnlyDescendantUsesResolvedCache(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		// MaxActiveSessions=1 keeps this a non-pool agent so expansion
+		// yields a single entry — SupportsInstanceExpansion returns
+		// true when the field is unset (unlimited pool by default).
+		{Name: "mayor", Dir: "myrig", Provider: "codex-max", MaxActiveSessions: intPtr(1)},
+	}
+	baseCodex := "builtin:codex"
+	state.cfg.Providers = map[string]config.ProviderSpec{
+		// Base-only descendant: no Command, no DisplayName.
+		"codex-max": {Base: &baseCodex},
+	}
+	state.cfg.ResolvedProviders = map[string]config.ResolvedProvider{
+		"codex-max": {
+			Name:            "codex-max",
+			BuiltinAncestor: "codex",
+			Command:         "codex", // inherited from builtin:codex
+			Chain: []config.HopIdentity{
+				{Kind: "custom", Name: "codex-max"},
+				{Kind: "builtin", Name: "codex"},
+			},
+		},
+	}
+	srv := New(state)
+	// Simulate the binary being installed by overriding LookPath.
+	srv.LookPathFunc = func(bin string) (string, error) {
+		if bin == "codex" {
+			return "/usr/local/bin/codex", nil
+		}
+		return "", os.ErrNotExist
+	}
+
+	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(resp.Items))
+	}
+	agent := resp.Items[0]
+	if agent.Provider != "codex-max" {
+		t.Errorf("provider = %q, want codex-max", agent.Provider)
+	}
+	// DisplayName must come from the builtin ancestor (Codex CLI),
+	// since the leaf provider did not declare one.
+	if agent.DisplayName != "Codex CLI" {
+		t.Errorf("display_name = %q, want %q (inherited from builtin:codex)", agent.DisplayName, "Codex CLI")
+	}
+	// The binary "codex" is stubbed as available, so the agent must
+	// be reported available.
+	if !agent.Available {
+		t.Errorf("available = false (reason: %q); want true — resolved cache should surface inherited command", agent.UnavailableReason)
+	}
+}
+
+// TestProviderPathCheck_BaseOnlyDescendant ensures the PATH probe uses
+// the inherited command from the resolved cache rather than the empty
+// Command on the raw spec.
+func TestProviderPathCheck_BaseOnlyDescendant(t *testing.T) {
+	baseCodex := "builtin:codex"
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"codex-max": {Base: &baseCodex},
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"codex-max": {
+				Name:            "codex-max",
+				BuiltinAncestor: "codex",
+				Command:         "codex",
+			},
+		},
+	}
+	got := providerPathCheck("codex-max", cfg)
+	if got != "codex" {
+		t.Errorf("providerPathCheck = %q, want %q", got, "codex")
+	}
+}
+
+// TestProviderPathCheck_FallsBackToRawWhenNoCache keeps Phase A configs
+// working: when the resolved cache is empty, we still read raw
+// Command/PathCheck for the provider.
+func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "custom-cli"},
+		},
+	}
+	if got := providerPathCheck("custom", cfg); got != "custom-cli" {
+		t.Errorf("providerPathCheck = %q, want custom-cli", got)
+	}
+}

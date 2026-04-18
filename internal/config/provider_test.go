@@ -64,7 +64,7 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	if p.ReadyDelayMs != 10000 {
 		t.Errorf("ReadyDelayMs = %d, want 10000", p.ReadyDelayMs)
 	}
-	if !p.EmitsPermissionWarning {
+	if !derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = false, want true")
 	}
 }
@@ -108,7 +108,7 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.ReadyDelayMs != 3000 {
 		t.Errorf("ReadyDelayMs = %d, want 3000", p.ReadyDelayMs)
 	}
-	if p.EmitsPermissionWarning {
+	if derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = true, want false")
 	}
 }
@@ -163,10 +163,10 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	if p.PromptFlag != "" {
 		t.Errorf("PromptFlag = %q, want empty", p.PromptFlag)
 	}
-	if !p.SupportsHooks {
+	if !derefBool(p.SupportsHooks) {
 		t.Error("SupportsHooks = false, want true")
 	}
-	if !p.SupportsACP {
+	if !derefBool(p.SupportsACP) {
 		t.Error("SupportsACP = false, want true")
 	}
 	if p.InstructionsFile != "AGENTS.md" {

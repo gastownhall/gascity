@@ -747,7 +747,7 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 		},
 		{
 			"emits_permission_warning",
-			func() bool { return base.EmitsPermissionWarning },
+			func() bool { return base.EmitsPermissionWarning != nil },
 			func() { result.EmitsPermissionWarning = frag.EmitsPermissionWarning },
 		},
 	}

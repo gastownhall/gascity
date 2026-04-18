@@ -28,7 +28,10 @@ gc [flags]
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
+| [gc daytona](#gc-daytona) | Commands from the daytona import |
+| [gc discord](#gc-discord) | Commands from the discord import |
 | [gc doctor](#gc-doctor) | Check workspace health |
+| [gc dolt](#gc-dolt) | Commands from the dolt import |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show the event log |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
@@ -698,6 +701,418 @@ gc dashboard serve [flags]
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--port` | int | `8080` | HTTP port |
 
+## gc daytona
+
+Commands from the daytona import
+
+```
+gc daytona
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc daytona cleanup](#gc-daytona-cleanup) | List or delete stale Gas City Daytona worker sandboxes |
+| [gc daytona list](#gc-daytona-list) | List running Gas City Daytona worker sandboxes |
+| [gc daytona logs](#gc-daytona-logs) | Show recent output for one Daytona worker session |
+| [gc daytona status](#gc-daytona-status) | Show Daytona worker pack configuration and running Gas City sandboxes |
+
+## gc daytona cleanup
+
+List or delete stale Gas City Daytona worker sandboxes
+
+```
+gc daytona cleanup
+```
+
+## gc daytona list
+
+List running Gas City Daytona worker sandboxes
+
+```
+gc daytona list
+```
+
+## gc daytona logs
+
+Show recent output for one Daytona worker session
+
+```
+gc daytona logs
+```
+
+## gc daytona status
+
+Show Daytona worker pack configuration and running Gas City sandboxes
+
+```
+gc daytona status
+```
+
+## gc discord
+
+Commands from the discord import
+
+```
+gc discord
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc discord bind-dm](#gc-discord-bind-dm) | Bind a Discord DM channel to one named session |
+| [gc discord bind-room](#gc-discord-bind-room) | Bind a Discord room channel or thread to named sessions |
+| [gc discord enable-room-launch](#gc-discord-enable-room-launch) | Enable launcher mode for a Discord root room |
+| [gc discord import-app](#gc-discord-import-app) | Import Discord app metadata and bot credentials into the pack state |
+| [gc discord map-channel](#gc-discord-map-channel) | Map a Discord guild channel to a slash-command dispatch target |
+| [gc discord map-rig](#gc-discord-map-rig) | Map a Discord guild rig name to a slash-command dispatch target |
+| [gc discord post-message](#gc-discord-post-message) | Post a Discord status update for a request or channel |
+| [gc discord publish](#gc-discord-publish) | Publish a Discord-visible message through a saved chat binding |
+| [gc discord release-workflow](#gc-discord-release-workflow) | Release a stuck workflow lock so the same Discord conversation can be retried |
+| [gc discord reply-current](#gc-discord-reply-current) | Reply to the latest Discord event seen by the current session |
+| [gc discord status](#gc-discord-status) | Show Discord provider status, URLs, mappings, bindings, and recent activity |
+| [gc discord sync-commands](#gc-discord-sync-commands) | Register guild-scoped /gc commands with Discord |
+
+## gc discord bind-dm
+
+Bind a Discord DM channel to exactly one named session.
+
+Examples:
+  gc discord bind-dm 123456789012345678 sky
+
+This stores the binding under `.gc/services/discord/data/config.json`.
+Use exact permanent session names.
+
+```
+gc discord bind-dm
+```
+
+## gc discord bind-room
+
+Bind a Discord channel or thread to one or more named sessions.
+
+Examples:
+  gc discord bind-room 123456789012345678 sky lawrence
+  gc discord bind-room --guild-id 223456789012345678 123456789012345678 sky lawrence
+  gc discord bind-room --guild-id 223456789012345678 --enable-ambient-read 123456789012345678 sky lawrence
+  gc discord bind-room --guild-id 223456789012345678 --enable-ambient-read --allow-untargeted-ambient-delivery 123456789012345678 randy
+  gc discord bind-room --guild-id 223456789012345678 --enable-peer-fanout 123456789012345678 corp--sky corp--priya
+  gc discord bind-room --guild-id 223456789012345678 --enable-peer-fanout --allow-untargeted-peer-fanout 123456789012345678 corp--sky corp--priya
+
+This stores the binding under `.gc/services/discord/data/config.json`.
+Use exact permanent session names.
+Direct `bind-room` routing is mutually exclusive with `gc discord enable-room-launch`
+for the same room.
+
+Ambient read is disabled by default. When enabled, messages in this bound room
+or bound thread no longer need to mention the bot, but they still must
+explicitly target one or more `@session_name` values to route. Parent-room
+thread inheritance still requires a bot mention unless the thread itself is
+also bound. Ambient-read bindings remain targeted-only even when the bot is
+mentioned directly, unless `--allow-untargeted-ambient-delivery` is enabled on
+an ambient-read room with exactly one bound session.
+
+Ambient read consumes unmentioned guild messages. Discord therefore requires
+the app's `Message Content Intent` to be enabled in the Developer Portal
+before ambient-read routing will work reliably.
+
+Peer fanout is disabled by default. When enabled, the bridge can reinject one
+session's room publish to other bound sessions as `discord_peer_publication`
+events without re-reading bot messages from Discord.
+
+Peer-fanout-enabled room bindings require lowercase canonical session names.
+Useful flags:
+
+- `--enable-ambient-read` / `--disable-ambient-read`
+- `--allow-untargeted-ambient-delivery` / `--disallow-untargeted-ambient-delivery`
+- `--enable-peer-fanout` / `--disable-peer-fanout`
+- `--allow-untargeted-peer-fanout` / `--disallow-untargeted-peer-fanout`
+- `--max-peer-triggered-publishes-per-root N`
+- `--max-total-peer-deliveries-per-root N`
+- `--max-peer-triggered-publishes-per-session-per-minute N`
+
+```
+gc discord bind-room
+```
+
+## gc discord enable-room-launch
+
+Enable launcher mode for a Discord root room.
+
+Usage:
+  gc discord enable-room-launch --guild-id 223456789012345678 323456789012345678
+  gc discord enable-room-launch --guild-id 223456789012345678 --response-mode respond_all --default-handle corp/sky 323456789012345678
+
+Launcher-mode rooms are different from direct `bind-room` rooms:
+
+- `@@handle` in the root room launches a thread-scoped session for that agent
+- the first agent reply creates the visible Discord thread
+- follow-up messages in that managed thread continue to the same session
+- `@@handle` inside the managed thread retargets the conversation to another agent
+- replying to an agent-authored Discord message inside the managed thread implicitly targets that agent
+- unmentioned follow-ups inside the managed thread continue to the last agent the human addressed there
+- human-visible replies inside the managed thread are also forwarded to the other participating thread agents as peer input
+- include `@@rig/alias` in an agent reply if it should only fan out to a specific peer; untargeted replies to peer publications do not fan out
+- direct `bind-room` and launcher mode are mutually exclusive for one room
+
+Launcher mode reads unmentioned guild messages. Discord therefore requires the
+app's `Message Content Intent` to be enabled in the Developer Portal before
+launcher rooms can route `@@handle` traffic reliably.
+
+`mention_only` is the safe default. `respond_all` requires `--default-handle`
+and routes top-level unmentioned messages to that one handle, except top-level
+replies, which still require an explicit `@@handle`.
+
+Launcher rooms default to peer fanout enabled for managed threads. Use
+`--disable-peer-fanout` to turn that off, or
+`--disallow-untargeted-peer-fanout` to require explicit `@@rig/alias` peer
+targeting inside the thread.
+
+```
+gc discord enable-room-launch
+```
+
+## gc discord import-app
+
+Import Discord app metadata and the bot token into the shared intake state.
+
+Example:
+  gc discord import-app \
+    --application-id 123456789012345678 \
+    --public-key 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+    --bot-token "$DISCORD_BOT_TOKEN"
+
+Optional fields:
+  --command-name &lt;name&gt;         slash command root, default: gc
+  --bot-token-file &lt;path&gt;       read the bot token from a file
+  --guild-allowlist &lt;id&gt;        allow only specific guild ids; repeatable
+  --channel-allowlist &lt;id&gt;      allow only specific parent channel ids; repeatable
+  --role-allowlist &lt;id&gt;         allow only specific Discord role ids; repeatable
+
+The public key is the Discord app's interaction verification key. The bot
+token is stored under the pack state root so the service can sync commands and
+post workflow status updates.
+
+If you want launcher rooms or ambient-read room bindings, also enable
+`Message Content Intent` for the app in the Discord Developer Portal.
+
+```
+gc discord import-app
+```
+
+## gc discord map-channel
+
+Map a Discord guild channel to a workflow dispatch target.
+
+Example:
+  gc discord map-channel 123456789012345678 223456789012345678 product/polecat \
+    --fix-formula mol-discord-fix-issue
+
+Arguments:
+  &lt;guild_id&gt;    Discord guild id
+  &lt;channel_id&gt;  Discord parent channel id
+  &lt;target&gt;      rig/pool sling target
+                `mol-discord-fix-issue` requires a `rig/polecat` target
+
+Flags:
+  --fix-formula &lt;name&gt;  formula to use for `/gc fix`, default: mol-discord-fix-issue
+
+Thread interactions inherit the mapping from their parent channel.
+
+```
+gc discord map-channel
+```
+
+## gc discord map-rig
+
+Map a Discord guild rig name to a workflow dispatch target.
+
+Example:
+  gc discord map-rig 123456789012345678 mission-control mission-control/polecat \
+    --fix-formula mol-discord-fix-issue
+
+Arguments:
+  &lt;guild_id&gt;    Discord guild id
+  &lt;rig_name&gt;    Rig name as used in /gc fix &lt;rig&gt;
+  &lt;target&gt;      rig/pool sling target
+                `mol-discord-fix-issue` requires a `rig/polecat` target
+
+Flags:
+  --fix-formula &lt;name&gt;  formula to use for `/gc fix`, default: mol-discord-fix-issue
+
+Users type `/gc fix mission-control "summary"` in any channel. The rig
+parameter routes the request to the configured target regardless of which
+channel the command is invoked from.
+
+```
+gc discord map-rig
+```
+
+## gc discord post-message
+
+Post a Discord message using the workspace bot token.
+
+Examples:
+  gc discord post-message --request-id dc-123-fix --body "Started work"
+  gc discord post-message --channel-id 223456789012345678 --body-file ./message.txt
+  gc discord post-message --channel-id 223456789012345678 --thread-id 323456789012345678 --body "Update"
+
+Flags:
+  --request-id &lt;id&gt;     load the target channel from a saved intake request
+  --channel-id &lt;id&gt;     parent channel id if no request id is provided
+  --thread-id &lt;id&gt;      optional thread id to post into
+  --body &lt;text&gt;         inline message body
+  --body-file &lt;path&gt;    read the message body from a file
+
+Use `--request-id` from formulas so the message lands back in the original
+conversation.
+
+```
+gc discord post-message
+```
+
+## gc discord publish
+
+Publish a human-visible Discord message through a saved chat binding.
+
+For agent replies to the current Discord turn, prefer:
+  gc discord reply-current --body-file ./reply.txt
+
+Examples:
+  gc discord publish --binding room:123456789012345678 --body "hello humans"
+  gc discord publish --binding room:123456789012345678 --trigger 223456789012345678 --body-file ./reply.txt
+  gc discord publish --binding room:123456789012345678 --conversation-id 323456789012345678 --trigger 223456789012345678 --body "Reply in thread"
+  gc discord publish --binding launch-room:123456789012345678 --source-event-kind discord_human_message --source-ingress-receipt-id in-223456789012345678 --body-file ./reply.txt
+  gc discord publish --binding room:123456789012345678 --source-event-kind discord_human_message --source-ingress-receipt-id in-223456789012345678 --source-session corp--sky --body-file ./reply.txt
+
+`--conversation-id` overrides the destination channel or thread for this send.
+Use it when the saved room binding is the parent channel but the inbound message
+arrived from a thread.
+
+`--reply-to` overrides the message id used for Discord reply threading. If
+omitted, `--trigger` is used as the reply target when present.
+
+Direct `publish` is primarily for operator-controlled sends or cross-binding
+publishes. Peer fanout only participates when you also supply source metadata
+such as `--source-event-kind` plus `--source-ingress-receipt-id` or
+`--root-ingress-receipt-id`. For agent replies to the latest Discord turn,
+prefer `gc discord reply-current --body-file ...`.
+
+Launcher-backed replies normally should use `reply-current`, not direct
+`publish`. When source context includes a room-launch id, the bridge will
+create the managed Discord thread on first publish and then post into that
+thread.
+
+For multi-line or generated content, prefer `--body-file` over inline `--body`.
+Do not pipe publish output through filters that can hide failures. Treat a
+publish as successful only when the returned JSON contains `record.remote_message_id`.
+
+If the command exits with status `2`, the Discord post succeeded but peer
+fanout for other bound sessions was partial or needs operator attention.
+Inspect `record.peer_delivery` and use `gc discord retry-peer-fanout` if needed.
+
+```
+gc discord publish
+```
+
+## gc discord release-workflow
+
+Release a stuck workflow lock for a Discord conversation.
+
+This is an operator recovery command. It does not touch the bead; it only
+clears the intake-side workflow lock so `/gc fix` can be accepted again for the
+same channel or thread.
+
+Example:
+  gc discord release-workflow 123456789012345678 223456789012345678
+  gc discord release-workflow --request-id dc-interaction-fix
+
+Arguments:
+  &lt;guild_id&gt;         Discord guild id
+  &lt;conversation_id&gt;  Channel id or thread id used for the workflow key
+
+Flags:
+  --request-id &lt;id&gt; Release the workflow key recorded on an existing request
+  --command &lt;name&gt;  slash command to unlock, default: fix
+
+```
+gc discord release-workflow
+```
+
+## gc discord reply-current
+
+Reply to the latest Discord event seen by the current session.
+
+This is the safest agent-facing Discord reply path. It resolves the latest
+`&lt;discord-event&gt;` from the current session transcript, reuses its
+`publish_binding_id`, `publish_conversation_id`, and reply threading metadata,
+then publishes the provided body back to Discord.
+
+For launcher-backed root-room turns, the first successful `reply-current`
+automatically creates the Discord thread before posting the message. The agent
+does not need to create or target that thread manually.
+
+Examples:
+  gc discord reply-current --body-file ./reply.txt
+  gc discord reply-current --session corp--sky --body-file ./reply.txt
+
+Prefer `--body-file` for agent replies. It avoids fragile shell quoting and
+makes multi-line responses safe.
+
+If you use `--session`, the override is treated as the source session identity
+for peer-fanout attribution as well as transcript lookup.
+
+In peer-fanout-enabled rooms, replying to a `discord_peer_publication` with an
+exact `@session_name` mention can route that publication to another bound
+session. Untargeted peer-triggered replies stay human-visible only.
+
+If the command exits with status `2`, the Discord reply was posted but peer
+fanout was only partially delivered. Inspect `record.peer_delivery` and ask an
+operator to run `gc discord retry-peer-fanout &lt;publish-id&gt;` if repair is needed.
+
+```
+gc discord reply-current
+```
+
+## gc discord status
+
+Show the current Discord configuration, published URLs, workflow mappings,
+chat bindings, and recent activity.
+
+Examples:
+  gc discord status
+  gc discord status --json
+
+The snapshot includes the public interactions URL, the tenant admin URL,
+redacted app configuration, workflow mappings, chat bindings, recent `/gc fix`
+requests, and recent explicit chat publishes.
+
+```
+gc discord status
+```
+
+## gc discord sync-commands
+
+Register or replace the guild-scoped `/gc` command for one or more Discord
+guilds.
+
+Examples:
+  gc discord sync-commands 123456789012345678
+  gc discord sync-commands 123456789012345678 223456789012345678
+
+Arguments:
+  &lt;guild_id&gt;...   one or more Discord guild ids
+
+The command payload is intentionally small in this slice:
+
+- `/gc fix` opens a modal for summary and additional context
+- a fallback `prompt` option is also registered for clients that skip the
+  modal round trip
+- role, guild, and channel policy is enforced by the workspace service after
+  Discord delivers the slash command
+
+```
+gc discord sync-commands
+```
+
 ## gc doctor
 
 Run diagnostic health checks on the city workspace.
@@ -723,6 +1138,107 @@ gc doctor
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
+
+## gc dolt
+
+Commands from the dolt import
+
+```
+gc dolt
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc dolt cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases |
+| [gc dolt health](#gc-dolt-health) | Check Dolt data-plane health |
+| [gc dolt list](#gc-dolt-list) | List Dolt databases |
+| [gc dolt logs](#gc-dolt-logs) | Tail the Dolt server log file |
+| [gc dolt recover](#gc-dolt-recover) | Recover Dolt from read-only state |
+| [gc dolt rollback](#gc-dolt-rollback) | List or restore from migration backups |
+| [gc dolt sql](#gc-dolt-sql) | Open an interactive Dolt SQL shell |
+| [gc dolt start](#gc-dolt-start) | Start the Dolt server if not already running |
+| [gc dolt status](#gc-dolt-status) | Check if the Dolt server is running |
+| [gc dolt sync](#gc-dolt-sync) | Push databases to configured remotes |
+
+## gc dolt cleanup
+
+Find and remove orphaned Dolt databases
+
+```
+gc dolt cleanup
+```
+
+## gc dolt health
+
+Check Dolt data-plane health
+
+```
+gc dolt health
+```
+
+## gc dolt list
+
+List Dolt databases
+
+```
+gc dolt list
+```
+
+## gc dolt logs
+
+Tail the Dolt server log file
+
+```
+gc dolt logs
+```
+
+## gc dolt recover
+
+Recover Dolt from read-only state
+
+```
+gc dolt recover
+```
+
+## gc dolt rollback
+
+List or restore from migration backups
+
+```
+gc dolt rollback
+```
+
+## gc dolt sql
+
+Open an interactive Dolt SQL shell
+
+```
+gc dolt sql
+```
+
+## gc dolt start
+
+Start the Dolt server if not already running
+
+```
+gc dolt start
+```
+
+## gc dolt status
+
+Check if the Dolt server is running
+
+```
+gc dolt status
+```
+
+## gc dolt sync
+
+Push databases to configured remotes
+
+```
+gc dolt sync
+```
 
 ## gc event
 

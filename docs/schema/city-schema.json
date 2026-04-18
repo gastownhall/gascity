@@ -1429,6 +1429,10 @@
             "$ref": "#/$defs/OptionChoice"
           },
           "type": "array"
+        },
+        "omit": {
+          "type": "boolean",
+          "description": "Omit is the removal sentinel for options_schema_merge = \"by_key\".\nWhen set on a child layer's entry, the matching Key inherited from\na parent layer is pruned from the resolved schema. Round-trippable\nthrough CRUD authoring: `omit,omitempty` keeps it out of responses\nwhose entries are resolved rather than raw."
         }
       },
       "additionalProperties": false,
@@ -1448,6 +1452,10 @@
           "type": "string",
           "description": "Name is the targeting key (required). Must match an existing provider's name."
         },
+        "base": {
+          "type": "string",
+          "description": "Base overrides the provider's inheritance parent (presence-aware).\nPointer to a pointer so the patch can distinguish \"no change\"\n(double-nil) from \"clear to inherit default\" (single-nil value in\nouter pointer) from \"set to explicit empty opt-out\" (value \"\" in\ninner pointer) from \"set to \u003cname\u003e\". Callers use:\n  nil          = patch does not touch Base\n  \u0026(*string)(nil) = patch clears Base to absent\n  \u0026(\u0026\"\")       = patch sets Base = \"\" (explicit opt-out)\n  \u0026(\u0026\"builtin:codex\") = patch sets Base to that value"
+        },
         "command": {
           "type": "string",
           "description": "Command overrides the provider command."
@@ -1458,6 +1466,17 @@
           },
           "type": "array",
           "description": "Args overrides the provider args."
+        },
+        "args_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ArgsAppend overrides the provider args_append list."
+        },
+        "options_schema_merge": {
+          "type": "string",
+          "description": "OptionsSchemaMerge overrides the options_schema merge mode."
         },
         "prompt_mode": {
           "type": "string",
@@ -1505,9 +1524,28 @@
     },
     "ProviderSpec": {
       "properties": {
+        "base": {
+          "type": "string",
+          "description": "Base names the parent provider this spec inherits from. Supported\nforms:\n  \"\u003cname\u003e\"         — custom first (self-excluded), then built-in\n  \"builtin:\u003cname\u003e\" — force built-in lookup\n  \"provider:\u003cname\u003e\" — force custom lookup\n  \"\"               — explicit standalone opt-out (suppresses Phase A\n                     legacy auto-inheritance warning and synthesis)\n  nil              — field absent; no explicit declaration\nPresence-aware *string so parse/compose/patch can distinguish\n\"absent\" from \"explicit empty\". See engdocs/design/provider-inheritance.md."
+        },
+        "args_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ArgsAppend is a list of arguments appended to the effective args of\nthe resolved chain after each layer's args replacement. Accumulates\nacross chain layers."
+        },
+        "options_schema_merge": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "by_key"
+          ],
+          "description": "OptionsSchemaMerge controls how OptionsSchema merges across the\nchain: \"replace\" (default, current semantics) or \"by_key\" (opt-in\nkey-wise merge with omit=true removal)."
+        },
         "display_name": {
           "type": "string",
-          "description": "DisplayName is the human-readable name shown in UI and logs."
+          "description": "Tri-state capability booleans (SupportsHooks, SupportsACP,\nEmitsPermissionWarning) are *bool so parse/compose/patch can\ndistinguish absent (inherit) from explicit false (disable) from\nexplicit true (enable). The \"can enable, cannot disable\" invariant\nof bool was removed when these migrated to pointers.\nSee engdocs/design/provider-inheritance.md §Tri-state capability.\n\nDisplayName is the human-readable name shown in UI and logs."
         },
         "command": {
           "type": "string",
@@ -1552,7 +1590,7 @@
         },
         "emits_permission_warning": {
           "type": "boolean",
-          "description": "EmitsPermissionWarning indicates whether the provider emits permission prompts."
+          "description": "EmitsPermissionWarning indicates whether the provider emits permission prompts.\nTri-state: nil = inherit from base, \u0026true = enable, \u0026false = explicit disable."
         },
         "env": {
           "additionalProperties": {
@@ -1567,11 +1605,11 @@
         },
         "supports_acp": {
           "type": "boolean",
-          "description": "SupportsACP indicates the binary speaks the Agent Client Protocol\n(JSON-RPC 2.0 over stdio). When an agent sets session = \"acp\",\nits resolved provider must have SupportsACP = true."
+          "description": "SupportsACP indicates the binary speaks the Agent Client Protocol\n(JSON-RPC 2.0 over stdio). When an agent sets session = \"acp\",\nits resolved provider must have SupportsACP = true.\nTri-state: nil = inherit from base, \u0026true = enable, \u0026false = explicit disable."
         },
         "supports_hooks": {
           "type": "boolean",
-          "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events."
+          "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events.\nTri-state: nil = inherit from base, \u0026true = enable, \u0026false = explicit disable."
         },
         "instructions_file": {
           "type": "string",

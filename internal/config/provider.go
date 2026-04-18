@@ -10,6 +10,12 @@ type ProviderOption struct {
 	Type    string         `toml:"type"    json:"type"` // "select" only (v1)
 	Default string         `toml:"default" json:"default"`
 	Choices []OptionChoice `toml:"choices" json:"choices"`
+	// Omit is the removal sentinel for options_schema_merge = "by_key".
+	// When set on a child layer's entry, the matching Key inherited from
+	// a parent layer is pruned from the resolved schema. Round-trippable
+	// through CRUD authoring: `omit,omitempty` keeps it out of responses
+	// whose entries are resolved rather than raw.
+	Omit bool `toml:"omit,omitempty" json:"omit,omitempty"`
 }
 
 // OptionChoice is one allowed value for a "select" option.
@@ -46,9 +52,10 @@ type ProviderSpec struct {
 	// key-wise merge with omit=true removal).
 	OptionsSchemaMerge string `toml:"options_schema_merge,omitempty" jsonschema:"enum=replace,enum=by_key"`
 	// Tri-state capability booleans (SupportsHooks, SupportsACP,
-	// EmitsPermissionWarning) are bool today. A future release will
-	// migrate these to *bool for explicit disable semantics. For now,
-	// the "can enable, cannot disable" merge invariant below applies.
+	// EmitsPermissionWarning) are *bool so parse/compose/patch can
+	// distinguish absent (inherit) from explicit false (disable) from
+	// explicit true (enable). The "can enable, cannot disable" invariant
+	// of bool was removed when these migrated to pointers.
 	// See engdocs/design/provider-inheritance.md §Tri-state capability.
 	//
 	// DisplayName is the human-readable name shown in UI and logs.
@@ -68,7 +75,8 @@ type ProviderSpec struct {
 	// ProcessNames lists process names to look for when checking if the provider is running.
 	ProcessNames []string `toml:"process_names,omitempty"`
 	// EmitsPermissionWarning indicates whether the provider emits permission prompts.
-	EmitsPermissionWarning bool `toml:"emits_permission_warning,omitempty"`
+	// Tri-state: nil = inherit from base, &true = enable, &false = explicit disable.
+	EmitsPermissionWarning *bool `toml:"emits_permission_warning,omitempty"`
 	// Env sets additional environment variables for the provider process.
 	Env map[string]string `toml:"env,omitempty"`
 	// PathCheck overrides the binary name used for PATH detection.
@@ -80,10 +88,12 @@ type ProviderSpec struct {
 	// SupportsACP indicates the binary speaks the Agent Client Protocol
 	// (JSON-RPC 2.0 over stdio). When an agent sets session = "acp",
 	// its resolved provider must have SupportsACP = true.
-	SupportsACP bool `toml:"supports_acp,omitempty"`
+	// Tri-state: nil = inherit from base, &true = enable, &false = explicit disable.
+	SupportsACP *bool `toml:"supports_acp,omitempty"`
 	// SupportsHooks indicates the provider has an executable hook mechanism
 	// (settings.json, plugins, etc.) for lifecycle events.
-	SupportsHooks bool `toml:"supports_hooks,omitempty"`
+	// Tri-state: nil = inherit from base, &true = enable, &false = explicit disable.
+	SupportsHooks *bool `toml:"supports_hooks,omitempty"`
 	// InstructionsFile is the filename the provider reads for project instructions
 	// (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md".
 	InstructionsFile string `toml:"instructions_file,omitempty"`
@@ -261,6 +271,22 @@ func (ps *ProviderSpec) pathCheckBinary() string {
 	return ps.Command
 }
 
+// boolPtr returns a pointer to the given bool. Used to build tri-state
+// capability fields (SupportsHooks, SupportsACP, EmitsPermissionWarning)
+// where nil means "inherit", &true means "enable", and &false means
+// "explicit disable".
+func boolPtr(b bool) *bool { return &b }
+
+// derefBool safely dereferences a *bool, returning false when the pointer
+// is nil. Used by specToResolved and runtime consumers that expect a
+// plain bool after resolution.
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
+}
+
 // builtinProviderOrder is the priority order for provider detection and
 // wizard display. Claude is first (default), followed by major providers
 // in rough popularity order.
@@ -295,9 +321,9 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ReadyDelayMs:           10000,
 			ReadyPromptPrefix:      "\u276f ", // ❯
 			ProcessNames:           []string{"node", "claude"},
-			EmitsPermissionWarning: true,
-			SupportsACP:            true,
-			SupportsHooks:          true,
+			EmitsPermissionWarning: boolPtr(true),
+			SupportsACP:            boolPtr(true),
+			SupportsHooks:          boolPtr(true),
 			InstructionsFile:       "CLAUDE.md",
 			ResumeFlag:             "--resume",
 			ResumeStyle:            "flag",
@@ -355,7 +381,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			PromptMode:       "arg",
 			ReadyDelayMs:     3000,
 			ProcessNames:     []string{"codex"},
-			SupportsHooks:    true,
+			SupportsHooks:    boolPtr(true),
 			InstructionsFile: "AGENTS.md",
 			PrintArgs:        []string{"exec"},
 			TitleModel:       "o4-mini",
@@ -424,7 +450,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ReadyPromptPrefix: "> ",
 			ReadyDelayMs:      5000,
 			ProcessNames:      []string{"gemini", "node"},
-			SupportsHooks:     true,
+			SupportsHooks:     boolPtr(true),
 			InstructionsFile:  "AGENTS.md",
 			PrintArgs:         []string{"-p"},
 			TitleModel:        "gemini-2.5-flash",
@@ -462,7 +488,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			Args:             []string{"-f"},
 			PromptMode:       "arg",
 			ProcessNames:     []string{"cursor-agent"},
-			SupportsHooks:    true,
+			SupportsHooks:    boolPtr(true),
 			InstructionsFile: "AGENTS.md",
 		},
 		"copilot": {
@@ -473,7 +499,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ReadyPromptPrefix: "\u276f ", // ❯
 			ReadyDelayMs:      5000,
 			ProcessNames:      []string{"copilot"},
-			SupportsHooks:     true,
+			SupportsHooks:     boolPtr(true),
 			InstructionsFile:  "AGENTS.md",
 		},
 		"amp": {
@@ -492,8 +518,8 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ReadyDelayMs:     8000,
 			ProcessNames:     []string{"opencode", "node", "bun"},
 			Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-			SupportsACP:      true,
-			SupportsHooks:    true,
+			SupportsACP:      boolPtr(true),
+			SupportsHooks:    boolPtr(true),
 			InstructionsFile: "AGENTS.md",
 		},
 		"auggie": {
@@ -511,7 +537,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			PromptMode:       "arg",
 			ReadyDelayMs:     8000,
 			ProcessNames:     []string{"pi", "node", "bun"},
-			SupportsHooks:    true,
+			SupportsHooks:    boolPtr(true),
 			InstructionsFile: "AGENTS.md",
 		},
 		"omp": {
@@ -520,7 +546,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			Args:             []string{"--hook", ".omp/hooks/gc-hook.ts"},
 			PromptMode:       "arg",
 			ProcessNames:     []string{"omp", "node", "bun"},
-			SupportsHooks:    true,
+			SupportsHooks:    boolPtr(true),
 			InstructionsFile: "AGENTS.md",
 		},
 	}
