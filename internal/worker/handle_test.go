@@ -767,6 +767,39 @@ func TestSessionHandleStartPassesSessionEnv(t *testing.T) {
 	}
 }
 
+func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
+	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileGeminiTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "gemini",
+		WorkDir:  t.TempDir(),
+		Provider: "gemini",
+	})
+
+	resolved := runtime.Config{
+		Command: "gemini --resume existing-session",
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"GC_WORKER_BOUNDARY": "start_resolved",
+		},
+	}
+	if err := handle.StartResolved(context.Background(), resolved.Command, resolved); err != nil {
+		t.Fatalf("StartResolved: %v", err)
+	}
+
+	start := firstCall(sp.Calls, "Start")
+	if start == nil {
+		t.Fatalf("runtime calls = %#v, want Start call", sp.Calls)
+	}
+	if got := start.Config.Command; got != resolved.Command {
+		t.Fatalf("StartResolved command = %q, want %q", got, resolved.Command)
+	}
+	if got := start.Config.Env["GC_WORKER_BOUNDARY"]; got != "start_resolved" {
+		t.Fatalf("StartResolved env GC_WORKER_BOUNDARY = %q, want start_resolved", got)
+	}
+}
+
 func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
 	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
