@@ -186,6 +186,13 @@ func mergeFragmentLists(global, perAgent []string) []string {
 	return merged
 }
 
+// effectivePromptFragments applies the runtime fragment layering contract.
+func effectivePromptFragments(global, inject, inherited, defaults []string) []string {
+	fragments := mergeFragmentLists(global, inject)
+	fragments = mergeFragmentLists(fragments, inherited)
+	return mergeFragmentLists(fragments, defaults)
+}
+
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {

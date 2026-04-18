@@ -247,13 +247,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
 	// imported-pack [agent_defaults].append_fragments, then city-level
 	// [agent_defaults].append_fragments.
-	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
-	if len(cfgAgent.InheritedAppendFragments) > 0 {
-		fragments = mergeFragmentLists(fragments, cfgAgent.InheritedAppendFragments)
-	}
-	if len(p.appendFragments) > 0 {
-		fragments = mergeFragmentLists(fragments, p.appendFragments)
-	}
+	fragments := effectivePromptFragments(
+		p.globalFragments,
+		cfgAgent.InjectFragments,
+		cfgAgent.InheritedAppendFragments,
+		p.appendFragments,
+	)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:      p.cityPath,
 		AgentName:     qualifiedName,

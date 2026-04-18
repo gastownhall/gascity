@@ -154,6 +154,66 @@ session_live = ["echo hi"]
 	}
 }
 
+func TestDoImportAddCanonicalizesLegacyAgentsDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+default_sling_formula = "mol-legacy"
+append_fragments = ["legacy-fragment"]
+`)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "[agents]") {
+		t.Fatalf("pack.toml should be rewritten to canonical [agent_defaults]:\n%s", text)
+	}
+	for _, want := range []string{
+		`[agent_defaults]`,
+		`default_sling_formula = "mol-legacy"`,
+		`append_fragments = ["legacy-fragment"]`,
+		`[imports.tools]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pack.toml missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestDoImportAddPathRejectsVersionFlag(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()

@@ -32,18 +32,19 @@ var (
 const cityPackSchema = 1
 
 type cityPackManifest struct {
-	Pack          config.PackMeta                `toml:"pack"`
-	Imports       map[string]config.Import       `toml:"imports,omitempty"`
-	AgentDefaults config.AgentDefaults           `toml:"agent_defaults,omitempty"`
-	Agents        []config.Agent                 `toml:"agent,omitempty"`
-	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
-	Services      []config.Service               `toml:"service,omitempty"`
-	Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
-	Formulas      config.FormulasConfig          `toml:"formulas,omitempty"`
-	Patches       config.Patches                 `toml:"patches,omitempty"`
-	Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands      []config.PackCommandEntry      `toml:"commands,omitempty"`
-	Global        config.PackGlobal              `toml:"global,omitempty"`
+	Pack           config.PackMeta                `toml:"pack"`
+	Imports        map[string]config.Import       `toml:"imports,omitempty"`
+	AgentDefaults  config.AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentsDefaults config.AgentDefaults           `toml:"agents,omitempty"`
+	Agents         []config.Agent                 `toml:"agent,omitempty"`
+	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
+	Services       []config.Service               `toml:"service,omitempty"`
+	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
+	Patches        config.Patches                 `toml:"patches,omitempty"`
+	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands       []config.PackCommandEntry      `toml:"commands,omitempty"`
+	Global         config.PackGlobal              `toml:"global,omitempty"`
 }
 
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -551,9 +552,11 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	}
 
 	var manifest cityPackManifest
-	if _, err := toml.Decode(string(data), &manifest); err != nil {
+	md, err := toml.Decode(string(data), &manifest)
+	if err != nil {
 		return nil, fmt.Errorf("parsing pack.toml: %w", err)
 	}
+	normalizeCityPackManifestAgentDefaultsAlias(&manifest, md)
 	if manifest.Pack.Name == "" {
 		manifest.Pack.Name = defaultCityPackName(fs, cityPath)
 	}
@@ -563,6 +566,7 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	if manifest.Imports == nil {
 		manifest.Imports = make(map[string]config.Import)
 	}
+	manifest.AgentsDefaults = config.AgentDefaults{}
 	return &manifest, nil
 }
 
@@ -579,12 +583,24 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 	if manifest.Imports == nil {
 		manifest.Imports = make(map[string]config.Import)
 	}
+	manifest.AgentsDefaults = config.AgentDefaults{}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(manifest); err != nil {
 		return fmt.Errorf("encoding pack.toml: %w", err)
 	}
 	return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "pack.toml"), buf.Bytes(), 0o644)
+}
+
+func normalizeCityPackManifestAgentDefaultsAlias(manifest *cityPackManifest, meta toml.MetaData) {
+	if meta.IsDefined("agent_defaults") {
+		manifest.AgentsDefaults = config.AgentDefaults{}
+		return
+	}
+	if meta.IsDefined("agents") {
+		manifest.AgentDefaults = manifest.AgentsDefaults
+		manifest.AgentsDefaults = config.AgentDefaults{}
+	}
 }
 
 func defaultCityPackName(fs fsys.FS, cityPath string) string {
