@@ -1,15 +1,22 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+var errMailNoBeadStore = errors.New("no bead store available")
 
 // findMailProvider returns the mail provider for a rig, or the first available
 // (deterministically by sorted rig name).
@@ -61,6 +68,152 @@ func (s *Server) findMailProviderByID(id string) (mail.Provider, string, error) 
 		}
 	}
 	return nil, "", firstErr
+}
+
+func (s *Server) resolveMailSendRecipient(r *http.Request, recipient string) (string, error) {
+	return s.resolveMailSendRecipientWithContext(r.Context(), recipient)
+}
+
+func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipient string) (string, error) {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "human" {
+		return recipient, nil
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config()))
+		if err != nil {
+			return "", errMailNoBeadStore
+		}
+		return resolved, nil
+	}
+	return s.resolveSessionIDMaterializingNamedWithContext(ctx, store, recipient)
+}
+
+func (s *Server) resolveMailQueryRecipients(r *http.Request, recipient string) []string {
+	return s.resolveMailQueryRecipientsWithContext(r.Context(), recipient)
+}
+
+func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return []string{""}
+	}
+	if recipient == "human" {
+		return []string{"human"}
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
+			if resolved == recipient {
+				return []string{resolved}
+			}
+			// Compatibility: older tests and direct provider callers may have
+			// persisted mail under the raw bare name while API sends now
+			// canonicalize to the qualified recipient.
+			return []string{resolved, recipient}
+		}
+		return []string{recipient}
+	}
+	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
+		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil && len(recipients) > 0 {
+			return append(recipients, recipient)
+		}
+	}
+	resolved, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{})
+	if err != nil {
+		return []string{recipient}
+	}
+	return []string{resolved}
+}
+
+func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedSessionSpec) ([]string, error) {
+	candidates, err := store.List(beads.ListQuery{
+		Label:         session.LabelSession,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing named session mail recipients: %w", err)
+	}
+	recipients := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, b := range candidates {
+		if !session.IsSessionBeadOrRepairable(b) ||
+			!session.IsNamedSessionBead(b) ||
+			session.NamedSessionIdentity(b) != spec.Identity {
+			continue
+		}
+		if b.ID == "" || seen[b.ID] {
+			continue
+		}
+		seen[b.ID] = true
+		recipients = append(recipients, b.ID)
+	}
+	sort.Strings(recipients)
+	return recipients, nil
+}
+
+func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	return mailMessagesForRecipients(mp.Inbox, recipients)
+}
+
+func mailAllForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	return mailMessagesForRecipients(mp.All, recipients)
+}
+
+func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	var all []mail.Message
+	seen := make(map[string]bool)
+	for _, recipient := range recipients {
+		msgs, err := fetch(recipient)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range msgs {
+			if msg.ID != "" {
+				if seen[msg.ID] {
+					continue
+				}
+				seen[msg.ID] = true
+			}
+			all = append(all, msg)
+		}
+	}
+	return all, nil
+}
+
+func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {
+	recipients = uniqueMailRecipients(recipients)
+	var totalAll, unreadAll int
+	for _, recipient := range recipients {
+		total, unread, err := mp.Count(recipient)
+		if err != nil {
+			return 0, 0, err
+		}
+		totalAll += total
+		unreadAll += unread
+	}
+	return totalAll, unreadAll, nil
+}
+
+func uniqueMailRecipients(recipients []string) []string {
+	if len(recipients) == 0 {
+		return []string{""}
+	}
+	seen := make(map[string]bool, len(recipients))
+	unique := recipients[:0]
+	for _, recipient := range recipients {
+		if seen[recipient] {
+			continue
+		}
+		seen[recipient] = true
+		unique = append(unique, recipient)
+	}
+	if len(unique) == 0 {
+		return []string{""}
+	}
+	return unique
 }
 
 // agentEntries converts city config agents to mail.AgentEntry for recipient resolution.

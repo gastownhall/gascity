@@ -52,11 +52,20 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	// Agent track.
 	resolved, workDir, transport, template, err := s.resolveSessionTemplate(name)
 	if err != nil {
+		if errors.Is(err, errSessionTemplateNotFound) && !strings.Contains(name, "/") {
+			if agentCfg, ok := findUniqueAgentTemplateByBareName(s.state.Config(), name); ok {
+				resolved, workDir, transport, template, err = s.resolveSessionTemplate(agentCfg.QualifiedName())
+			}
+		}
+		if err == nil {
+			goto resolvedTemplate
+		}
 		if errors.Is(err, errSessionTemplateNotFound) {
 			return nil, huma.Error404NotFound("agent '" + name + "' not found")
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+resolvedTemplate:
 
 	if len(body.Options) > 0 {
 		if len(resolved.OptionsSchema) == 0 {
@@ -513,14 +522,14 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 
 // humaHandleSessionSuspend is the Huma-typed handler for POST /v0/session/{id}/suspend.
 
-func (s *Server) humaHandleSessionSuspend(_ context.Context, input *SessionIDInput) (*OKResponse, error) {
+func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDInput) (*OKResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 	mgr := s.sessionManager(store)
 
-	id, err := s.resolveSessionIDWithConfig(store, input.ID)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -548,7 +557,10 @@ func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseIn
 		return nil, humaResolveError(err)
 	}
 
-	if b, getErr := store.Get(id); getErr == nil && strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" && strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" {
+	if b, getErr := store.Get(id); getErr == nil &&
+		strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" &&
+		strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" &&
+		strings.Contains(strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey]), "/") {
 		return nil, huma.Error409Conflict("configured always-on named sessions cannot be closed while config-managed")
 	}
 	nudgeIDs, err := session.WaitNudgeIDs(store, id)

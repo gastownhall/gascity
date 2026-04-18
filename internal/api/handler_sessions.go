@@ -129,17 +129,7 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	if k := b.Metadata["mc_session_kind"]; k != "" {
 		r.Kind = k
 	}
-	// Surface bead-persisted sleep/hold/quarantine reason.
-	switch {
-	case b.Metadata["sleep_reason"] != "":
-		r.Reason = b.Metadata["sleep_reason"]
-	case b.Metadata["quarantined_until"] != "":
-		r.Reason = "quarantine"
-	case b.Metadata["wait_hold"] != "":
-		r.Reason = "wait-hold"
-	case b.Metadata["held_until"] != "":
-		r.Reason = "user-hold"
-	}
+	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
 	// Expose only mc_* prefixed metadata keys to API consumers.
@@ -181,8 +171,9 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 
 	resp.Running = sp.IsRunning(info.SessionName)
 
-	// Active bead: search rig stores for in_progress work assigned to this template.
-	resp.ActiveBead = s.findActiveBead(info.Template, "")
+	// Active bead: search rig stores for in_progress work assigned to the
+	// concrete session first, then fall back to runtime/session names.
+	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Template)
 
 	// Peek preview (opt-in, only when running).
 	if wantPeek && resp.Running {

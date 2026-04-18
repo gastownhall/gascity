@@ -14,7 +14,7 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 	agents := make([]configAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		agents = append(agents, configAgentResponse{
-			Name:      a.Name,
+			Name:      a.BindingQualifiedName(),
 			Dir:       a.Dir,
 			Provider:  a.Provider,
 			IsPool:    isMultiSessionAgent(a),
@@ -87,7 +87,7 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 	for _, a := range cfg.Agents {
 		origin := agentOrigin(a, rawCfg, cfg)
 		agents = append(agents, annotatedAgentResponse{
-			Name:      a.Name,
+			Name:      a.BindingQualifiedName(),
 			Dir:       a.Dir,
 			Provider:  a.Provider,
 			IsPool:    isMultiSessionAgent(a),

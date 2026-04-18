@@ -1,13 +1,17 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -36,12 +40,62 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	return children
 }
 
+func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []string {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return []string{""}
+	}
+	terms := []string{assignee}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return terms
+	}
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
+	if err != nil || id == "" || id == assignee {
+		return terms
+	}
+	return []string{id, assignee}
+}
+
+func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) (string, error) {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return "", nil
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return assignee, nil
+	}
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
+	if errors.Is(err, session.ErrSessionNotFound) {
+		id, err = s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{materialize: true})
+	}
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+		}
+		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		return "", fmt.Errorf("looking up resolved assignee session %q: %w", id, err)
+	}
+	if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+	}
+	session.RepairEmptyType(store, &b)
+	return b.ID, nil
+}
+
 // findStore returns the bead store for the given rig. If rig is empty, returns
 // the sole store when exactly one exists (after deduplication), or nil when
 // multiple distinct stores exist (caller should require explicit rig).
 func (s *Server) findStore(rig string) beads.Store {
 	if rig != "" {
 		return s.state.BeadStore(rig)
+	}
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		return cityStore
 	}
 	stores := s.state.BeadStores()
 	names := sortedRigNames(stores)
@@ -220,5 +274,3 @@ func resolveRoutePrefix(rigPath, prefix string) (string, bool) {
 	}
 	return "", false
 }
-
-

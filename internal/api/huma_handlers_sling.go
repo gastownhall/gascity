@@ -34,7 +34,11 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		return nil, huma.Error400BadRequest("target agent or pool is required")
 	}
 
+	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
+	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
+
 	cfg := s.state.Config()
+	body.Target = qualifySlingTarget(cfg, body.Target, slingRigContext(body))
 	agentCfg, ok := findAgent(cfg, body.Target)
 	if !ok {
 		return nil, huma.Error404NotFound("target " + body.Target + " not found")
@@ -50,8 +54,6 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		return nil, huma.Error400BadRequest("bead and attached_bead_id are mutually exclusive")
 	}
 
-	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
-	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
 	workflowLaunchOptions := body.AttachedBeadID != "" ||
 		len(body.Vars) > 0 ||
 		body.Title != "" ||
@@ -73,6 +75,18 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	}
 	if body.ScopeKind != "" && body.ScopeKind != "city" && body.ScopeKind != "rig" {
 		return nil, huma.Error400BadRequest("scope_kind must be 'city' or 'rig'")
+	}
+	if body.ScopeKind == "rig" && body.ScopeRef != "" {
+		if agentCfg.Dir != body.ScopeRef {
+			msg := "scope_ref " + body.ScopeRef + " conflicts with resolved target rig " + agentCfg.Dir
+			if agentCfg.Dir == "" {
+				msg = "scope_ref " + body.ScopeRef + " requires a rig-scoped target; resolved target " + body.Target + " is city-scoped"
+			}
+			return nil, huma.Error400BadRequest(msg)
+		}
+		if body.Rig != "" && body.Rig != body.ScopeRef {
+			return nil, huma.Error400BadRequest("rig " + body.Rig + " conflicts with scope_ref " + body.ScopeRef)
+		}
 	}
 
 	resp, status, code, message := s.execSling(ctx, body, agentCfg.EffectiveDefaultSlingFormula())

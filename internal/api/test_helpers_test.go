@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +78,15 @@ func newTestCityHandlerWith(t *testing.T, state State, srv *Server) http.Handler
 	sm.cacheMu.Lock()
 	sm.cache[state.CityName()] = cachedCityServer{state: state, srv: srv}
 	sm.cacheMu.Unlock()
-	return wrapTestSupervisorMiddleware(sm)
+	inner := wrapTestSupervisorMiddleware(sm)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v0/") && !strings.HasPrefix(r.URL.Path, "/v0/city/") {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = testShimRewritePath(r.URL.Path, state.CityName())
+			r2.URL.RawPath = ""
+			inner.ServeHTTP(w, r2)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
 }

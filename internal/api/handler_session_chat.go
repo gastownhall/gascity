@@ -195,7 +195,7 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 	for k, v := range optMeta {
 		batch[k] = v
 	}
-	if kind != "" {
+	if kind != "" && kind != "provider" {
 		batch["mc_session_kind"] = kind
 	}
 	if projectID != "" {

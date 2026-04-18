@@ -211,7 +211,7 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 // Uses ListByAssignee with limit=1 instead of List() to avoid fetching all
 // beads from every store — a critical performance fix when bead counts are
 // large (e.g., 2200+ beads × 102 agents = ~186 full-list subprocess spawns).
-func (s *Server) findActiveBead(agentName, rig string) string {
+func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
 	if rig != "" {
@@ -222,18 +222,30 @@ func (s *Server) findActiveBead(agentName, rig string) string {
 	if rigNames == nil {
 		rigNames = sortedRigNames(stores)
 	}
-	for _, rn := range rigNames {
-		matches, err := stores[rn].List(beads.ListQuery{
-			Assignee: agentName,
-			Status:   "in_progress",
-			Limit:    1,
-			Sort:     beads.SortCreatedDesc,
-		})
-		if err != nil {
+	seen := make(map[string]bool, len(assignees))
+	var unique []string
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" || seen[assignee] {
 			continue
 		}
-		if len(matches) > 0 {
-			return matches[0].ID
+		seen[assignee] = true
+		unique = append(unique, assignee)
+	}
+	for _, assignee := range unique {
+		for _, rn := range rigNames {
+			matches, err := stores[rn].List(beads.ListQuery{
+				Assignee: assignee,
+				Status:   "in_progress",
+				Limit:    1,
+				Sort:     beads.SortCreatedDesc,
+			})
+			if err != nil {
+				continue
+			}
+			if len(matches) > 0 {
+				return matches[0].ID
+			}
 		}
 	}
 	return ""

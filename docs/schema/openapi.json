@@ -155,6 +155,12 @@
               "null"
             ]
           },
+          "InjectAssignedSkills": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "InjectFragments": {
             "items": {
               "type": "string"
@@ -415,6 +421,7 @@
           "SkillsAppend",
           "MCPAppend",
           "HooksInstalled",
+          "InjectAssignedSkills",
           "SessionSetup",
           "SessionSetupScript",
           "SessionLive",

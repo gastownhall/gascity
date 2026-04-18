@@ -29,7 +29,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		pp.IsPaging = true
 	}
 
-	agent := input.Agent
+	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
 	index := s.latestIndex()
@@ -44,7 +44,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 					Body:  ListBody[mail.Message]{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
-			msgs, err := mp.Inbox(agent)
+			msgs, err := mailInboxForRecipients(mp, agents)
 			if err != nil {
 				return nil, huma.Error500InternalServerError(err.Error())
 			}
@@ -75,7 +75,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		providers := s.state.MailProviders()
 		var allMsgs []mail.Message
 		for _, name := range sortedProviderNames(providers) {
-			msgs, err := providers[name].Inbox(agent)
+			msgs, err := mailInboxForRecipients(providers[name], agents)
 			if err != nil {
 				return nil, huma.Error500InternalServerError("mail provider " + name + ": " + err.Error())
 			}
@@ -112,7 +112,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 					Body:  ListBody[mail.Message]{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
-			msgs, err := mp.All(agent)
+			msgs, err := mailAllForRecipients(mp, agents)
 			if err != nil {
 				return nil, huma.Error500InternalServerError(err.Error())
 			}
@@ -143,7 +143,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		providers := s.state.MailProviders()
 		var allMsgs []mail.Message
 		for _, name := range sortedProviderNames(providers) {
-			msgs, err := providers[name].All(agent)
+			msgs, err := mailAllForRecipients(providers[name], agents)
 			if err != nil {
 				return nil, huma.Error500InternalServerError("mail provider " + name + ": " + err.Error())
 			}
@@ -205,10 +205,12 @@ func (s *Server) humaHandleMailGet(_ context.Context, input *MailGetInput) (*Ind
 // humaHandleMailSend is the Huma-typed handler for POST /v0/mail.
 // Body validation (To and Subject required, minLength:"1") is enforced by
 // the framework from MailSendInput's struct tags.
-func (s *Server) humaHandleMailSend(_ context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
-	// Resolve recipient against configured agents.
-	resolved, resolveErr := mail.ResolveRecipient(input.Body.To, agentEntries(s.state.Config()))
+func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
+	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
+		if errors.Is(resolveErr, errMailNoBeadStore) {
+			return nil, huma.Error400BadRequest(resolveErr.Error())
+		}
 		return nil, huma.Error400BadRequest(resolveErr.Error())
 	}
 
@@ -257,8 +259,8 @@ func (s *Server) humaHandleMailSend(_ context.Context, input *MailSendInput) (*I
 }
 
 // humaHandleMailCount is the Huma-typed handler for GET /v0/mail/count.
-func (s *Server) humaHandleMailCount(_ context.Context, input *MailCountInput) (*MailCountOutput, error) {
-	agentName := input.Agent
+func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput) (*MailCountOutput, error) {
+	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
 	rig := input.Rig
 
 	if rig != "" {
@@ -269,7 +271,7 @@ func (s *Server) humaHandleMailCount(_ context.Context, input *MailCountInput) (
 			resp.Body.Unread = 0
 			return resp, nil
 		}
-		total, unread, err := mp.Count(agentName)
+		total, unread, err := mailCountForRecipients(mp, agents)
 		if err != nil {
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
@@ -283,7 +285,7 @@ func (s *Server) humaHandleMailCount(_ context.Context, input *MailCountInput) (
 	providers := s.state.MailProviders()
 	var totalAll, unreadAll int
 	for _, name := range sortedProviderNames(providers) {
-		total, unread, err := providers[name].Count(agentName)
+		total, unread, err := mailCountForRecipients(providers[name], agents)
 		if err != nil {
 			return nil, huma.Error500InternalServerError("mail provider " + name + ": " + err.Error())
 		}

@@ -28,6 +28,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	stores := s.state.BeadStores()
+	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
 	var rigNames []string
 	if input.Rig != "" {
 		if _, ok := stores[input.Rig]; ok {
@@ -38,22 +39,35 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	var all []beads.Bead
+	dedupe := len(assigneeTerms) > 1
+	seen := map[string]bool{}
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		query := beads.ListQuery{
-			Status:   input.Status,
-			Type:     input.Type,
-			Label:    input.Label,
-			Assignee: input.Assignee,
+		for _, assignee := range assigneeTerms {
+			query := beads.ListQuery{
+				Status:   input.Status,
+				Type:     input.Type,
+				Label:    input.Label,
+				Assignee: assignee,
+			}
+			if !query.HasFilter() {
+				query.AllowScan = true
+			}
+			list, err := store.List(query)
+			if err != nil {
+				continue
+			}
+			for _, b := range list {
+				dedupeKey := rigName + "\x00" + b.ID
+				if dedupe && seen[dedupeKey] {
+					continue
+				}
+				if dedupe {
+					seen[dedupeKey] = true
+				}
+				all = append(all, b)
+			}
 		}
-		if !query.HasFilter() {
-			query.AllowScan = true
-		}
-		list, err := store.List(query)
-		if err != nil {
-			continue
-		}
-		all = append(all, list...)
 	}
 
 	if all == nil {
@@ -222,7 +236,7 @@ type beadDepsResponse struct {
 
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
-func (s *Server) humaHandleBeadCreate(_ context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
+func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
 	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
 	idemKey := ""
 	var bodyHash string
@@ -252,12 +266,17 @@ func (s *Server) humaHandleBeadCreate(_ context.Context, input *BeadCreateInput)
 		s.idem.unreserve(idemKey)
 		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")
 	}
+	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		return nil, huma.Error400BadRequest(err.Error())
+	}
 
 	b, err := store.Create(beads.Bead{
 		Title:       input.Body.Title,
 		Type:        input.Body.Type,
 		Priority:    input.Body.Priority,
-		Assignee:    input.Body.Assignee,
+		Assignee:    assignee,
 		Description: input.Body.Description,
 		Labels:      input.Body.Labels,
 	})
@@ -317,10 +336,20 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 }
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
-func (s *Server) humaHandleBeadAssign(_ context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
+func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
 	id := input.ID
 	for _, store := range s.beadStoresForID(id) {
-		if err := store.Update(id, beads.UpdateOpts{Assignee: &input.Body.Assignee}); err != nil {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+		if err != nil {
+			return nil, huma.Error400BadRequest(err.Error())
+		}
+		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
@@ -328,7 +357,7 @@ func (s *Server) humaHandleBeadAssign(_ context.Context, input *BeadAssignInput)
 		}
 		return &IndexOutput[map[string]string]{
 			Index: s.latestIndex(),
-			Body:  map[string]string{"status": "assigned", "assignee": input.Body.Assignee},
+			Body:  map[string]string{"status": "assigned", "assignee": assignee},
 		}, nil
 	}
 	return nil, huma.Error404NotFound("bead " + id + " not found")
@@ -345,7 +374,7 @@ func (s *Server) humaHandleBeadAssign(_ context.Context, input *BeadAssignInput)
 // supported"). That UX nicety was removed in Phase 3 because (a) the only
 // in-repo caller (dashboard issue update) never sends null, and (b) keeping
 // it required a json.RawMessage body that broke the spec-driven contract.
-func (s *Server) humaHandleBeadUpdate(_ context.Context, input *BeadUpdateInput) (*OKResponse, error) {
+func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInput) (*OKResponse, error) {
 	id := input.ID
 	body := input.Body
 
@@ -354,13 +383,25 @@ func (s *Server) humaHandleBeadUpdate(_ context.Context, input *BeadUpdateInput)
 		Status:       body.Status,
 		Type:         body.Type,
 		Priority:     body.Priority,
-		Assignee:     body.Assignee,
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,
 	}
 
 	for _, store := range s.beadStoresForID(id) {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		if body.Assignee != nil {
+			assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
+			if err != nil {
+				return nil, huma.Error400BadRequest(err.Error())
+			}
+			opts.Assignee = &assignee
+		}
 		if err := store.Update(id, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue

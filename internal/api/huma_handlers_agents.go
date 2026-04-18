@@ -92,6 +92,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 
 			var lastActivity *time.Time
+			sessionID := ""
 			if running {
 				si := &sessionInfo{Name: sessionName}
 				if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
@@ -100,9 +101,12 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 				si.Attached = sp.IsAttached(sessionName)
 				resp.Session = si
+				if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+					sessionID = strings.TrimSpace(id)
+				}
 			}
 
-			resp.ActiveBead = s.findActiveBead(ea.qualifiedName, ea.rig)
+			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
 			quarantined := s.state.IsQuarantined(sessionName)
 			resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
 
@@ -193,6 +197,7 @@ func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*In
 	}
 
 	var lastActivity *time.Time
+	sessionID := ""
 	if running {
 		si := &sessionInfo{Name: sessionName}
 		if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
@@ -201,9 +206,12 @@ func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*In
 		}
 		si.Attached = sp.IsAttached(sessionName)
 		resp.Session = si
+		if id, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+			sessionID = strings.TrimSpace(id)
+		}
 	}
 
-	resp.ActiveBead = s.findActiveBead(name, agentCfg.Dir)
+	resp.ActiveBead = s.findActiveBeadForAssignees(agentCfg.Dir, sessionID, sessionName, name)
 	quarantined := s.state.IsQuarantined(sessionName)
 	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
 
