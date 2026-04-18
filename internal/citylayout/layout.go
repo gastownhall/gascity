@@ -72,9 +72,6 @@ func CachePath(cityRoot string, rel ...string) string {
 	return filepath.Join(parts...)
 }
 
-// PromptsPath returns the absolute path to the prompts directory.
-func PromptsPath(cityRoot string) string { return filepath.Join(cityRoot, PromptsRoot) }
-
 // FormulasPath returns the absolute path to the formulas directory.
 func FormulasPath(cityRoot string) string { return filepath.Join(cityRoot, FormulasRoot) }
 
