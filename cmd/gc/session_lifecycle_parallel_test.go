@@ -1892,6 +1892,9 @@ func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 		context.Background(),
 		[]preparedStart{{candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}}}},
 		&panicStartProvider{Fake: runtime.NewFake()},
+		nil,
+		"",
+		nil,
 		time.Second,
 		1,
 	)
@@ -2135,6 +2138,9 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		context.Background(),
 		[]preparedStart{item},
 		sp,
+		nil,
+		"",
+		nil,
 		10*time.Second,
 		1,
 	)
@@ -2177,6 +2183,9 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		context.Background(),
 		[]preparedStart{item},
 		sp,
+		nil,
+		"",
+		nil,
 		10*time.Second,
 		1,
 	)

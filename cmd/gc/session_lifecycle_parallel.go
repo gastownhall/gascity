@@ -435,6 +435,9 @@ func executePreparedStartWave(
 	ctx context.Context,
 	prepared []preparedStart,
 	sp runtime.Provider,
+	store beads.Store,
+	cityPath string,
+	cfg *config.City,
 	startupTimeout time.Duration,
 	maxParallel int,
 ) []startResult {
@@ -472,13 +475,13 @@ func executePreparedStartWave(
 				startCtx, cancel = context.WithTimeout(ctx, startupTimeout)
 			}
 			defer cancel()
-			err := sp.Start(startCtx, item.candidate.name(), item.cfg)
+			usedWorkerBoundary, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
 			// Stale session key detection: if the session was started
 			// with a resume flag but dies immediately, the session key
 			// likely references a conversation that no longer exists
 			// (e.g., "No conversation found"). Report as a failure so
 			// recordWakeFailure clears the key for the next attempt.
-			if err == nil && item.candidate.session.Metadata["session_key"] != "" {
+			if err == nil && !usedWorkerBoundary && item.candidate.session.Metadata["session_key"] != "" {
 				time.Sleep(staleKeyDetectDelay)
 				if !sp.IsRunning(item.candidate.name()) {
 					err = fmt.Errorf("session %q died during startup", item.candidate.name())
@@ -533,6 +536,24 @@ func executePreparedStartWave(
 		<-done
 	}
 	return results
+}
+
+func startPreparedStartCandidate(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+) (bool, error) {
+	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
+		return false, sp.Start(ctx, item.candidate.name(), item.cfg)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, item.candidate.session.ID)
+	if err != nil {
+		return true, err
+	}
+	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
 }
 
 func commitStartResult(
@@ -863,7 +884,7 @@ func executePlannedStartsTraced(
 				prepared = append(prepared, *item)
 			}
 			offset = end
-			results := executePreparedStartWave(ctx, prepared, sp, startupTimeout, defaultMaxParallelStartsPerWave)
+			results := executePreparedStartWave(ctx, prepared, sp, store, "", cfg, startupTimeout, defaultMaxParallelStartsPerWave)
 			for _, result := range results {
 				if trace != nil {
 					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{
