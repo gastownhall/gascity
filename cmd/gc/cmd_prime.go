@@ -178,7 +178,12 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
 		}
 		if ok && a.PromptTemplate != "" {
-			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
+			fragments := effectivePromptFragments(
+				cfg.Workspace.GlobalFragments,
+				a.InjectFragments,
+				a.InheritedAppendFragments,
+				cfg.AgentDefaults.AppendFragments,
+			)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {

@@ -670,3 +670,24 @@ func TestMergeFragmentLists(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectivePromptFragments(t *testing.T) {
+	got := effectivePromptFragments(
+		[]string{"global"},
+		[]string{"inject"},
+		[]string{"inherited"},
+		[]string{"default"},
+	)
+	want := []string{"global", "inject", "inherited", "default"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if effectivePromptFragments(nil, nil, nil, nil) != nil {
+		t.Fatal("effectivePromptFragments(nil, nil, nil, nil) = non-nil, want nil")
+	}
+}
