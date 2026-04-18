@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -93,6 +94,12 @@ func doRigStatus(
 	stdout, stderr io.Writer,
 ) int {
 	_ = stderr // reserved for future error reporting
+	var store beads.Store
+	if cityPath != "" {
+		if opened, err := openCityStoreAt(cityPath); err == nil {
+			store = opened
+		}
+	}
 
 	suspStr := "no"
 	if rig.Suspended {
@@ -108,12 +115,14 @@ func doRigStatus(
 		sp0 := scaleParamsFor(&a)
 		if !a.SupportsInstanceExpansion() {
 			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), sessionTemplate)
-			status := agentStatusLine(sp, dops, sn, a.Suspended)
+			obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, nil, sn)
+			status := agentStatusLine(obs.Running, dops, sn, a.Suspended || obs.Suspended)
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
 		} else {
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				sn := cliSessionName(cityPath, cityName, qualifiedInstance, sessionTemplate)
-				status := agentStatusLine(sp, dops, sn, a.Suspended)
+				obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, nil, sn)
+				status := agentStatusLine(obs.Running, dops, sn, a.Suspended || obs.Suspended)
 				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
 			}
 		}
@@ -122,8 +131,7 @@ func doRigStatus(
 }
 
 // agentStatusLine returns a human-readable status string for an agent session.
-func agentStatusLine(sp runtime.Provider, dops drainOps, sn string, suspended bool) string {
-	running := sp.IsRunning(sn)
+func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) string {
 	draining, _ := dops.isDraining(sn)
 
 	switch {

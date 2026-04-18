@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessions "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // errTokenMismatch indicates the running session's instance token
@@ -470,7 +471,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
 			// Drain timed out — force stop.
-			if err := verifiedStop(*session, sp); err != nil {
+			if err := verifiedStop(*session, store, sp, cfg); err != nil {
 				if errors.Is(err, errTokenMismatch) {
 					// Session was re-woken by a different incarnation.
 					// This drain is stale — cancel it.
@@ -524,7 +525,7 @@ func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk c
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(session beads.Bead, sp runtime.Provider) error {
+func verifiedStop(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
 	name := session.Metadata["session_name"]
 	expectedToken := session.Metadata["instance_token"]
 	if expectedToken != "" {
@@ -533,11 +534,15 @@ func verifiedStop(session beads.Bead, sp runtime.Provider) error {
 			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
 		}
 	}
-	return sp.Stop(name)
+	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
+	if err != nil {
+		return err
+	}
+	return handle.Kill(context.Background())
 }
 
 // verifiedInterrupt sends an interrupt signal after verifying instance_token.
-func verifiedInterrupt(session beads.Bead, sp runtime.Provider) error {
+func verifiedInterrupt(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
 	name := session.Metadata["session_name"]
 	expectedToken := session.Metadata["instance_token"]
 	if expectedToken != "" {
@@ -546,5 +551,9 @@ func verifiedInterrupt(session beads.Bead, sp runtime.Provider) error {
 			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
 		}
 	}
-	return sp.Interrupt(name)
+	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
+	if err != nil {
+		return err
+	}
+	return handle.Interrupt(context.Background(), worker.InterruptRequest{})
 }

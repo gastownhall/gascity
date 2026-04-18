@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type agentCounts struct {
@@ -60,6 +62,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
+	store := s.state.CityBeadStore()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
 
@@ -72,14 +75,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		for _, ea := range expandAgent(a, cityName, sessTmpl, sp) {
 			ac.Total++
 			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
-			running := sp.IsRunning(sessName)
+			handle, _ := s.workerHandleForSessionTarget(store, sessName)
+			obs, _ := worker.ObserveHandle(context.Background(), handle)
+			running := obs.Running
 			if running {
 				rawRunning++
 			}
-			suspended := ea.suspended
-			if v, err := sp.GetMeta(sessName, "suspended"); err == nil && v == "true" {
-				suspended = true
-			}
+			suspended := ea.suspended || obs.Suspended
 			switch {
 			case suspended:
 				ac.Suspended++
@@ -94,7 +96,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Count rigs by state.
 	rc := rigCounts{Total: len(cfg.Rigs)}
 	for _, rig := range cfg.Rigs {
-		if rigSuspended(cfg, rig, sp, cityName, s.state.CityPath()) {
+		if s.rigSuspended(cfg, rig, store, sp, cityName, s.state.CityPath()) {
 			rc.Suspended++
 		}
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -189,7 +189,6 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
 
 	q := r.URL.Query()
 	stateFilter := q.Get("state")
@@ -214,7 +213,10 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek)
+		handle, err := s.workerHandleForSession(store, sess.ID)
+		if err == nil {
+			s.enrichSessionResponse(&items[i], sess, cfg, handle, wantPeek)
+		}
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -240,7 +242,6 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
@@ -255,7 +256,10 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek)
+	handle, err := s.workerHandleForSession(store, id)
+	if err == nil {
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -289,11 +293,14 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
-
 	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
+		return
+	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
 		return
 	}
 	nudgeIDs, err := session.WaitNudgeIDs(store, id)
@@ -301,7 +308,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	if err := mgr.Close(id); err != nil {
+	if err := handle.Close(r.Context()); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -404,13 +411,18 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 	session.RepairEmptyType(store, &b)
 
-	mgr := s.sessionManager(store)
-	if err := mgr.Rename(id, body.Title); err != nil {
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Rename(r.Context(), body.Title); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
@@ -423,12 +435,18 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, sp runtime.Provider, wantPeek bool) {
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, handle worker.Handle, wantPeek bool) {
 	if info.State != session.StateActive {
 		return
 	}
-
-	resp.Running = sp.IsRunning(info.SessionName)
+	if handle == nil {
+		return
+	}
+	state, err := handle.State(context.Background())
+	if err != nil {
+		return
+	}
+	resp.Running = workerPhaseHasLiveOutput(state.Phase)
 
 	// Active bead: prefer canonical session ownership, with legacy
 	// session_name/alias/template fallbacks for old in-progress records.
@@ -436,7 +454,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 
 	// Peek preview (opt-in, only when running).
 	if wantPeek && resp.Running {
-		if output, err := sp.Peek(info.SessionName, 5); err == nil {
+		if output, err := handle.Peek(context.Background(), 5); err == nil {
 			resp.LastOutput = output
 		}
 	}

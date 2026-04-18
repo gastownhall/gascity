@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -59,7 +60,8 @@ func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name 
 	}
 
 	// No session file found — fall back to Peek() (raw terminal text).
-	s.peekFallbackOutput(w, name, cfg)
+	handle := s.agentWorkerHandle(name, cfg)
+	s.peekFallbackOutput(r.Context(), w, name, handle)
 }
 
 // trySessionLogOutput attempts to read structured conversation data from
@@ -124,16 +126,14 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 }
 
 // peekFallbackOutput returns raw terminal text wrapped as a single turn.
-func (s *Server) peekFallbackOutput(w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
-	if !sp.IsRunning(sessionName) {
+func (s *Server) peekFallbackOutput(ctx context.Context, w http.ResponseWriter, name string, handle worker.Handle) {
+	running, err := workerHandleRunning(ctx, handle)
+	if err != nil || !running {
 		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
 		return
 	}
 
-	output, err := sp.Peek(sessionName, 100)
+	output, err := handle.Peek(ctx, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -391,10 +391,8 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		logPath = adapter.DiscoverTranscript(provider, workDir, "")
 	}
 
-	// Check if agent is running.
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	handle := s.agentWorkerHandle(name, cfg)
+	running, _ := workerHandleRunning(r.Context(), handle)
 
 	// If no session log and agent isn't running, return 404 before committing SSE headers.
 	if logPath == "" && !running {
@@ -419,7 +417,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	if logPath != "" {
 		s.streamSessionLog(ctx, w, name, provider, logPath)
 	} else {
-		s.streamPeekOutput(ctx, w, name, cfg)
+		s.streamPeekOutput(ctx, w, name, handle)
 	}
 }
 
@@ -528,11 +526,9 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
 }
 
-// streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
+// streamPeekOutput polls Peek() through the worker boundary and emits changes
+// as SSE events.
+func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, handle worker.Handle) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -542,10 +538,11 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 	var seq uint64
 
 	emitPeek := func() {
-		if !sp.IsRunning(sessionName) {
+		running, err := workerHandleRunning(ctx, handle)
+		if err != nil || !running {
 			return
 		}
-		output, err := sp.Peek(sessionName, 100)
+		output, err := handle.Peek(ctx, 100)
 		if err != nil || output == lastOutput {
 			return
 		}
@@ -583,6 +580,33 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 			writeSSEComment(w)
 		}
 	}
+}
+
+func (s *Server) agentWorkerHandle(name string, cfg *config.City) worker.Handle {
+	if cfg == nil {
+		return nil
+	}
+	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	handle, _ := s.workerHandleForSessionTarget(s.state.CityBeadStore(), sessionName)
+	return handle
+}
+
+func workerHandleRunning(ctx context.Context, handle worker.Handle) (bool, error) {
+	if handle == nil {
+		return false, nil
+	}
+	obs, err := worker.ObserveHandle(ctx, handle)
+	if err == nil {
+		return obs.Running, nil
+	}
+	state, stateErr := handle.State(ctx)
+	if stateErr != nil {
+		if errors.Is(err, worker.ErrOperationUnsupported) {
+			return false, stateErr
+		}
+		return false, err
+	}
+	return state.Phase != worker.PhaseStopped && state.Phase != worker.PhaseFailed, nil
 }
 
 // unwrapDoubleEncoded handles Claude's double-encoded message format
