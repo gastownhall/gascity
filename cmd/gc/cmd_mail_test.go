@@ -919,6 +919,106 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	}
 }
 
+func TestDefaultReplySubject(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", "(no subject)"},
+		{"whitespace-only", "   \t\n", "(no subject)"},
+		{"plain subject", "Hello world", "Re: Hello world"},
+		{"already re-prefixed", "Re: Hello world", "Re: Hello world"},
+		{"case-insensitive re prefix", "RE: Hello world", "RE: Hello world"},
+		{"mixed-case re prefix", "rE: Hello world", "rE: Hello world"},
+		{"leading whitespace trimmed", "  Hello", "Re: Hello"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultReplySubject(tc.in); got != tc.want {
+				t.Errorf("defaultReplySubject(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveReplySubject_ExplicitValueHonored(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "body") //nolint:errcheck
+
+	got, err := resolveReplySubject(mp, "gc-1", "Custom subject")
+	if err != nil {
+		t.Fatalf("resolveReplySubject: %v", err)
+	}
+	if got != "Custom subject" {
+		t.Errorf("subject = %q, want %q", got, "Custom subject")
+	}
+}
+
+func TestResolveReplySubject_DefaultsFromOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "body") //nolint:errcheck
+
+	got, err := resolveReplySubject(mp, "gc-1", "")
+	if err != nil {
+		t.Fatalf("resolveReplySubject: %v", err)
+	}
+	if got != "Re: Hello" {
+		t.Errorf("subject = %q, want %q", got, "Re: Hello")
+	}
+}
+
+func TestResolveReplySubject_WhitespaceOnlyExplicitTreatedAsEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "body") //nolint:errcheck
+
+	got, err := resolveReplySubject(mp, "gc-1", "   \t\n")
+	if err != nil {
+		t.Fatalf("resolveReplySubject: %v", err)
+	}
+	if got != "Re: Hello" {
+		t.Errorf("subject = %q, want %q (whitespace-only explicit should fall back to derived)", got, "Re: Hello")
+	}
+}
+
+func TestResolveReplySubject_AvoidsReStacking(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Re: Hello", "body") //nolint:errcheck
+
+	got, err := resolveReplySubject(mp, "gc-1", "")
+	if err != nil {
+		t.Fatalf("resolveReplySubject: %v", err)
+	}
+	if got != "Re: Hello" {
+		t.Errorf("subject = %q, want %q (no stacking)", got, "Re: Hello")
+	}
+}
+
+// Note: the "empty original subject → (no subject)" fallback is covered by
+// TestDefaultReplySubject/empty and /whitespace-only. It can't be exercised
+// end-to-end through beadmail because beadmail.Send promotes the first body
+// line to Title when subject is empty — so the original never has an empty
+// Subject. The fallback is defensive for providers that don't auto-title.
+
+func TestResolveReplySubject_FetchErrorPropagates(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	// No message with this ID exists.
+
+	_, err := resolveReplySubject(mp, "nonexistent", "")
+	if err == nil {
+		t.Fatal("resolveReplySubject should error when original cannot be fetched")
+	}
+	// Error must include the ID so CLI output is actionable.
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("error = %q, want it to include the failing message ID", err.Error())
+	}
+}
+
 // --- gc mail mark-read / mark-unread ---
 
 func TestMailMarkReadSuccess(t *testing.T) {
