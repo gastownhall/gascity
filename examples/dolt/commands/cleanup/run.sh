@@ -107,11 +107,53 @@ if [ "$orphan_count" -eq 0 ]; then
   exit 0
 fi
 
-# Print orphan table.
-printf "%-30s  %s\n" "NAME" "SIZE"
+# overlapping_rig_path — emit the registered non-HQ rig path that overlaps
+# the given database path, or nothing if no overlap. Strips trailing slashes
+# before comparison so `$data_dir/*/` glob output (always ending in `/`)
+# matches correctly against registry paths (no trailing slash).
+overlapping_rig_path() {
+  _db_path=${1%/}
+  gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null \
+    | while IFS= read -r rig_path; do
+        [ -z "$rig_path" ] && continue
+        rig_path=${rig_path%/}
+        # Exact equality, db under rig, or rig under db.
+        if [ "$_db_path" = "$rig_path" ] \
+          || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
+          || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
+        then
+          printf '%s\n' "$rig_path"
+          break
+        fi
+      done
+}
+
+# Fail closed: the allowlist guard relies on `gc rig list --json` plus jq.
+# Without either, we cannot reliably exclude HQ or match paths, so refuse
+# --force rather than silently skipping the safety check.
+if [ "$force" = true ]; then
+  if ! command -v gc >/dev/null 2>&1; then
+    echo "gc dolt cleanup --force requires gc for the overlap safety check" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "gc dolt cleanup --force requires jq for the overlap safety check" >&2
+    echo "install jq or remove orphans manually" >&2
+    exit 1
+  fi
+fi
+
+# Print orphan table. Under dry-run, annotate entries that --force would refuse
+# so users can preview refusals without running the destructive command.
+printf "%-30s  %-12s  %s\n" "NAME" "SIZE" "STATUS"
 echo "$orphans" | while IFS='|' read -r name size path; do
   [ -z "$name" ] && continue
-  printf "%-30s  %s\n" "$name" "$size"
+  status=""
+  if [ "$force" != true ]; then
+    overlap=$(overlapping_rig_path "$path")
+    [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
+  fi
+  printf "%-30s  %-12s  %s\n" "$name" "$size" "$status"
 done
 
 # Safety limit.
@@ -137,26 +179,10 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   # Exclude HQ: HQ's path is the city root; the managed data-dir (.beads/dolt/) is
   # always a subdirectory of it. Including HQ would refuse every orphan at the default
   # data-dir location. Only non-HQ rig paths need the overlap guard.
-  skip=false
-  if command -v gc >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    while IFS= read -r rig_path; do
-      [ -z "$rig_path" ] && continue
-      overlaps=false
-      # Trailing slash prevents /a/b from matching /a/bc (path-prefix boundary).
-      case "$path" in "$rig_path/"*) overlaps=true ;; esac
-      case "$rig_path" in "$path/"*) overlaps=true ;; esac
-      if [ "$overlaps" = true ]; then
-        echo "refusing to remove '$db_name': path overlaps registered rig at '$rig_path'" >&2
-        echo "refused" >> "$refused_tmp"
-        skip=true
-        break
-      fi
-    done <<RIG_LIST
-$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null || true)
-RIG_LIST
-  fi
-
-  if [ "$skip" = true ]; then
+  overlap=$(overlapping_rig_path "$path")
+  if [ -n "$overlap" ]; then
+    echo "refusing to remove '$db_name': path overlaps registered rig at '$overlap'" >&2
+    echo "refused" >> "$refused_tmp"
     continue
   fi
 
