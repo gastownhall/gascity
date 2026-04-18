@@ -200,6 +200,14 @@ func reconcileSessionBeadsTraced(
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) int {
+	// Filesystem backpressure gate: if the kernel reports that tasks have
+	// been stalling on IO for a large fraction of the last 60 seconds, skip
+	// this tick entirely to avoid piling on more btrfs write amplification.
+	// See fs_pressure.go for details. On non-Linux this always returns false.
+	if shouldSkipTickForFSPressure(stderr) {
+		return 0
+	}
+
 	deps := buildDepsMap(cfg)
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
