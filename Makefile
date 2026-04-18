@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-cmd-gc-process test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -99,9 +99,16 @@ fmt: $(GOLANGCI_LINT)
 vet:
 	go vet ./...
 
-## test: run unit tests (skip integration tests tagged with //go:build integration)
+## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
+## The skipped cmd/gc process-backed scenarios remain covered by
+## `make test-cmd-gc-process` locally and the CI `test-integration-packages` shard.
 test:
-	go test ./...
+	GC_FAST_UNIT=1 go test ./...
+
+## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
+## process-backed lifecycle coverage routed out of the default fast loop
+test-cmd-gc-process:
+	GC_FAST_UNIT=0 go test ./cmd/gc
 
 ## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR).
 ## ACCEPTANCE_TIMEOUT overrides the go-test timeout (defaults to 5m on
@@ -133,6 +140,7 @@ test-integration-shards: test-integration-packages test-integration-review-formu
 test-integration-shards-cover: test-integration-packages-cover test-integration-review-formulas-cover test-integration-bdstore-cover test-integration-rest-smoke-cover test-integration-rest-full-cover
 
 ## test-integration-packages: run all integration-tagged packages except ./test/integration
+## This shard is also the required non-short CI path for the slow cmd/gc process suite.
 test-integration-packages:
 	./scripts/test-integration-shard packages
 
@@ -212,9 +220,11 @@ check-docs:
 #   beadstest: conformance helper, runs under internal/beads coverage
 UNIT_COVER_PKGS := $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
 
-## test-cover: run unit-test coverage without the integration-tagged package sweep
+## test-cover: run fast unit-test coverage without the integration-tagged package sweep
+## The skipped cmd/gc process-backed scenarios remain covered by
+## `make test-cmd-gc-process` locally and the CI `test-integration-packages` shard.
 test-cover:
-	go test -timeout 8m -coverprofile=coverage.txt $(UNIT_COVER_PKGS)
+	GC_FAST_UNIT=1 go test -timeout 8m -coverprofile=coverage.txt $(UNIT_COVER_PKGS)
 
 ## cover: run tests and show coverage report
 cover: test-cover

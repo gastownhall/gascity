@@ -58,7 +58,7 @@ run_pkg_tests() {
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
     go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
   fi
-  go test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+  GC_FAST_UNIT=0 go test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 }
 
 list_integration_tests() {
@@ -99,7 +99,7 @@ run_packages_shard() {
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
     go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
   fi
-  go test "${go_test_args[@]}" "${packages[@]}"
+  GC_FAST_UNIT=0 go test "${go_test_args[@]}" "${packages[@]}"
 }
 
 run_rest_smoke_shard() {

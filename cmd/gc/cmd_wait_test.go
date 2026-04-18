@@ -61,6 +61,7 @@ func waitTestEnv(overrides map[string]string) []string {
 
 func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
+	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run without -short or via integration packages")
 	waitTestRealBDPathOnce.Do(func() {
 		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 			if strings.TrimSpace(dir) == "" {

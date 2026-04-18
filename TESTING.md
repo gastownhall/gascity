@@ -29,12 +29,20 @@ func TestBeadStore_CorruptLine(t *testing.T) {
 When to use: corrupted data, concurrent writes, specific error types,
 double-claim conflicts, rollback behavior, boundary conditions.
 
-`make test-cover` now follows this boundary strictly: it runs unit-test
-coverage only. If you need the CI integration-tagged coverage sweep
-locally, use `make test-integration-shards-cover`. As a result,
-`coverage.txt` is now the unit-only baseline; the integration contribution
-comes from the shard-specific `coverage.integration-*.txt` profiles and
-their matching Codecov flags.
+`make test` and `make test-cover` now follow this boundary strictly: they
+run the fast unit loop only, with `GC_FAST_UNIT=1` gating slow `cmd/gc`
+process scenarios. Slow process-backed cases
+such as managed Dolt recovery, real `bd` lifecycle, tutorial regression
+scripts, and the large `gc-beads-bd` provider suite are routed out of the
+default path so local `make check` and CI `Check` stay focused on quick
+feedback. If you need that full `cmd/gc` scenario coverage locally, run
+`make test-cmd-gc-process`. In CI, the required non-short path is the
+`test-integration-packages` shard. If you need the heavier package
+coverage sweep locally, use `make test-integration-packages-cover` or
+`make test-integration-shards-cover`. As a result, `coverage.txt` is the
+fast unit-only baseline; the integration contribution comes from the
+shard-specific `coverage.integration-*.txt` profiles and their matching
+Codecov flags.
 
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 

@@ -1009,6 +1009,7 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 }
 
 func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run without -short or via integration packages")
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1843,6 +1844,7 @@ func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
 }
 
 func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run without -short or via integration packages")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2199,6 +2201,7 @@ esac
 }
 
 func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run without -short or via integration packages")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2273,6 +2276,7 @@ func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails
 }
 
 func TestDoltStateRecoverManagedCmdFailsWhenPostStartHealthFails(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run without -short or via integration packages")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {

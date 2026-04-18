@@ -149,6 +149,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestTutorial01(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs the end-to-end tutorial script; run without -short for scenario coverage")
 	testscript.Run(t, newTestscriptParams(t))
 }
 

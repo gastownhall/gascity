@@ -132,8 +132,11 @@ jobs:
 
   # Runs always. Keep the packages shard blocking so PRs still fail on
   # integration-tagged package regressions even though `Check` is now
-  # unit-only. Set repository variable CI_PACKAGES_SHARD_SOFT_FAIL=true
-  # for an emergency rollback to best-effort without editing the workflow.
+  # unit-only. This is also the required non-fast path for the slow cmd/gc
+  # process suite, because scripts/test-integration-shard forces
+  # `GC_FAST_UNIT=0` for integration shard execution. Set repository variable
+  # CI_PACKAGES_SHARD_SOFT_FAIL=true for an emergency rollback to best-effort
+  # without editing the workflow.
   # The heavier end-to-end review-formulas shard is routed in its own
   # workflow so label-triggered reruns do not re-fire the whole CI suite.
   # The rest shard is now split: a smoke slice stays here on every PR while
