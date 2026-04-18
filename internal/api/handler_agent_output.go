@@ -226,35 +226,41 @@ func historyEntryToTurn(entry worker.HistoryEntry) outputTurn {
 	if entry.Timestamp != nil {
 		turn.Timestamp = entry.Timestamp.Format("2006-01-02T15:04:05Z07:00")
 	}
+
+	if len(entry.Blocks) > 0 {
+		var parts []string
+		for _, block := range entry.Blocks {
+			switch block.Kind {
+			case worker.BlockKindText:
+				if block.Text != "" {
+					parts = append(parts, block.Text)
+				}
+			case worker.BlockKindToolUse:
+				if block.Name != "" {
+					parts = append(parts, "["+block.Name+"]")
+				}
+			case worker.BlockKindToolResult:
+				text := extractToolResultText(block.Content)
+				if text != "" {
+					if len(text) > 500 {
+						text = text[:500] + "…"
+					}
+					parts = append(parts, "[result] "+text)
+				}
+			case worker.BlockKindThinking:
+				parts = append(parts, "[thinking]")
+			}
+		}
+		turn.Text = strings.Join(parts, "\n")
+		if turn.Text != "" {
+			return turn
+		}
+	}
+
 	if strings.TrimSpace(entry.Text) != "" {
 		turn.Text = entry.Text
 		return turn
 	}
-
-	var parts []string
-	for _, block := range entry.Blocks {
-		switch block.Kind {
-		case worker.BlockKindText:
-			if block.Text != "" {
-				parts = append(parts, block.Text)
-			}
-		case worker.BlockKindToolUse:
-			if block.Name != "" {
-				parts = append(parts, "["+block.Name+"]")
-			}
-		case worker.BlockKindToolResult:
-			text := extractToolResultText(block.Content)
-			if text != "" {
-				if len(text) > 500 {
-					text = text[:500] + "…"
-				}
-				parts = append(parts, "[result] "+text)
-			}
-		case worker.BlockKindThinking:
-			parts = append(parts, "[thinking]")
-		}
-	}
-	turn.Text = strings.Join(parts, "\n")
 	if turn.Text == "" {
 		turn.Text = historyRawEntryText(entry.Provenance.Raw)
 	}
