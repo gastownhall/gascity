@@ -112,14 +112,18 @@ func TestLifecycle_RigAgentGetsBeadsDir(t *testing.T) {
 
 	reportCmd := c.WriteReportScript("worker", true)
 
-	// Write config with a rig-scoped agent.
+	// Write config with a rig-scoped agent. The [[named_session]] entry
+	// reserves a canonical session so the reconciler materializes and
+	// starts the agent even without queued work — post-PR-666 templates
+	// are lazy.
 	cityName := filepath.Base(c.Dir)
 	config := "[workspace]\nname = \"" + cityName + "\"\n" +
 		"\n[beads]\nprovider = \"file\"\n" +
 		"\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\n" +
 		"\n[[agent]]\nname = \"worker\"\ndir = \"myrig\"\n" +
 		"max_active_sessions = 1\n" +
-		"start_command = \"" + reportCmd + "\"\n"
+		"start_command = \"" + reportCmd + "\"\n" +
+		"\n[[named_session]]\ntemplate = \"worker\"\ndir = \"myrig\"\nmode = \"always\"\n"
 	c.WriteConfig(config)
 
 	c.StartWithSupervisor()
