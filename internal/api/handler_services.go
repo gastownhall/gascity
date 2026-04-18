@@ -11,18 +11,18 @@ import (
 func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	reg := s.state.ServiceRegistry()
 	if reg == nil {
-		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
+		problemServiceRouteNotFound.writeTo(w)
 		return
 	}
 	name := serviceNameFromPath(r.URL.Path)
 	if name == "" {
-		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
+		problemServiceRouteNotFound.writeTo(w)
 		return
 	}
 	if !reg.AuthorizeAndServeHTTP(name, w, r, func(status workspacesvc.Status) bool {
 		return serviceRequestAllowed(w, status, r, s.readOnly)
 	}) {
-		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
+		problemServiceRouteNotFound.writeTo(w)
 	}
 }
 
@@ -47,17 +47,17 @@ func serviceRequestAllowed(w http.ResponseWriter, status workspacesvc.Status, r 
 	// published URL.
 	directPublished := status.PublishMode == "direct"
 	if apiReadOnly && !directPublished && isMutationMethod(r.Method) {
-		writeProblemDetails(w, http.StatusForbidden, problemDetailsTitle(http.StatusForbidden), "read_only: service mutations are disabled for unpublished services")
+		problemServiceReadOnly.writeTo(w)
 		return false
 	}
 	if !directPublished {
 		internalProxyRequest := r.Header.Get("X-GC-Request") != ""
 		if !isLoopbackRemoteAddr(r.RemoteAddr) && !internalProxyRequest {
-			writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
+			problemServiceRouteNotFound.writeTo(w)
 			return false
 		}
 		if isMutationMethod(r.Method) && !internalProxyRequest {
-			writeProblemDetails(w, http.StatusForbidden, problemDetailsTitle(http.StatusForbidden), "csrf: X-GC-Request header required on private service mutation endpoints")
+			problemServiceCSRFRequired.writeTo(w)
 			return false
 		}
 	}

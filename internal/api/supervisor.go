@@ -109,7 +109,7 @@ func NewSupervisorMux(resolver CityResolver, readOnly bool, version string, star
 func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Request) {
 	cityName := r.PathValue("cityName")
 	if cityName == "" {
-		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "bad_request: city name required in URL")
+		problemCityNameRequired.writeTo(w)
 		return
 	}
 	// Strip the /v0/city/<name> prefix; the remaining path is /svc/...
@@ -194,7 +194,7 @@ func (sm *SupervisorMux) serveCityRequest(w http.ResponseWriter, r *http.Request
 		sm.cacheMu.Lock()
 		delete(sm.cache, cityName)
 		sm.cacheMu.Unlock()
-		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: city not found or not running: "+cityName)
+		problemCityNotFound.writeTo(w)
 		return
 	}
 	t1 := time.Now()

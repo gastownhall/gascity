@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"log"
 	"net/http"
 	"runtime/debug"
@@ -13,41 +12,49 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-// writeProblemDetails emits an RFC 9457 Problem Details response that matches
-// Huma's built-in error encoder byte-for-byte (modulo field order). Used by
-// mux-level middleware (withRecovery) and by the supervisor's topology
-// dispatcher, which must emit Huma-shaped errors without going through an
-// operation handler.
-func writeProblemDetails(w http.ResponseWriter, status int, title, detail string) {
+// problemBody is a pre-serialized RFC 9457 Problem Details response emitted
+// by mux-level gates that run before Huma takes over (withRecovery, the
+// supervisor's service-proxy dispatcher, handler_services' /svc/* gates).
+// Pre-serialization satisfies Principle 8: no runtime json.Marshal on
+// error paths. Huma handlers do not use these — they return typed
+// huma.StatusError values that Huma serializes.
+type problemBody struct {
+	status int
+	body   []byte
+}
+
+func (p problemBody) writeTo(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
-	w.WriteHeader(status)
-	body, _ := json.Marshal(struct {
-		Status int    `json:"status"`
-		Title  string `json:"title"`
-		Detail string `json:"detail,omitempty"`
-	}{Status: status, Title: title, Detail: detail})
-	_, _ = w.Write(body)
+	w.WriteHeader(p.status)
+	_, _ = w.Write(p.body)
 }
 
-// writeTypedJSON emits a success response with the given status and typed
-// body. Used by the few remaining mux-level handlers (supervisor, city
-// create, provider readiness, service proxy) that haven't moved onto Huma
-// yet. Fix 3b migrates those handlers; this helper goes away with them.
-//
-// Huma handlers do NOT use this — they return typed output structs which
-// Huma serializes automatically.
-func writeTypedJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	_ = enc.Encode(v)
-}
-
-// problemDetailsTitle maps an HTTP status code to a human-readable title
-// matching RFC 9457 recommendations (the status text).
-func problemDetailsTitle(status int) string {
-	return http.StatusText(status)
-}
+var (
+	problemInternalServerError = problemBody{
+		status: http.StatusInternalServerError,
+		body:   []byte(`{"status":500,"title":"Internal Server Error","detail":"internal server error"}`),
+	}
+	problemCityNameRequired = problemBody{
+		status: http.StatusBadRequest,
+		body:   []byte(`{"status":400,"title":"Bad Request","detail":"bad_request: city name required in URL"}`),
+	}
+	problemCityNotFound = problemBody{
+		status: http.StatusNotFound,
+		body:   []byte(`{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`),
+	}
+	problemServiceRouteNotFound = problemBody{
+		status: http.StatusNotFound,
+		body:   []byte(`{"status":404,"title":"Not Found","detail":"not_found: service route not found"}`),
+	}
+	problemServiceReadOnly = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"read_only: service mutations are disabled for unpublished services"}`),
+	}
+	problemServiceCSRFRequired = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"csrf: X-GC-Request header required on private service mutation endpoints"}`),
+	}
+)
 
 type dataSourceKey struct{}
 
@@ -91,7 +98,7 @@ func withRecovery(next http.Handler) http.Handler {
 		defer func() {
 			if err := recover(); err != nil {
 				log.Printf("api: panic: %v\n%s", err, debug.Stack())
-				writeProblemDetails(w, http.StatusInternalServerError, "Internal Server Error", "internal server error")
+				problemInternalServerError.writeTo(w)
 			}
 		}()
 		next.ServeHTTP(w, r)
