@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"reflect"
 	"sort"
 	"strings"
@@ -66,12 +67,27 @@ type WireTaggedEvent struct {
 
 // toWireEvent decodes the bus's opaque Payload into the registered
 // typed variant and returns the list-endpoint wire shape.
-// Unregistered event types fall through with a nil payload and a
-// skip-log; the registry-coverage test makes that path unreachable in
-// practice (Principle 7).
+// Unregistered event types or decode failures log loudly and fall
+// through with a nil payload — the registry-coverage test
+// (TestEveryKnownEventTypeHasRegisteredPayload) makes both paths
+// unreachable for any registered KnownEventTypes constant (Principle 7);
+// the log is for unregistered custom types and bus corruption
+// so operators can investigate.
 func toWireEvent(e events.Event) WireEvent {
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
-	if err != nil || !registered {
+	if err != nil {
+		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
+		return WireEvent{
+			Seq:     e.Seq,
+			Type:    e.Type,
+			Ts:      e.Ts,
+			Actor:   e.Actor,
+			Subject: e.Subject,
+			Message: e.Message,
+		}
+	}
+	if !registered {
+		log.Printf("api: events wire: unregistered event type %q seq=%d (add to events.KnownEventTypes and register a payload)", e.Type, e.Seq)
 		return WireEvent{
 			Seq:     e.Seq,
 			Type:    e.Type,

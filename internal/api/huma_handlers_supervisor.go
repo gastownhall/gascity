@@ -401,6 +401,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	mux := sm.buildMultiplexer()
 	mw, err := mux.Watch(hctx.Context(), cursors)
 	if err != nil {
+		log.Printf("api: supervisor events-stream: Watch failed cursors=%v: %v", cursors, err)
 		return
 	}
 	defer mw.Close() //nolint:errcheck
@@ -430,6 +431,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			return
 		case r := <-ch:
 			if r.err != nil {
+				log.Printf("api: supervisor events-stream: multiplex Next failed: %v", r.err)
 				return
 			}
 			cursors[r.event.City] = r.event.Seq

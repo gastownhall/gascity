@@ -116,6 +116,7 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 	afterSeq := input.resolveAfterSeq()
 	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {
+		log.Printf("api: events-stream: Watch failed after_seq=%d: %v", afterSeq, err)
 		return
 	}
 	defer watcher.Close() //nolint:errcheck
@@ -147,6 +148,7 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 			return
 		case r := <-ch:
 			if r.err != nil {
+				log.Printf("api: events-stream: watcher Next failed: %v", r.err)
 				return
 			}
 			envelope, decodeErr := wireEventFrom(r.event, projectWorkflowEvent(s.state, r.event))
