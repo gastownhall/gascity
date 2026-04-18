@@ -19,6 +19,8 @@ type phase2ProviderCase struct {
 	profileID             workertest.ProfileID
 	family                string
 	wantCommand           string
+	wantCommandPrefix     string
+	wantSettingsArg       bool
 	wantReadyDelayMs      int
 	wantReadyPromptPrefix string
 	wantProcessNames      []string
@@ -53,7 +55,8 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 		{
 			profileID:             "claude/tmux-cli",
 			family:                "claude",
-			wantCommand:           "claude --dangerously-skip-permissions --effort max",
+			wantCommandPrefix:     "claude --dangerously-skip-permissions --effort max",
+			wantSettingsArg:       true,
 			wantReadyDelayMs:      10000,
 			wantReadyPromptPrefix: "❯ ",
 			wantProcessNames:      []string{"node", "claude"},
@@ -179,4 +182,21 @@ func containsOrderedArgs(command string, args []string) bool {
 		}
 	}
 	return true
+}
+
+func commandFlagValue(command, flag string) (string, bool) {
+	parts := shellquote.Split(command)
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		if part == flag {
+			if i+1 >= len(parts) {
+				return "", false
+			}
+			return parts[i+1], true
+		}
+		if strings.HasPrefix(part, flag+"=") {
+			return strings.TrimPrefix(part, flag+"="), true
+		}
+	}
+	return "", false
 }

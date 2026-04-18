@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -32,12 +33,27 @@ func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParam
 	case tp.ResolvedProvider.PromptMode != "arg":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("PromptMode = %q, want arg", tp.ResolvedProvider.PromptMode)).WithEvidence(evidence)
-	case tp.Command != tc.wantCommand:
+	case tc.wantCommand != "" && tp.Command != tc.wantCommand:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("Command = %q, want %q", tp.Command, tc.wantCommand)).WithEvidence(evidence)
+	case tc.wantCommandPrefix != "" && !strings.HasPrefix(tp.Command, tc.wantCommandPrefix):
+		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
+			fmt.Sprintf("Command = %q, want prefix %q", tp.Command, tc.wantCommandPrefix)).WithEvidence(evidence)
 	case !containsOrderedArgs(tp.Command, tp.ResolvedProvider.ResolveDefaultArgs()):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("Command = %q, want default args %v", tp.Command, tp.ResolvedProvider.ResolveDefaultArgs())).WithEvidence(evidence)
+	case tc.wantSettingsArg:
+		settingsPath, ok := commandFlagValue(tp.Command, "--settings")
+		if !ok {
+			return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
+				fmt.Sprintf("Command = %q, want --settings arg", tp.Command)).WithEvidence(evidence)
+		}
+		if !strings.HasSuffix(filepath.Clean(settingsPath), filepath.Join(".gc", "settings.json")) {
+			return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
+				fmt.Sprintf("settings path = %q, want suffix %q", settingsPath, filepath.Join(".gc", "settings.json"))).WithEvidence(evidence)
+		}
+		return workertest.Pass(tc.profileID, workertest.RequirementStartupCommandMaterialization,
+			"provider defaults and launch semantics materialized into the startup command").WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			"provider defaults and launch semantics materialized into the startup command").WithEvidence(evidence)

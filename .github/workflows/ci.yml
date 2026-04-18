@@ -605,17 +605,10 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-inference-phase3-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
-        with:
-          go-version-file: go.mod
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerInference phase-3 conformance
-        id: worker_inference_phase3_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference-phase3 PROFILE="$PROFILE"
-      - name: Ensure WorkerInference phase-3 reports
-        if: ${{ always() && steps.worker_inference_phase3_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
+      - name: Emit manual-only WorkerInference phase-3 report
+        run: python3 .github/workflows/scripts/worker_report_manual_only.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
       - name: WorkerInference phase-3 report summary
         if: ${{ always() }}
         run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
@@ -637,17 +630,10 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-inference-phase3-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
-        with:
-          go-version-file: go.mod
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerInference phase-3 conformance
-        id: worker_inference_phase3_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference-phase3 PROFILE="$PROFILE"
-      - name: Ensure WorkerInference phase-3 reports
-        if: ${{ always() && steps.worker_inference_phase3_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
+      - name: Emit manual-only WorkerInference phase-3 report
+        run: python3 .github/workflows/scripts/worker_report_manual_only.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
       - name: WorkerInference phase-3 report summary
         if: ${{ always() }}
         run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
@@ -669,17 +655,10 @@ jobs:
       WORKER_REPORT_DIR: /tmp/worker-inference-phase3-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
-        with:
-          go-version-file: go.mod
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerInference phase-3 conformance
-        id: worker_inference_phase3_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference-phase3 PROFILE="$PROFILE"
-      - name: Ensure WorkerInference phase-3 reports
-        if: ${{ always() && steps.worker_inference_phase3_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
+      - name: Emit manual-only WorkerInference phase-3 report
+        run: python3 .github/workflows/scripts/worker_report_manual_only.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
       - name: WorkerInference phase-3 report summary
         if: ${{ always() }}
         run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
