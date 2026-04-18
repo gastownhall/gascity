@@ -95,7 +95,10 @@ func shouldEmitLoadCityConfigWarning(warning string) bool {
 	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
 		return true
 	}
-	return strings.Contains(warning, `"agent_defaults.`) && strings.Contains(warning, `" is not supported`)
+	if !strings.Contains(warning, `" is not supported`) {
+		return false
+	}
+	return strings.Contains(warning, `"agent_defaults.`) || strings.Contains(warning, `"agents.`)
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include

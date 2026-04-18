@@ -47,8 +47,8 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "preserved unsupported [agent_defaults] keys in pack.toml") {
-		t.Fatalf("expected unsupported-keys warning, got stderr %q", stderr.String())
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no warnings for synthetic empty manifest, got stderr %q", stderr.String())
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
