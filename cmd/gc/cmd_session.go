@@ -546,9 +546,11 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
-	// Build attachment cache from Attached already populated by ListFull,
-	// avoiding redundant tmux subprocess calls in wakeReasons.
-	attachedSet := buildAttachmentCache(sessions)
+	// Build attachment cache from worker observations so reason evaluation
+	// does not bypass the worker boundary for attachment checks.
+	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
+		return workerSessionTargetAttachedWithConfig("", store, sp, cfg, info.ID)
+	})
 
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No sessions found.") //nolint:errcheck // best-effort stdout
@@ -601,9 +603,9 @@ func sessionListTitle(s session.Info) string {
 	return title
 }
 
-// attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
-// results to avoid redundant tmux subprocess calls. wakeReasons calls
-// IsAttached per session, but cmdSessionList already queried it.
+// attachmentCachingProvider wraps a runtime.Provider and serves attachment
+// state from a worker-populated cache so session list reason evaluation does
+// not fall back to raw runtime attachment checks.
 type attachmentCachingProvider struct {
 	runtime.Provider
 	cache map[string]bool
@@ -613,7 +615,7 @@ func (p *attachmentCachingProvider) IsAttached(name string) bool {
 	if v, ok := p.cache[name]; ok {
 		return v
 	}
-	return p.Provider.IsAttached(name)
+	return false
 }
 
 func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
@@ -623,15 +625,19 @@ func (p *attachmentCachingProvider) SleepCapability(name string) runtime.Session
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-func buildAttachmentCache(sessions []session.Info) map[string]bool {
+func buildAttachmentCache(sessions []session.Info, observe func(session.Info) (bool, error)) map[string]bool {
 	cache := make(map[string]bool)
 	for _, s := range sessions {
-		// ListFull only populates Attached for active sessions. Leave other
-		// states uncached so reason evaluation can fall through to the provider.
-		if s.State != session.StateActive || s.SessionName == "" {
+		if s.State == "" || s.SessionName == "" {
 			continue
 		}
-		cache[s.SessionName] = s.Attached
+		attached := s.Attached
+		if observe != nil {
+			if observed, err := observe(s); err == nil {
+				attached = observed
+			}
+		}
+		cache[s.SessionName] = attached
 	}
 	return cache
 }
