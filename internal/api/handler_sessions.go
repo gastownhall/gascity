@@ -446,7 +446,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, handle worker.Handle, wantPeek bool) {
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, handle worker.Handle, wantPeek bool) {
 	if info.State != session.StateActive {
 		return
 	}

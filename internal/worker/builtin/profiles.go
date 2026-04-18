@@ -1,3 +1,4 @@
+// Package builtin defines the canonical builtin worker provider catalog.
 package builtin
 
 import (
@@ -7,6 +8,8 @@ import (
 )
 
 // BuiltinProviderOption declares one configurable option for a builtin worker.
+//
+//nolint:revive // Mirrors the config boundary naming intentionally.
 type BuiltinProviderOption struct {
 	Key     string
 	Label   string
@@ -16,6 +19,8 @@ type BuiltinProviderOption struct {
 }
 
 // BuiltinOptionChoice is one allowed value for a builtin provider option.
+//
+//nolint:revive // Mirrors the config boundary naming intentionally.
 type BuiltinOptionChoice struct {
 	Value    string
 	Label    string
@@ -24,6 +29,8 @@ type BuiltinOptionChoice struct {
 
 // BuiltinProviderSpec is the canonical builtin worker materialization source.
 // config.ProviderSpec is derived from this in Phase 4+.
+//
+//nolint:revive // Mirrors the config boundary naming intentionally.
 type BuiltinProviderSpec struct {
 	DisplayName            string
 	Command                string
@@ -322,6 +329,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 }
 
 // BuiltinProviderOrder returns provider names in canonical order.
+//
+//nolint:revive // Mirrors the config boundary naming intentionally.
 func BuiltinProviderOrder() []string {
 	out := make([]string, len(builtinProviderOrder))
 	copy(out, builtinProviderOrder)
@@ -329,6 +338,8 @@ func BuiltinProviderOrder() []string {
 }
 
 // BuiltinProviders returns the canonical builtin worker provider definitions.
+//
+//nolint:revive // Mirrors the config boundary naming intentionally.
 func BuiltinProviders() map[string]BuiltinProviderSpec {
 	out := make(map[string]BuiltinProviderSpec, len(builtinProviderSpecs))
 	for name, spec := range builtinProviderSpecs {

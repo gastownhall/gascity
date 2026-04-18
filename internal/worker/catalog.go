@@ -1,3 +1,4 @@
+// Package worker owns the canonical in-memory worker boundary and catalog APIs.
 package worker
 
 import (
