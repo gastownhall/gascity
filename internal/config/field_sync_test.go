@@ -423,6 +423,78 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	}
 }
 
+// TestProviderFieldSync verifies every ProviderSpec field (other than the
+// small excluded set) has a matching ProviderPatch field. Parallel to
+// TestAgentFieldSync. Prevents the class of bug where a new ProviderSpec
+// field ships without a corresponding patch path.
+func TestProviderFieldSync(t *testing.T) {
+	// Fields on ProviderSpec that are NOT overridable via patch.
+	excluded := map[string]string{
+		// OptionsSchema is a complex slice with its own merge semantics
+		// (merge-by-Key when OptionsSchemaMerge = "by_key"). Direct patch
+		// is not yet implemented; users mutate via higher-level APIs.
+		"OptionsSchema": "patched via higher-level mutation APIs, not raw patch",
+		// OptionDefaults: existing fields, no patch path yet
+		"OptionDefaults": "existing map field, patched via higher-level APIs",
+		// PermissionModes: reference lookup table, not intended for patching
+		"PermissionModes": "reference lookup table, not patched",
+		// Provider-identity fields that don't belong on a patch
+		"DisplayName":            "identity/display field, not patched",
+		"PathCheck":              "internal PATH override, not patched",
+		"ReadyPromptPrefix":      "internal ready detection, not patched",
+		"ProcessNames":           "reference list, not currently patched",
+		"EmitsPermissionWarning": "capability bool (tri-state migration deferred)",
+		"SupportsACP":            "capability bool (tri-state migration deferred)",
+		"SupportsHooks":          "capability bool (tri-state migration deferred)",
+		"InstructionsFile":       "internal config path, not patched",
+		"ResumeFlag":             "internal resume config, not patched directly (use ResumeCommand)",
+		"ResumeStyle":            "internal resume config, not patched directly (use ResumeCommand)",
+		"ResumeCommand":          "already patchable at agent level via AgentPatch.ResumeCommand",
+		"SessionIDFlag":          "internal session-id config, not patched",
+		"PrintArgs":              "internal print-mode args, not patched",
+		"TitleModel":             "internal title-model key, not patched",
+	}
+
+	// Fields on ProviderPatch that don't map 1:1 to ProviderSpec.
+	patchOnly := map[string]bool{
+		"Name":      true, // targeting key
+		"EnvRemove": true, // remove modifier, no Spec field
+		"Replace":   true, // patch-mode flag
+	}
+
+	specFields := structFields(reflect.TypeOf(ProviderSpec{}))
+	patchFields := structFields(reflect.TypeOf(ProviderPatch{}))
+
+	var expected []string
+	for _, f := range specFields {
+		if _, ok := excluded[f]; !ok {
+			expected = append(expected, f)
+		}
+	}
+	sort.Strings(expected)
+
+	patchSet := toSet(patchFields)
+	var missing []string
+	for _, f := range expected {
+		if !patchSet[f] {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("ProviderPatch missing fields present on ProviderSpec: %v\n"+
+			"Add them to ProviderPatch + applyProviderPatch, or add to the excluded map with justification.",
+			missing)
+	}
+
+	// Check for extra fields on Patch not on Spec or patchOnly.
+	specSet := toSet(specFields)
+	for _, f := range patchFields {
+		if !specSet[f] && !patchOnly[f] {
+			t.Errorf("ProviderPatch has field %q not on ProviderSpec or patchOnly exclusion list", f)
+		}
+	}
+}
+
 func structFields(t reflect.Type) []string {
 	var names []string
 	for i := 0; i < t.NumField(); i++ {

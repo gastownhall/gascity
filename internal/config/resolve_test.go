@@ -884,7 +884,11 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 // zero value. This catches fields that were added to the struct but not
 // wired into the merge function.
 func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
+	basePtr := "builtin:custom"
 	city := ProviderSpec{
+		Base:                   &basePtr,
+		ArgsAppend:             []string{"--extra"},
+		OptionsSchemaMerge:     "by_key",
 		DisplayName:            "Custom",
 		Command:                "custom-cmd",
 		Args:                   []string{"--flag"},

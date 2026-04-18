@@ -164,6 +164,21 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	result := base
 
+	// Inheritance control fields: presence-aware for Base.
+	if city.Base != nil {
+		// City explicitly declared base (may be "" for opt-out, or a
+		// named value). Copy the pointer so the presence is preserved
+		// through the merge; we do not deep-copy the underlying string.
+		b := *city.Base
+		result.Base = &b
+	}
+	if city.ArgsAppend != nil {
+		result.ArgsAppend = city.ArgsAppend
+	}
+	if city.OptionsSchemaMerge != "" {
+		result.OptionsSchemaMerge = city.OptionsSchemaMerge
+	}
+
 	// Scalar fields: override if city defines them.
 	if city.DisplayName != "" {
 		result.DisplayName = city.DisplayName

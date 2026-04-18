@@ -26,6 +26,31 @@ type OptionChoice struct {
 // Built-in presets are returned by BuiltinProviders(). Users can override
 // or define new providers via [providers.xxx] in city.toml.
 type ProviderSpec struct {
+	// Base names the parent provider this spec inherits from. Supported
+	// forms:
+	//   "<name>"         — custom first (self-excluded), then built-in
+	//   "builtin:<name>" — force built-in lookup
+	//   "provider:<name>" — force custom lookup
+	//   ""               — explicit standalone opt-out (suppresses Phase A
+	//                      legacy auto-inheritance warning and synthesis)
+	//   nil              — field absent; no explicit declaration
+	// Presence-aware *string so parse/compose/patch can distinguish
+	// "absent" from "explicit empty". See engdocs/design/provider-inheritance.md.
+	Base *string `toml:"base,omitempty"`
+	// ArgsAppend is a list of arguments appended to the effective args of
+	// the resolved chain after each layer's args replacement. Accumulates
+	// across chain layers.
+	ArgsAppend []string `toml:"args_append,omitempty"`
+	// OptionsSchemaMerge controls how OptionsSchema merges across the
+	// chain: "replace" (default, current semantics) or "by_key" (opt-in
+	// key-wise merge with omit=true removal).
+	OptionsSchemaMerge string `toml:"options_schema_merge,omitempty" jsonschema:"enum=replace,enum=by_key"`
+	// Tri-state capability booleans (SupportsHooks, SupportsACP,
+	// EmitsPermissionWarning) are bool today. A future release will
+	// migrate these to *bool for explicit disable semantics. For now,
+	// the "can enable, cannot disable" merge invariant below applies.
+	// See engdocs/design/provider-inheritance.md §Tri-state capability.
+	//
 	// DisplayName is the human-readable name shown in UI and logs.
 	DisplayName string `toml:"display_name,omitempty"`
 	// Command is the executable to run for this provider.
@@ -108,6 +133,31 @@ type ProviderSpec struct {
 	TitleModel string `toml:"title_model,omitempty"`
 }
 
+// Reserved prefixes for the Base field.
+const (
+	BasePrefixBuiltin  = "builtin:"
+	BasePrefixProvider = "provider:"
+)
+
+// RawProviderSpec is a type alias that marks a ProviderSpec as unresolved
+// (pre-compose, pre-chain-walk). Runtime code should never accept
+// RawProviderSpec; it only accepts ResolvedProvider. Quick-parse paths
+// (e.g. gc config show without full load) return RawProviderSpec to
+// prevent runtime surfaces from accidentally consuming unresolved data.
+type RawProviderSpec = ProviderSpec
+
+// HopIdentity identifies a single hop in a resolved provider chain.
+type HopIdentity struct {
+	Kind string // "builtin" | "custom"
+	Name string // canonical name (without prefix)
+}
+
+// ChainEntry annotates one hop of the resolved chain.
+type ChainEntry struct {
+	HopIdentity
+	BaseTagIsExplicit bool // true if the hop's Base field was explicitly set
+}
+
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
 // All fields are populated after resolution (built-in + city override + agent override).
 type ResolvedProvider struct {
@@ -115,7 +165,18 @@ type ResolvedProvider struct {
 	// Kind is the canonical builtin provider name when this provider derives
 	// from a builtin (e.g. "claude" even if Name is "my-fast-claude"). Empty
 	// when the provider is fully custom with no builtin base.
-	Kind                   string
+	//
+	// DEPRECATED in favor of BuiltinAncestor. Kept during transition.
+	Kind string
+	// BuiltinAncestor is the nearest built-in provider in the resolved
+	// chain, derived from hop identity during the chain walk (not from
+	// name-matching). Empty when no hop in the chain is a built-in.
+	// Runtime sites that branch on provider family MUST consume this
+	// field, not the raw Name.
+	BuiltinAncestor string
+	// Chain records the resolved ancestry from leaf (index 0) to root
+	// (index len-1). Populated by resolveProviderChain.
+	Chain                  []HopIdentity
 	Command                string
 	Args                   []string
 	PromptMode             string
@@ -298,6 +359,14 @@ func BuiltinProviders() map[string]ProviderSpec {
 			InstructionsFile: "AGENTS.md",
 			PrintArgs:        []string{"exec"},
 			TitleModel:       "o4-mini",
+			// Resume support: codex uses the `resume <key>` subcommand form.
+			// Added so base = "builtin:codex" descendants inherit resume for
+			// non-wrapper cases. Wrapper descendants (e.g. aimux-wrapped)
+			// must declare their own ResumeCommand per the wrapper-resume
+			// validator (see design §Resume).
+			ResumeFlag:    "resume",
+			ResumeStyle:   "subcommand",
+			SessionIDFlag: "",
 			PermissionModes: map[string]string{
 				"suggest":      "--ask-for-approval untrusted --sandbox read-only",
 				"auto-edit":    "--full-auto",
