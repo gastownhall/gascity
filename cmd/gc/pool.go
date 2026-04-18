@@ -151,7 +151,7 @@ func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]s
 
 // SessionSetupContext holds template variables for session_setup command expansion.
 type SessionSetupContext struct {
-	Session   string // tmux session name
+	Session   string // runtime session name
 	Agent     string // qualified agent name
 	AgentBase string // unqualified agent name or pool instance name
 	Rig       string // rig name (empty for city-scoped)

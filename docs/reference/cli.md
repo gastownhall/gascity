@@ -36,6 +36,7 @@ gc [flags]
 | [gc events](#gc-events) | Show the event log |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
+| [gc halt](#gc-halt) | Pause the supervisor reconciliation tick |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
@@ -1117,10 +1118,11 @@ gc discord sync-commands
 
 Run diagnostic health checks on the city workspace.
 
-Checks city structure, config validity, binary dependencies (tmux, git,
-bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.
+Checks city structure, config validity, session-backend dependencies
+(including tmux when required), git, bd, dolt, controller status,
+agent sessions, zombie/orphan sessions, bead stores, Dolt server
+health, event log integrity, and per-rig health. Use --fix to
+attempt automatic repairs.
 
 ```
 gc doctor [flags]
@@ -1401,6 +1403,24 @@ gc graph gc-42               # expand convoy children
 |------|------|---------|-------------|
 | `--mermaid` | bool |  | output Mermaid.js flowchart |
 | `--tree` | bool |  | output Unicode dependency tree |
+
+## gc halt
+
+Halt the supervisor reconciliation tick for a city by creating
+a flag file at &lt;city&gt;/.gc/runtime/halt. While the flag is present the
+supervisor loop skips tick work (no session wakes, no convergence,
+no order dispatch) but keeps the process alive, logs, and control
+socket responsive.
+
+This is a soft circuit breaker for emergencies: it stops disk thrash
+from a runaway reconciler without requiring "systemctl stop". The
+supervisor process itself is not killed.
+
+Idempotent. Use "gc resume" to clear the flag.
+
+```
+gc halt [path]
+```
 
 ## gc handoff
 
@@ -2004,6 +2024,8 @@ gc restart [path]
 ## gc resume
 
 Resume a suspended city by clearing workspace.suspended in city.toml.
+Also clears the halt flag file (if any) created by "gc halt", so this
+is the single verb that takes a city out of every soft-pause state.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -2370,8 +2392,8 @@ gc session
 
 Attach to a running session or resume a suspended one.
 
-If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
+If the session is active with a live runtime session, reattaches.
+If the session is suspended or the runtime session disappeared, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).

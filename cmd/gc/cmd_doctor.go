@@ -22,10 +22,11 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Check workspace health",
 		Long: `Run diagnostic health checks on the city workspace.
 
-Checks city structure, config validity, binary dependencies (tmux, git,
-bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.`,
+Checks city structure, config validity, session-backend dependencies
+(including tmux when required), git, bd, dolt, controller status,
+agent sessions, zombie/orphan sessions, bead stores, Dolt server
+health, event log integrity, and per-rig health. Use --fix to
+attempt automatic repairs.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose`,
@@ -122,14 +123,11 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewPackCacheCheck(cfg.Packs, cityPath))
 	}
 
-	// Infrastructure checks — universal dependencies.
-	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
-	// check-dolt.sh) which also verify versions and service health.
-	d.Register(doctor.NewBinaryCheck("tmux", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("git", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))
+	sessionProvider := effectiveProviderName("")
+	if cfgErr == nil {
+		sessionProvider = effectiveProviderName(cfg.Session.Provider)
+	}
+	registerCoreBinaryChecks(d, sessionProvider, exec.LookPath)
 
 	// Controller check + session checks (gated by controller state).
 	controllerRunning := doctor.IsControllerRunning(cityPath)
@@ -208,6 +206,18 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func registerCoreBinaryChecks(d *doctor.Doctor, sessionProvider string, lookPath doctor.LookPathFunc) {
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	// Infrastructure checks — provider-aware core dependencies.
+	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
+	// check-dolt.sh) which also verify versions and service health.
+	for _, dep := range coreBinaryDependencies(sessionProvider, "", coreBinaryDependencyOptions{}) {
+		d.Register(newBinaryDependencyCheck(dep, lookPath))
+	}
 }
 
 // collectPackDirs returns all unique pack directories from the city

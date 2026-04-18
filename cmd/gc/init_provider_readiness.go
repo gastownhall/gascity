@@ -56,8 +56,9 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
-	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
-	// to fail-loop silently — the user never sees the error.
+	// Without this, missing backend deps (for example tmux for tmux/hybrid
+	// cities, plus git/dolt/bd where relevant) cause the supervisor to
+	// fail-loop silently and the user never sees the actual error.
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "%s: missing required dependencies:\n\n", opts.commandName) //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -513,64 +514,32 @@ const (
 // binaries cause the supervisor to fail-loop silently and the user never
 // sees the actual error.
 func checkHardDependencies(cityPath string) []missingDep {
-	type dep struct {
-		name        string
-		installHint string
-		minVersion  string      // empty = no version check
-		condition   func() bool // if non-nil, only checked when true
-	}
-
 	beadsProvider := rawBeadsProvider(cityPath)
-	needsBd := providerUsesBdStoreContract(beadsProvider)
-
-	deps := []dep{
-		{
-			name:        "tmux",
-			installHint: "https://github.com/tmux/tmux/wiki/Installing",
-		},
-		{
-			name:        "jq",
-			installHint: "brew install jq (macOS) or apt install jq (Linux)",
-		},
-		{
-			name:        "git",
-			installHint: "https://git-scm.com/downloads",
-		},
-		{
-			name:        "dolt",
-			installHint: "https://github.com/dolthub/dolt/releases",
-			minVersion:  doltMinVersion,
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "bd",
-			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "flock",
-			installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "pgrep",
-			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
-		},
-		{
-			name:        "lsof",
-			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
-		},
-	}
+	sessionProvider := effectiveSessionProviderForCity(cityPath)
+	deps := coreBinaryDependencies(sessionProvider, beadsProvider, coreBinaryDependencyOptions{
+		includePackManaged: true,
+	})
 
 	var missing []missingDep
 	for _, d := range deps {
-		if d.condition != nil && !d.condition() {
-			continue
-		}
-		if _, err := initLookPath(d.name); err != nil {
+		if d.lookupName == "" {
 			missing = append(missing, missingDep{
 				name:        d.name,
+				installHint: d.installHint,
+			})
+			continue
+		}
+		resolvedPath, err := initLookPath(d.lookupName)
+		if err != nil {
+			missing = append(missing, missingDep{
+				name:        d.name,
+				installHint: d.installHint,
+			})
+			continue
+		}
+		if err := validateBinaryDependency(d, resolvedPath); err != nil {
+			missing = append(missing, missingDep{
+				name:        fmt.Sprintf("%s (%v)", d.name, err),
 				installHint: d.installHint,
 			})
 			continue

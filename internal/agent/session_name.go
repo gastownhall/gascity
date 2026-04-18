@@ -42,7 +42,7 @@ func UnsanitizeQualifiedNameFromSession(name string) string {
 // This is the single source of truth for the naming convention.
 // sessionTemplate is a Go text/template string; empty means use the
 // default pattern "{agent}" (the sanitized agent name). With per-city
-// tmux socket isolation as the default, the city prefix is unnecessary.
+// controller/provider scoping as the default, the city prefix is usually unnecessary.
 //
 // For qualified identities, structural separators are encoded to avoid tmux
 // naming issues while preserving slash-vs-dot distinction:
@@ -54,8 +54,8 @@ func SessionNameFor(cityName, agentName, sessionTemplate string) string {
 	sanitized := SanitizeQualifiedNameForSession(agentName)
 
 	if sessionTemplate == "" {
-		// Default: just the sanitized agent name. Per-city tmux socket
-		// isolation makes a city prefix redundant.
+		// Default: just the sanitized agent name. City scoping is handled
+		// outside the name itself, so a prefix is usually redundant.
 		return sanitized
 	}
 

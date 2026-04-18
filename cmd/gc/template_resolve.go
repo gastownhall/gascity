@@ -41,7 +41,7 @@ type TemplateParams struct {
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
 	WorkDir string
-	// SessionName is the computed tmux session name.
+	// SessionName is the computed runtime session name.
 	SessionName string
 	// Alias is the human-readable session identifier used for commands and mail.
 	Alias string

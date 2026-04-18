@@ -5,12 +5,15 @@ description: Create a city, add a rig, and route work in a few minutes.
 
 <Note>
 This guide assumes you have already installed Gas City and its
-prerequisites. If you haven't, start with the
+prerequisites for the default stack. If you haven't, start with the
 [Installation](/getting-started/installation) page.
 </Note>
 
-You will need `gc`, `tmux`, `git`, `jq`, and a beads provider (`bd` + `dolt`
-by default, or set `GC_BEADS=file` to skip them).
+This walkthrough uses the default backends: `tmux` for session management and
+the `bd` + `dolt` + `flock` stack for beads. If your city uses
+`GC_SESSION=subprocess`, `GC_SESSION=acp`, `GC_SESSION=k8s`,
+`GC_SESSION=exec:<script>`, or `GC_BEADS=file`, see
+[Installation](/getting-started/installation) for the rows you can skip.
 
 ## 1. Create a City
 

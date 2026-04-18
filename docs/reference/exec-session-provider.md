@@ -70,7 +70,15 @@ The `start` operation receives a JSON object on stdin:
   "env": {"GC_AGENT": "mayor", "GC_CITY": "/home/user/bright-lights"},
   "process_names": ["claude", "node"],
   "nudge": "initial prompt text",
-  "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"]
+  "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"],
+  "session_setup": ["./scripts/install-hooks.sh"],
+  "session_setup_script": "/path/to/setup-script.sh",
+  "session_live": ["./scripts/session-style.sh"],
+  "pack_overlay_dirs": ["/path/to/pack-overlay"],
+  "overlay_dir": "/path/to/agent-overlay",
+  "copy_files": [
+    {"src": "/tmp/settings.json", "rel_dst": ".gc/settings.json"}
+  ]
 }
 ```
 
@@ -78,32 +86,35 @@ All fields are optional (omitted when empty).
 
 ### Startup Hints
 
-The JSON config contains fields that the tmux provider uses for multi-step
-startup orchestration. The exec provider itself is fire-and-forget — it
+The JSON config contains startup hints shared with other session providers
+that do multi-step orchestration. The exec provider itself is fire-and-forget — it
 calls `script start` and returns immediately. Scripts may handle these
 hints or ignore them:
 
-- **`process_names`** — the tmux adapter polls for these process names to
-  appear in the session's process tree (30s timeout) before considering the
-  agent "started." A script can implement this by polling its backend's
-  process tree after session creation, or ignore it for fire-and-forget
-  behavior (like the subprocess provider does).
+- **`process_names`** — providers that verify readiness can poll for these
+  process names to appear in the session's process tree (30s timeout)
+  before considering the agent "started." A script can implement this by
+  polling its backend's process tree after session creation, or ignore it
+  for fire-and-forget behavior (like the subprocess provider does).
 
-- **`nudge`** — text that the tmux adapter types into the session after
-  the agent is ready. Scripts that support interactive input can handle
-  this in `start` (type the text after session creation) or leave it to
-  the separate `nudge` operation which gc calls after `start` returns.
+- **`nudge`** — text that an interactive provider can send into the session
+  after the agent is ready. Scripts that support interactive input can
+  handle this in `start` (send the text after session creation) or leave
+  it to the separate `nudge` operation which gc calls after `start` returns.
 
 - **`pre_start`** — array of shell commands to run on the target
   filesystem **before** the session is created. Used for directory
   preparation, worktree creation, or other setup that must exist before
   the agent starts. Scripts should execute each command in the target
-  environment before creating the tmux session. Non-fatal: warn on
-  stderr if a command fails, but don't abort start.
+  environment before creating the session. Fatal: abort startup if a
+  command fails so the agent never launches into an unprepared workDir.
 
 - **`session_setup`** — array of shell commands to run on the target
   filesystem after the session is created and ready, before returning.
-  Scripts should execute each command inside the session environment
+  These are provider hints, not a hardcoded `gc` execution model: the
+  built-in tmux backend runs its equivalent commands from the controller
+  process, while exec scripts typically execute each command inside the
+  session environment
   (e.g. `kubectl exec -- sh -c '<cmd>'` for K8s, `docker exec -- sh -c
   '<cmd>'` for Docker, or plain `sh -c '<cmd>'` for local providers).
   Non-fatal: warn on stderr if a command fails, but don't abort start.
