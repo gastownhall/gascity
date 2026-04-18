@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -780,7 +781,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
+	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
 
 	// Get the session to find its template.
 	info, err := mgr.Get(sessionID)
@@ -788,12 +789,14 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	// Build the resume command from the template's provider.
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
-	if err := mgr.Attach(context.Background(), sessionID, resumeCmd, hints); err != nil {
+	if err := handle.Attach(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1349,19 +1352,20 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
-	info, err := mgr.Get(sessionID)
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
-	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
+	result, err := handle.Message(context.Background(), worker.MessageRequest{
+		Text:     message,
+		Delivery: workerDeliveryIntentForSubmitIntent(intent),
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitSessionSubmitResult(stdout, target, intent, outcome.Queued)
+	emitSessionSubmitResult(stdout, target, intent, result.Queued)
 	return 0
 }
 
