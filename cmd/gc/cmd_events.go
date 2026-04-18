@@ -20,6 +20,7 @@ func newEventsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var seqFlag bool
 	var jsonFlag bool
 	var timeoutFlag string
+	var debounceFlag string
 	var afterFlag uint64
 	var payloadMatch []string
 
@@ -35,6 +36,7 @@ scripting and automation).`,
 		Example: `  gc events
   gc events --type bead.created --since 1h
   gc events --watch --type convoy.closed --timeout 5m
+  gc events --watch --type bead.updated --timeout 5m --debounce 60s
   gc events --follow
   gc events --seq`,
 		Args: cobra.NoArgs,
@@ -52,7 +54,7 @@ scripting and automation).`,
 				return nil
 			}
 			if watchFlag {
-				if cmdEventsWatch(typeFilter, payloadMatch, afterFlag, timeoutFlag, stdout, stderr) != 0 {
+				if cmdEventsWatch(typeFilter, payloadMatch, afterFlag, timeoutFlag, debounceFlag, stdout, stderr) != 0 {
 					return errExit
 				}
 				return nil
@@ -71,6 +73,7 @@ scripting and automation).`,
 	cmd.Flags().StringVar(&timeoutFlag, "timeout", "30s", "Max wait duration for --watch (e.g. 30s, 5m)")
 	cmd.Flags().Uint64Var(&afterFlag, "after", 0, "Resume watching from this sequence number (0 = current head)")
 	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value, repeatable)")
+	cmd.Flags().StringVar(&debounceFlag, "debounce", "", "Minimum collection window before returning matches in --watch mode (e.g. 60s). Prevents rapid-fire wakes from high-frequency event streams")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in JSON format (list mode only)")
 	return cmd
 }
@@ -243,10 +246,8 @@ func doEventsFollow(ep events.Provider, typeFilter string, payloadMatch map[stri
 			return 1
 		}
 
-		for _, e := range evts {
-			if e.Seq > lastSeq {
-				lastSeq = e.Seq
-			}
+		if s := lastSeqOf(evts); s > lastSeq {
+			lastSeq = s
 		}
 
 		if matches := filterEvents(evts, afterSeq, typeFilter, payloadMatch); len(matches) > 0 {
@@ -259,11 +260,28 @@ func doEventsFollow(ep events.Provider, typeFilter string, payloadMatch map[stri
 }
 
 // cmdEventsWatch is the CLI entry point for watch mode.
-func cmdEventsWatch(typeFilter string, payloadMatch []string, afterSeq uint64, timeoutFlag string, stdout, stderr io.Writer) int {
+func cmdEventsWatch(typeFilter string, payloadMatch []string, afterSeq uint64, timeoutFlag, debounceFlag string, stdout, stderr io.Writer) int {
 	timeout, err := time.ParseDuration(timeoutFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: invalid --timeout %q: %v\n", timeoutFlag, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	var debounce time.Duration
+	if debounceFlag != "" {
+		debounce, err = time.ParseDuration(debounceFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc events: invalid --debounce %q: %v\n", debounceFlag, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if debounce < 0 {
+			fmt.Fprintf(stderr, "gc events: --debounce must not be negative\n") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if debounce >= timeout {
+			fmt.Fprintf(stderr, "gc events: --debounce (%s) must be less than --timeout (%s)\n", debounce, timeout) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	pm, err := parsePayloadMatch(payloadMatch)
@@ -277,14 +295,19 @@ func cmdEventsWatch(typeFilter string, payloadMatch []string, afterSeq uint64, t
 		return code
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doEventsWatch(ep, typeFilter, pm, afterSeq, timeout, 250*time.Millisecond, stdout, stderr)
+	return doEventsWatch(ep, typeFilter, pm, afterSeq, timeout, debounce, 250*time.Millisecond, stdout, stderr)
 }
 
 // doEventsWatch polls the event provider for new events matching the filter.
 // It blocks until matching events arrive or the timeout expires. Outputs
 // matching events as JSON lines (one per line). Returns 0 always — empty
 // stdout means timeout, non-empty means events found.
-func doEventsWatch(ep events.Provider, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, timeout, pollInterval time.Duration, stdout, stderr io.Writer) int {
+//
+// When debounce > 0, the first matching event starts a debounce window.
+// Events continue accumulating until the window closes, then all matches
+// are returned at once. This prevents high-frequency event streams from
+// causing rapid-fire wakes in patrol loops (see issue #458).
+func doEventsWatch(ep events.Provider, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, timeout, debounce, pollInterval time.Duration, stdout, stderr io.Writer) int {
 	explicitAfterSeq := afterSeq > 0
 
 	// Determine starting point.
@@ -306,7 +329,12 @@ func doEventsWatch(ep events.Provider, typeFilter string, payloadMatch map[strin
 			return 1
 		}
 		if matches := filterEvents(evts, afterSeq, typeFilter, payloadMatch); len(matches) > 0 {
-			return printEventsJSON(matches, stdout, stderr)
+			if debounce <= 0 {
+				return printEventsJSON(matches, stdout, stderr)
+			}
+			// Debounce: accumulate more events before returning.
+			// Full timeout as remaining — no deadline created yet in this early path.
+			return doEventsWatchDebounce(ep, typeFilter, payloadMatch, matches, lastSeqOf(evts), timeout, debounce, pollInterval, stdout, stderr)
 		}
 	}
 
@@ -320,15 +348,17 @@ func doEventsWatch(ep events.Provider, typeFilter string, payloadMatch map[strin
 			return 1
 		}
 
-		// Track the highest seq we've seen.
-		for _, e := range evts {
-			if e.Seq > lastSeq {
-				lastSeq = e.Seq
-			}
+		if s := lastSeqOf(evts); s > lastSeq {
+			lastSeq = s
 		}
 
 		if matches := filterEvents(evts, afterSeq, typeFilter, payloadMatch); len(matches) > 0 {
-			return printEventsJSON(matches, stdout, stderr)
+			if debounce <= 0 {
+				return printEventsJSON(matches, stdout, stderr)
+			}
+			// Debounce: accumulate more events before returning.
+			remaining := time.Until(deadline)
+			return doEventsWatchDebounce(ep, typeFilter, payloadMatch, matches, lastSeq, remaining, debounce, pollInterval, stdout, stderr)
 		}
 
 		if time.Now().After(deadline) {
@@ -337,6 +367,64 @@ func doEventsWatch(ep events.Provider, typeFilter string, payloadMatch map[strin
 
 		time.Sleep(pollInterval)
 	}
+}
+
+// doEventsWatchDebounce accumulates events within a debounce window after the
+// first match. Returns all accumulated matches when the window closes. If the
+// overall timeout expires first, returns whatever has been accumulated so far.
+func doEventsWatchDebounce(ep events.Provider, typeFilter string, payloadMatch map[string][]string, initial []events.Event, lastSeq uint64, remaining, debounce, pollInterval time.Duration, stdout, stderr io.Writer) int {
+	accumulated := append([]events.Event(nil), initial...)
+	// highWater tracks the debounce-internal filter cursor. filterEvents
+	// returns events with Seq > highWater, so initializing to the caller's
+	// lastSeq excludes the initial batch already in accumulated.
+	highWater := lastSeq
+
+	debounceDeadline := time.Now().Add(debounce)
+	overallDeadline := time.Now().Add(remaining)
+
+	// Cap debounce at overall deadline.
+	if debounceDeadline.After(overallDeadline) {
+		debounceDeadline = overallDeadline
+	}
+
+	for {
+		untilDebounce := time.Until(debounceDeadline)
+		if untilDebounce <= 0 {
+			return printEventsJSON(accumulated, stdout, stderr)
+		}
+
+		sleep := pollInterval
+		if untilDebounce < sleep {
+			sleep = untilDebounce
+		}
+		time.Sleep(sleep)
+
+		evts, err := ep.List(events.Filter{AfterSeq: lastSeq})
+		if err != nil {
+			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck // best-effort stderr
+			return printEventsJSON(accumulated, stdout, stderr)
+		}
+
+		if s := lastSeqOf(evts); s > lastSeq {
+			lastSeq = s
+		}
+
+		if matches := filterEvents(evts, highWater, typeFilter, payloadMatch); len(matches) > 0 {
+			accumulated = append(accumulated, matches...)
+			highWater = lastSeq
+		}
+	}
+}
+
+// lastSeqOf returns the highest sequence number in a slice of events.
+func lastSeqOf(evts []events.Event) uint64 {
+	var highest uint64
+	for _, e := range evts {
+		if e.Seq > highest {
+			highest = e.Seq
+		}
+	}
+	return highest
 }
 
 // filterEvents returns events with Seq > afterSeq that match typeFilter

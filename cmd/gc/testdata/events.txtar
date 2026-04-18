@@ -89,3 +89,26 @@ exec gc events --watch --type=agent.crashed --timeout=100ms
 
 ! exec gc events --watch --timeout=notaduration
 stderr 'invalid --timeout'
+
+# --- Watch mode: invalid --debounce ---
+
+! exec gc events --watch --debounce=notaduration
+stderr 'invalid --debounce'
+
+# --- Watch mode: negative --debounce ---
+
+! exec gc events --watch --debounce=-1s
+stderr 'must not be negative'
+
+# --- Watch mode: debounce >= timeout ---
+
+! exec gc events --watch --timeout=30s --debounce=30s
+stderr 'must be less than'
+
+! exec gc events --watch --timeout=30s --debounce=60s
+stderr 'must be less than'
+
+# --- Watch mode: debounce with timeout, no matching events ---
+
+exec gc events --watch --type=agent.crashed --timeout=100ms --debounce=30ms
+! stdout '.'

@@ -271,7 +271,7 @@ func TestDoEventsWatchImmediate(t *testing.T) {
 
 	// afterSeq=1 → seq 2 is already there, should return immediately.
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, "", nil, 1, 100*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, "", nil, 1, 100*time.Millisecond, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -299,7 +299,7 @@ func TestDoEventsWatchTimeout(t *testing.T) {
 	ep := newTestProvider(t, dir)
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, "", nil, 0, 50*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, "", nil, 0, 50*time.Millisecond, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -328,7 +328,7 @@ func TestDoEventsWatchTypeFilter(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, events.BeadClosed, nil, 0, 2*time.Second, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, events.BeadClosed, nil, 0, 2*time.Second, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -351,7 +351,7 @@ func TestDoEventsWatchAfterSeq(t *testing.T) {
 
 	// Watch with explicit afterSeq=3 — should return seq 4 and 5.
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, "", nil, 3, 100*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, "", nil, 3, 100*time.Millisecond, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -395,7 +395,7 @@ func TestDoEventsWatchDefaultAfterSeq(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, "", nil, 0, 2*time.Second, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, "", nil, 0, 2*time.Second, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -435,7 +435,7 @@ func TestDoEventsWatchNoTypeFilter(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, "", nil, 0, 2*time.Second, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, "", nil, 0, 2*time.Second, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -484,7 +484,7 @@ func TestDoEventsWatchPayloadMatch(t *testing.T) {
 
 	pm := map[string][]string{"type": {"merge-request"}}
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, events.BeadCreated, pm, 0, 2*time.Second, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, events.BeadCreated, pm, 0, 2*time.Second, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -510,12 +510,162 @@ func TestDoEventsWatchPayloadMatchTimeout(t *testing.T) {
 
 	pm := map[string][]string{"type": {"merge-request"}}
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(ep, events.BeadCreated, pm, 1, 50*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(ep, events.BeadCreated, pm, 1, 50*time.Millisecond, 0, 10*time.Millisecond, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if stdout.String() != "" {
 		t.Errorf("expected empty stdout on timeout, got %q", stdout.String())
+	}
+}
+
+// --- Debounce tests ---
+
+func TestDoEventsWatchDebounceAccumulates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	ep := newTestProvider(t, dir)
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 1
+
+	// Append events in batches during the debounce window.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		var stderrBuf bytes.Buffer
+		rec2, err := events.NewFileRecorder(path, &stderrBuf)
+		if err != nil {
+			return
+		}
+		rec2.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-1"}) // seq 2
+		rec2.Close()                                                                           //nolint:errcheck // test cleanup
+
+		time.Sleep(30 * time.Millisecond)
+		rec3, err := events.NewFileRecorder(path, &stderrBuf)
+		if err != nil {
+			return
+		}
+		rec3.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-2"}) // seq 3
+		rec3.Close()                                                                           //nolint:errcheck // test cleanup
+	}()
+
+	var stdout, stderr bytes.Buffer
+	// debounce=150ms — should accumulate both events before returning.
+	code := doEventsWatch(ep, events.BeadUpdated, nil, 0, 2*time.Second, 150*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("got %d lines, want >= 2 (debounce should accumulate); output: %q", len(lines), stdout.String())
+	}
+
+	// Both bead.updated events should be present.
+	out := stdout.String()
+	if !strings.Contains(out, "gc-1") {
+		t.Errorf("output missing gc-1: %q", out)
+	}
+	if !strings.Contains(out, "gc-2") {
+		t.Errorf("output missing gc-2: %q", out)
+	}
+}
+
+func TestDoEventsWatchDebounceZeroIsImmediate(t *testing.T) {
+	// With debounce=0, behavior is identical to pre-debounce: returns on first match.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	ep := newTestProvider(t, dir)
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 1
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		var stderrBuf bytes.Buffer
+		rec2, err := events.NewFileRecorder(path, &stderrBuf)
+		if err != nil {
+			return
+		}
+		rec2.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-1"}) // seq 2
+		rec2.Close()                                                                           //nolint:errcheck // test cleanup
+
+		time.Sleep(30 * time.Millisecond)
+		rec3, err := events.NewFileRecorder(path, &stderrBuf)
+		if err != nil {
+			return
+		}
+		rec3.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-2"}) // seq 3
+		rec3.Close()                                                                           //nolint:errcheck // test cleanup
+	}()
+
+	var stdout, stderr bytes.Buffer
+	// debounce=0 — should return immediately on first match.
+	code := doEventsWatch(ep, events.BeadUpdated, nil, 0, 2*time.Second, 0, 10*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	// Should return only the first batch (seq 2), not wait for seq 3.
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1 (no debounce = immediate return); output: %q", len(lines), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "gc-1") {
+		t.Errorf("output missing gc-1: %q", stdout.String())
+	}
+}
+
+func TestDoEventsWatchDebounceTimeoutBeforeMatch(t *testing.T) {
+	// Timeout expires before any events arrive — debounce doesn't change this.
+	dir := t.TempDir()
+	ep := newTestProvider(t, dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(ep, events.BeadUpdated, nil, 0, 80*time.Millisecond, 40*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout on timeout, got %q", stdout.String())
+	}
+}
+
+func TestDoEventsWatchDebounceWithExplicitAfterSeq(t *testing.T) {
+	// Debounce should work when events already exist past afterSeq.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	ep := newTestProvider(t, dir)
+	ep.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-1"}) // seq 1
+	ep.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-2"}) // seq 2
+
+	// Append a third event during the debounce window.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		var stderrBuf bytes.Buffer
+		rec2, err := events.NewFileRecorder(path, &stderrBuf)
+		if err != nil {
+			return
+		}
+		rec2.Record(events.Event{Type: events.BeadUpdated, Actor: "polecat", Subject: "gc-3"}) // seq 3
+		rec2.Close()                                                                           //nolint:errcheck // test cleanup
+	}()
+
+	var stdout, stderr bytes.Buffer
+	// afterSeq=0 means "current head" (seq 2). Only seq 3 should appear.
+	// But with afterSeq=1, seqs 2 and 3 should appear after debounce.
+	code := doEventsWatch(ep, events.BeadUpdated, nil, 1, 2*time.Second, 100*time.Millisecond, 10*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	// Should have at least 2 events: gc-2 (already past afterSeq=1) and gc-3 (appended during debounce).
+	if len(lines) < 2 {
+		t.Fatalf("got %d lines, want >= 2; output: %q", len(lines), out)
+	}
+	if !strings.Contains(out, "gc-2") {
+		t.Errorf("output missing gc-2: %q", out)
+	}
+	if !strings.Contains(out, "gc-3") {
+		t.Errorf("output missing gc-3: %q", out)
 	}
 }
 
