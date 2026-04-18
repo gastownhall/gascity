@@ -70,6 +70,25 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Clear any tripped circuit breaker for this session's named identity.
+	// The breaker is keyed by named-session identity (see
+	// session_circuit_breaker.go), which the reconciler obtains from the
+	// session bead via namedSessionIdentity. Operators are told to run
+	// `gc session reset <identity>` from the breaker's ERROR log, so this
+	// must actually clear the breaker — otherwise the supervisor would
+	// continue to refuse respawns until the auto-reset window elapsed.
+	cb := defaultSessionCircuitBreaker()
+	// Reset by the user's input first: in the common case the operator
+	// pasted the identity from the ERROR message verbatim ("mayor"), and
+	// the resolver below may not be able to map that back to a session
+	// bead if the breaker is tripped because no session ever materialized.
+	cb.Reset(args[0])
+	if bead, err := store.Get(sessionID); err == nil {
+		if identity := namedSessionIdentity(bead); identity != "" {
+			cb.Reset(identity)
+		}
+	}
+
 	_ = pokeController(cityPath)
 
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout
