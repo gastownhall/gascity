@@ -1,0 +1,2 @@
+description = "Add a pack to the city's imports (source)"
+run = "add.py"

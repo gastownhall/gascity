@@ -6,39 +6,14 @@
 # maintenance) unless the city sets implicit_imports = false.
 # No tap concept, no user-level registry, no third-party Python deps.
 # See README.md for the user guide.
+#
+# Commands and the doctor check are convention-discovered from
+# commands/<name>/ and doctor/<name>/ directories. Each command's
+# command.toml sidecar points at the Python entrypoint (run = "<name>.py");
+# the python3.11 doctor check uses run.sh per V2 convention.
 
 [pack]
 name = "import"
 version = "0.2.0"
-schema = 1
+schema = 2
 description = "Source-based package manager for Gas City packs (gc import add/remove/install/upgrade/list, plus implicit-imports splice from ~/.gc/implicit-import.toml)"
-
-[[commands]]
-name = "add"
-description = "Add a pack to the city's imports (source)"
-script = "commands/add.py"
-
-[[commands]]
-name = "remove"
-description = "Remove a pack from imports and prune transitive deps"
-script = "commands/remove.py"
-
-[[commands]]
-name = "install"
-description = "Restore the city to the exact state in pack.lock"
-script = "commands/install.py"
-
-[[commands]]
-name = "upgrade"
-description = "Re-resolve constraints and bump pack.lock"
-script = "commands/upgrade.py"
-
-[[commands]]
-name = "list"
-description = "Show what this city imports (use --tree for the dependency graph)"
-script = "commands/list.py"
-
-[[doctor]]
-name = "python3.11"
-description = "Verify Python 3.11+ is available (gc import uses tomllib from stdlib)"
-script = "doctor/check-python.sh"

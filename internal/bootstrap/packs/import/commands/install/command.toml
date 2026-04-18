@@ -1,0 +1,2 @@
+description = "Restore the city to the exact state in pack.lock"
+run = "install.py"

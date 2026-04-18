@@ -118,7 +118,7 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 		expected := []string{
 			"packs/hyperscale/pack.toml",
 			"packs/hyperscale/agents",
-			"packs/hyperscale/scripts",
+			"packs/hyperscale/assets/scripts",
 		}
 		for _, rel := range expected {
 			if !c.HasFile(rel) {

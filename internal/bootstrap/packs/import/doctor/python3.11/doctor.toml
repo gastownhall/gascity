@@ -1,0 +1,1 @@
+description = "Verify Python 3.11+ is available (gc import uses tomllib from stdlib)"

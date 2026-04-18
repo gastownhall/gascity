@@ -32,7 +32,7 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 
 	// Verify doctor scripts are executable.
 	for _, script := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "doctor", "check-bd.sh"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "doctor", "check-bd", "run.sh"),
 		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh"),
 	} {
 		info, err := os.Stat(script)

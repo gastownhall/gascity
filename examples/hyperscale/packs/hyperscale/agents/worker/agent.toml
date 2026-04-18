@@ -1,5 +1,5 @@
 scope = "rig"
-start_command = "scripts/mock-worker.sh"
+start_command = "assets/scripts/mock-worker.sh"
 nudge = "Check your hook for work."
 idle_timeout = "5m"
 min_active_sessions = 0

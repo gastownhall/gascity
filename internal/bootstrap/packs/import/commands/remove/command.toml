@@ -1,0 +1,2 @@
+description = "Remove a pack from imports and prune transitive deps"
+run = "remove.py"
