@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const reviewWorkflowTimeout = 8 * time.Minute
+// reviewWorkflowTimeout bounds waits for review-formula workflow beads to
+// close. Successful runs on CI average ~5 min per test, but runner variance
+// pushes individual runs past 8 min; keep the budget at 12 min so slow
+// runners don't flake the lane.
+const reviewWorkflowTimeout = 12 * time.Minute
 
 const testReviewExpansionFormula = `description = """
 Test-local review expansion used by integration tests.
