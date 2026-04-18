@@ -101,18 +101,22 @@ func (h *RuntimeHandle) Stop(context.Context) error {
 	return h.provider.Stop(h.sessionName)
 }
 
+// Kill asks the provider to stop the live runtime session immediately.
 func (h *RuntimeHandle) Kill(context.Context) error {
 	return h.provider.Stop(h.sessionName)
 }
 
+// Close asks the provider to close the live runtime session.
 func (h *RuntimeHandle) Close(context.Context) error {
 	return h.provider.Stop(h.sessionName)
 }
 
+// Rename reports unsupported because runtime-only handles have no persisted name update.
 func (h *RuntimeHandle) Rename(context.Context, string) error {
 	return fmt.Errorf("%w: rename requires a bead-backed session", ErrOperationUnsupported)
 }
 
+// Peek returns recent runtime output lines for the live session.
 func (h *RuntimeHandle) Peek(_ context.Context, lines int) (string, error) {
 	if !h.provider.IsRunning(h.sessionName) {
 		return "", fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
@@ -120,6 +124,7 @@ func (h *RuntimeHandle) Peek(_ context.Context, lines int) (string, error) {
 	return h.provider.Peek(h.sessionName, lines)
 }
 
+// State projects runtime-only observations into the canonical worker state view.
 func (h *RuntimeHandle) State(context.Context) (State, error) {
 	state := State{
 		SessionName: h.sessionName,
@@ -142,6 +147,7 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 	return state, nil
 }
 
+// Message submits a runtime nudge as a synchronous worker message.
 func (h *RuntimeHandle) Message(_ context.Context, req MessageRequest) (MessageResult, error) {
 	if strings.TrimSpace(req.Text) == "" {
 		return MessageResult{}, fmt.Errorf("message text is required")
@@ -155,10 +161,12 @@ func (h *RuntimeHandle) Message(_ context.Context, req MessageRequest) (MessageR
 	return MessageResult{Queued: false}, nil
 }
 
+// Interrupt asks the provider to interrupt the live runtime session.
 func (h *RuntimeHandle) Interrupt(context.Context, InterruptRequest) error {
 	return h.provider.Interrupt(h.sessionName)
 }
 
+// Nudge submits a best-effort reminder to the live runtime session.
 func (h *RuntimeHandle) Nudge(_ context.Context, req NudgeRequest) (NudgeResult, error) {
 	if strings.TrimSpace(req.Text) == "" {
 		return NudgeResult{}, fmt.Errorf("nudge text is required")
@@ -187,26 +195,32 @@ func (h *RuntimeHandle) Nudge(_ context.Context, req NudgeRequest) (NudgeResult,
 	}
 }
 
+// Transcript reports unavailable because runtime-only handles have no transcript adapter.
 func (h *RuntimeHandle) Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error) {
 	return nil, ErrHistoryUnavailable
 }
 
+// TranscriptPath reports unavailable because runtime-only handles have no transcript path.
 func (h *RuntimeHandle) TranscriptPath(context.Context) (string, error) {
 	return "", ErrHistoryUnavailable
 }
 
+// AgentMappings reports unavailable because runtime-only handles have no agent transcripts.
 func (h *RuntimeHandle) AgentMappings(context.Context) ([]AgentMapping, error) {
 	return nil, ErrHistoryUnavailable
 }
 
+// AgentTranscript reports unavailable because runtime-only handles have no agent transcripts.
 func (h *RuntimeHandle) AgentTranscript(context.Context, string) (*AgentTranscriptResult, error) {
 	return nil, ErrHistoryUnavailable
 }
 
+// History reports unavailable because runtime-only handles have no transcript history.
 func (h *RuntimeHandle) History(context.Context, HistoryRequest) (*HistorySnapshot, error) {
 	return nil, ErrHistoryUnavailable
 }
 
+// Pending returns the current blocking interaction for a runtime-only session if supported.
 func (h *RuntimeHandle) Pending(context.Context) (*PendingInteraction, error) {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
@@ -228,6 +242,7 @@ func (h *RuntimeHandle) Pending(context.Context) (*PendingInteraction, error) {
 	}, nil
 }
 
+// PendingStatus returns the pending interaction plus whether the provider supports it.
 func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction, bool, error) {
 	_, supported := h.provider.(runtime.InteractionProvider)
 	pending, err := h.Pending(ctx)
@@ -262,6 +277,7 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	return obs, nil
 }
 
+// Respond resolves a blocking interaction through the runtime provider.
 func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) error {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
