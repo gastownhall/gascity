@@ -11,7 +11,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -61,7 +60,7 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
-	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	searchPaths := worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 
 	store, err := tryOpenCityStore()
 	var (
@@ -241,7 +240,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	}
 }
 
-func readSessionFile(provider, path string, tail int) (*sessionlog.Session, error) {
+func readSessionFile(provider, path string, tail int) (*worker.TranscriptSession, error) {
 	result, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
 		Provider:        provider,
 		TranscriptPath:  path,
@@ -257,12 +256,12 @@ func readSessionFile(provider, path string, tail int) (*sessionlog.Session, erro
 // object format: {"role":"user","content":"hello"}
 // string format: "{\"role\":\"user\",\"content\":\"hello\"}" (escaped JSON string)
 // Returns the message content struct if parseable.
-func resolveMessage(raw json.RawMessage) *sessionlog.MessageContent {
+func resolveMessage(raw json.RawMessage) *worker.TranscriptMessageContent {
 	if len(raw) == 0 {
 		return nil
 	}
 	// Try object format first.
-	var mc sessionlog.MessageContent
+	var mc worker.TranscriptMessageContent
 	if err := json.Unmarshal(raw, &mc); err == nil && mc.Role != "" {
 		return &mc
 	}
@@ -277,7 +276,7 @@ func resolveMessage(raw json.RawMessage) *sessionlog.MessageContent {
 }
 
 // printLogEntry prints a single session log entry to stdout.
-func printLogEntry(w io.Writer, e *sessionlog.Entry) {
+func printLogEntry(w io.Writer, e *worker.TranscriptEntry) {
 	if e.IsCompactBoundary() {
 		fmt.Fprintln(w, "── context compacted ──") //nolint:errcheck
 		return
@@ -313,7 +312,7 @@ func printLogEntry(w io.Writer, e *sessionlog.Entry) {
 	}
 
 	// Try content as array of blocks.
-	var blocks []sessionlog.ContentBlock
+	var blocks []worker.TranscriptContentBlock
 	if json.Unmarshal(mc.Content, &blocks) == nil && len(blocks) > 0 {
 		for _, b := range blocks {
 			switch b.Type {

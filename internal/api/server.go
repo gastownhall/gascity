@@ -21,7 +21,7 @@ type Server struct {
 	readOnly bool // when true, POST endpoints return 403
 
 	// sessionLogSearchPaths overrides the default search paths for Claude
-	// session JSONL files. Nil means use sessionlog.DefaultSearchPaths().
+	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
 
 	// idem caches responses for Idempotency-Key replay on create endpoints.

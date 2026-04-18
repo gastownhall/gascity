@@ -16,14 +16,44 @@ import (
 )
 
 func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, spec worker.SessionSpec) (*worker.SessionHandle, error) {
-	return worker.NewSessionHandle(worker.SessionHandleConfig{
-		Manager: newSessionManagerWithConfig(cityPath, store, sp, cfg),
-		Session: spec,
-	})
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Session(spec)
 }
 
 func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
-	return worker.NewSessionCatalog(newSessionManagerWithConfig(cityPath, store, sp, cfg))
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Catalog()
+}
+
+func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
+	var (
+		resolveTransport func(template string) string
+		searchPaths      []string
+	)
+	if cfg != nil {
+		rigContext := currentRigContext(cfg)
+		resolveTransport = func(template string) string {
+			agentCfg, ok := resolveAgentIdentity(cfg, template, rigContext)
+			if !ok {
+				return ""
+			}
+			return agentCfg.Session
+		}
+		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	}
+	return worker.NewFactory(worker.FactoryConfig{
+		Store:            store,
+		Provider:         sp,
+		CityPath:         cityPath,
+		SearchPaths:      searchPaths,
+		ResolveTransport: resolveTransport,
+	})
 }
 
 func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
@@ -116,10 +146,11 @@ func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp run
 	}
 	applyResolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind, &spec)
 
-	return worker.NewSessionHandle(worker.SessionHandleConfig{
-		Manager: newSessionManagerWithConfig(cityPath, store, sp, cfg),
-		Session: spec,
-	})
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Session(spec)
 }
 
 func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (worker.Handle, error) {

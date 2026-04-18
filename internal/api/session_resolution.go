@@ -472,11 +472,11 @@ func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.S
 		}
 	}
 
-	return worker.NewSessionHandle(worker.SessionHandleConfig{
-		Manager:     s.sessionManager(store),
-		SearchPaths: s.sessionLogPaths(),
-		Session:     spec,
-	})
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Session(spec)
 }
 
 func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) (worker.Handle, error) {
@@ -507,11 +507,11 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 }
 
 func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (*worker.SessionHandle, error) {
-	return worker.NewSessionHandle(worker.SessionHandleConfig{
-		Manager:     s.sessionManager(store),
-		SearchPaths: s.sessionLogPaths(),
-		Session:     spec,
-	})
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
+	return factory.Session(spec)
 }
 
 func workerDeliveryIntent(intent session.SubmitIntent) worker.DeliveryIntent {
