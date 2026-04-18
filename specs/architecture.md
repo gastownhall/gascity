@@ -88,13 +88,21 @@ types; the spec drives everything downstream.
 
 ### The generated Go client
 
-`internal/api/genclient/` has exactly two in-tree consumers:
+`internal/api/genclient/` has three in-tree consumers:
 
-1. **CLI multi-process coordination** via `internal/api/client.go`,
-   used by `cmd/gc/apiroute.go` as described above.
-2. **Layer 2 conformance probe** — `genclient_roundtrip_test.go`
-   exercises every generated method against a real supervisor so
-   spec/reality drift fails CI.
+1. **CLI mutation coordination** via `internal/api/client.go`, used
+   by `cmd/gc/apiroute.go` as described above. This is the only
+   consumer for paths that mutate state and could race an in-process
+   supervisor.
+2. **CLI read/stream paths that use genclient directly** —
+   `cmd/gc/cmd_events.go` imports `internal/api/genclient` and calls
+   its typed methods for event listing and SSE following. Direct use
+   is allowed for read/stream paths where the mutation-coordination
+   concern does not apply; wrapping them through `client.go` would be
+   a pure pass-through.
+3. **Layer 2 conformance probe** —
+   `genclient_roundtrip_test.go` exercises every generated method
+   against a real supervisor so spec/reality drift fails CI.
 
 The generated client is not promoted as a public Go SDK for
 external consumers. External Go consumers, if they ever appear,
@@ -144,13 +152,31 @@ shadow mapping. No `prefix-strip-and-forward`. No client-side
 path-rewrite helpers. The existence of such a helper is direct
 evidence the spec disagrees with reality and is a bug to fix.
 
-### 3.4 Zero hand-written JSON in the typed control plane
+### 3.4 No hand-constructed JSON for domain data
 
-No `json.Marshal` or `json.Unmarshal` in any HTTP or SSE code path
-that touches bytes owned by our API contract. No
-`json.NewEncoder` / `json.NewDecoder` writing or reading wire
-bodies. Huma owns every byte that enters or leaves the socket for
-a typed operation.
+Every wire byte that represents a domain value comes from encoding
+a typed Go struct (schema-registered with Huma) through the
+standard JSON encoder, directly or via Huma's own serialization
+machinery. This principle forbids three anti-patterns specifically:
+
+- `json.Marshal(map[string]any{...})` — untyped input.
+- `fmt.Sprintf`-built JSON strings — hand-constructed shape.
+- `json.Marshal(anyInterfaceValue)` where the interface carries
+  values whose types are not schema-registered — hides the shape
+  from the spec.
+
+The test a reviewer applies: *is there any line in your code that
+produces JSON-shaped output from non-typed or map-typed input?* If
+yes, violation. If every JSON byte comes from `encoder.Encode` of a
+typed, schema-registered struct, the principle holds.
+
+Protocol framing around domain data — HTTP status codes, HTTP
+response headers, SSE `id:` / `event:` / `data:` / retry line
+separators, chunked-encoding bytes — is not domain data and is not
+in scope for this principle. `internal/api/sse.go` hand-writes the
+SSE protocol-text lines around a typed `encoder.Encode(data)` call
+on a registered struct; the domain payload IS framework-encoded,
+the surrounding protocol literals are not JSON at all.
 
 Edge cases that are NOT wire and therefore exempt:
 
@@ -167,15 +193,16 @@ Custom `MarshalJSON` / `UnmarshalJSON` on wire types are forbidden
 with two narrow, documented exceptions:
 
 - **`SessionRawMessageFrame`** (`internal/api/session_frame_types.go`)
-  — the third-party provider frame hatch; forwards arbitrary JSON
-  the provider wrote. See §3.6.
+  — the raw-frame pass-through for provider-native session
+  transcripts; forwards arbitrary JSON the provider wrote. See §3.6.
 - **`EventPayloadUnion`** (`internal/api/convoy_event_stream.go`)
   — the wire wrapper around `events.Payload` that emits the typed
   payload as a named `oneOf` component. Its `MarshalJSON` emits
   the concrete variant directly (so the wire sees `{"rig":...}`
   rather than a wrapper object); its Schema method registers and
-  refs the named component. Both methods are necessary for the
-  current Go OpenAPI tooling (see §6 for the tooling note).
+  refs the named component. Required to get a single named
+  `EventPayload` component schema that Go and TS clients can both
+  consume.
 
 ### 3.5 Typed structs for every shape knowable at compile time
 
@@ -189,28 +216,31 @@ figure out the union later", and "it's just internal" are not
 qualifying exceptions. If our code constructs the map, we know the
 keys. Make it a struct.
 
-### 3.6 Raw pass-through only for shapes unknowable at compile time
+### 3.6 Raw pass-through for provider-native session frames
 
-The single legitimate case for `json.RawMessage` on the wire is
-content authored outside our source tree that we forward verbatim
-and cannot enumerate statically. The canonical example is
-third-party provider session transcript frames: Gas City is an
-SDK, users plug in providers via config, and their frame shapes
-are not in our source tree.
+Session transcript streaming and query endpoints forward
+provider-native frames with full fidelity. Each response/envelope
+identifies the producing provider via a `provider` field whose
+value is one of the known provider keys (`claude`, `codex`,
+`gemini`, `open-code`, etc.); each frame's JSON is emitted verbatim
+as the provider wrote it, with no GC-side interpretation.
+Consumers parse frames using provider-specific logic on their side,
+keyed by the provider identifier on the envelope.
 
-The rule for this case:
-
-- First-party provider frame shapes ARE modeled as named schemas
-  in the spec (see `internal/api/session_frame_types.go` for Codex
-  and Gemini types). Consumers code against the typed cases for
-  the common path.
-- Only truly unknown third-party frames fall through to the raw
-  hatch.
-- The raw hatch is a single named type with a documented reason
-  in its doc comment explaining why it cannot be typed.
+The single JSON-pass-through wire type is `SessionRawMessageFrame`
+(`internal/api/session_frame_types.go`). Its Schema method emits
+an "any JSON value" schema because Gas City does not own the
+shape of provider frames. Publishing typed wire schemas for
+provider frames would claim a contract we don't own: a provider
+could change its frame shape tomorrow and the spec would silently
+lie until regenerated. Honest opacity with a provider discriminator
+is the right design.
 
 Passing through externally-authored shapes is not a license to
 also opacify our own shapes that happen to be nested near them.
+Every GC-owned field on the same envelope as the raw frames
+(envelope metadata, provider identifier, session info) stays
+typed.
 
 ### 3.7 Every event type has a typed wire payload
 
@@ -354,34 +384,67 @@ Skipping any step lands on a CI failure, not a production bug:
 | New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
 | Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath` in `api.ts`) |
 
-## 6. Tooling ceiling
+## 6. Tooling landscape
 
 Principle 7's "payload-field-level discrimination rather than
-envelope-level" is not a principled preference; it's a tooling
-ceiling. A future contributor evaluating whether to revisit
-envelope-level `oneOf` should know what was tried and why it was
-rejected:
+envelope-level" is a Go-tooling constraint, not a principled
+preference. The TypeScript and Go ecosystems differ on what they
+support; this section records what we evaluated and what we use
+per language.
 
-- **oapi-codegen** is the current Go client generator. It supports
-  OpenAPI 3.0 (we downgrade the 3.1 spec in `cmd/gen-client` before
-  feeding it in). When given envelope-level `oneOf`, it generates
-  `struct { union json.RawMessage }` with `AsX`/`FromX`/`MergeX`
-  accessor methods. That shape breaks the CLI's field-based
-  construction in `cmd/gc/cmd_events.go` and cannot be directly
-  initialized with the envelope fields the list endpoint surfaces.
-- **ogen** is the main alternative. It refuses `text/event-stream`
-  content type entirely; every SSE endpoint gets skipped from the
+### Go (server-side Huma, client via oapi-codegen)
+
+- **Huma v2** — server framework. Generates OpenAPI 3.1 from
+  annotated Go types; we use it for every typed endpoint. Emits a
+  3.0 downgrade on request for consumers that still need 3.0.
+- **oapi-codegen** — our current Go client generator. Supports
+  OpenAPI 3.0 (we feed it the downgrade from Huma). When given
+  envelope-level `oneOf`, it generates `struct { union
+  json.RawMessage }` with `AsX`/`FromX`/`MergeX` accessor methods.
+  That shape breaks field-based construction in
+  `cmd/gc/cmd_events.go`. It does generate typed request methods
+  for SSE endpoints, but does not parse SSE frames — the caller
+  handles framing.
+- **ogen** — evaluated via spike. Refuses `text/event-stream`
+  content type entirely; every SSE endpoint is dropped from the
   generated client. With `ignore_not_implemented: all`, ogen
-  produces clean types for REST but drops the SSE operations
-  Gas City is built on. Not viable.
-- **openapi-generator** (Java-based) breaks the pure-Go toolchain
+  produces clean REST types but drops SSE operations Gas City is
+  built on. Not viable.
+- **openapi-generator** (Java-based) — breaks the pure-Go toolchain
   and generates less-idiomatic Go.
-- **Huma's own client generator** does not exist yet (project
-  discussion, no code).
+- **Commercial SDK generators** (Speakeasy, Fern, Stainless) —
+  generate typed Go SSE clients including envelope-level `oneOf`
+  handling. Not open source; paid plans start at ~$250/mo.
 
-The payload-field-union design is the current best trade-off. If
-any of the above generators fixes its limitation, envelope-level
-discrimination becomes available and this spec should be revisited.
+The payload-field-union `EventPayload` design (Principle 7) is the
+current ceiling under open-source Go tooling. Revisit if
+oapi-codegen's experimental 3.1/3.2-aware branch stabilizes or if
+another open-source Go generator ships envelope-level `oneOf` plus
+SSE that works with our shape.
+
+### TypeScript (dashboard SPA)
+
+- **`@hey-api/openapi-ts`** — open-source generator that produces
+  typed clients for both REST and SSE. Uses `fetch()` +
+  `ReadableStream` for SSE (not `EventSource`), which means custom
+  auth headers, built-in retry with exponential backoff, and
+  async-generator consumer shapes. Generates typed
+  discriminated-union response types for SSE operations
+  (`Array<{event: 'event'; data: EventStreamEnvelope} | {event:
+  'heartbeat'; data: HeartbeatEvent}>`). Target TS tool for the
+  dashboard.
+- **`openapi-fetch`** — simpler typed-`fetch` wrapper. Does not
+  handle SSE. The dashboard currently uses this for REST and
+  hand-rolls SSE framing alongside it; a migration to
+  `@hey-api/openapi-ts` is planned to unify both and delete the
+  hand-rolled SSE decoder.
+- **`openapi-typescript-codegen`** — unmaintained.
+- **OpenAPI Generator** (Java) — same pure-toolchain concern as Go.
+
+The narrower Go-side `oneOf` ceiling does not apply to TypeScript
+consumers. Once the hey-api migration lands, TS consumers receive
+envelope-plus-typed-payload discrimination automatically from the
+generated client with no hand-rolled SSE parsing in the SPA.
 
 ## 7. What is out of scope
 
