@@ -1,5 +1,8 @@
+// Package reviewworkflows holds shared test-local workflow formulas for review
+// coverage so compile and integration tests exercise the same definitions.
 package reviewworkflows
 
+// ExpansionReviewPR is the test-local review expansion workflow fixture.
 const ExpansionReviewPR = `description = """
 Test-local review expansion used by integration tests.
 Exercises compose.expand, pooled reviewer fan-out, Gemini soft-fail retries,
@@ -60,6 +63,7 @@ max_attempts = 3
 on_exhausted = "hard_fail"
 `
 
+// ExpansionDesignReview is the test-local design review expansion fixture.
 const ExpansionDesignReview = `description = """
 Test-local design review expansion used by integration tests.
 Exercises a second compose.expand path, pooled persona generation/review fan-out,
@@ -162,6 +166,7 @@ max_attempts = 3
 on_exhausted = "hard_fail"
 `
 
+// AdoptPR is the test-local adopt-pr workflow fixture.
 const AdoptPR = `description = """
 Test-local adopt-pr workflow used by integration tests.
 Exercises a body scope, setup retries, a Ralph loop, compose.expand fan-out,
@@ -270,6 +275,7 @@ max_attempts = 3
 on_exhausted = "hard_fail"
 `
 
+// PersonalWork is the test-local personal-work workflow fixture.
 const PersonalWork = `description = """
 Test-local personal-work workflow used by integration tests.
 Exercises two Ralph loops, two compose.expand sites, pooled fan-out,
