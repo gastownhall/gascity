@@ -147,12 +147,12 @@ type = "task"
 
 	// Enable graph workflow features.
 	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	prevGraphApply := molecule.GraphApplyEnabled
+	prevGraphApply := molecule.IsGraphApplyEnabled()
 	formula.SetFormulaV2Enabled(true)
-	molecule.GraphApplyEnabled = true
+	molecule.SetGraphApplyEnabled(true)
 	t.Cleanup(func() {
 		formula.SetFormulaV2Enabled(prevFormulaV2)
-		molecule.GraphApplyEnabled = prevGraphApply
+		molecule.SetGraphApplyEnabled(prevGraphApply)
 	})
 
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
