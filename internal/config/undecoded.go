@@ -46,7 +46,11 @@ func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []strin
 	if !md.IsDefined("agents") {
 		return nil
 	}
-	return []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
+	warnings := []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
+	if md.IsDefined("agent_defaults") {
+		warnings = append(warnings, fmt.Sprintf("%s: both [agent_defaults] and [agents] are present; canonical [agent_defaults] wins for overlapping keys", source))
+	}
+	return warnings
 }
 
 func specializedUndecodedWarning(source, key string) (string, bool) {

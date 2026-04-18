@@ -85,7 +85,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		if inject {
 			return 0

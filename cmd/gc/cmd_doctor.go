@@ -130,7 +130,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).
-	cfg, cfgErr := loadCityConfig(cityPath)
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {

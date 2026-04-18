@@ -130,7 +130,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		fmt.Fprintf(stderr, "%s: loading config: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"))
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading expanded config: %v\n", name, err) //nolint:errcheck
 		return 1

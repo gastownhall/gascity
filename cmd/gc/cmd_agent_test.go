@@ -150,10 +150,7 @@ append_fragments = ["footer"]
 `)
 
 	var stderr bytes.Buffer
-	restore := setLoadCityConfigWarningWriterForTest(&stderr)
-	t.Cleanup(restore)
-
-	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
 	if err != nil {
 		t.Fatalf("loadCityConfigFS: %v", err)
 	}
@@ -179,11 +176,8 @@ append_fragments = ["footer"]
 `)
 
 	var stderr bytes.Buffer
-	restore := setLoadCityConfigWarningWriterForTest(&stderr)
-	t.Cleanup(restore)
-
 	for i := 0; i < 2; i++ {
-		cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+		cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
 		if err != nil {
 			t.Fatalf("loadCityConfigFS call %d: %v", i+1, err)
 		}

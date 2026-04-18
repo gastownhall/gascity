@@ -46,7 +46,7 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

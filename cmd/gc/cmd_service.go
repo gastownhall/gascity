@@ -74,7 +74,7 @@ func cmdServiceList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc service list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -88,7 +88,7 @@ func cmdServiceDoctor(name string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc service doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -120,7 +120,7 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

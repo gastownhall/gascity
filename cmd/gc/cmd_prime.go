@@ -123,7 +123,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
