@@ -421,7 +421,7 @@ func SyncWorkDirEnv(cfg Config) Config {
 	if cfg.Env != nil && cfg.Env["GC_DIR"] == cfg.WorkDir {
 		return cfg
 	}
-	env := make(map[string]string, len(cfg.Env))
+	env := make(map[string]string)
 	for k, v := range cfg.Env {
 		env[k] = v
 	}
