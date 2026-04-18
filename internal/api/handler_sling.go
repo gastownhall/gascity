@@ -59,11 +59,12 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 	cfg := s.state.Config()
 
 	// UI dispatches carry scope_kind/scope_ref but not the CLI's ambient
-	// rig directory. Apply the same rig-prefixing convention so a bare
-	// target resolves to the rig-scoped agent when scope_kind=rig. Keeps
-	// formulas generic (bare assignees) while routing to the correct
-	// rig-local beads/worktree context.
-	body.Target = qualifySlingTarget(cfg, body.Target, body.ScopeKind, body.ScopeRef)
+	// rig directory. Dashboard dispatches use body.Rig (from --rig=X).
+	// Apply the same rig-prefixing convention for either so a bare
+	// target resolves to the rig-scoped agent. Keeps formulas generic
+	// (bare assignees) while routing to the correct rig-local beads
+	// and worktree context.
+	body.Target = qualifySlingTarget(cfg, body.Target, slingRigContext(body))
 
 	agentCfg, ok := findAgent(cfg, body.Target)
 	if !ok {
@@ -346,25 +347,36 @@ func (apiAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) 
 	return findAgent(cfg, name)
 }
 
-// qualifySlingTarget prepends a rig directory to a bare-name target when
-// the caller passes scope_kind=rig and a scope_ref that names a real
-// rig-scoped agent. Returns the target unchanged in all other cases
-// (already-qualified, city scope, no rig-scoped match). This lets the
-// UI carry scope via scope_kind/scope_ref without every caller having
-// to compose the "<rig>/<name>" string manually, matching the CLI's
-// ambient-rig-directory behavior.
-func qualifySlingTarget(cfg *config.City, target, scopeKind, scopeRef string) string {
-	if scopeKind != "rig" || scopeRef == "" {
+// qualifySlingTarget prepends a rig directory to a bare-name target
+// when the caller supplies a non-empty rigContext. Returns the target
+// unchanged if already qualified or if the qualified form does not
+// resolve (the caller's final findAgent call will then surface a clean
+// 404). This lets the API carry rig intent via scope_ref (UI path) or
+// body.Rig (dashboard/--rig CLI path) without every caller composing
+// the "<rig>/<name>" string manually.
+func qualifySlingTarget(cfg *config.City, target, rigContext string) string {
+	if rigContext == "" || strings.Contains(target, "/") {
 		return target
 	}
-	if strings.Contains(target, "/") {
-		return target
-	}
-	qualified := scopeRef + "/" + target
+	qualified := rigContext + "/" + target
 	if _, ok := findAgent(cfg, qualified); ok {
 		return qualified
 	}
 	return target
+}
+
+// slingRigContext derives the effective rig context for target
+// qualification. scope_ref takes precedence (explicit UI intent); when
+// absent, body.Rig is used as the implicit rig for legacy dashboard
+// dispatches that pass --rig= without scope_kind/scope_ref.
+func slingRigContext(body slingBody) string {
+	if body.ScopeKind == "rig" && body.ScopeRef != "" {
+		return body.ScopeRef
+	}
+	if body.ScopeKind == "" && body.Rig != "" {
+		return body.Rig
+	}
+	return ""
 }
 
 // apiBranchResolver implements sling.BranchResolver for the API context.

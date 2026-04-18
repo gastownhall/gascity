@@ -155,11 +155,12 @@ func TestSlingPoolTarget(t *testing.T) {
 	}
 }
 
-// TestQualifySlingTarget covers the scope-aware target qualification logic:
-// when a UI dispatch arrives with scope_kind=rig and a bare-name target,
-// the helper rewrites the target to "<scope_ref>/<name>" — but only when
-// the rig-scoped agent actually exists, so city-scoped fallbacks keep
-// working.
+// TestQualifySlingTarget covers the rig-aware target qualification
+// helper. Given a rigContext (derived from scope_ref for UI dispatches
+// or body.Rig for dashboard dispatches), the helper rewrites a bare
+// target to "<rigContext>/<name>" when that qualified form resolves.
+// In all other cases (empty context, already-qualified target, no
+// matching agent) the target passes through unchanged.
 func TestQualifySlingTarget(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -169,27 +170,65 @@ func TestQualifySlingTarget(t *testing.T) {
 	}
 
 	cases := []struct {
-		name      string
-		target    string
-		scopeKind string
-		scopeRef  string
-		want      string
+		name       string
+		target     string
+		rigContext string
+		want       string
 	}{
-		{"rig_bare_qualifies", "worker", "rig", "myrig", "myrig/worker"},
-		{"rig_bare_no_match_unchanged", "worker", "rig", "otherrig", "worker"},
-		{"rig_qualified_unchanged", "myrig/worker", "rig", "myrig", "myrig/worker"},
-		{"city_bare_unchanged", "worker", "city", "test-city", "worker"},
-		{"no_scope_unchanged", "worker", "", "", "worker"},
-		{"rig_but_no_ref_unchanged", "worker", "rig", "", "worker"},
-		{"rig_city_scoped_fallthrough", "mayor", "rig", "myrig", "mayor"},
+		{"rig_bare_qualifies", "worker", "myrig", "myrig/worker"},
+		{"rig_bare_no_match_unchanged", "worker", "otherrig", "worker"},
+		{"already_qualified_unchanged", "myrig/worker", "myrig", "myrig/worker"},
+		{"empty_context_unchanged", "worker", "", "worker"},
+		{"rig_city_scoped_fallthrough", "mayor", "myrig", "mayor"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := qualifySlingTarget(cfg, tc.target, tc.scopeKind, tc.scopeRef)
+			got := qualifySlingTarget(cfg, tc.target, tc.rigContext)
 			if got != tc.want {
-				t.Errorf("qualifySlingTarget(%q, %q, %q) = %q, want %q", tc.target, tc.scopeKind, tc.scopeRef, got, tc.want)
+				t.Errorf("qualifySlingTarget(%q, %q) = %q, want %q", tc.target, tc.rigContext, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSlingRigContext locks in the rigContext derivation rules used
+// by handleSling to pick between scope_ref (UI intent) and body.Rig
+// (dashboard/--rig CLI intent).
+func TestSlingRigContext(t *testing.T) {
+	cases := []struct {
+		name string
+		body slingBody
+		want string
+	}{
+		{"scope_ref_wins", slingBody{ScopeKind: "rig", ScopeRef: "myrig", Rig: "otherrig"}, "myrig"},
+		{"body_rig_when_no_scope", slingBody{Rig: "myrig"}, "myrig"},
+		{"empty_when_city_scope", slingBody{ScopeKind: "city", ScopeRef: "test-city", Rig: "myrig"}, ""},
+		{"empty_when_nothing_set", slingBody{}, ""},
+		{"rig_scope_without_ref_is_empty", slingBody{ScopeKind: "rig"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slingRigContext(tc.body); got != tc.want {
+				t.Errorf("slingRigContext(%+v) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSlingDashboardRigQualifiesBareTarget is the E2E complement:
+// the dashboard's sling command passes --rig=X as body.Rig (no
+// scope_kind/scope_ref), and bare targets must still be qualified
+// to the matching rig-scoped agent rather than 404ing.
+func TestSlingDashboardRigQualifiesBareTarget(t *testing.T) {
+	srv, _ := newSlingTestServer(t)
+	// Bare "worker" with body.Rig="myrig" (no scope_kind) — mirrors
+	// `sling <bead> worker --rig=myrig` via cmd/gc/dashboard/api.go.
+	// Must resolve to myrig/worker and hit the happy direct-bead path.
+	body := `{"target":"worker","bead":"abc","rig":"myrig"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("got 404 — body.Rig qualification did not apply; body = %s", rec.Body.String())
 	}
 }
 
