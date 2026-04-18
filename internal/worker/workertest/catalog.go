@@ -1,9 +1,12 @@
+// Package workertest provides shared worker conformance catalogs, fixtures, and helpers.
 package workertest
 
 // RequirementCode is the stable identifier for a conformance requirement.
 type RequirementCode string
 
-const (
+// revive:disable:exported
+const ( //nolint:revive // exported requirement IDs are documented by the catalog helpers.
+	// Requirement* are stable worker-conformance requirement identifiers.
 	RequirementTranscriptDiscovery                 RequirementCode = "WC-TX-001"
 	RequirementTranscriptNormalization             RequirementCode = "WC-TX-002"
 	RequirementTranscriptDiagnostics               RequirementCode = "WC-TX-003"
@@ -34,6 +37,8 @@ const (
 	RequirementInferenceFreshReset                 RequirementCode = "WI-RESET-001"
 	RequirementInferenceInterruptRecoverContinue   RequirementCode = "WI-INT-001"
 )
+
+// revive:enable:exported
 
 // Requirement describes one worker conformance rule.
 type Requirement struct {

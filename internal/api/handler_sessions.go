@@ -482,8 +482,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
-		var sessionFile string
-		sessionFile = factory.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
+		sessionFile := factory.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
 		if sessionFile != "" {
 			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model

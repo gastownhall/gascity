@@ -582,7 +582,7 @@ func syncSessionBeadsWithSnapshot(
 
 		// Use provider for liveness check (includes zombie detection).
 		state := "stopped"
-		alive, _ := workerSessionTargetAliveWithConfig("", store, sp, cfg, sn, tp.Hints.ProcessNames)
+		alive, _ := workerSessionTargetAliveWithConfig(store, sp, cfg, sn, tp.Hints.ProcessNames)
 		if alive {
 			state = "active"
 		}

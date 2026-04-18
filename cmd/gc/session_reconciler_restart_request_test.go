@@ -64,7 +64,7 @@ func (e *restartRequestTestEnv) setSessionMetadata(session *beads.Bead, kvs map[
 	}
 }
 
-func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) int {
+func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 	poolDesired := make(map[string]int)
 	for _, tp := range e.desiredState {
 		if tp.TemplateName != "" {
@@ -72,7 +72,7 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) int {
 		}
 	}
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
-	return reconcileSessionBeads(
+	_ = reconcileSessionBeads(
 		context.Background(),
 		sessions,
 		e.desiredState,

@@ -12,14 +12,13 @@ import (
 )
 
 func TestPhase2InitialInputDelivery(t *testing.T) {
-	const basePrompt = "Base worker prompt"
 	reporter := newPhase2Reporter(t, "phase2-input-delivery")
 
 	for _, tc := range selectedPhase2ProviderCases(t) {
 		tc := tc
 		t.Run(string(tc.profileID), func(t *testing.T) {
 			t.Run(string(workertest.RequirementInputInitialMessageFirstStart), func(t *testing.T) {
-				prepared := preparePhase2Start(t, tc, basePrompt, "", map[string]string{
+				prepared := preparePhase2Start(t, tc, "", map[string]string{
 					"initial_message": "Do the first task.",
 				})
 
@@ -27,7 +26,7 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 			})
 
 			t.Run(string(workertest.RequirementInputInitialMessageResume), func(t *testing.T) {
-				prepared := preparePhase2Start(t, tc, basePrompt, "already-started", map[string]string{
+				prepared := preparePhase2Start(t, tc, "already-started", map[string]string{
 					"initial_message": "Do the first task.",
 				})
 
@@ -35,7 +34,7 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 			})
 
 			t.Run(string(workertest.RequirementInputOverrideDefaults), func(t *testing.T) {
-				prepared := preparePhase2Start(t, tc, basePrompt, "", map[string]string{
+				prepared := preparePhase2Start(t, tc, "", map[string]string{
 					"initial_message": "Ship it.",
 					"model":           tc.wantModelOverride,
 				})
@@ -50,7 +49,7 @@ func TestPhase2InputResultFailureClassification(t *testing.T) {
 	tc := selectedPhase2ProviderCases(t)[0]
 
 	t.Run("prompt suffix parse failure stays requirement-scoped", func(t *testing.T) {
-		prepared := preparePhase2Start(t, tc, "Base worker prompt", "", map[string]string{
+		prepared := preparePhase2Start(t, tc, "", map[string]string{
 			"initial_message": "Do the first task.",
 		})
 		prepared.cfg.PromptSuffix = "'one' 'two'"
@@ -68,7 +67,7 @@ func TestPhase2InputResultFailureClassification(t *testing.T) {
 	})
 
 	t.Run("missing resolved provider fails without panic", func(t *testing.T) {
-		prepared := preparePhase2Start(t, tc, "Base worker prompt", "", map[string]string{
+		prepared := preparePhase2Start(t, tc, "", map[string]string{
 			"initial_message": "Ship it.",
 			"model":           tc.wantModelOverride,
 		})
@@ -87,7 +86,7 @@ func TestPhase2InputResultFailureClassification(t *testing.T) {
 	})
 }
 
-func preparePhase2Start(t *testing.T, tc phase2ProviderCase, prompt, startedConfigHash string, overrides map[string]string) *preparedStart {
+func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash string, overrides map[string]string) *preparedStart {
 	t.Helper()
 
 	rawOverrides, err := json.Marshal(overrides)
@@ -113,7 +112,7 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, prompt, startedConf
 
 	prepared, err := prepareStartCandidate(startCandidate{
 		session: &session,
-		tp:      phase2TemplateParams(t, tc, prompt),
+		tp:      phase2TemplateParams(t, tc, "Base worker prompt"),
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)

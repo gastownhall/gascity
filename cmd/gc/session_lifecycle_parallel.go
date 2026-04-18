@@ -199,14 +199,14 @@ func dependencyTemplateAlive(
 			if tp.TemplateName != template {
 				continue
 			}
-			if alive, err := workerSessionTargetAliveWithConfig("", store, sp, cfg, name, tp.Hints.ProcessNames); err == nil && alive {
+			if alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, name, tp.Hints.ProcessNames); err == nil && alive {
 				return true
 			}
 		}
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
 	depTP := desiredState[sessionName]
-	alive, err := workerSessionTargetAliveWithConfig("", store, sp, cfg, sessionName, depTP.Hints.ProcessNames)
+	alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, sessionName, depTP.Hints.ProcessNames)
 	return err == nil && alive
 }
 
@@ -437,7 +437,6 @@ func executePreparedStartWave(
 	prepared []preparedStart,
 	sp runtime.Provider,
 	store beads.Store,
-	cityPath string,
 	cfg *config.City,
 	startupTimeout time.Duration,
 	maxParallel int,
@@ -445,6 +444,7 @@ func executePreparedStartWave(
 	if len(prepared) == 0 {
 		return nil
 	}
+	cityPath := ""
 	if maxParallel <= 0 {
 		maxParallel = 1
 	}
@@ -909,7 +909,7 @@ func executePlannedStartsTraced(
 				prepared = append(prepared, *item)
 			}
 			offset = end
-			results := executePreparedStartWave(ctx, prepared, sp, store, "", cfg, startupTimeout, defaultMaxParallelStartsPerWave)
+			results := executePreparedStartWave(ctx, prepared, sp, store, cfg, startupTimeout, defaultMaxParallelStartsPerWave)
 			for _, result := range results {
 				if trace != nil {
 					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{

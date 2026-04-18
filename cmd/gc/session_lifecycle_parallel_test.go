@@ -1896,7 +1896,6 @@ func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 		}},
 		&panicStartProvider{Fake: runtime.NewFake()},
 		nil,
-		"",
 		nil,
 		time.Second,
 		1,
@@ -2112,7 +2111,7 @@ func (p *dieAfterStartProvider) Start(ctx context.Context, name string, cfg runt
 		return err
 	}
 	// Simulate the pane dying immediately.
-	_ = p.Fake.Stop(name)
+	_ = p.Stop(name)
 	return nil
 }
 
@@ -2146,7 +2145,6 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		[]preparedStart{item},
 		sp,
 		nil,
-		"",
 		nil,
 		10*time.Second,
 		1,
@@ -2191,7 +2189,6 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		[]preparedStart{item},
 		sp,
 		nil,
-		"",
 		nil,
 		10*time.Second,
 		1,

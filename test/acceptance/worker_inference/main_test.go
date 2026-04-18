@@ -494,7 +494,11 @@ func stageClaudeOAuthSource(sourceDir, rootConfigPath, gcHome string) error {
 	); err != nil {
 		return err
 	}
-	if err := copyFileIfExists(rootConfigPath, filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
+	if err := mergeClaudeLocalConfig(
+		rootConfigPath,
+		filepath.Join(sourceDir, ".claude.json"),
+		filepath.Join(gcHome, ".claude.json"),
+	); err != nil {
 		return err
 	}
 	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())
@@ -518,7 +522,11 @@ func stageClaudeOAuth(realHome, gcHome string) error {
 	); err != nil {
 		return err
 	}
-	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
+	if err := mergeClaudeLocalConfig(
+		filepath.Join(realHome, ".claude.json"),
+		filepath.Join(srcClaudeDir, ".claude.json"),
+		filepath.Join(gcHome, ".claude.json"),
+	); err != nil {
 		return err
 	}
 	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())

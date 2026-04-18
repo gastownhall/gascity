@@ -231,8 +231,8 @@ func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp
 	return obs.Running, nil
 }
 
-func workerSessionTargetAliveWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (bool, error) {
-	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
+func workerSessionTargetAliveWithConfig(store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (bool, error) {
+	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig("", store, sp, cfg, target, processNames)
 	if err != nil {
 		return false, err
 	}

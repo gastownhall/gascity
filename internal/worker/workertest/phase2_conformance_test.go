@@ -1205,13 +1205,3 @@ func loadHistory(t *testing.T, provider, path string) *worker.HistorySnapshot {
 	}
 	return history
 }
-
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return string(data)
-}

@@ -268,10 +268,6 @@ func prependHookBeacon(cityName, agentName, prompt string) string {
 	return beacon + "\n\n" + prompt
 }
 
-func writePrimePrompt(stdout io.Writer, cityName, agentName, prompt string, hookMode bool) {
-	writePrimePromptWithFormat(stdout, cityName, agentName, prompt, hookMode, "")
-}
-
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string) {
 	if hookMode {
 		prompt = prependHookBeacon(cityName, agentName, prompt)

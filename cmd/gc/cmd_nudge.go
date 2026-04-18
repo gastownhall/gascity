@@ -279,10 +279,6 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func cmdNudgeDrain(args []string, inject bool, stdout, stderr io.Writer) int {
-	return cmdNudgeDrainWithFormat(args, inject, "", stdout, stderr)
-}
-
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
@@ -534,12 +530,8 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 	return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
 }
 
-func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
-	return deliverSessionNudgeWithWorker(target, nil, sp, message, mode, stdout, stderr)
-}
-
-func queueSessionNudge(target nudgeTarget, sp runtime.Provider, message string, stdout, stderr io.Writer) int {
-	return queueSessionNudgeWithWorker(target, nil, sp, message, stdout, stderr)
+func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
+	return deliverSessionNudgeWithWorker(target, nil, sp, "check deploy status", mode, stdout, stderr)
 }
 
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, stdout, stderr io.Writer) int {
@@ -562,8 +554,8 @@ func sendMailNotify(target nudgeTarget, sender string) error {
 	return sendMailNotifyWithWorker(target, store, newSessionProvider(), sender)
 }
 
-func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender string) error {
-	return sendMailNotifyWithWorker(target, nil, sp, sender)
+func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
+	return sendMailNotifyWithWorker(target, nil, sp, "human")
 }
 
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender string) error {
@@ -937,13 +929,6 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
-}
-
-func formatDirectReminderOutput(source, message string) string {
-	return formatNudgeInjectOutput([]queuedNudge{{
-		Source:  source,
-		Message: message,
-	}})
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {

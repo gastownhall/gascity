@@ -37,7 +37,6 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		}},
 		sp,
 		store,
-		"",
 		nil,
 		10*time.Second,
 		1,

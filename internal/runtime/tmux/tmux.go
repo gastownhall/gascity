@@ -2422,7 +2422,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 				return err
 			}
 			consecutiveIdle = 0
-			if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+			if err := waitForIdlePoll(ctx); err != nil {
 				return err
 			}
 			continue
@@ -2433,7 +2433,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		// the agent is busy regardless of whether the prompt is visible.
 		if paneContainsBusyIndicator(lines) {
 			consecutiveIdle = 0
-			if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+			if err := waitForIdlePoll(ctx); err != nil {
 				return err
 			}
 			continue
@@ -2462,15 +2462,15 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		} else {
 			consecutiveIdle = 0
 		}
-		if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+		if err := waitForIdlePoll(ctx); err != nil {
 			return err
 		}
 	}
 	return ErrIdleTimeout
 }
 
-func waitForIdlePoll(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
+func waitForIdlePoll(ctx context.Context) error {
+	timer := time.NewTimer(200 * time.Millisecond)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -2518,7 +2518,7 @@ func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since 
 				return nil
 			}
 		}
-		if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+		if err := waitForIdlePoll(ctx); err != nil {
 			return err
 		}
 	}

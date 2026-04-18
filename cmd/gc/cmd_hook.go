@@ -43,8 +43,8 @@ With --inject: wraps output in <system-reminder> for hook injection, always exit
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
 // $GC_AGENT or a positional argument, loads the city config, and runs
 // the agent's work query.
-func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
-	return cmdHookWithFormat(args, inject, "", stdout, stderr)
+func cmdHook(args []string, stdout, stderr io.Writer) int {
+	return cmdHookWithFormat(args, false, "", stdout, stderr)
 }
 
 func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {

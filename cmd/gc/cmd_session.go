@@ -919,19 +919,6 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 	return cmd, runtime.Config{WorkDir: info.WorkDir}
 }
 
-// beadSessionKind reads the mc_session_kind metadata from a session bead.
-// Returns "" if the store is nil or the bead cannot be read.
-func beadSessionKind(store beads.Store, sessionID string) string {
-	if store == nil {
-		return ""
-	}
-	b, err := store.Get(sessionID)
-	if err != nil {
-		return ""
-	}
-	return b.Metadata["mc_session_kind"]
-}
-
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
 func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{

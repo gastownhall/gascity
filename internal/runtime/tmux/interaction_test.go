@@ -462,16 +462,3 @@ func phase2ReportProfile() workertest.ProfileID {
 		return workertest.ProfileClaudeTmuxCLI
 	}
 }
-
-func assertTMuxCall(t *testing.T, got, want []string) {
-	t.Helper()
-
-	if len(got) != len(want) {
-		t.Fatalf("tmux args = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("tmux args[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}

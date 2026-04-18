@@ -270,7 +270,7 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 		obs.Alive = h.provider.ProcessAlive(h.sessionName, h.processNames)
 		obs.Attached = h.provider.IsAttached(h.sessionName)
 		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
-			lastCopy := time.Time(last)
+			lastCopy := last
 			obs.LastActivity = &lastCopy
 		}
 	}

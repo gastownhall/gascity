@@ -272,7 +272,7 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 	for i := len(lines) - 1; i >= 0; i-- {
 		var entry tailEntry
 		if err := json.Unmarshal(lines[i], &entry); err != nil {
-			if i == len(lines)-1 && !(i == 0 && startsMidLine) {
+			if i == len(lines)-1 && (i != 0 || !startsMidLine) {
 				malformedTail = true
 			}
 			continue

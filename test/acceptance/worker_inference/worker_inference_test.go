@@ -4904,9 +4904,9 @@ func tmuxSessionExistsOnCitySocket(cityDir, name string) (bool, error) {
 	if name == "" {
 		return false, nil
 	}
-	socketName := strings.TrimSpace(filepath.Base(cityDir))
-	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
-		return false, fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	socketName, err := tmuxSocketNameForCity(cityDir)
+	if err != nil {
+		return false, err
 	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -4929,9 +4929,9 @@ func tmuxSessionLive(cityDir, name string) (bool, error) {
 	if name == "" {
 		return false, nil
 	}
-	socketName := strings.TrimSpace(filepath.Base(cityDir))
-	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
-		return false, fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	socketName, err := tmuxSocketNameForCity(cityDir)
+	if err != nil {
+		return false, err
 	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -4997,9 +4997,9 @@ func captureTmuxPane(cityDir, name string, lines int) (string, error) {
 	if name == "" {
 		return "", nil
 	}
-	socketName := strings.TrimSpace(filepath.Base(cityDir))
-	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
-		return "", fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	socketName, err := tmuxSocketNameForCity(cityDir)
+	if err != nil {
+		return "", err
 	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -5011,13 +5011,6 @@ func captureTmuxPane(cityDir, name string, lines int) (string, error) {
 	cmd := exec.Command(tmuxPath, "-L", socketName, "capture-pane", "-p", "-t", name, "-S", fmt.Sprintf("-%d", lines))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			text := strings.ToLower(strings.TrimSpace(string(out)))
-			if strings.Contains(text, "can't find") || strings.Contains(text, "no server") {
-				return "", nil
-			}
-		}
 		return "", fmt.Errorf("tmux -L %q capture-pane -t %q: %w\n%s", socketName, name, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
@@ -5147,9 +5140,9 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 }
 
 func listTmuxSessionsOnCitySocket(cityDir string) ([]string, error) {
-	socketName := strings.TrimSpace(filepath.Base(cityDir))
-	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
-		return nil, fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	socketName, err := tmuxSocketNameForCity(cityDir)
+	if err != nil {
+		return nil, err
 	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -5174,6 +5167,26 @@ func listTmuxSessionsOnCitySocket(cityDir string) ([]string, error) {
 		}
 	}
 	return sessions, nil
+}
+
+func tmuxSocketNameForCity(cityDir string) (string, error) {
+	cityDir = strings.TrimSpace(cityDir)
+	if cityDir == "" {
+		return "", fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	}
+	socketName := strings.TrimSpace(filepath.Base(cityDir))
+	if cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err == nil {
+		switch {
+		case strings.TrimSpace(cfg.Session.Socket) != "":
+			socketName = strings.TrimSpace(cfg.Session.Socket)
+		case strings.TrimSpace(cfg.Workspace.Name) != "":
+			socketName = strings.TrimSpace(cfg.Workspace.Name)
+		}
+	}
+	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
+		return "", fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	}
+	return socketName, nil
 }
 
 func pollForCondition(timeout, interval time.Duration, check func() bool) bool {

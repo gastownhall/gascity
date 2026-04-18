@@ -157,11 +157,6 @@ $GC_SESSION_ID, or "human".`,
 	return cmd
 }
 
-// cmdMailCheck is the CLI entry point for checking mail.
-func cmdMailCheck(args []string, inject bool, stdout, stderr io.Writer) int {
-	return cmdMailCheckWithFormat(args, inject, "", stdout, stderr)
-}
-
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	// Check city-level suspension before opening the store.
 	if cityPath, err := resolveCity(); err == nil {

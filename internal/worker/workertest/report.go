@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// ReportSchemaVersion identifies the machine-readable conformance report schema.
 const ReportSchemaVersion = "gc.worker.conformance.v1"
 
 // RunReport is the minimal machine-readable worker-conformance run artifact.
@@ -282,18 +283,18 @@ func evidenceExcerpt(evidence map[string]string, keys []string, limit int) strin
 	return strings.Join(parts, "; ")
 }
 
-func truncateEvidenceValue(value string, max int) string {
-	if max <= 0 {
+func truncateEvidenceValue(value string, limit int) string {
+	if limit <= 0 {
 		return ""
 	}
 	runes := []rune(value)
-	if len(runes) <= max {
+	if len(runes) <= limit {
 		return value
 	}
-	if max <= 3 {
-		return string(runes[:max])
+	if limit <= 3 {
+		return string(runes[:limit])
 	}
-	return string(runes[:max-3]) + "..."
+	return string(runes[:limit-3]) + "..."
 }
 
 func evidenceSeverity(status ResultStatus) int {

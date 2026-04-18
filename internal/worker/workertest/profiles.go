@@ -3,11 +3,15 @@ package workertest
 // ProfileID is the canonical worker profile identifier.
 type ProfileID string
 
-const (
+// revive:disable:exported
+const ( //nolint:revive // exported profile IDs are documented by the enclosing type.
+	// Profile* identify the canonical worker profiles used by conformance tests.
 	ProfileClaudeTmuxCLI ProfileID = "claude/tmux-cli"
 	ProfileCodexTmuxCLI  ProfileID = "codex/tmux-cli"
 	ProfileGeminiTmuxCLI ProfileID = "gemini/tmux-cli"
 )
+
+// revive:enable:exported
 
 // ProfileFixtureSet describes the provider-native fixture layouts for a profile.
 type ProfileFixtureSet struct {

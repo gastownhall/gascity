@@ -8,7 +8,9 @@ import (
 // Profile identifies a canonical worker profile.
 type Profile string
 
-const (
+// revive:disable:exported
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// Profile* identify the supported canonical worker profiles.
 	ProfileClaudeTmuxCLI Profile = "claude/tmux-cli"
 	ProfileCodexTmuxCLI  Profile = "codex/tmux-cli"
 	ProfileGeminiTmuxCLI Profile = "gemini/tmux-cli"
@@ -17,7 +19,8 @@ const (
 // CapabilityStatus expresses whether a Phase 1 capability is available.
 type CapabilityStatus string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// CapabilityStatus* describe whether a capability is available.
 	CapabilityStatusUnknown     CapabilityStatus = "unknown"
 	CapabilityStatusSupported   CapabilityStatus = "supported"
 	CapabilityStatusUnsupported CapabilityStatus = "unsupported"
@@ -26,7 +29,8 @@ const (
 // ResultStatus tracks normalized entry lifecycle state.
 type ResultStatus string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// ResultStatus* track normalized entry lifecycle state.
 	ResultStatusUnknown    ResultStatus = "unknown"
 	ResultStatusFinal      ResultStatus = "final"
 	ResultStatusPartial    ResultStatus = "partial"
@@ -36,7 +40,8 @@ const (
 // Actor identifies the normalized entry author.
 type Actor string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// Actor* identify normalized transcript authors.
 	ActorUnknown   Actor = "unknown"
 	ActorUser      Actor = "user"
 	ActorAssistant Actor = "assistant"
@@ -47,7 +52,8 @@ const (
 // BlockKind classifies normalized message/tool blocks.
 type BlockKind string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// BlockKind* classify normalized transcript blocks.
 	BlockKindText        BlockKind = "text"
 	BlockKindThinking    BlockKind = "thinking"
 	BlockKindToolUse     BlockKind = "tool_use"
@@ -61,7 +67,8 @@ const (
 // structured interaction recorded in normalized history.
 type InteractionState string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// InteractionState* capture the durable lifecycle of a required interaction.
 	InteractionStateUnknown             InteractionState = "unknown"
 	InteractionStateOpened              InteractionState = "opened"
 	InteractionStatePending             InteractionState = "pending"
@@ -73,7 +80,8 @@ const (
 // ContinuityStatus captures the adapter's continuity proof level.
 type ContinuityStatus string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// ContinuityStatus* capture the adapter's continuity proof level.
 	ContinuityStatusUnknown    ContinuityStatus = "unknown"
 	ContinuityStatusContinuous ContinuityStatus = "continuous"
 	ContinuityStatusCompacted  ContinuityStatus = "compacted"
@@ -83,11 +91,14 @@ const (
 // TailActivity summarizes the observed state of the transcript tail.
 type TailActivity string
 
-const (
+const ( //nolint:revive // exported enum values are documented by the enclosing type.
+	// TailActivity* summarize normalized tail activity.
 	TailActivityUnknown TailActivity = "unknown"
 	TailActivityIdle    TailActivity = "idle"
 	TailActivityInTurn  TailActivity = "in_turn"
 )
+
+// revive:enable:exported
 
 // Generation identifies a raw transcript stream instance.
 type Generation struct {

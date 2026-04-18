@@ -490,7 +490,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	if interruptIdx < 0 || waitIdx < 0 || resetIdx < 0 || clearIdx < 0 || nudgeIdx < 0 {
 		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + ResetInterruptedTurn + SendKeys(C-u) before NudgeNow", sp.Calls)
 	}
-	if !(interruptIdx < waitIdx && waitIdx < resetIdx && resetIdx < clearIdx && clearIdx < nudgeIdx) {
+	if interruptIdx >= waitIdx || waitIdx >= resetIdx || resetIdx >= clearIdx || clearIdx >= nudgeIdx {
 		t.Fatalf("calls = %#v, want Interrupt -> WaitForIdle -> ResetInterruptedTurn -> SendKeys(C-u) before NudgeNow", sp.Calls)
 	}
 	if sawStop {
@@ -551,7 +551,7 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 	if !sawEscape || !sawWaitForIdle || !sawWaitForBoundary || !sawNudge {
 		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + WaitForInterruptBoundary + NudgeNow", sp.Calls)
 	}
-	if waitIdx < 0 || boundaryIdx < 0 || nudgeIdx < 0 || !(waitIdx < boundaryIdx && boundaryIdx < nudgeIdx) {
+	if waitIdx < 0 || boundaryIdx < 0 || nudgeIdx < 0 || waitIdx >= boundaryIdx || boundaryIdx >= nudgeIdx {
 		t.Fatalf("calls = %#v, want WaitForIdle -> WaitForInterruptBoundary before NudgeNow", sp.Calls)
 	}
 	if sawStop {

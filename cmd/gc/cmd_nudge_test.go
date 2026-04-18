@@ -43,7 +43,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -270,7 +270,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *t
 	t.Cleanup(func() { startNudgePoller = prev })
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -307,7 +307,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsClaudePollerWhenQueued(t *
 	t.Cleanup(func() { startNudgePoller = prev })
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -377,7 +377,7 @@ func TestDeliverSessionNudgeWithProviderImmediateUsesImmediateNudge(t *testing.T
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryImmediate, &stdout, &stderr)
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -416,7 +416,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleWrapsDirectDeliveryInSystemRemin
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -470,7 +470,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleLeavesACPDeliveryUnwrapped(t *te
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -499,7 +499,7 @@ func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 		sessionName: "sess-mayor",
 	}
 
-	if err := sendMailNotifyWithProvider(target, runtime.NewFake(), "human"); err != nil {
+	if err := sendMailNotifyWithProvider(target, runtime.NewFake()); err != nil {
 		t.Fatalf("sendMailNotifyWithProvider: %v", err)
 	}
 
@@ -549,7 +549,7 @@ func TestSendMailNotifyWithProviderStartsCodexPollerWhenQueueingRunningSession(t
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	if err := sendMailNotifyWithProvider(target, fake, "human"); err != nil {
+	if err := sendMailNotifyWithProvider(target, fake); err != nil {
 		t.Fatalf("sendMailNotifyWithProvider: %v", err)
 	}
 	if !called {
@@ -583,7 +583,7 @@ func TestSendMailNotifyWithProviderStartsClaudePollerWhenQueueingRunningSession(
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	if err := sendMailNotifyWithProvider(target, fake, "human"); err != nil {
+	if err := sendMailNotifyWithProvider(target, fake); err != nil {
 		t.Fatalf("sendMailNotifyWithProvider: %v", err)
 	}
 	if !called {
@@ -607,7 +607,7 @@ func TestSendMailNotifyWithProviderWaitIdleWrapsDirectDeliveryInSystemReminder(t
 		sessionName: "sess-mayor",
 	}
 
-	if err := sendMailNotifyWithProvider(target, fake, "human"); err != nil {
+	if err := sendMailNotifyWithProvider(target, fake); err != nil {
 		t.Fatalf("sendMailNotifyWithProvider: %v", err)
 	}
 

@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1051,7 +1050,7 @@ func (h *sessionChaosHarness) requestRestart() {
 		return
 	}
 	for _, bead := range all {
-		if !session.IsSessionBeadOrRepairable(bead) || bead.Status == "closed" {
+		if !sessionpkg.IsSessionBeadOrRepairable(bead) || bead.Status == "closed" {
 			continue
 		}
 		if bead.Metadata["session_name"] == h.sessionName {

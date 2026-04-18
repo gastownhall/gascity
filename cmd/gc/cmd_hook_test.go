@@ -213,7 +213,7 @@ max = 5
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -292,7 +292,7 @@ dir = "myrig"
 	t.Setenv("BEADS_DIR", cityBeads)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -359,7 +359,7 @@ dir = "myrig"
 	t.Setenv("GC_DIR", rigAbs)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -418,7 +418,7 @@ dir = "workdir"
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -492,7 +492,7 @@ max = 5
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -556,7 +556,7 @@ name = "worker"
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -616,7 +616,7 @@ dir = "myrig"
 	wantSession := cliSessionName(cityDir, "test-city", wantAgent, "")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

@@ -5,7 +5,9 @@ import "fmt"
 // ResultStatus is the outcome of a conformance check.
 type ResultStatus string
 
-const (
+// revive:disable:exported
+const ( //nolint:revive // exported result statuses are documented by the enclosing type.
+	// Result* describe normalized conformance outcomes.
 	ResultPass           ResultStatus = "pass"
 	ResultFail           ResultStatus = "fail"
 	ResultUnsupported    ResultStatus = "unsupported"
@@ -14,6 +16,8 @@ const (
 	ResultFlakyLive      ResultStatus = "flaky_live"
 	ResultNotCertifiable ResultStatus = "not_certifiable_live"
 )
+
+// revive:enable:exported
 
 // Result captures one requirement evaluation.
 type Result struct {
