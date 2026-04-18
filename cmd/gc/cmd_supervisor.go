@@ -1368,13 +1368,7 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize builtin prompts and formulas.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin prompts: %v\n", cityName, err) //nolint:errcheck
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin formulas: %v\n", cityName, err) //nolint:errcheck
-	}
+	// Built-in prompts and formulas now arrive via the core bootstrap pack.
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.

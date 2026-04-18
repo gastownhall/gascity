@@ -3473,11 +3473,12 @@ max = 3
 }
 
 func TestDoPrimePoolAgentFallback(t *testing.T) {
-	// An explicit pool agent with no prompt_template reads the materialized
-	// pool-worker.md from prompts/ on disk.
+	// An explicit pool agent with no prompt_template reads the pool-worker
+	// prompt shipped by the core bootstrap pack, materialized under
+	// .gc/system/packs/core/assets/prompts/.
 	dir := t.TempDir()
-	if err := materializeBuiltinPrompts(dir); err != nil {
-		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 	tomlContent := `[workspace]
 name = "test-city"

@@ -27,8 +27,8 @@ func TestDefaultCity(t *testing.T) {
 	if c.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", c.Agents[0].Name, "mayor")
 	}
-	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
+	if c.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
 	}
 }
 
@@ -83,7 +83,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"agents/mayor/prompt.template.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -680,8 +680,8 @@ func TestWizardCity(t *testing.T) {
 	if c.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", c.Agents[0].Name, "mayor")
 	}
-	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
+	if c.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
 	}
 }
 

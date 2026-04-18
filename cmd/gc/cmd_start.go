@@ -429,13 +429,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: only needed if provider = "bd".
 	}
-	// Materialize builtin prompts and formulas to stay in sync with binary.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: builtin prompts: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: builtin formulas: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
+	// Built-in prompts and formulas now arrive via the core bootstrap pack.
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
 
 	// Resolve rig paths and run the full bead store lifecycle:

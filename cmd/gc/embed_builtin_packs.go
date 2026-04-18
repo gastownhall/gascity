@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/examples/dolt"
 	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -29,6 +30,7 @@ const (
 // builtinPacks lists all packs embedded in the gc binary. These are
 // materialized to .gc/system/packs/ on every gc start and gc init.
 var builtinPacks = []builtinPack{
+	{fs: core.PackFS, name: "core"},
 	{fs: bd.PackFS, name: "bd"},
 	{fs: dolt.PackFS, name: "dolt"},
 	{fs: maintenance.PackFS, name: "maintenance"},

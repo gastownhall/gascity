@@ -682,10 +682,10 @@ func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
 	return 0
 }
 
-// writeInitAgentPrompts creates the agents/ directory and writes only the
-// default prompt scaffolds referenced by the init template's explicit agents.
-// This keeps a freshly initialized city aligned with the city.toml it writes
-// instead of silently creating additional convention-discoverable agents.
+// writeInitAgentPrompts writes the mayor scaffold prompt into the V2
+// agents/mayor/ directory when the init template includes a mayor agent.
+// Other implicit agents use prompts shipped by the core bootstrap pack at
+// runtime, so they don't need init-time scaffolding.
 func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer) int {
 	if err := fs.MkdirAll(filepath.Join(cityPath, "agents"), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -694,19 +694,16 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 	if cfg == nil {
 		return 0
 	}
-	seen := make(map[string]bool, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
-		dst, ok := initPromptTemplatePath(agent.PromptTemplate)
-		if !ok || seen[dst] {
+		if agent.Name != "mayor" {
 			continue
 		}
-		seen[dst] = true
-		data, err := defaultPrompts.ReadFile(agent.PromptTemplate)
+		data, err := defaultPrompts.ReadFile("prompts/mayor.md")
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc init: reading embedded mayor prompt: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		dst = filepath.Join(cityPath, dst)
+		dst := filepath.Join(cityPath, "agents", "mayor", "prompt.template.md")
 		if err := fs.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -715,6 +712,7 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
 	}
 	return 0
 }

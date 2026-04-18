@@ -1907,7 +1907,9 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.PromptsRoot + "/pool-worker.md"
+	// Implicit agents reference the pool-worker prompt shipped by the
+	// core bootstrap pack, materialized under .gc/system/packs/core/.
+	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
@@ -2430,7 +2432,7 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
-		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
+		Agents:        []Agent{{Name: "mayor", PromptTemplate: "agents/mayor/prompt.template.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 }
@@ -2459,7 +2461,7 @@ func WizardCity(name, provider, startCommand string) City {
 	return City{
 		Workspace: ws,
 		Agents: []Agent{
-			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
+			{Name: "mayor", PromptTemplate: "agents/mayor/prompt.template.md"},
 		},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}

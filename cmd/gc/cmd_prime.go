@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -174,7 +175,8 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 				return 0
 			}
 		}
-		// Agents without a prompt_template: read a materialized builtin prompt.
+		// Agents without a prompt_template: read a builtin prompt shipped by
+		// the core bootstrap pack, materialized under .gc/system/packs/core/.
 		// When formula_v2 is enabled, all agents use graph-worker.md.
 		// Otherwise pool agents use pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the
@@ -182,9 +184,9 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 		if ok && a.PromptTemplate == "" {
 			promptFile := ""
 			if cfg.Daemon.FormulaV2 {
-				promptFile = "prompts/graph-worker.md"
+				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/graph-worker.md"
 			} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
-				promptFile = "prompts/pool-worker.md"
+				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
