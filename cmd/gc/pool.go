@@ -214,11 +214,12 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,
 		// DefaultSlingFormula: deep-copied below with other pointer fields.
-		WorkQuery:            src.WorkQuery,
-		SlingQuery:           src.SlingQuery,
-		SessionSetupScript:   src.SessionSetupScript,
-		OverlayDir:           src.OverlayDir,
-		SourceDir:            src.SourceDir,
+		WorkQuery:          src.WorkQuery,
+		SlingQuery:         src.SlingQuery,
+		SessionSetupScript: src.SessionSetupScript,
+		OverlayDir:         src.OverlayDir,
+		SourceDir:          src.SourceDir,
+		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
 		Fallback:             src.Fallback,
 		IdleTimeout:          src.IdleTimeout,
 		SleepAfterIdle:       src.SleepAfterIdle,
@@ -266,6 +267,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.InjectFragments = make([]string, len(src.InjectFragments))
 		copy(dst.InjectFragments, src.InjectFragments)
 	}
+	if len(src.InheritedAppendFragments) > 0 {
+		dst.InheritedAppendFragments = make([]string, len(src.InheritedAppendFragments))
+		copy(dst.InheritedAppendFragments, src.InheritedAppendFragments)
+	}
 	if len(src.InstallAgentHooks) > 0 {
 		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
@@ -305,6 +310,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	if src.DefaultSlingFormula != nil {
 		v := *src.DefaultSlingFormula
 		dst.DefaultSlingFormula = &v
+	}
+	if src.InheritedDefaultSlingFormula != nil {
+		v := *src.InheritedDefaultSlingFormula
+		dst.InheritedDefaultSlingFormula = &v
 	}
 	if src.Attach != nil {
 		v := *src.Attach
