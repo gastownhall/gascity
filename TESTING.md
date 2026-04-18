@@ -29,6 +29,13 @@ func TestBeadStore_CorruptLine(t *testing.T) {
 When to use: corrupted data, concurrent writes, specific error types,
 double-claim conflicts, rollback behavior, boundary conditions.
 
+`make test-cover` now follows this boundary strictly: it runs unit-test
+coverage only. If you need the CI integration-tagged coverage sweep
+locally, use `make test-integration-shards-cover`. As a result,
+`coverage.txt` is now the unit-only baseline; the integration contribution
+comes from the shard-specific `coverage.integration-*.txt` profiles and
+their matching Codecov flags.
+
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
 Test what the USER sees. Run the real `gc` binary, assert on stdout/stderr.

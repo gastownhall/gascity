@@ -140,8 +140,8 @@ jobs:
           ACCEPTANCE_TIMEOUT: 20m
         run: make test-acceptance
 
-  # Integration-tagged coverage pass — the Linux `Check` job's equivalent
-  # of `make test-cover`. Kept best-effort while we discover Mac-specific
+  # Unit coverage pass — the Linux `Check` job's equivalent of
+  # `make test-cover`. Kept best-effort while we discover Mac-specific
   # failures; continue-on-error is on the test step (not the job) so the
   # job's result still reflects the actual outcome for the summary.
   mac-cover:

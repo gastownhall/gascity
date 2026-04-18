@@ -32,6 +32,7 @@ run_pkg_tests() {
   local test_pkg="$1"
   shift
   local -a tests=("$@")
+  local -a go_test_args=()
   local regex
 
   if [[ ${#tests[@]} -eq 0 ]]; then
@@ -41,7 +42,11 @@ run_pkg_tests() {
 
   regex="^($(join_regex "${tests[@]}"))$"
   echo "Running shard ${shard} against ${test_pkg} (${#tests[@]} tests)"
-  go test -tags integration -timeout "$timeout" "$test_pkg" -run "$regex"
+  go_test_args=(-tags integration -timeout "$timeout")
+  if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
+    go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
+  fi
+  go test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 }
 
 list_integration_tests() {
@@ -51,6 +56,7 @@ list_integration_tests() {
 run_packages_shard() {
   # Avoid bash 4 `mapfile` so this runs on macOS's stock bash 3.2.
   local -a packages=()
+  local -a go_test_args=()
   local line
   while IFS= read -r line; do
     packages+=("$line")
@@ -60,7 +66,11 @@ run_packages_shard() {
     exit 1
   fi
   echo "Running shard packages (${#packages[@]} packages)"
-  go test -tags integration -timeout "$timeout" "${packages[@]}"
+  go_test_args=(-tags integration -timeout "$timeout")
+  if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
+    go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
+  fi
+  go test "${go_test_args[@]}" "${packages[@]}"
 }
 
 run_rest_shard() {

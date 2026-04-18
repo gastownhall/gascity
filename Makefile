@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -129,21 +129,40 @@ test-integration:
 ## test-integration-shards: run the CI integration shards sequentially
 test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest
 
+## test-integration-shards-cover: run the CI integration coverage shards sequentially
+test-integration-shards-cover: test-integration-packages-cover test-integration-review-formulas-cover test-integration-bdstore-cover test-integration-rest-cover
+
 ## test-integration-packages: run all integration-tagged packages except ./test/integration
 test-integration-packages:
 	./scripts/test-integration-shard packages
+
+## test-integration-packages-cover: run the packages shard with a CI coverage profile
+test-integration-packages-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-packages.txt ./scripts/test-integration-shard packages
 
 ## test-integration-review-formulas: run the long-running workflow formula integration tests
 test-integration-review-formulas:
 	./scripts/test-integration-shard review-formulas
 
+## test-integration-review-formulas-cover: run the review-formulas shard with a CI coverage profile
+test-integration-review-formulas-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-review-formulas.txt ./scripts/test-integration-shard review-formulas
+
 ## test-integration-bdstore: run the bd store conformance shard in isolation
 test-integration-bdstore:
 	./scripts/test-integration-shard bdstore
 
+## test-integration-bdstore-cover: run the bdstore shard with a CI coverage profile
+test-integration-bdstore-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-bdstore.txt ./scripts/test-integration-shard bdstore
+
 ## test-integration-rest: run the remaining ./test/integration tests
 test-integration-rest:
 	./scripts/test-integration-shard rest
+
+## test-integration-rest-cover: run the rest shard with a CI coverage profile
+test-integration-rest-cover:
+	GO_TEST_COVERPROFILE=coverage.integration-rest.txt ./scripts/test-integration-shard rest
 
 ## test-chaos-dolt: run the opt-in managed Dolt chaos integration test
 ## Set GC_DOLT_CHAOS_DURATION and GC_DOLT_CHAOS_SEED to control runtime and replay failures.
@@ -169,11 +188,11 @@ check-docs:
 # Packages for coverage — exclude noise:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
-COVER_PKGS := $(shell go list ./... | grep -v -e /session/tmux -e /beadstest)
+UNIT_COVER_PKGS := $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
 
-## test-cover: run all tests with coverage output (excludes tmux)
+## test-cover: run unit-test coverage without the integration-tagged package sweep
 test-cover:
-	go test -tags integration -timeout 8m -coverprofile=coverage.txt $(COVER_PKGS)
+	go test -timeout 8m -coverprofile=coverage.txt $(UNIT_COVER_PKGS)
 
 ## cover: run tests and show coverage report
 cover: test-cover
