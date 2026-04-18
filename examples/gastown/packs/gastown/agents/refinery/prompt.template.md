@@ -93,9 +93,9 @@ Polecats set these metadata fields before assigning a work bead to you:
 
 Read them mechanically:
 ```bash
-bd show $WORK --json | jq -r '.metadata.branch'
-bd show $WORK --json | jq -r '.metadata.target // "{{ .DefaultBranch }}"'
-bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"'
+bd show $WORK --json | jq -r '.[0].metadata.branch'
+bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
+bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"'
 ```
 
 Never infer a branch name. If `metadata.branch` is missing, reject the bead.
@@ -162,7 +162,7 @@ alert the witness, not `gc mail send`.
 | Find assigned work | `bd list --assignee="$GC_ALIAS" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
-| Read work metadata | `bd show $WORK --json \| jq '.metadata'` |
+| Read work metadata | `bd show $WORK --json \| jq '.[0].metadata'` |
 | Set metadata field | `bd update $WORK --set-metadata key=value` |
 | Remove metadata field | `bd update $WORK --unset-metadata key` |
 | Fetch remote branches | `git fetch --prune origin` |

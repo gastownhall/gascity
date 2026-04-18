@@ -70,7 +70,7 @@ with you when they become ready:
 
 ```bash
 # After claiming your first bead, read its continuation group
-GROUP=$(bd show <id> --json | jq -r '.metadata["gc.continuation_group"] // empty')
+GROUP=$(bd show <id> --json | jq -r '.[0].metadata["gc.continuation_group"] // empty')
 
 if [ -n "$GROUP" ]; then
   # Find all open beads in the same group and pre-assign them

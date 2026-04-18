@@ -54,7 +54,7 @@ metadata before doing anything destructive.
 gc prime
 bd prime
 bd show {{issue}}
-bd show {{issue}} --json | jq '.metadata'
+bd show {{issue}} --json | jq '.[0].metadata'
 gc mail inbox
 ```
 """
@@ -86,7 +86,7 @@ Ensure there is an isolated worktree for this work item.
 
 ```bash
 git fetch --prune origin
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
   WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
   git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
@@ -186,7 +186,7 @@ description = """
 Remove the temporary worktree after the body reaches terminal state.
 
 ```bash
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
   git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
 fi

@@ -48,7 +48,7 @@ echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .
     COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$NEW" '.[$id] = $n')
 
     if [ "$NEW" -ge "$THRESHOLD" ]; then
-        TITLE=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.title // "unknown"')
+        TITLE=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.[0].title // "unknown"')
         gc mail send mayor/ \
             -s "SPAWN_STORM: bead $bead_id reset ${NEW}x" \
             -m "Bead $bead_id ($TITLE) has been reset to pool $NEW times (threshold: $THRESHOLD).

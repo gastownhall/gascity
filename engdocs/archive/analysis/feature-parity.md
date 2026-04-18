@@ -286,7 +286,7 @@ become role-agnostic infrastructure that any pack can use.
 |---------|----------|--------|-------|
 | `gt mq submit` | — | **REMAP** | Just bd: polecat sets `metadata.branch`/`metadata.target` + assigns to refinery |
 | `gt mq list` | — | **REMAP** | Just bd: `bd list --assignee=refinery --status=open` |
-| `gt mq status` | — | **REMAP** | Just bd: `bd show $WORK --json \| jq '.metadata'` |
+| `gt mq status` | — | **REMAP** | Just bd: `bd show $WORK --json \| jq '.[0].metadata'` |
 | `gt mq retry` | — | **REMAP** | Just bd: refinery rejects back to pool, new polecat picks up |
 | `gt mq reject` | — | **REMAP** | Just bd: `bd update --status=open --assignee="" --set-metadata rejection_reason=...` |
 | `gt mq next` | — | **REMAP** | Just bd: `bd list --assignee=$GC_AGENT --limit=1` |

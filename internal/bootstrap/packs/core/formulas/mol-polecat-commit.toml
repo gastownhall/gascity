@@ -49,7 +49,7 @@ git fetch --prune origin
 
 Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:

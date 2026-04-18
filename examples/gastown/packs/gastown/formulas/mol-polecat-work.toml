@@ -60,7 +60,7 @@ git fetch --prune origin
 
 Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -90,7 +90,7 @@ Worktrees are scoped to the work bead (not the agent name) so that:
 
 Check if `metadata.branch` already records a branch:
 ```bash
-BRANCH=$(bd show {{issue}} --json | jq -r '.metadata.branch // empty')
+BRANCH=$(bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
 ```
 
 **If branch exists in metadata** — check it out:
@@ -99,7 +99,7 @@ git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/"$BRANCH"
 ```
 If resuming a rejected branch, rebase onto latest base:
 ```bash
-REJECTION=$(bd show {{issue}} --json | jq -r '.metadata.rejection_reason // empty')
+REJECTION=$(bd show {{issue}} --json | jq -r '.[0].metadata.rejection_reason // empty')
 if [ -n "$REJECTION" ]; then
     git rebase origin/{{base_branch}}
     # If conflicts: resolve them (this is likely the rejection reason)

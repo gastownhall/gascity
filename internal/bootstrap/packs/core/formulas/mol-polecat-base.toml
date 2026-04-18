@@ -70,7 +70,7 @@ bd list --assignee=$GC_AGENT --status=in_progress
 The hook_bead is your assigned issue. Read it carefully:
 ```bash
 bd show {{issue}}           # Full issue details
-bd show {{issue}} --json | jq '.metadata'  # Check for existing metadata
+bd show {{issue}} --json | jq '.[0].metadata'  # Check for existing metadata
 ```
 
 **3. Check for rejection (IMPORTANT):**

@@ -61,7 +61,7 @@ sees the existing branch and reason, and resumes instead of redoing everything.
 
 Read metadata:
 ```bash
-bd show <issue> --json | jq '.metadata'
+bd show <issue> --json | jq '.[0].metadata'
 ```
 
 ## Work Protocol
@@ -129,8 +129,8 @@ conflict, test failure, etc.), and resubmit. Don't redo all the work.
 
 ```bash
 # Check for rejection
-bd show <issue> --json | jq -r '.metadata.rejection_reason // empty'
-bd show <issue> --json | jq -r '.metadata.branch // empty'
+bd show <issue> --json | jq -r '.[0].metadata.rejection_reason // empty'
+bd show <issue> --json | jq -r '.[0].metadata.branch // empty'
 
 # If both exist: resume the branch, fix the issue, resubmit
 ```
