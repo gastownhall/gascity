@@ -220,14 +220,15 @@ func (c *Client) patchCity(suspend bool) error {
 	return checkMutation(resp, err)
 }
 
-// SuspendAgent suspends an agent via POST /v0/agent/{name}/suspend.
-// Name can be qualified (e.g., "myrig/worker") — the server route uses
-// {name...} which captures path segments including slashes.
+// SuspendAgent suspends an agent via POST /v0/agent/{base}/{action} (or
+// the qualified form /agent/{dir}/{base}/{action}). Name can be
+// qualified (e.g. "myrig/worker") — the client picks the right route.
 func (c *Client) SuspendAgent(name string) error {
 	return c.postAgentAction(name, "suspend")
 }
 
-// ResumeAgent resumes an agent via POST /v0/agent/{name}/resume.
+// ResumeAgent resumes an agent via POST /v0/agent/{base}/{action} (or
+// the qualified form).
 func (c *Client) ResumeAgent(name string) error {
 	return c.postAgentAction(name, "resume")
 }
@@ -236,10 +237,18 @@ func (c *Client) postAgentAction(name, action string) error {
 	if c.cw == nil {
 		return errClientUninitialized
 	}
-	// The server's {name...} captures the full suffix including the
-	// trailing /suspend or /resume; the handler strips it. We pass the
-	// composite path as the "name" parameter to the generated client.
-	resp, err := c.cw.PostV0CityByCityNameAgentByNameWithResponse(context.Background(), c.cityName, name+"/"+action)
+	// Agents can be addressed unqualified or rig-qualified. The server
+	// exposes a distinct route for each shape — no trailing-path
+	// wildcard, no client-side path-rewriting shim.
+	if dir, base, ok := strings.Cut(name, "/"); ok {
+		resp, err := c.cw.PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(
+			context.Background(), c.cityName, dir, base,
+			genclient.PostV0CityByCityNameAgentByDirByBaseByActionParamsAction(action))
+		return checkMutation(resp, err)
+	}
+	resp, err := c.cw.PostV0CityByCityNameAgentByBaseByActionWithResponse(
+		context.Background(), c.cityName, name,
+		genclient.PostV0CityByCityNameAgentByBaseByActionParamsAction(action))
 	return checkMutation(resp, err)
 }
 

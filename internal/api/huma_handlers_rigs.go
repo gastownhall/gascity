@@ -19,7 +19,7 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
-	wantGit := input.Git == "true"
+	wantGit := input.Git
 
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
@@ -40,7 +40,7 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 	name := input.Name
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
-	wantGit := input.Git == "true"
+	wantGit := input.Git
 
 	for _, rig := range cfg.Rigs {
 		if rig.Name == name {

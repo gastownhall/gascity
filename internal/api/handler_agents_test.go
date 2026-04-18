@@ -424,15 +424,20 @@ func TestAgentSuspendResume(t *testing.T) {
 
 func TestAgentRuntimeActionsRemoved(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
+	// Unknown actions (kill/drain/undrain/nudge/restart) are rejected
+	// by the spec's action enum at the Huma validation layer, before
+	// the handler runs. A 422 with a Problem Details body is the
+	// contract for "your request violated the input schema."
 	for _, action := range []string{"kill", "drain", "undrain", "nudge", "restart"} {
 		req := newPostRequest(cityURL(state, "/agent/myrig/worker/")+action, nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s: status = %d, want %d", action, rec.Code, http.StatusNotFound)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status = %d, want %d", action, rec.Code, http.StatusUnprocessableEntity)
 		}
 	}
 }

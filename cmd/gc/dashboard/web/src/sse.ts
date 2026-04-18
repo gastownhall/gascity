@@ -14,6 +14,12 @@ export interface SSEHandle {
   close(): void;
 }
 
+export type SSEStatus = "connecting" | "live" | "reconnecting";
+
+export interface SSEOptions {
+  onStatus?: (status: SSEStatus) => void;
+}
+
 export type HeartbeatMessage = {
   event: "heartbeat";
   id?: string;
@@ -43,19 +49,28 @@ export interface AgentOutputMessage {
   data: unknown;
 }
 
-export function connectEvents(onEvent: (msg: DashboardEventMessage) => void): SSEHandle {
+export function connectEvents(
+  onEvent: (msg: DashboardEventMessage) => void,
+  opts?: SSEOptions,
+): SSEHandle {
   return connectTypedStream(
     `${supervisorBaseURL()}/v0/events/stream`,
     decodeSupervisorMessage,
     onEvent,
+    opts,
   );
 }
 
-export function connectCityEvents(city: string, onEvent: (msg: DashboardEventMessage) => void): SSEHandle {
+export function connectCityEvents(
+  city: string,
+  onEvent: (msg: DashboardEventMessage) => void,
+  opts?: SSEOptions,
+): SSEHandle {
   return connectTypedStream(
     `${supervisorBaseURL()}/v0/city/${encodeURIComponent(city)}/events/stream`,
     decodeCityMessage,
     onEvent,
+    opts,
   );
 }
 
@@ -63,8 +78,13 @@ function connectTypedStream<T>(
   url: string,
   decode: (eventName: string, raw: string, lastEventID: string) => T,
   onEvent: (msg: T) => void,
+  opts?: SSEOptions,
 ): SSEHandle {
   const source = new EventSource(url, { withCredentials: false });
+  opts?.onStatus?.("connecting");
+  source.onopen = () => {
+    opts?.onStatus?.("live");
+  };
   for (const eventName of ["heartbeat", "event", "tagged_event"]) {
     source.addEventListener(eventName, (event) => {
       try {
@@ -75,9 +95,9 @@ function connectTypedStream<T>(
     });
   }
   source.onerror = () => {
-    // EventSource handles reconnecting; this path is still surfaced for observability.
-    // eslint-disable-next-line no-console
-    console.debug("sse: reconnecting events stream");
+    // EventSource reconnects automatically; surface the state transition
+    // so the UI can reflect that the live feed is not currently flowing.
+    opts?.onStatus?.(source.readyState === EventSource.CLOSED ? "reconnecting" : "reconnecting");
   };
   return { close: () => source.close() };
 }
@@ -128,9 +148,10 @@ export function connectAgentOutput(
 ): SSEHandle {
   const url = `${supervisorBaseURL()}/v0/city/${encodeURIComponent(city)}/session/${encodeURIComponent(sessionID)}/stream`;
   const source = new EventSource(url, { withCredentials: false });
-  source.onmessage = (e) => {
-    onEvent({ id: e.lastEventId || undefined, type: "message", data: parseUnknownJSON(e.data) });
-  };
+  // SSE fires both onmessage AND addEventListener("message") for any frame
+  // whose event-type resolves to "message" (the default). Wiring both
+  // appends every transcript line twice. Route "message" through the
+  // same loop as other named events so there's one code path.
   for (const eventName of ["turn", "message", "activity", "pending", "heartbeat"]) {
     source.addEventListener(eventName, (event) => {
       onEvent({

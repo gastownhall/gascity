@@ -601,16 +601,16 @@
         }
 
         /* Polecat styles */
-        .polecat-name {
+        .rigged-name {
             font-weight: 600;
             color: var(--cyan);
         }
 
-        .polecat-rig {
+        .rigged-rig {
             color: var(--text-muted);
         }
 
-        .polecat-work {
+        .rigged-work {
             color: var(--text-secondary);
             font-size: 0.8rem;
         }
@@ -625,28 +625,28 @@
         }
 
         /* Polecat issue styles */
-        .polecat-issue {
+        .rigged-issue {
             font-size: 0.8rem;
             max-width: 180px;
         }
 
-        .polecat-issue .issue-id {
+        .rigged-issue .issue-id {
             color: var(--blue);
             font-weight: 600;
             margin-right: 4px;
         }
 
-        .polecat-issue .issue-title {
+        .rigged-issue .issue-title {
             color: var(--text-secondary);
         }
 
-        .polecat-issue .no-issue {
+        .rigged-issue .no-issue {
             color: var(--text-muted);
         }
 
         /* Polecat status row highlights */
-        tr.polecat-working { }
-        tr.polecat-stale { background: rgba(255, 180, 84, 0.05); }
+        tr.rigged-working { }
+        tr.rigged-stale { background: rgba(255, 180, 84, 0.05); }
 
         /* Crew styles */
         .crew-name {
@@ -1105,8 +1105,8 @@
 
         tr.ready-p1 { background: rgba(240, 113, 120, 0.08); }
         tr.ready-p2 { background: rgba(255, 180, 84, 0.08); }
-        tr.polecat-stuck { background: rgba(240, 113, 120, 0.08); }
-        tr.polecat-idle { opacity: 0.7; }
+        tr.rigged-stuck { background: rgba(240, 113, 120, 0.08); }
+        tr.rigged-idle { opacity: 0.7; }
 
         /* Mail styles */
         .mail-unread {
@@ -2171,7 +2171,7 @@
         }
 
         /* Mayor status banner */
-        .mayor-banner {
+        .scope-banner {
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -2182,59 +2182,59 @@
             border: 1px solid var(--border);
         }
 
-        .mayor-banner.attached {
+        .scope-banner.attached {
             border-color: var(--green);
             background: rgba(166, 209, 137, 0.08);
         }
 
-        .mayor-banner.detached {
+        .scope-banner.detached {
             border-color: var(--text-muted);
             opacity: 0.7;
         }
 
-        .mayor-info {
+        .scope-info {
             display: flex;
             align-items: center;
             gap: 12px;
         }
 
-        .mayor-icon {
+        .scope-icon {
             font-size: 1.5rem;
         }
 
-        .mayor-title {
+        .scope-title {
             font-weight: 600;
             color: var(--text-primary);
         }
 
-        .mayor-status {
+        .scope-status {
             display: flex;
             align-items: center;
             gap: 16px;
         }
 
-        .mayor-stat {
+        .scope-stat {
             display: flex;
             flex-direction: column;
             align-items: flex-end;
         }
 
-        .mayor-stat-label {
+        .scope-stat-label {
             font-size: 0.7rem;
             color: var(--text-muted);
             text-transform: uppercase;
         }
 
-        .mayor-stat-value {
+        .scope-stat-value {
             font-size: 0.85rem;
             font-weight: 500;
         }
 
-        .mayor-stat-value.active {
+        .scope-stat-value.active {
             color: var(--green);
         }
 
-        .mayor-stat-value.idle {
+        .scope-stat-value.idle {
             color: var(--yellow);
         }
 
@@ -2423,13 +2423,13 @@
                 justify-content: center;
             }
 
-            .mayor-banner {
+            .scope-banner {
                 flex-direction: column;
                 gap: 12px;
                 text-align: center;
             }
 
-            .mayor-status {
+            .scope-status {
                 justify-content: center;
             }
 
@@ -2504,7 +2504,7 @@
         /* Don't truncate text when expanded */
         .panel.expanded .pr-title,
         .panel.expanded .convoy-id,
-        .panel.expanded .polecat-issue,
+        .panel.expanded .rigged-issue,
         .panel.expanded .issue-title,
         .panel.expanded .assigned-title,
         .panel.expanded .mail-subject,
@@ -2542,14 +2542,14 @@
                 display: none; /* Hide on mobile, too wide */
             }
 
-            .mayor-banner {
+            .scope-banner {
                 flex-direction: column;
                 gap: 12px;
                 text-align: center;
                 padding: 10px 14px;
             }
 
-            .mayor-status {
+            .scope-status {
                 justify-content: center;
             }
 
@@ -2647,7 +2647,7 @@
                 max-width: 120px;
             }
 
-            .polecat-issue {
+            .rigged-issue {
                 max-width: 100px;
             }
 

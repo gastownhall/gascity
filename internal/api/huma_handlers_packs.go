@@ -5,12 +5,18 @@ import (
 	"sort"
 )
 
+// PackListBody is the response body for GET /v0/packs.
+type PackListBody struct {
+	Packs []packResponse `json:"packs" doc:"Registered packs."`
+}
+
+// PackListOutput is the response envelope for GET /v0/packs.
+type PackListOutput struct {
+	Body PackListBody
+}
+
 // humaHandlePackList is the Huma-typed handler for GET /v0/packs.
-func (s *Server) humaHandlePackList(_ context.Context, _ *PackListInput) (*struct {
-	Body struct {
-		Packs []packResponse `json:"packs"`
-	}
-}, error) {
+func (s *Server) humaHandlePackList(_ context.Context, _ *PackListInput) (*PackListOutput, error) {
 	cfg := s.state.Config()
 	names := make([]string, 0, len(cfg.Packs))
 	for name := range cfg.Packs {
@@ -27,11 +33,7 @@ func (s *Server) humaHandlePackList(_ context.Context, _ *PackListInput) (*struc
 			Path:   src.Path,
 		})
 	}
-	out := &struct {
-		Body struct {
-			Packs []packResponse `json:"packs"`
-		}
-	}{}
+	out := &PackListOutput{}
 	out.Body.Packs = packs
 	return out, nil
 }

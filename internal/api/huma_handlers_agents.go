@@ -22,7 +22,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	wantPeek := input.Peek == "true"
+	wantPeek := input.Peek
 
 	index := s.latestIndex()
 	cacheKey := ""
@@ -139,13 +139,22 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	}, nil
 }
 
-// humaHandleAgent is the Huma-typed handler for GET /v0/agent/{name}.
-// Also handles the /output sub-resource: if the agent isn't found by exact
-// name, checks for /output suffix and returns the agent output response
-// wrapped in an agentResponse envelope with a special "output_response" field.
-// The /output/stream SSE sub-resource is handled by a separate old-mux handler.
+// humaHandleAgent is the Huma-typed handler for
+// GET /v0/city/{cityName}/agent/{base} (unqualified form).
 func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
-	name := input.Name
+	return s.agentByName(input.Name)
+}
+
+// humaHandleAgentQualified is the Huma-typed handler for
+// GET /v0/city/{cityName}/agent/{dir}/{base} (qualified form).
+func (s *Server) humaHandleAgentQualified(ctx context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(input.QualifiedName())
+}
+
+// agentByName is the shared agent-get implementation. Both the qualified
+// and unqualified routes normalize to a single "name" string before
+// dispatching here.
+func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	if name == "" {
 		return nil, huma.Error400BadRequest("agent name required")
 	}
@@ -250,20 +259,25 @@ func (s *Server) humaHandleAgentCreate(_ context.Context, input *AgentCreateInpu
 	return resp, nil
 }
 
-// humaHandleAgentUpdate is the Huma-typed handler for PATCH /v0/agent/{name}.
+// humaHandleAgentUpdate is the Huma-typed handler for
+// PATCH /v0/city/{cityName}/agent/{base}.
 func (s *Server) humaHandleAgentUpdate(ctx context.Context, input *AgentUpdateInput) (*OKResponse, error) {
+	return s.updateAgentByName(input.Name, input.Body.Provider, input.Body.Scope, input.Body.Suspended)
+}
+
+// humaHandleAgentUpdateQualified is the Huma-typed handler for
+// PATCH /v0/city/{cityName}/agent/{dir}/{base}.
+func (s *Server) humaHandleAgentUpdateQualified(ctx context.Context, input *AgentUpdateQualifiedInput) (*OKResponse, error) {
+	return s.updateAgentByName(input.QualifiedName(), input.Body.Provider, input.Body.Scope, input.Body.Suspended)
+}
+
+func (s *Server) updateAgentByName(name, provider, scope string, suspended *bool) (*OKResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
-
-	patch := AgentUpdate{
-		Provider:  input.Body.Provider,
-		Scope:     input.Body.Scope,
-		Suspended: input.Body.Suspended,
-	}
-
-	if err := sm.UpdateAgent(input.Name, patch); err != nil {
+	patch := AgentUpdate{Provider: provider, Scope: scope, Suspended: suspended}
+	if err := sm.UpdateAgent(name, patch); err != nil {
 		return nil, mutationError(err)
 	}
 	resp := &OKResponse{}
@@ -271,14 +285,24 @@ func (s *Server) humaHandleAgentUpdate(ctx context.Context, input *AgentUpdateIn
 	return resp, nil
 }
 
-// humaHandleAgentDelete is the Huma-typed handler for DELETE /v0/agent/{name}.
+// humaHandleAgentDelete is the Huma-typed handler for
+// DELETE /v0/city/{cityName}/agent/{base}.
 func (s *Server) humaHandleAgentDelete(ctx context.Context, input *AgentDeleteInput) (*OKResponse, error) {
+	return s.deleteAgentByName(input.Name)
+}
+
+// humaHandleAgentDeleteQualified is the Huma-typed handler for
+// DELETE /v0/city/{cityName}/agent/{dir}/{base}.
+func (s *Server) humaHandleAgentDeleteQualified(ctx context.Context, input *AgentDeleteQualifiedInput) (*OKResponse, error) {
+	return s.deleteAgentByName(input.QualifiedName())
+}
+
+func (s *Server) deleteAgentByName(name string) (*OKResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
-
-	if err := sm.DeleteAgent(input.Name); err != nil {
+	if err := sm.DeleteAgent(name); err != nil {
 		return nil, mutationError(err)
 	}
 	resp := &OKResponse{}
@@ -286,40 +310,36 @@ func (s *Server) humaHandleAgentDelete(ctx context.Context, input *AgentDeleteIn
 	return resp, nil
 }
 
-// humaHandleAgentAction is the Huma-typed handler for POST /v0/agent/{name}
-// (suspend/resume actions).
+// humaHandleAgentAction is the Huma-typed handler for
+// POST /v0/city/{cityName}/agent/{base}/{action}.
 func (s *Server) humaHandleAgentAction(ctx context.Context, input *AgentActionInput) (*OKResponse, error) {
-	name := input.Name
+	return s.agentActionByName(input.Name, input.Action)
+}
 
+// humaHandleAgentActionQualified is the Huma-typed handler for
+// POST /v0/city/{cityName}/agent/{dir}/{base}/{action}.
+func (s *Server) humaHandleAgentActionQualified(ctx context.Context, input *AgentActionQualifiedInput) (*OKResponse, error) {
+	return s.agentActionByName(input.QualifiedName(), input.Action)
+}
+
+func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
-
-	var action string
-	if after, found := strings.CutSuffix(name, "/suspend"); found {
-		name = after
-		action = "suspend"
-	} else if after, found := strings.CutSuffix(name, "/resume"); found {
-		name = after
-		action = "resume"
-	} else {
-		return nil, huma.Error404NotFound("unknown agent action; runtime operations moved to /v0/session/{id}/*")
-	}
-
 	cfg := s.state.Config()
 	if _, ok := findAgent(cfg, name); !ok {
 		return nil, huma.Error404NotFound("agent " + name + " not found")
 	}
-
 	var err error
 	switch action {
 	case "suspend":
 		err = sm.SuspendAgent(name)
 	case "resume":
 		err = sm.ResumeAgent(name)
+	default:
+		return nil, huma.Error400BadRequest("unknown agent action: " + action)
 	}
-
 	if err != nil {
 		return nil, mutationError(err)
 	}

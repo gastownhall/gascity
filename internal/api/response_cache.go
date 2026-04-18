@@ -93,6 +93,9 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 		if fv.Kind() == reflect.String && fv.String() == "" {
 			continue
 		}
+		if fv.Kind() == reflect.Bool && !fv.Bool() {
+			continue
+		}
 		if fv.Kind() == reflect.Int || fv.Kind() == reflect.Int64 || fv.Kind() == reflect.Uint64 {
 			if fv.Int() == 0 && fv.Kind() != reflect.Uint64 {
 				continue

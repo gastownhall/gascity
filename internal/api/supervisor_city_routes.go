@@ -46,13 +46,16 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain)
 	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate)
 
-	// Agents — read / CRUD. Output sub-resources use explicit path
-	// segments because Go 1.22+ mux does not allow suffixes after a
-	// {name...} catch-all.
+	// Agents — read / CRUD. Agents can be addressed unqualified
+	// ({base}) or rig-qualified ({dir}/{base}); there is no third
+	// form, so two explicit routes cover every real case without a
+	// trailing-path wildcard. The routes we register are the routes
+	// we expose.
 	cityGet(sm, "/agents", (*Server).humaHandleAgentList)
 	cityGet(sm, "/agent/{dir}/{base}/output", (*Server).humaHandleAgentOutputQualified)
 	cityGet(sm, "/agent/{base}/output", (*Server).humaHandleAgentOutput)
-	cityGet(sm, "/agent/{name...}", (*Server).humaHandleAgent)
+	cityGet(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentQualified)
+	cityGet(sm, "/agent/{base}", (*Server).humaHandleAgent)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-agent",
 		Method:        http.MethodPost,
@@ -60,9 +63,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Create an agent",
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleAgentCreate)
-	cityPatch(sm, "/agent/{name...}", (*Server).humaHandleAgentUpdate)
-	cityDelete(sm, "/agent/{name...}", (*Server).humaHandleAgentDelete)
-	cityPost(sm, "/agent/{name...}", (*Server).humaHandleAgentAction)
+	cityPatch(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentUpdateQualified)
+	cityPatch(sm, "/agent/{base}", (*Server).humaHandleAgentUpdate)
+	cityDelete(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentDeleteQualified)
+	cityDelete(sm, "/agent/{base}", (*Server).humaHandleAgentDelete)
+	cityPost(sm, "/agent/{dir}/{base}/{action}", (*Server).humaHandleAgentActionQualified)
+	cityPost(sm, "/agent/{base}/{action}", (*Server).humaHandleAgentAction)
 
 	// Agent output SSE streams.
 	agentOutputEventMap := map[string]any{
@@ -115,11 +121,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete)
 	cityPost(sm, "/rig/{name}/{action}", (*Server).humaHandleRigAction)
 
-	// Patches — agent.
+	// Patches — agent. Same qualified/unqualified split as /agent: two
+	// explicit routes instead of a trailing-path wildcard.
 	cityGet(sm, "/patches/agents", (*Server).humaHandleAgentPatchList)
-	cityGet(sm, "/patches/agent/{name...}", (*Server).humaHandleAgentPatchGet)
+	cityGet(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchGetQualified)
+	cityGet(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchGet)
 	cityPut(sm, "/patches/agents", (*Server).humaHandleAgentPatchSet)
-	cityDelete(sm, "/patches/agent/{name...}", (*Server).humaHandleAgentPatchDelete)
+	cityDelete(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchDeleteQualified)
+	cityDelete(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchDelete)
 	// Patches — rig.
 	cityGet(sm, "/patches/rigs", (*Server).humaHandleRigPatchList)
 	cityGet(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchGet)

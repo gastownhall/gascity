@@ -25,6 +25,16 @@ var spaBundle embed.FS
 
 const maxClientLogBody = 64 << 10
 
+// reservedNonSPAPrefixes are URL prefixes the dashboard server never serves.
+// Requests matching one of these get a 404 instead of the SPA index.html
+// so stale callers break visibly rather than silently.
+var reservedNonSPAPrefixes = []string{
+	"/api/",
+	"/v0/",
+	"/debug/",
+	"/health",
+}
+
 type clientLogEntry struct {
 	City    string          `json:"city"`
 	Details json.RawMessage `json:"details,omitempty"`
@@ -56,11 +66,18 @@ func NewStaticHandler(supervisorURL string) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/__client-log", handleClientLog)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Every request that isn't a known static asset routes to
-		// index.html so client-side navigation works. The SPA has no
-		// routes today beyond the query-string city scope, but this
-		// future-proofs the server against additions.
 		path := strings.TrimPrefix(r.URL.Path, "/")
+		// Reserved non-SPA prefixes: return 404 instead of handing out
+		// index.html. The dashboard server proxies nothing — these
+		// prefixes would only be hit by stale scripts or probes from
+		// the pre-migration era. Silently serving index.html to them
+		// makes old callers look healthy while they're actually broken.
+		for _, p := range reservedNonSPAPrefixes {
+			if strings.HasPrefix(r.URL.Path, p) {
+				http.NotFound(w, r)
+				return
+			}
+		}
 		if path == "" || path == "index.html" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")

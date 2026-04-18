@@ -51,7 +51,7 @@ type SupervisorStartup struct {
 // SupervisorReadinessInput is the input for GET /v0/readiness.
 type SupervisorReadinessInput struct {
 	Items string `query:"items" required:"false" doc:"Comma-separated list of readiness items to check."`
-	Fresh string `query:"fresh" required:"false" doc:"Force fresh probe, bypassing cache (true/false)."`
+	Fresh bool   `query:"fresh" required:"false" doc:"Force fresh probe, bypassing cache."`
 }
 
 // SupervisorReadinessOutput is the response for GET /v0/readiness.
@@ -62,7 +62,7 @@ type SupervisorReadinessOutput struct {
 // SupervisorProviderReadinessInput is the input for GET /v0/provider-readiness.
 type SupervisorProviderReadinessInput struct {
 	Providers string `query:"providers" required:"false" doc:"Comma-separated list of providers to probe."`
-	Fresh     string `query:"fresh" required:"false" doc:"Force fresh probe (true/false)."`
+	Fresh     bool   `query:"fresh" required:"false" doc:"Force fresh probe, bypassing cache."`
 }
 
 // SupervisorProviderReadinessOutput is the response for GET /v0/provider-readiness.
@@ -174,6 +174,7 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 		Summary:     "Stream tagged events from all running cities.",
 	}, map[string]any{
 		"tagged_event": &taggedEventStreamEnvelope{},
+		"heartbeat":    HeartbeatEvent{},
 	}, sm.precheckGlobalEventStream, sm.streamGlobalEvents)
 }
 
@@ -227,8 +228,7 @@ func (sm *SupervisorMux) humaHandleReadiness(ctx context.Context, input *Supervi
 	if err != nil {
 		return nil, huma.Error400BadRequest("invalid: " + err.Error())
 	}
-	fresh := strings.EqualFold(strings.TrimSpace(input.Fresh), "true")
-	resp, err := buildReadinessResponse(ctx, items, fresh)
+	resp, err := buildReadinessResponse(ctx, items, input.Fresh)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("internal: " + err.Error())
 	}
@@ -242,8 +242,7 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 	if err != nil {
 		return nil, huma.Error400BadRequest("invalid: " + err.Error())
 	}
-	fresh := strings.EqualFold(strings.TrimSpace(input.Fresh), "true")
-	resp, err := buildReadinessResponse(ctx, providers, fresh)
+	resp, err := buildReadinessResponse(ctx, providers, input.Fresh)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("internal: " + err.Error())
 	}
@@ -415,11 +414,12 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			}
 			_ = send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope})
 			readNext()
-		case <-keepalive.C:
-			// Emit a comment-style keepalive by writing a heartbeat envelope
-			// (no ID so reconnect state is preserved). Huma's SSE wrapper
-			// doesn't support raw comment frames; clients tolerate periodic
-			// empty messages.
+		case t := <-keepalive.C:
+			// Emit a heartbeat frame (no ID so reconnect cursor is preserved).
+			// Idle proxies drop long-lived SSE without traffic; skipping this
+			// makes the stream look healthy to EventSource while the
+			// connection has silently died.
+			_ = send(StringIDMessage{Data: HeartbeatEvent{Timestamp: t.UTC().Format(time.RFC3339)}})
 		}
 	}
 }

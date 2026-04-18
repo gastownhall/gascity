@@ -42,17 +42,27 @@ func TestOpenAPISpecInSync(t *testing.T) {
 		t.Fatalf("encode live spec: %v", err)
 	}
 
-	specPath := filepath.Join("openapi.json")
-	onDisk, err := os.ReadFile(specPath)
-	if err != nil {
-		t.Fatalf("read %s: %v (run `go run ./cmd/genspec` to create it)", specPath, err)
+	// Every tracked copy of the spec must match the live server. The internal
+	// copy (internal/api/openapi.json) feeds the Go client generator. The
+	// docs copies (docs/schema/openapi.{json,txt}) are what Mintlify publishes
+	// for external consumers. All three must agree or external readers see a
+	// different contract than the code enforces.
+	tracked := []string{
+		"openapi.json",
+		filepath.Join("..", "..", "docs", "schema", "openapi.json"),
+		filepath.Join("..", "..", "docs", "schema", "openapi.txt"),
 	}
-
-	if !bytes.Equal(onDisk, liveBuf.Bytes()) {
-		t.Fatalf("openapi.json is out of sync with the live server spec.\n"+
-			"Run `go run ./cmd/genspec` to regenerate.\n"+
-			"Live spec size: %d bytes, on-disk size: %d bytes",
-			liveBuf.Len(), len(onDisk))
+	for _, specPath := range tracked {
+		onDisk, err := os.ReadFile(specPath)
+		if err != nil {
+			t.Fatalf("read %s: %v (run `go run ./cmd/genspec` to create it)", specPath, err)
+		}
+		if !bytes.Equal(onDisk, liveBuf.Bytes()) {
+			t.Errorf("%s is out of sync with the live server spec.\n"+
+				"Run `go run ./cmd/genspec` to regenerate.\n"+
+				"Live spec size: %d bytes, on-disk size: %d bytes",
+				specPath, liveBuf.Len(), len(onDisk))
+		}
 	}
 }
 

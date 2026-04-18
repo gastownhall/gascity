@@ -5,7 +5,8 @@ import (
 	"log"
 	"net"
 	"net/http"
-	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
+	"net/http/pprof"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -130,11 +131,38 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
 	root := http.HandlerFunc(sm.ServeHTTP)
-	// pprof: expose on a separate port for profiling
+	return withLogging(withRecovery(withRequestID(withCORS(root))))
+}
+
+// StartPprof starts a pprof HTTP server on 127.0.0.1:<port> if GC_PPROF=1
+// is set. The listener runs on a dedicated mux (not http.DefaultServeMux)
+// and is returned so the caller can Shutdown it. Returns (nil, nil) when
+// GC_PPROF is unset.
+func StartPprof(addr string) (*http.Server, error) {
+	if os.Getenv("GC_PPROF") != "1" {
+		return nil, nil
+	}
+	if addr == "" {
+		addr = "127.0.0.1:6060"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{Addr: addr, Handler: mux}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
-		_ = http.ListenAndServe("localhost:6060", nil) // default mux has pprof handlers
+		if err := srv.Serve(lis); err != nil && err != http.ErrServerClosed {
+			log.Printf("pprof: %v", err)
+		}
 	}()
-	return withLogging(withRecovery(withCORS(root)))
+	log.Printf("pprof: listening on %s (GC_PPROF=1)", addr)
+	return srv, nil
 }
 
 // Serve accepts connections on lis. Blocks until stopped.

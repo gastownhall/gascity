@@ -12,14 +12,33 @@ type AgentListInput struct {
 	BlockingParam
 	Pool    string `query:"pool" required:"false" doc:"Filter by pool name."`
 	Rig     string `query:"rig" required:"false" doc:"Filter by rig name."`
-	Running string `query:"running" required:"false" doc:"Filter by running state (true/false)."`
-	Peek    string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+	Running string `query:"running" required:"false" enum:"true,false" doc:"Filter by running state. Omit to return all agents."`
+	Peek    bool   `query:"peek" required:"false" doc:"Include last output preview."`
 }
 
-// AgentGetInput is the Huma input for GET /v0/city/{cityName}/agent/{name}.
+// AgentGetInput is the Huma input for GET /v0/city/{cityName}/agent/{base}.
+// Agents can be addressed either by their unqualified name (this form) or by
+// rig-qualified path segments (see AgentGetQualifiedInput). Qualified names
+// never exceed two segments, so the two routes cover every real case without
+// any trailing-path wildcard.
 type AgentGetInput struct {
 	CityScope
-	Name string `path:"name" doc:"Agent qualified name."`
+	Name string `path:"base" doc:"Agent name (unqualified, no rig)."`
+}
+
+// AgentGetQualifiedInput is the Huma input for GET /v0/city/{cityName}/agent/{dir}/{base}.
+type AgentGetQualifiedInput struct {
+	CityScope
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// QualifiedName joins dir and base into a canonical agent name.
+func (i *AgentGetQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
 }
 
 // AgentCreateInput is the Huma input for POST /v0/city/{cityName}/agents.
@@ -33,10 +52,10 @@ type AgentCreateInput struct {
 	}
 }
 
-// AgentUpdateInput is the Huma input for PATCH /v0/city/{cityName}/agent/{name}.
+// AgentUpdateInput is the Huma input for PATCH /v0/city/{cityName}/agent/{base}.
 type AgentUpdateInput struct {
 	CityScope
-	Name string `path:"name" doc:"Agent qualified name."`
+	Name string `path:"base" doc:"Agent name (unqualified)."`
 	Body struct {
 		Provider  string `json:"provider,omitempty" doc:"Provider name."`
 		Scope     string `json:"scope,omitempty" doc:"Agent scope."`
@@ -44,16 +63,73 @@ type AgentUpdateInput struct {
 	}
 }
 
-// AgentDeleteInput is the Huma input for DELETE /v0/city/{cityName}/agent/{name}.
-type AgentDeleteInput struct {
+// AgentUpdateQualifiedInput is the Huma input for
+// PATCH /v0/city/{cityName}/agent/{dir}/{base}.
+type AgentUpdateQualifiedInput struct {
 	CityScope
-	Name string `path:"name" doc:"Agent qualified name."`
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+	Body struct {
+		Provider  string `json:"provider,omitempty" doc:"Provider name."`
+		Scope     string `json:"scope,omitempty" doc:"Agent scope."`
+		Suspended *bool  `json:"suspended,omitempty" doc:"Whether agent is suspended."`
+	}
 }
 
-// AgentActionInput is the Huma input for POST /v0/city/{cityName}/agent/{name} (actions).
+// QualifiedName joins dir and base into a canonical agent name.
+func (i *AgentUpdateQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
+}
+
+// AgentDeleteInput is the Huma input for DELETE /v0/city/{cityName}/agent/{base}.
+type AgentDeleteInput struct {
+	CityScope
+	Name string `path:"base" doc:"Agent name (unqualified)."`
+}
+
+// AgentDeleteQualifiedInput is the Huma input for
+// DELETE /v0/city/{cityName}/agent/{dir}/{base}.
+type AgentDeleteQualifiedInput struct {
+	CityScope
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// QualifiedName joins dir and base into a canonical agent name.
+func (i *AgentDeleteQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
+}
+
+// AgentActionInput is the Huma input for
+// POST /v0/city/{cityName}/agent/{base}/{action}. Valid actions are
+// suspend, resume, and (reserved) restart — matching the rig-action shape.
 type AgentActionInput struct {
 	CityScope
-	Name string `path:"name" doc:"Agent qualified name with action suffix (e.g. myagent/suspend)."`
+	Name   string `path:"base" doc:"Agent name (unqualified)."`
+	Action string `path:"action" enum:"suspend,resume" doc:"Action to perform."`
+}
+
+// AgentActionQualifiedInput is the Huma input for
+// POST /v0/city/{cityName}/agent/{dir}/{base}/{action}.
+type AgentActionQualifiedInput struct {
+	CityScope
+	Dir    string `path:"dir" doc:"Agent directory (rig name)."`
+	Base   string `path:"base" doc:"Agent base name."`
+	Action string `path:"action" enum:"suspend,resume" doc:"Action to perform."`
+}
+
+// QualifiedName joins dir and base into a canonical agent name.
+func (i *AgentActionQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
 }
 
 // --- Agent output types ---

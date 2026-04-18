@@ -51,14 +51,19 @@ func TestResponseBodiesMatchSpec(t *testing.T) {
 		// Supervisor scope.
 		{"cities list", "/v0/cities"},
 		{"readiness", "/v0/readiness"},
+		{"provider readiness", "/v0/provider-readiness"},
+		{"health", "/health"},
 
 		// Per-city scope.
 		{"city detail", "/v0/city/{cityName}"},
+		{"city status", "/v0/city/{cityName}/status"},
 		{"agent list", "/v0/city/{cityName}/agents"},
 		{"bead list", "/v0/city/{cityName}/beads"},
+		{"mail inbox", "/v0/city/{cityName}/mail"},
+		{"convoy list", "/v0/city/{cityName}/convoys"},
 		{"session list", "/v0/city/{cityName}/sessions"},
 		{"service list", "/v0/city/{cityName}/services"},
-		{"formula list", "/v0/city/{cityName}/formulas"},
+		{"formula list", "/v0/city/{cityName}/formulas?scope_kind=city&scope_ref=test-city"},
 		{"order list", "/v0/city/{cityName}/orders"},
 		{"config", "/v0/city/{cityName}/config"},
 		{"pack list", "/v0/city/{cityName}/packs"},

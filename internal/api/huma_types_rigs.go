@@ -10,14 +10,14 @@ package api
 type RigListInput struct {
 	CityScope
 	BlockingParam
-	Git string `query:"git" required:"false" doc:"Include git status (true/false)."`
+	Git bool `query:"git" required:"false" doc:"Include git status."`
 }
 
 // RigGetInput is the Huma input for GET /v0/city/{cityName}/rig/{name}.
 type RigGetInput struct {
 	CityScope
 	Name string `path:"name" doc:"Rig name."`
-	Git  string `query:"git" required:"false" doc:"Include git status (true/false)."`
+	Git  bool   `query:"git" required:"false" doc:"Include git status."`
 }
 
 // RigCreateInput is the Huma input for POST /v0/city/{cityName}/rigs.

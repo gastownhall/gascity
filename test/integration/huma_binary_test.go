@@ -93,17 +93,65 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 		t.Fatalf("spec missing /v0/cities; got %d paths", len(spec.Paths))
 	}
 
-	// Run `gc cities` as a subprocess and verify it succeeds.
-	citiesCmd := exec.Command(bin, "cities")
-	citiesCmd.Env = env
-	out, err := citiesCmd.CombinedOutput()
+	// Each CLI subcommand below talks to the running supervisor over
+	// its real socket. Together these prove the full stack wires through
+	// the typed API for both supervisor-scope and per-city commands.
+
+	// 1) `gc cities list` — supervisor scope, no city required.
+	runCLI(t, bin, env, "gc cities list", "cities", "list")
+
+	// 2) `gc cities` (default action) — legacy alias still must work.
+	runCLI(t, bin, env, "gc cities", "cities")
+
+	// 3) Create a city the supervisor can see, then exercise per-city commands.
+	cityRoot := filepath.Join(gcHome, "city")
+	runCLI(t, bin, env, "gc init", "init", cityRoot, "--provider", "claude")
+	runCLI(t, bin, env, "gc register", "register", cityRoot, "--name", "humatest")
+
+	// Give the supervisor a moment to pick up the registered city.
+	cityListURL := baseURL + "/v0/cities"
+	waitForCityRegistered(t, cityListURL, "humatest", 5*time.Second)
+
+	// 4) `gc city status` — resolves the city, calls per-city status.
+	runCLI(t, bin, env, "gc city status", "--city", "humatest", "status")
+
+	// 5) `gc agents list` — per-city, exercises a different domain handler.
+	runCLI(t, bin, env, "gc agents list", "--city", "humatest", "agents", "list")
+}
+
+// runCLI executes a gc subcommand against the live supervisor and fails
+// the test if the command returns non-zero. label is included in error
+// messages to identify which command failed.
+func runCLI(t *testing.T, bin string, env []string, label string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("gc cities: %v\noutput: %s", err, string(out))
+		t.Fatalf("%s: %v\noutput: %s", label, err, string(out))
 	}
-	// No cities registered — output should be non-empty and not a panic.
 	if len(out) == 0 {
-		t.Fatalf("gc cities produced no output")
+		t.Fatalf("%s produced no output", label)
 	}
+}
+
+// waitForCityRegistered polls the supervisor's /v0/cities endpoint until
+// the named city appears or the deadline expires.
+func waitForCityRegistered(t *testing.T, url, city string, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		resp, err := http.Get(url)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if strings.Contains(string(body), `"name":"`+city+`"`) {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for city %q to register at %s", city, url)
 }
 
 // buildGCBinary builds cmd/gc into a tempdir and returns the path.
@@ -183,19 +231,31 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-// waitHTTP polls url until it returns 2xx or deadline expires.
+// waitHTTP polls url until it returns 2xx or deadline expires. Honors
+// the test's context so a cancelled parent aborts the loop promptly
+// rather than burning the whole deadline.
 func waitHTTP(t *testing.T, url string, deadline time.Duration) {
 	t.Helper()
-	end := time.Now().Add(deadline)
-	for time.Now().Before(end) {
-		resp, err := http.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for %s", url)
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("timed out waiting for %s", url)
 }

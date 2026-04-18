@@ -564,6 +564,24 @@
         },
         "type": "object"
       },
+      "AgentUpdateQualifiedInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "description": "Provider name.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Agent scope.",
+            "type": "string"
+          },
+          "suspended": {
+            "description": "Whether agent is suspended.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "AnnotatedAgentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2386,6 +2404,30 @@
         ],
         "type": "object"
       },
+      "FormulaListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "Formula summaries.",
+            "items": {
+              "$ref": "#/components/schemas/FormulaSummaryResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "partial": {
+            "description": "Whether the list is partial.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "partial"
+        ],
+        "type": "object"
+      },
       "FormulaPreviewEdgeResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2573,82 +2615,6 @@
         "required": [
           "name",
           "type"
-        ],
-        "type": "object"
-      },
-      "Get-v0-city-by-city-name-formulasResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/FormulaSummaryResponse"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "partial": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "items",
-          "partial"
-        ],
-        "type": "object"
-      },
-      "Get-v0-city-by-city-name-orders-checkResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "checks": {
-            "items": {
-              "$ref": "#/components/schemas/OrderCheckResponse"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "checks"
-        ],
-        "type": "object"
-      },
-      "Get-v0-city-by-city-name-ordersResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "orders": {
-            "items": {
-              "$ref": "#/components/schemas/OrderResponse"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "orders"
-        ],
-        "type": "object"
-      },
-      "Get-v0-city-by-city-name-packsResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "packs": {
-            "items": {
-              "$ref": "#/components/schemas/PackResponse"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "packs"
         ],
         "type": "object"
       },
@@ -3429,6 +3395,25 @@
         ],
         "type": "object"
       },
+      "OrderCheckBody": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "description": "Order gate evaluations.",
+            "items": {
+              "$ref": "#/components/schemas/OrderCheckResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "checks"
+        ],
+        "type": "object"
+      },
       "OrderCheckResponse": {
         "additionalProperties": false,
         "properties": {
@@ -3549,6 +3534,25 @@
           "labels",
           "capture_output",
           "has_output"
+        ],
+        "type": "object"
+      },
+      "OrderListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "orders": {
+            "description": "Registered orders.",
+            "items": {
+              "$ref": "#/components/schemas/OrderResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "orders"
         ],
         "type": "object"
       },
@@ -3686,6 +3690,25 @@
         "required": [
           "role",
           "text"
+        ],
+        "type": "object"
+      },
+      "PackListBody": {
+        "additionalProperties": false,
+        "properties": {
+          "packs": {
+            "description": "Registered packs.",
+            "items": {
+              "$ref": "#/components/schemas/PackResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "packs"
         ],
         "type": "object"
       },
@@ -6137,6 +6160,178 @@
         "summary": "Patch v0 city by city name"
       }
     },
+    "/v0/city/{cityName}/agent/{base}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-agent-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent name (unqualified).",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent name (unqualified).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name agent by base"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-agent-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent name (unqualified, no rig).",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent name (unqualified, no rig).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name agent by base"
+      },
+      "patch": {
+        "operationId": "patch-v0-city-by-city-name-agent-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent name (unqualified).",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent name (unqualified).",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentUpdateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Patch v0 city by city name agent by base"
+      }
+    },
     "/v0/city/{cityName}/agent/{base}/output": {
       "get": {
         "operationId": "get-v0-city-by-city-name-agent-by-base-output",
@@ -6318,6 +6513,274 @@
           }
         },
         "summary": "Stream agent output in real time"
+      }
+    },
+    "/v0/city/{cityName}/agent/{base}/{action}": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-agent-by-base-by-action",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent name (unqualified).",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent name (unqualified).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Action to perform.",
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "description": "Action to perform.",
+              "enum": [
+                "suspend",
+                "resume"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name agent by base by action"
+      }
+    },
+    "/v0/city/{cityName}/agent/{dir}/{base}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-agent-by-dir-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name agent by dir by base"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-agent-by-dir-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name agent by dir by base"
+      },
+      "patch": {
+        "operationId": "patch-v0-city-by-city-name-agent-by-dir-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentUpdateQualifiedInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Patch v0 city by city name agent by dir by base"
       }
     },
     "/v0/city/{cityName}/agent/{dir}/{base}/output": {
@@ -6523,179 +6986,9 @@
         "summary": "Stream agent output in real time (qualified name)"
       }
     },
-    "/v0/city/{cityName}/agent/{name...}": {
-      "delete": {
-        "operationId": "delete-v0-city-by-city-name-agent-by-name",
-        "parameters": [
-          {
-            "description": "City name.",
-            "in": "path",
-            "name": "cityName",
-            "required": true,
-            "schema": {
-              "description": "City name.",
-              "minLength": 1,
-              "pattern": "\\S",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Agent qualified name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 city by city name agent by name"
-      },
-      "get": {
-        "operationId": "get-v0-city-by-city-name-agent-by-name",
-        "parameters": [
-          {
-            "description": "City name.",
-            "in": "path",
-            "name": "cityName",
-            "required": true,
-            "schema": {
-              "description": "City name.",
-              "minLength": 1,
-              "pattern": "\\S",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Agent qualified name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 city by city name agent by name"
-      },
-      "patch": {
-        "operationId": "patch-v0-city-by-city-name-agent-by-name",
-        "parameters": [
-          {
-            "description": "City name.",
-            "in": "path",
-            "name": "cityName",
-            "required": true,
-            "schema": {
-              "description": "City name.",
-              "minLength": 1,
-              "pattern": "\\S",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Agent qualified name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentUpdateInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Patch v0 city by city name agent by name"
-      },
+    "/v0/city/{cityName}/agent/{dir}/{base}/{action}": {
       "post": {
-        "operationId": "post-v0-city-by-city-name-agent-by-name",
+        "operationId": "post-v0-city-by-city-name-agent-by-dir-by-base-by-action",
         "parameters": [
           {
             "description": "City name.",
@@ -6710,12 +7003,36 @@
             }
           },
           {
-            "description": "Agent qualified name with action suffix (e.g. myagent/suspend).",
+            "description": "Agent directory (rig name).",
             "in": "path",
-            "name": "name",
+            "name": "dir",
             "required": true,
             "schema": {
-              "description": "Agent qualified name with action suffix (e.g. myagent/suspend).",
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Action to perform.",
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "description": "Action to perform.",
+              "enum": [
+                "suspend",
+                "resume"
+              ],
               "type": "string"
             }
           }
@@ -6742,7 +7059,7 @@
             "description": "Error"
           }
         },
-        "summary": "Post v0 city by city name agent by name"
+        "summary": "Post v0 city by city name agent by dir by base by action"
       }
     },
     "/v0/city/{cityName}/agents": {
@@ -6802,23 +7119,27 @@
             }
           },
           {
-            "description": "Filter by running state (true/false).",
+            "description": "Filter by running state. Omit to return all agents.",
             "explode": false,
             "in": "query",
             "name": "running",
             "schema": {
-              "description": "Filter by running state (true/false).",
+              "description": "Filter by running state. Omit to return all agents.",
+              "enum": [
+                "true",
+                "false"
+              ],
               "type": "string"
             }
           },
           {
-            "description": "Include last output preview (true/false).",
+            "description": "Include last output preview.",
             "explode": false,
             "in": "query",
             "name": "peek",
             "schema": {
-              "description": "Include last output preview (true/false).",
-              "type": "string"
+              "description": "Include last output preview.",
+              "type": "boolean"
             }
           }
         ],
@@ -9624,7 +9945,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-formulasResponse"
+                  "$ref": "#/components/schemas/FormulaListBody"
                 }
               }
             },
@@ -10880,7 +11201,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-ordersResponse"
+                  "$ref": "#/components/schemas/OrderListBody"
                 }
               }
             },
@@ -10922,7 +11243,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-orders-checkResponse"
+                  "$ref": "#/components/schemas/OrderCheckBody"
                 }
               }
             },
@@ -11114,7 +11435,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Get-v0-city-by-city-name-packsResponse"
+                  "$ref": "#/components/schemas/PackListBody"
                 }
               }
             },
@@ -11134,9 +11455,9 @@
         "summary": "Get v0 city by city name packs"
       }
     },
-    "/v0/city/{cityName}/patches/agent/{name...}": {
+    "/v0/city/{cityName}/patches/agent/{base}": {
       "delete": {
-        "operationId": "delete-v0-city-by-city-name-patches-agent-by-name",
+        "operationId": "delete-v0-city-by-city-name-patches-agent-by-base",
         "parameters": [
           {
             "description": "City name.",
@@ -11151,12 +11472,12 @@
             }
           },
           {
-            "description": "Agent patch qualified name.",
+            "description": "Agent patch name (unqualified).",
             "in": "path",
-            "name": "name",
+            "name": "base",
             "required": true,
             "schema": {
-              "description": "Agent patch qualified name.",
+              "description": "Agent patch name (unqualified).",
               "type": "string"
             }
           }
@@ -11183,10 +11504,10 @@
             "description": "Error"
           }
         },
-        "summary": "Delete v0 city by city name patches agent by name"
+        "summary": "Delete v0 city by city name patches agent by base"
       },
       "get": {
-        "operationId": "get-v0-city-by-city-name-patches-agent-by-name",
+        "operationId": "get-v0-city-by-city-name-patches-agent-by-base",
         "parameters": [
           {
             "description": "City name.",
@@ -11201,12 +11522,12 @@
             }
           },
           {
-            "description": "Agent patch qualified name.",
+            "description": "Agent patch name (unqualified).",
             "in": "path",
-            "name": "name",
+            "name": "base",
             "required": true,
             "schema": {
-              "description": "Agent patch qualified name.",
+              "description": "Agent patch name (unqualified).",
               "type": "string"
             }
           }
@@ -11243,7 +11564,139 @@
             "description": "Error"
           }
         },
-        "summary": "Get v0 city by city name patches agent by name"
+        "summary": "Get v0 city by city name patches agent by base"
+      }
+    },
+    "/v0/city/{cityName}/patches/agent/{dir}/{base}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-patches-agent-by-dir-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatchDeletedResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name patches agent by dir by base"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-patches-agent-by-dir-by-base",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPatch"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name patches agent by dir by base"
       }
     },
     "/v0/city/{cityName}/patches/agents": {
@@ -11803,13 +12256,13 @@
             }
           },
           {
-            "description": "Force fresh probe (0 or 1).",
+            "description": "Force fresh probe, bypassing cache.",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "Force fresh probe (0 or 1).",
-              "type": "string"
+              "description": "Force fresh probe, bypassing cache.",
+              "type": "boolean"
             }
           }
         ],
@@ -12149,13 +12602,13 @@
             }
           },
           {
-            "description": "Force fresh probe (0 or 1).",
+            "description": "Force fresh probe, bypassing cache.",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "Force fresh probe (0 or 1).",
-              "type": "string"
+              "description": "Force fresh probe, bypassing cache.",
+              "type": "boolean"
             }
           }
         ],
@@ -12261,13 +12714,13 @@
             }
           },
           {
-            "description": "Include git status (true/false).",
+            "description": "Include git status.",
             "explode": false,
             "in": "query",
             "name": "git",
             "schema": {
-              "description": "Include git status (true/false).",
-              "type": "string"
+              "description": "Include git status.",
+              "type": "boolean"
             }
           }
         ],
@@ -12465,13 +12918,13 @@
             }
           },
           {
-            "description": "Include git status (true/false).",
+            "description": "Include git status.",
             "explode": false,
             "in": "query",
             "name": "git",
             "schema": {
-              "description": "Include git status (true/false).",
-              "type": "string"
+              "description": "Include git status.",
+              "type": "boolean"
             }
           }
         ],
@@ -12753,13 +13206,13 @@
             }
           },
           {
-            "description": "Include last output preview (true/false).",
+            "description": "Include last output preview.",
             "explode": false,
             "in": "query",
             "name": "peek",
             "schema": {
-              "description": "Include last output preview (true/false).",
-              "type": "string"
+              "description": "Include last output preview.",
+              "type": "boolean"
             }
           }
         ],
@@ -13029,13 +13482,13 @@
             }
           },
           {
-            "description": "Permanently delete bead after closing (true/false).",
+            "description": "Permanently delete bead after closing.",
             "explode": false,
             "in": "query",
             "name": "delete",
             "schema": {
-              "description": "Permanently delete bead after closing (true/false).",
-              "type": "string"
+              "description": "Permanently delete bead after closing.",
+              "type": "boolean"
             }
           }
         ],
@@ -13940,13 +14393,13 @@
             }
           },
           {
-            "description": "Include last output preview (true/false).",
+            "description": "Include last output preview.",
             "explode": false,
             "in": "query",
             "name": "peek",
             "schema": {
-              "description": "Include last output preview (true/false).",
-              "type": "string"
+              "description": "Include last output preview.",
+              "type": "boolean"
             }
           }
         ],
@@ -14206,13 +14659,13 @@
             }
           },
           {
-            "description": "Permanently delete beads from store (true/false).",
+            "description": "Permanently delete beads from store.",
             "explode": false,
             "in": "query",
             "name": "delete",
             "schema": {
-              "description": "Permanently delete beads from store (true/false).",
-              "type": "string"
+              "description": "Permanently delete beads from store.",
+              "type": "boolean"
             }
           }
         ],
@@ -14416,6 +14869,32 @@
                       {
                         "properties": {
                           "data": {
+                            "$ref": "#/components/schemas/HeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID (composite cursor).",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
                             "$ref": "#/components/schemas/TaggedEventStreamEnvelope"
                           },
                           "event": {
@@ -14477,13 +14956,13 @@
             }
           },
           {
-            "description": "Force fresh probe (true/false).",
+            "description": "Force fresh probe, bypassing cache.",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "Force fresh probe (true/false).",
-              "type": "string"
+              "description": "Force fresh probe, bypassing cache.",
+              "type": "boolean"
             }
           }
         ],
@@ -14527,13 +15006,13 @@
             }
           },
           {
-            "description": "Force fresh probe, bypassing cache (true/false).",
+            "description": "Force fresh probe, bypassing cache.",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "Force fresh probe, bypassing cache (true/false).",
-              "type": "string"
+              "description": "Force fresh probe, bypassing cache.",
+              "type": "boolean"
             }
           }
         ],

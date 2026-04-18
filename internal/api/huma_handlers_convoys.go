@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -193,10 +194,16 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	// Link child items to convoy.
+	// Link child items to convoy. If any Update fails (e.g. a concurrent
+	// writer deleted an item between pre-validation and link), delete
+	// the convoy bead we just created so we never leave a half-populated
+	// convoy behind.
 	for _, itemID := range input.Body.Items {
 		pid := convoy.ID
 		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
+			if delErr := store.Delete(convoy.ID); delErr != nil {
+				log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", convoy.ID, delErr)
+			}
 			return nil, huma.Error500InternalServerError("failed to link item " + itemID + ": " + err.Error())
 		}
 	}
@@ -519,7 +526,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 
 	scopeKind := strings.TrimSpace(input.ScopeKind)
 	scopeRef := strings.TrimSpace(input.ScopeRef)
-	deleteFromStore := input.Delete == "true"
+	deleteFromStore := input.Delete
 
 	stores := s.workflowStores()
 

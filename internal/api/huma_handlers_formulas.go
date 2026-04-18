@@ -10,13 +10,19 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 )
 
+// FormulaListBody is the response body for GET /v0/formulas.
+type FormulaListBody struct {
+	Items   []formulaSummaryResponse `json:"items" doc:"Formula summaries."`
+	Partial bool                     `json:"partial" doc:"Whether the list is partial."`
+}
+
+// FormulaListOutput is the response envelope for GET /v0/formulas.
+type FormulaListOutput struct {
+	Body FormulaListBody
+}
+
 // humaHandleFormulaList is the Huma-typed handler for GET /v0/formulas.
-func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInput) (*struct {
-	Body struct {
-		Items   []formulaSummaryResponse `json:"items"`
-		Partial bool                     `json:"partial"`
-	}
-}, error) {
+func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInput) (*FormulaListOutput, error) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, huma.Error400BadRequest(scopeErr)
@@ -38,12 +44,7 @@ func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInpu
 		return nil, huma.Error500InternalServerError("formula catalog failed")
 	}
 
-	out := &struct {
-		Body struct {
-			Items   []formulaSummaryResponse `json:"items"`
-			Partial bool                     `json:"partial"`
-		}
-	}{}
+	out := &FormulaListOutput{}
 	out.Body.Items = items
 	out.Body.Partial = false
 	return out, nil

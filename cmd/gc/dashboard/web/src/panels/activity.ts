@@ -59,12 +59,16 @@ export async function loadActivityHistory(): Promise<void> {
   await seedActivity(normalized);
 }
 
-export function startActivityStream(onEvent?: (msg: DashboardEventMessage, eventType: string) => void): void {
+export function startActivityStream(
+  onEvent?: (msg: DashboardEventMessage, eventType: string) => void,
+  onStatus?: (status: import("../sse").SSEStatus) => void,
+): void {
   const city = cityScope();
   handle?.close();
+  const opts = onStatus ? { onStatus } : undefined;
   const connect = city
-    ? (listener: (msg: DashboardEventMessage) => void) => connectCityEvents(city, listener)
-    : connectEvents;
+    ? (listener: (msg: DashboardEventMessage) => void) => connectCityEvents(city, listener, opts)
+    : (listener: (msg: DashboardEventMessage) => void) => connectEvents(listener, opts);
   handle = connect((msg) => {
     const eventType = eventTypeFromMessage(msg);
     onEvent?.(msg, eventType);

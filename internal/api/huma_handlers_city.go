@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -63,12 +61,8 @@ func (s *Server) humaHandleProviderReadiness(ctx context.Context, input *Provide
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	fresh, err := parseReadinessFreshParam(input.Fresh)
-	if err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
-	}
 
-	resp, err := buildReadinessResponse(ctx, providers, fresh)
+	resp, err := buildReadinessResponse(ctx, providers, input.Fresh)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -98,12 +92,8 @@ func (s *Server) humaHandleReadiness(ctx context.Context, input *ReadinessInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	fresh, err := parseReadinessFreshParam(input.Fresh)
-	if err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
-	}
 
-	resp, err := buildReadinessResponse(ctx, items, fresh)
+	resp, err := buildReadinessResponse(ctx, items, input.Fresh)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
@@ -111,18 +101,3 @@ func (s *Server) humaHandleReadiness(ctx context.Context, input *ReadinessInput)
 	return &ReadinessOutput{Body: resp}, nil
 }
 
-// parseReadinessFreshParam parses the fresh query parameter for readiness endpoints.
-func parseReadinessFreshParam(fresh string) (bool, error) {
-	fresh = strings.TrimSpace(fresh)
-	if fresh == "" {
-		return false, nil
-	}
-	switch fresh {
-	case "0":
-		return false, nil
-	case "1":
-		return true, nil
-	default:
-		return false, errors.New("fresh must be 0 or 1")
-	}
-}

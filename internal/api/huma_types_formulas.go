@@ -165,6 +165,6 @@ type WorkflowDeleteInput struct {
 	WorkflowID string `path:"workflow_id" doc:"Workflow (convoy) ID."`
 	ScopeKind  string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
-	Delete     string `query:"delete" required:"false" doc:"Permanently delete beads from store (true/false)."`
+	Delete     bool   `query:"delete" required:"false" doc:"Permanently delete beads from store."`
 }
 

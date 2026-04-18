@@ -38,7 +38,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 	}
 
-	wantPeek := input.Peek == "true"
+	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
@@ -105,7 +105,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 		return nil, humaSessionManagerError(err)
 	}
 	b, _ := store.Get(id)
-	wantPeek := input.Peek == "true"
+	wantPeek := input.Peek
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek)
 	return &IndexOutput[sessionResponse]{

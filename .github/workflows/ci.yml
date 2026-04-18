@@ -69,6 +69,9 @@ jobs:
       # Pinned dependency versions — keep in sync with deps.env.
       DOLT_VERSION: "1.86.1"
       BD_VERSION: "v1.0.0"
+      # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
+      # spec→client drift check can never silently skip in CI.
+      GC_REQUIRE_OAPI_CODEGEN: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -121,6 +124,12 @@ jobs:
 
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
+
+      - name: Dashboard bundle drift check
+        run: make dashboard-ci
+
+      - name: OpenAPI spec + client drift check
+        run: make spec-ci
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5

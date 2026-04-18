@@ -22,9 +22,19 @@ func (s *Server) humaHandleAgentPatchList(_ context.Context, _ *AgentPatchListIn
 	}, nil
 }
 
-// humaHandleAgentPatchGet is the Huma-typed handler for GET /v0/patches/agent/{name}.
+// humaHandleAgentPatchGet is the Huma-typed handler for
+// GET /v0/city/{cityName}/patches/agent/{base} (unqualified).
 func (s *Server) humaHandleAgentPatchGet(_ context.Context, input *AgentPatchGetInput) (*IndexOutput[config.AgentPatch], error) {
-	name := input.Name
+	return s.agentPatchByName(input.Name)
+}
+
+// humaHandleAgentPatchGetQualified is the Huma-typed handler for
+// GET /v0/city/{cityName}/patches/agent/{dir}/{base}.
+func (s *Server) humaHandleAgentPatchGetQualified(_ context.Context, input *AgentPatchGetQualifiedInput) (*IndexOutput[config.AgentPatch], error) {
+	return s.agentPatchByName(input.QualifiedName())
+}
+
+func (s *Server) agentPatchByName(name string) (*IndexOutput[config.AgentPatch], error) {
 	cfg := s.state.Config()
 	dir, base := config.ParseQualifiedName(name)
 	for _, p := range cfg.Patches.Agents {
@@ -72,19 +82,29 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 	return resp, nil
 }
 
-// humaHandleAgentPatchDelete is the Huma-typed handler for DELETE /v0/patches/agent/{name}.
+// humaHandleAgentPatchDelete is the Huma-typed handler for
+// DELETE /v0/city/{cityName}/patches/agent/{base} (unqualified).
 func (s *Server) humaHandleAgentPatchDelete(_ context.Context, input *AgentPatchDeleteInput) (*PatchDeletedResponse, error) {
+	return s.deleteAgentPatchByName(input.Name)
+}
+
+// humaHandleAgentPatchDeleteQualified is the Huma-typed handler for
+// DELETE /v0/city/{cityName}/patches/agent/{dir}/{base}.
+func (s *Server) humaHandleAgentPatchDeleteQualified(_ context.Context, input *AgentPatchDeleteQualifiedInput) (*PatchDeletedResponse, error) {
+	return s.deleteAgentPatchByName(input.QualifiedName())
+}
+
+func (s *Server) deleteAgentPatchByName(name string) (*PatchDeletedResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
-
-	if err := sm.DeleteAgentPatch(input.Name); err != nil {
+	if err := sm.DeleteAgentPatch(name); err != nil {
 		return nil, mutationError(err)
 	}
 	resp := &PatchDeletedResponse{}
 	resp.Body.Status = "deleted"
-	resp.Body.AgentPatch = input.Name
+	resp.Body.AgentPatch = name
 	return resp, nil
 }
 

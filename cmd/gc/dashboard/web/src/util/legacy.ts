@@ -34,14 +34,19 @@ export function calculateActivity(ts: string | undefined | null): ActivityInfo {
   return { display, colorClass: "red" };
 }
 
+// formatAgentAddress turns a structured agent address into a short label
+// for display. Addresses are one of:
+//   - "name"              → single-segment (bare agent)
+//   - "rig/name"          → rig-qualified
+//   - "rig/pool/name"     → pool-in-rig
+// No role names are hardcoded; the formatting is purely structural.
 export function formatAgentAddress(addr: string | undefined | null): string {
   if (!addr) return "—";
-  if (addr === "mayor/" || addr === "mayor") return "Mayor";
-  const parts = addr.split("/");
-  if (parts.length >= 3 && parts[1] === "polecats") return `${parts[2]} (${parts[0]})`;
-  if (parts.length >= 3 && parts[1] === "crew") return `${parts[2]} (${parts[0]}/crew)`;
-  if (parts.length >= 2) return `${parts[0]}/${parts[parts.length - 1]}`;
-  return addr;
+  const parts = addr.split("/").filter(Boolean);
+  if (parts.length === 0) return "—";
+  if (parts.length === 1) return parts[0]!;
+  if (parts.length >= 3) return `${parts[parts.length - 1]} (${parts[0]}/${parts[1]})`;
+  return `${parts[0]}/${parts[parts.length - 1]}`;
 }
 
 export function extractRig(actor: string | undefined | null): string {

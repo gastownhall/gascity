@@ -12,22 +12,24 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+// OrderListBody is the response body for GET /v0/orders.
+type OrderListBody struct {
+	Orders []orderResponse `json:"orders" doc:"Registered orders."`
+}
+
+// OrderListOutput is the response envelope for GET /v0/orders.
+type OrderListOutput struct {
+	Body OrderListBody
+}
+
 // humaHandleOrderList is the Huma-typed handler for GET /v0/orders.
-func (s *Server) humaHandleOrderList(_ context.Context, _ *OrderListInput) (*struct {
-	Body struct {
-		Orders []orderResponse `json:"orders"`
-	}
-}, error) {
+func (s *Server) humaHandleOrderList(_ context.Context, _ *OrderListInput) (*OrderListOutput, error) {
 	aa := s.state.Orders()
 	resp := make([]orderResponse, len(aa))
 	for i, a := range aa {
 		resp[i] = toOrderResponse(a)
 	}
-	out := &struct {
-		Body struct {
-			Orders []orderResponse `json:"orders"`
-		}
-	}{}
+	out := &OrderListOutput{}
 	out.Body.Orders = resp
 	return out, nil
 }
@@ -48,12 +50,18 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 	}{Body: toOrderResponse(*a)}, nil
 }
 
+// OrderCheckBody is the response body for GET /v0/orders/check.
+type OrderCheckBody struct {
+	Checks []orderCheckResponse `json:"checks" doc:"Order gate evaluations."`
+}
+
+// OrderCheckOutput is the response envelope for GET /v0/orders/check.
+type OrderCheckOutput struct {
+	Body OrderCheckBody
+}
+
 // humaHandleOrderCheck is the Huma-typed handler for GET /v0/orders/check.
-func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*struct {
-	Body struct {
-		Checks []orderCheckResponse `json:"checks"`
-	}
-}, error) {
+func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*OrderCheckOutput, error) {
 	aa := s.state.Orders()
 
 	store := s.state.CityBeadStore()
@@ -117,11 +125,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*s
 		checks = []orderCheckResponse{}
 	}
 
-	out := &struct {
-		Body struct {
-			Checks []orderCheckResponse `json:"checks"`
-		}
-	}{}
+	out := &OrderCheckOutput{}
 	out.Body.Checks = checks
 	return out, nil
 }

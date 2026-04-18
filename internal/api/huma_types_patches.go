@@ -11,10 +11,27 @@ type AgentPatchListInput struct {
 	CityScope
 }
 
-// AgentPatchGetInput is the Huma input for GET /v0/city/{cityName}/patches/agent/{name}.
+// AgentPatchGetInput is the Huma input for
+// GET /v0/city/{cityName}/patches/agent/{base}.
 type AgentPatchGetInput struct {
 	CityScope
-	Name string `path:"name" doc:"Agent patch qualified name."`
+	Name string `path:"base" doc:"Agent patch name (unqualified)."`
+}
+
+// AgentPatchGetQualifiedInput is the Huma input for
+// GET /v0/city/{cityName}/patches/agent/{dir}/{base}.
+type AgentPatchGetQualifiedInput struct {
+	CityScope
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// QualifiedName joins dir and base into a canonical agent name.
+func (i *AgentPatchGetQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
 }
 
 // AgentPatchSetInput is the Huma input for PUT /v0/city/{cityName}/patches/agents.
@@ -30,10 +47,27 @@ type AgentPatchSetInput struct {
 	}
 }
 
-// AgentPatchDeleteInput is the Huma input for DELETE /v0/city/{cityName}/patches/agent/{name}.
+// AgentPatchDeleteInput is the Huma input for
+// DELETE /v0/city/{cityName}/patches/agent/{base}.
 type AgentPatchDeleteInput struct {
 	CityScope
-	Name string `path:"name" doc:"Agent patch qualified name."`
+	Name string `path:"base" doc:"Agent patch name (unqualified)."`
+}
+
+// AgentPatchDeleteQualifiedInput is the Huma input for
+// DELETE /v0/city/{cityName}/patches/agent/{dir}/{base}.
+type AgentPatchDeleteQualifiedInput struct {
+	CityScope
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// QualifiedName joins dir and base into a canonical agent name.
+func (i *AgentPatchDeleteQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
 }
 
 // RigPatchListInput is the Huma input for GET /v0/city/{cityName}/patches/rigs.

@@ -30,11 +30,9 @@ func newTestCityHandlerReadOnly(t *testing.T, state State) http.Handler {
 }
 
 // wrapTestSupervisorMiddleware applies the same middleware the supervisor's
-// production Handler() does — minus the pprof listener goroutine, which
-// would try to bind localhost:6060 on every test.
+// production Handler() does.
 func wrapTestSupervisorMiddleware(sm *SupervisorMux) http.Handler {
-	inner := http.HandlerFunc(sm.ServeHTTP)
-	return withLogging(withRecovery(withRequestID(withCORS(inner))))
+	return sm.Handler()
 }
 
 // stateCityResolver is a CityResolver backed by a single State. Used by

@@ -16,7 +16,7 @@ type SessionListInput struct {
 	PaginationParam
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
-	Peek     string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+	Peek     bool   `query:"peek" required:"false" doc:"Include last output preview."`
 
 	// cursorPresent is set by Resolve to distinguish "cursor absent" from
 	// "cursor present but empty" in the query string. Huma gives "" for both.
@@ -36,7 +36,7 @@ func (s *SessionListInput) Resolve(ctx huma.Context) []error {
 type SessionGetInput struct {
 	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Peek string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+	Peek bool `query:"peek" required:"false" doc:"Include last output preview."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.
@@ -116,7 +116,7 @@ type SessionPatchInput struct {
 type SessionCloseInput struct {
 	CityScope
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Delete string `query:"delete" required:"false" doc:"Permanently delete bead after closing (true/false)."`
+	Delete bool `query:"delete" required:"false" doc:"Permanently delete bead after closing."`
 }
 
 // SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.

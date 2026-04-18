@@ -322,6 +322,31 @@ dashboard-check: dashboard-build
 	cd cmd/gc/dashboard/web && npm run typecheck
 	go test ./cmd/gc/dashboard/...
 
+## dashboard-ci: rebuild the SPA bundle and fail if the tracked dist/ is stale.
+## Used by CI to enforce that cmd/gc/dashboard/web/dist/ matches the source.
+dashboard-ci: dashboard-check
+	@if ! git diff --quiet -- cmd/gc/dashboard/web/dist; then \
+		echo "ERROR: cmd/gc/dashboard/web/dist/ is stale — run 'make dashboard-build' and commit." >&2; \
+		git --no-pager diff --stat -- cmd/gc/dashboard/web/dist; \
+		exit 1; \
+	fi
+
+## spec-ci: regenerate the OpenAPI spec + generated Go client, fail on drift.
+## Used by CI to enforce that internal/api/openapi.json, docs/schema/openapi.{json,txt},
+## and internal/api/genclient/client_gen.go are all in lock-step with Huma.
+spec-ci:
+	@if ! command -v oapi-codegen >/dev/null; then \
+		echo "Installing oapi-codegen..." >&2; \
+		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
+	fi
+	go run ./cmd/genspec
+	go generate ./internal/api/genclient
+	@if ! git diff --quiet -- internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt internal/api/genclient/client_gen.go; then \
+		echo "ERROR: spec/client artifacts drifted — run 'make spec-ci' locally and commit." >&2; \
+		git --no-pager diff --stat -- internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt internal/api/genclient/client_gen.go; \
+		exit 1; \
+	fi
+
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
 docker-base: check-docker
 	. ./deps.env && docker build -f contrib/k8s/Dockerfile.base \

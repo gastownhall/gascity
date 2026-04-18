@@ -19,7 +19,7 @@ export async function renderStatus(): Promise<void> {
     await renderSupervisorStatus(banner);
     return;
   }
-  renderMayorUnknown();
+  renderCityScopeBannerIdle();
 
   const [statusR, sessionsR, beadsR, convoysR] = await Promise.all([
     api.GET("/v0/city/{cityName}/status", { params: { path: { cityName: city } } }),
@@ -41,10 +41,12 @@ export async function renderStatus(): Promise<void> {
   const sessions = (sessionsR.data?.items ?? []) as SessionSummary[];
   const beads = beadsR.data?.items ?? [];
   const convoys = convoysR.data?.items ?? [];
-  renderMayor(sessions);
+  renderCityScopeBanner(city, sessions);
 
-  const stuckPolecats = sessions.filter((session) => {
-    if (!session.rig || !session.pool || !session.running || !session.last_active) return false;
+  // Generic "stuck" detection: any running, pooled agent whose last
+  // activity is >30 min old. No role name required.
+  const stuckAgents = sessions.filter((session) => {
+    if (!session.pool || !session.running || !session.last_active) return false;
     return Date.now() - new Date(session.last_active).getTime() >= 30 * 60 * 1000;
   }).length;
   const staleAssigned = beads.filter((bead) => bead.assignee && bead.status !== "closed").length;
@@ -52,20 +54,20 @@ export async function renderStatus(): Promise<void> {
   const deadSessions = sessions.filter((session) => !session.running).length;
 
   const stats = el("div", { class: "summary-stats" }, [
-    statChip(statusR.data.agents.running, "🦨 Polecats"),
-    statChip(statusR.data.work.in_progress, "👤 Assigned"),
-    statChip(statusR.data.work.open, "📋 Beads"),
-    statChip(convoys.length, "🚚 Convoys"),
-    statChip(statusR.data.mail.unread, "✉️ Unread"),
+    statChip(statusR.data.agents.running, "Agents"),
+    statChip(statusR.data.work.in_progress, "Assigned"),
+    statChip(statusR.data.work.open, "Beads"),
+    statChip(convoys.length, "Convoys"),
+    statChip(statusR.data.mail.unread, "Unread"),
   ]);
 
   const alerts = el("div", { class: "summary-alerts" });
-  appendAlert(alerts, stuckPolecats > 0, "alert-red", `💀 ${stuckPolecats} stuck`);
-  appendAlert(alerts, staleAssigned > 0, "alert-yellow", `⏰ ${staleAssigned} assigned`);
-  appendAlert(alerts, highPriorityIssues > 0, "alert-red", `🔥 ${highPriorityIssues} P1/P2`);
-  appendAlert(alerts, deadSessions > 0, "alert-red", `☠️ ${deadSessions} dead`);
+  appendAlert(alerts, stuckAgents > 0, "alert-red", `${stuckAgents} stuck`);
+  appendAlert(alerts, staleAssigned > 0, "alert-yellow", `${staleAssigned} assigned`);
+  appendAlert(alerts, highPriorityIssues > 0, "alert-red", `${highPriorityIssues} P1/P2`);
+  appendAlert(alerts, deadSessions > 0, "alert-red", `${deadSessions} dead`);
   if (!alerts.childNodes.length) {
-    alerts.append(el("span", { class: "alert-item alert-green" }, ["✓ All clear"]));
+    alerts.append(el("span", { class: "alert-item alert-green" }, ["All clear"]));
   }
 
   clear(banner);
@@ -73,7 +75,7 @@ export async function renderStatus(): Promise<void> {
 }
 
 async function renderSupervisorStatus(banner: HTMLElement): Promise<void> {
-  renderMayorSupervisor();
+  renderCityScopeBannerFleet();
 
   const [healthR, citiesR] = await Promise.all([
     api.GET("/health"),
@@ -128,22 +130,65 @@ function appendAlert(container: HTMLElement, show: boolean, klass: string, text:
   container.append(el("span", { class: `alert-item ${klass}` }, [text]));
 }
 
-function renderMayorUnknown(): void {
-  const banner = byId("mayor-banner");
-  const badge = byId("mayor-badge");
-  const status = byId("mayor-status");
+// renderCityScopeBanner renders a generic "scope" banner that reports
+// whether any un-rigged, un-pooled session (the city-scope overseer, if
+// the pack defines one) is currently attached. The dashboard makes no
+// assumption about what that session is called — it just surfaces the
+// attached/detached state the API provides. Packs that don't define a
+// city-scope session show "Detached" and that's fine.
+function renderCityScopeBanner(city: string, sessions: SessionSummary[]): void {
+  const banner = byId("scope-banner");
+  const badge = byId("scope-badge");
+  const status = byId("scope-status");
+  if (!banner || !badge || !status) return;
+
+  const overseer = sessions.find((session) => !session.rig && !session.pool);
+  if (!overseer) {
+    banner.classList.remove("attached");
+    banner.classList.add("detached");
+    badge.className = "badge badge-muted";
+    badge.textContent = "Detached";
+    clear(status);
+    status.append(
+      scopeStat("Scope", city),
+      scopeStat("Overseer", "none"),
+    );
+    return;
+  }
+
+  banner.classList.remove("attached", "detached");
+  banner.classList.add(overseer.attached ? "attached" : "detached");
+  badge.className = `badge ${overseer.attached ? "badge-green" : "badge-muted"}`;
+  badge.textContent = overseer.attached ? "Attached" : "Detached";
+  clear(status);
+
+  const active = overseer.last_active
+    ? Date.now() - new Date(overseer.last_active).getTime() < ACTIVE_WINDOW_MS
+    : false;
+  status.append(
+    scopeStat("Scope", city),
+    scopeStat("Session", overseer.template),
+    scopeStat("Activity", overseer.last_active ? formatTimestamp(overseer.last_active) : "Unknown", active ? "active" : "idle"),
+    scopeStat("State", overseer.running ? "Running" : "Stopped"),
+  );
+}
+
+function renderCityScopeBannerIdle(): void {
+  const banner = byId("scope-banner");
+  const badge = byId("scope-badge");
+  const status = byId("scope-status");
   if (!banner || !badge || !status) return;
   banner.classList.remove("attached");
   banner.classList.add("detached");
   badge.className = "badge badge-muted";
-  badge.textContent = "Unknown";
+  badge.textContent = "Idle";
   clear(status);
 }
 
-function renderMayorSupervisor(): void {
-  const banner = byId("mayor-banner");
-  const badge = byId("mayor-badge");
-  const status = byId("mayor-status");
+function renderCityScopeBannerFleet(): void {
+  const banner = byId("scope-banner");
+  const badge = byId("scope-badge");
+  const status = byId("scope-status");
   if (!banner || !badge || !status) return;
   banner.classList.remove("attached");
   banner.classList.add("detached");
@@ -151,45 +196,15 @@ function renderMayorSupervisor(): void {
   badge.textContent = "Supervisor";
   clear(status);
   status.append(
-    mayorStat("Scope", "Fleet"),
-    mayorStat("Mayor", "Select a city"),
+    scopeStat("Scope", "Fleet"),
+    scopeStat("City", "Select one"),
   );
 }
 
-function renderMayor(sessions: SessionSummary[]): void {
-  const banner = byId("mayor-banner");
-  const badge = byId("mayor-badge");
-  const status = byId("mayor-status");
-  if (!banner || !badge || !status) return;
-
-  const mayor = sessions.find((session) => !session.rig && !session.pool);
-  if (!mayor) {
-    renderMayorUnknown();
-    return;
-  }
-
-  banner.classList.remove("attached", "detached");
-  banner.classList.add(mayor.attached ? "attached" : "detached");
-  badge.className = `badge ${mayor.attached ? "badge-green" : "badge-muted"}`;
-  badge.textContent = mayor.attached ? "Attached" : "Detached";
-  clear(status);
-
-  if (!mayor.attached) return;
-
-  const active = mayor.last_active
-    ? Date.now() - new Date(mayor.last_active).getTime() < ACTIVE_WINDOW_MS
-    : false;
-
-  status.append(
-    mayorStat("Activity", mayor.last_active ? formatTimestamp(mayor.last_active) : "Unknown", active ? "active" : "idle"),
-    mayorStat("State", mayor.running ? "Running" : "Stopped"),
-  );
-}
-
-function mayorStat(label: string, value: string, variant = ""): HTMLElement {
-  return el("div", { class: "mayor-stat" }, [
-    el("span", { class: "mayor-stat-label" }, [label]),
-    el("span", { class: `mayor-stat-value${variant ? ` ${variant}` : ""}` }, [value]),
+function scopeStat(label: string, value: string, variant = ""): HTMLElement {
+  return el("div", { class: "scope-stat" }, [
+    el("span", { class: "scope-stat-label" }, [label]),
+    el("span", { class: `scope-stat-value${variant ? ` ${variant}` : ""}` }, [value]),
   ]);
 }
 

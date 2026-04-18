@@ -40,3 +40,7 @@ reports/
 .vscode/settings.json
 .env
 /gen-client
+
+# Developer scratch — diff dumps and ad-hoc patches created during review
+tmp_*.diff
+tmp_*.patch

@@ -10,11 +10,11 @@ describe("crew empty states", () => {
       <div id="crew-loading">Loading crew...</div>
       <table id="crew-table" style="display:none"><tbody id="crew-tbody"></tbody></table>
       <div id="crew-empty" style="display:none"><p>No crew configured</p></div>
-      <div id="polecats-body"></div>
-      <div id="dogs-body"></div>
+      <div id="rigged-body"></div>
+      <div id="pooled-body"></div>
       <span id="crew-count"></span>
-      <span id="polecats-count"></span>
-      <span id="dogs-count"></span>
+      <span id="rigged-count"></span>
+      <span id="pooled-count"></span>
       <div id="agent-log-drawer" style="display:none"></div>
     `;
     window.history.pushState({}, "", "/dashboard?city=mc-city");

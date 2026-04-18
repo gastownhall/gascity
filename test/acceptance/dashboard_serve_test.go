@@ -69,22 +69,18 @@ func TestDashboard_ServesSPABundle(t *testing.T) {
 		t.Errorf("GET /dashboard.css: %v", err)
 	}
 
-	// The old Go proxy surface is gone. Hitting any /api/* path
-	// should not succeed — the SPA must talk to the supervisor
-	// directly on its own port, not proxy through the Go layer.
+	// The old Go proxy surface is gone. /api/* is a reserved non-SPA
+	// prefix: stale callers get an explicit 404 rather than silently
+	// receiving the SPA index.html, which would mask migration breakage.
 	for _, path := range []string{"/api/run", "/api/commands", "/api/options", "/api/mail/inbox"} {
 		resp, err := http.Get(base + path) //nolint:gosec // acceptance test against localhost
 		if err != nil {
 			t.Errorf("GET %s: %v", path, err)
 			continue
 		}
-		// The SPA fallback serves index.html for unknown paths, which
-		// is fine — the SPA just can't talk to /api/*. What matters
-		// is that no JSON proxy response comes back.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		_ = resp.Body.Close()
-		if strings.Contains(string(body), `"items"`) || strings.Contains(string(body), `"commands"`) {
-			t.Errorf("GET %s returned JSON proxy response; the old /api layer should be gone", path)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s: expected 404, got %d", path, resp.StatusCode)
 		}
 	}
 }

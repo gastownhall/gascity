@@ -171,7 +171,9 @@ func TestClientQualifiedAgentName(t *testing.T) {
 	if err := c.SuspendAgent("myrig/worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
 	}
-	// The server uses {name...} wildcard, so the raw slash must arrive unescaped.
+	// Qualified agent names now map to explicit {dir}/{base}/{action}
+	// route segments — the slash between dir and base must arrive
+	// unescaped so the server's ServeMux routes to the qualified variant.
 	if gotPath != "/v0/city/alpha/agent/myrig/worker/suspend" {
 		t.Errorf("path = %q, want /v0/city/alpha/agent/myrig/worker/suspend", gotPath)
 	}

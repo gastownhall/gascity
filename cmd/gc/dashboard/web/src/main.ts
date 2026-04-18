@@ -24,12 +24,12 @@ import { installSharedModals } from "./modals";
 const CITY_SCOPED_PANEL_IDS = [
   "convoy-panel",
   "crew-panel",
-  "polecats-panel",
+  "rigged-panel",
   "mail-panel",
   "escalations-panel",
   "services-panel",
   "rigs-panel",
-  "dogs-panel",
+  "pooled-panel",
   "queues-panel",
   "beads-panel",
   "assigned-panel",
@@ -46,15 +46,30 @@ async function refreshAllForced(): Promise<void> {
 }
 
 function wireSSE(): void {
-  startActivityStream((msg) => {
-    if (refreshPaused()) return;
-    const eventType = eventTypeFromMessage(msg);
-    if (!eventType || eventType === "heartbeat") return;
-    invalidateForEventType(eventType);
-    void refreshVisibleResources().catch((error) => reportUIError("Refresh failed", error));
-  });
-  byId("connection-status")?.replaceChildren(document.createTextNode("Live"));
-  byId("connection-status")?.classList.add("connection-live");
+  setConnectionBadge("connecting");
+  startActivityStream(
+    (msg) => {
+      if (refreshPaused()) return;
+      const eventType = eventTypeFromMessage(msg);
+      if (!eventType || eventType === "heartbeat") return;
+      invalidateForEventType(eventType);
+      void refreshVisibleResources().catch((error) => reportUIError("Refresh failed", error));
+    },
+    setConnectionBadge,
+  );
+}
+
+function setConnectionBadge(status: "connecting" | "live" | "reconnecting"): void {
+  const el = byId("connection-status");
+  if (!el) return;
+  const labels: Record<typeof status, string> = {
+    connecting: "Connecting…",
+    live: "Live",
+    reconnecting: "Reconnecting…",
+  };
+  el.replaceChildren(document.createTextNode(labels[status]));
+  el.classList.remove("connection-live", "connection-connecting", "connection-reconnecting");
+  el.classList.add(`connection-${status}`);
 }
 
 function installInteractions(): void {

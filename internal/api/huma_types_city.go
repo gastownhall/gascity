@@ -23,7 +23,7 @@ type CityPatchInput struct {
 type ProviderReadinessInput struct {
 	CityScope
 	Providers string `query:"providers" required:"false" doc:"Comma-separated provider names to check (default: claude,codex,gemini)."`
-	Fresh     string `query:"fresh" required:"false" doc:"Force fresh probe (0 or 1)."`
+	Fresh     bool   `query:"fresh" required:"false" doc:"Force fresh probe, bypassing cache."`
 }
 
 // ProviderReadinessOutput is the response body for GET /v0/provider-readiness.
@@ -35,7 +35,7 @@ type ProviderReadinessOutput struct {
 type ReadinessInput struct {
 	CityScope
 	Items string `query:"items" required:"false" doc:"Comma-separated readiness items to check (default: claude,codex,gemini,github_cli)."`
-	Fresh string `query:"fresh" required:"false" doc:"Force fresh probe (0 or 1)."`
+	Fresh bool   `query:"fresh" required:"false" doc:"Force fresh probe, bypassing cache."`
 }
 
 // ReadinessOutput is the response body for GET /v0/readiness.

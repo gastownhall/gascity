@@ -21,9 +21,9 @@ export async function renderCrew(): Promise<void> {
   const crewTable = byId<HTMLTableElement>("crew-table");
   const crewEmpty = byId("crew-empty");
   const crewBody = byId("crew-tbody");
-  const polecatsBody = byId("polecats-body");
-  const dogsBody = byId("dogs-body");
-  if (!crewLoading || !crewTable || !crewEmpty || !crewBody || !polecatsBody || !dogsBody) return;
+  const riggedBody = byId("rigged-body");
+  const pooledBody = byId("pooled-body");
+  if (!crewLoading || !crewTable || !crewEmpty || !crewBody || !riggedBody || !pooledBody) return;
 
   setCrewEmptyMessage("No crew configured");
   crewLoading.style.display = "block";
@@ -36,8 +36,8 @@ export async function renderCrew(): Promise<void> {
   });
   if (error || !data?.items) {
     crewLoading.textContent = "Failed to load crew";
-    renderSimpleEmpty(polecatsBody, "No polecats");
-    renderSimpleEmpty(dogsBody, "No dogs in kennel");
+    renderSimpleEmpty(riggedBody, "No rigged agents");
+    renderSimpleEmpty(pooledBody, "No pooled agents");
     return;
   }
 
@@ -99,8 +99,8 @@ export async function renderCrew(): Promise<void> {
     crewEmpty.style.display = "block";
   }
 
-  renderPolecats(sessions, beadTitles);
-  renderDogs(sessions);
+  renderRiggedAgents(sessions, beadTitles);
+  renderPooledAgents(sessions);
 }
 
 function resetCrewNoCity(): void {
@@ -108,21 +108,21 @@ function resetCrewNoCity(): void {
   const crewTable = byId<HTMLTableElement>("crew-table");
   const crewEmpty = byId("crew-empty");
   const crewBody = byId("crew-tbody");
-  const polecatsBody = byId("polecats-body");
-  const dogsBody = byId("dogs-body");
-  if (!crewLoading || !crewTable || !crewEmpty || !crewBody || !polecatsBody || !dogsBody) return;
+  const riggedBody = byId("rigged-body");
+  const pooledBody = byId("pooled-body");
+  if (!crewLoading || !crewTable || !crewEmpty || !crewBody || !riggedBody || !pooledBody) return;
 
   closeLogDrawer();
   byId("crew-count")!.textContent = "0";
-  byId("polecats-count")!.textContent = "0";
-  byId("dogs-count")!.textContent = "0";
+  byId("rigged-count")!.textContent = "0";
+  byId("pooled-count")!.textContent = "0";
   crewLoading.style.display = "none";
   crewTable.style.display = "none";
   crewEmpty.style.display = "block";
   setCrewEmptyMessage("Select a city to view crew");
   clear(crewBody);
-  renderSimpleEmpty(polecatsBody, "Select a city to view polecats");
-  renderSimpleEmpty(dogsBody, "Select a city to view dogs");
+  renderSimpleEmpty(riggedBody, "Select a city to view rigged agents");
+  renderSimpleEmpty(pooledBody, "Select a city to view pooled agents");
 }
 
 function setCrewEmptyMessage(message: string): void {
@@ -158,15 +158,17 @@ function logButton(sessionID: string, label: string): HTMLElement {
   return btn;
 }
 
-function renderPolecats(sessions: SessionRecord[], beadTitles: Map<string, string>): void {
-  const body = byId("polecats-body");
-  const count = byId("polecats-count");
+// renderRiggedAgents lists sessions attached to a specific rig. Grouping
+// is purely by the API's `rig` + `pool` fields — no role names hardcoded.
+function renderRiggedAgents(sessions: SessionRecord[], beadTitles: Map<string, string>): void {
+  const body = byId("rigged-body");
+  const count = byId("rigged-count");
   if (!body || !count) return;
 
   const rows = sessions.filter((session) => session.rig && session.pool);
   count.textContent = String(rows.length);
   if (rows.length === 0) {
-    renderSimpleEmpty(body, "No polecats");
+    renderSimpleEmpty(body, "No rigged agents");
     return;
   }
 
@@ -174,11 +176,11 @@ function renderPolecats(sessions: SessionRecord[], beadTitles: Map<string, strin
   rows.forEach((session) => {
     const activity = calculateActivity(session.last_active);
     const workStatus = !session.active_bead ? "Idle" : activity.colorClass === "red" ? "Stuck" : activity.colorClass === "yellow" ? "Stale" : "Working";
-    tbody.append(el("tr", { class: `polecat-${workStatus.toLowerCase()}` }, [
+    tbody.append(el("tr", { class: `rigged-${workStatus.toLowerCase()}` }, [
       el("td", {}, [logButton(session.id, session.template)]),
-      el("td", {}, [el("span", { class: `badge ${session.pool === "refinery" ? "badge-blue" : "badge-muted"}` }, [session.pool ?? "polecat"])]),
+      el("td", {}, [el("span", { class: "badge badge-muted" }, [session.pool ?? "pool"])]),
       el("td", {}, [session.rig ?? "city"]),
-      el("td", { class: "polecat-issue" }, [
+      el("td", { class: "rigged-issue" }, [
         session.active_bead
           ? `${session.active_bead} ${beadTitles.get(session.active_bead) ?? ""}`.trim()
           : "—",
@@ -191,8 +193,8 @@ function renderPolecats(sessions: SessionRecord[], beadTitles: Map<string, strin
   clear(body);
   body.append(el("table", {}, [
     el("thead", {}, [el("tr", {}, [
-      el("th", {}, ["Worker"]),
-      el("th", {}, ["Type"]),
+      el("th", {}, ["Agent"]),
+      el("th", {}, ["Pool"]),
       el("th", {}, ["Rig"]),
       el("th", {}, ["Working On"]),
       el("th", {}, ["Status"]),
@@ -202,14 +204,17 @@ function renderPolecats(sessions: SessionRecord[], beadTitles: Map<string, strin
   ]));
 }
 
-function renderDogs(sessions: SessionRecord[]): void {
-  const body = byId("dogs-body");
-  const count = byId("dogs-count");
+// renderPooledAgents lists sessions that belong to a pool but are not
+// bound to a specific rig (floating workers). Grouping is by API fields
+// only — no role names hardcoded.
+function renderPooledAgents(sessions: SessionRecord[]): void {
+  const body = byId("pooled-body");
+  const count = byId("pooled-count");
   if (!body || !count) return;
   const rows = sessions.filter((session) => !session.rig && session.pool);
   count.textContent = String(rows.length);
   if (rows.length === 0) {
-    renderSimpleEmpty(body, "No dogs in kennel");
+    renderSimpleEmpty(body, "No pooled agents");
     return;
   }
 
@@ -226,7 +231,7 @@ function renderDogs(sessions: SessionRecord[]): void {
   clear(body);
   body.append(el("table", {}, [
     el("thead", {}, [el("tr", {}, [
-      el("th", {}, ["Name"]),
+      el("th", {}, ["Agent"]),
       el("th", {}, ["State"]),
       el("th", {}, ["Work"]),
       el("th", {}, ["Activity"]),
