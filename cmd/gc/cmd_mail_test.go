@@ -970,6 +970,20 @@ func TestResolveReplySubject_DefaultsFromOriginal(t *testing.T) {
 	}
 }
 
+func TestResolveReplySubject_WhitespaceOnlyExplicitTreatedAsEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "body") //nolint:errcheck
+
+	got, err := resolveReplySubject(mp, "gc-1", "   \t\n")
+	if err != nil {
+		t.Fatalf("resolveReplySubject: %v", err)
+	}
+	if got != "Re: Hello" {
+		t.Errorf("subject = %q, want %q (whitespace-only explicit should fall back to derived)", got, "Re: Hello")
+	}
+}
+
 func TestResolveReplySubject_AvoidsReStacking(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -998,6 +1012,10 @@ func TestResolveReplySubject_FetchErrorPropagates(t *testing.T) {
 	_, err := resolveReplySubject(mp, "nonexistent", "")
 	if err == nil {
 		t.Fatal("resolveReplySubject should error when original cannot be fetched")
+	}
+	// Error must include the ID so CLI output is actionable.
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("error = %q, want it to include the failing message ID", err.Error())
 	}
 }
 

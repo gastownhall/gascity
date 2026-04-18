@@ -1197,16 +1197,18 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	return doMailReply(mp, rec, args[0], sender, resolvedSubject, body, nf, stdout, stderr)
 }
 
-// resolveReplySubject returns the caller-supplied subject when non-empty,
-// or derives a default ("Re: <original subject>") by fetching the original
-// message. Returns an error only when the original cannot be fetched.
+// resolveReplySubject returns the caller-supplied subject when non-empty
+// and non-whitespace, or derives a default ("Re: <original subject>") by
+// fetching the original message. Whitespace-only explicit subjects are
+// treated as empty so the downstream bead-title validation isn't tripped
+// after trimming. Returns an error only when the original cannot be fetched.
 func resolveReplySubject(mp mail.Provider, id, explicit string) (string, error) {
-	if explicit != "" {
+	if strings.TrimSpace(explicit) != "" {
 		return explicit, nil
 	}
 	original, err := mp.Get(id)
 	if err != nil {
-		return "", fmt.Errorf("fetch original: %w", err)
+		return "", fmt.Errorf("fetch original %q: %w", id, err)
 	}
 	return defaultReplySubject(original.Subject), nil
 }
