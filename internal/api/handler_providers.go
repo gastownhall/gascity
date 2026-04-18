@@ -109,9 +109,15 @@ func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
 		for _, name := range cityNames {
 			spec := cfg.Providers[name]
 			_, isBuiltin := builtins[name]
-			// Merge city spec over builtin if the provider name matches a builtin.
+			// Prefer the eager-resolution cache (built via chain walk
+			// in BuildResolvedProviderCache). Fall back to legacy
+			// name/command merge only when the cache has no entry —
+			// this preserves compat for Phase A configs that don't
+			// declare `base` yet.
 			merged := spec
-			if base, ok := builtins[name]; ok {
+			if resolved, ok := config.ResolvedProviderCached(cfg, name); ok {
+				merged = resolvedProviderToSpec(resolved, spec)
+			} else if base, ok := builtins[name]; ok {
 				merged = config.MergeProviderOverBuiltin(base, spec)
 			} else if base, ok := builtins[spec.Command]; ok {
 				merged = config.MergeProviderOverBuiltin(base, spec)
@@ -160,10 +166,17 @@ func (s *Server) handleProviderGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 
-	// Check city-level first.
+	// Check city-level first. Prefer the resolved cache (chain-walked)
+	// so inherited fields (PromptMode, ReadyDelayMs, PermissionModes, …)
+	// are returned to callers. Fall back to the raw spec when cache
+	// doesn't have an entry (Phase A legacy providers).
 	if spec, ok := cfg.Providers[name]; ok {
 		_, isBuiltin := builtins[name]
-		writeIndexJSON(w, s.latestIndex(), providerFromSpec(name, spec, isBuiltin, true))
+		effective := spec
+		if resolved, ok := config.ResolvedProviderCached(cfg, name); ok {
+			effective = resolvedProviderToSpec(resolved, spec)
+		}
+		writeIndexJSON(w, s.latestIndex(), providerFromSpec(name, effective, isBuiltin, true))
 		return
 	}
 
@@ -174,4 +187,49 @@ func (s *Server) handleProviderGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeError(w, http.StatusNotFound, "not_found", "provider "+name+" not found")
+}
+
+// resolvedProviderToSpec folds a ResolvedProvider back into a
+// ProviderSpec shape so the existing response DTOs (which accept
+// ProviderSpec) can consume cache-derived data without taking a
+// dependency on the full ResolvedProvider struct. Preserves fields
+// from the original raw spec that ResolvedProvider doesn't carry
+// (PathCheck in particular).
+func resolvedProviderToSpec(r config.ResolvedProvider, fallback config.ProviderSpec) config.ProviderSpec {
+	out := fallback
+	// DisplayName is not carried on ResolvedProvider — retain the
+	// fallback spec's DisplayName.
+	out.Command = r.Command
+	out.Args = append([]string(nil), r.Args...)
+	out.PromptMode = r.PromptMode
+	out.PromptFlag = r.PromptFlag
+	out.ReadyDelayMs = r.ReadyDelayMs
+	out.ReadyPromptPrefix = r.ReadyPromptPrefix
+	out.ProcessNames = append([]string(nil), r.ProcessNames...)
+	out.EmitsPermissionWarning = r.EmitsPermissionWarning
+	out.SupportsACP = r.SupportsACP
+	out.SupportsHooks = r.SupportsHooks
+	out.InstructionsFile = r.InstructionsFile
+	out.ResumeFlag = r.ResumeFlag
+	out.ResumeStyle = r.ResumeStyle
+	out.ResumeCommand = r.ResumeCommand
+	out.SessionIDFlag = r.SessionIDFlag
+	out.PrintArgs = append([]string(nil), r.PrintArgs...)
+	out.TitleModel = r.TitleModel
+	if r.PermissionModes != nil {
+		out.PermissionModes = make(map[string]string, len(r.PermissionModes))
+		for k, v := range r.PermissionModes {
+			out.PermissionModes[k] = v
+		}
+	}
+	if r.Env != nil {
+		out.Env = make(map[string]string, len(r.Env))
+		for k, v := range r.Env {
+			out.Env[k] = v
+		}
+	}
+	if r.OptionsSchema != nil {
+		out.OptionsSchema = append([]config.ProviderOption(nil), r.OptionsSchema...)
+	}
+	return out
 }
