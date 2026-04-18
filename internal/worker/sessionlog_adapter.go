@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // LoadRequest scopes a Phase 1 transcript load.
@@ -28,10 +29,7 @@ type SessionLogAdapter struct {
 
 // DiscoverTranscript returns the best available transcript path for a worker.
 func (a SessionLogAdapter) DiscoverTranscript(provider, workDir, gcSessionID string) string {
-	if strings.TrimSpace(gcSessionID) != "" && supportsTranscriptIDLookup(provider) {
-		return sessionlog.FindSessionFileByID(a.SearchPaths, workDir, gcSessionID)
-	}
-	return sessionlog.FindSessionFileForProvider(a.SearchPaths, provider, workDir)
+	return workertranscript.DiscoverPath(a.SearchPaths, provider, workDir, gcSessionID)
 }
 
 // LoadHistory loads and normalizes a provider transcript.
@@ -416,18 +414,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func isProviderFamily(provider string, families ...string) bool {
-	lower := strings.ToLower(strings.TrimSpace(provider))
-	for _, family := range families {
-		if strings.Contains(lower, family) {
-			return true
-		}
-	}
-	return false
-}
-
-func supportsTranscriptIDLookup(provider string) bool {
-	return !isProviderFamily(provider, "codex", "gemini")
 }

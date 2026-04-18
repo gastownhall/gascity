@@ -49,6 +49,18 @@ func TestSessionHandleStartStopState(t *testing.T) {
 	if bead.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", bead.Metadata["pending_create_claim"])
 	}
+	if bead.Metadata["worker_profile_provider_family"] != "claude" {
+		t.Fatalf("worker_profile_provider_family = %q, want claude", bead.Metadata["worker_profile_provider_family"])
+	}
+	if bead.Metadata["worker_profile_transport_class"] != "tmux-cli" {
+		t.Fatalf("worker_profile_transport_class = %q, want tmux-cli", bead.Metadata["worker_profile_transport_class"])
+	}
+	if bead.Metadata["worker_profile_compatibility_version"] == "" {
+		t.Fatal("worker_profile_compatibility_version is empty")
+	}
+	if bead.Metadata["worker_profile_certification_fingerprint"] == "" {
+		t.Fatal("worker_profile_certification_fingerprint is empty")
+	}
 
 	info, err := mgr.Get(handle.sessionID)
 	if err != nil {
@@ -84,6 +96,38 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		if call.Method == "Pending" {
 			t.Fatalf("State(after stop) probed Pending on a stopped session: %#v", sp.Calls[callCount:])
 		}
+	}
+}
+
+func TestCanonicalProfileIdentity(t *testing.T) {
+	identity, ok := CanonicalProfileIdentity(ProfileCodexTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileCodexTmuxCLI) = false, want true")
+	}
+	if identity.ProviderFamily != "codex" {
+		t.Fatalf("ProviderFamily = %q, want codex", identity.ProviderFamily)
+	}
+	if identity.TransportClass != "tmux-cli" {
+		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
+	}
+	if identity.BehaviorClaimsVersion == "" {
+		t.Fatal("BehaviorClaimsVersion is empty")
+	}
+	if identity.TranscriptAdapterVersion == "" {
+		t.Fatal("TranscriptAdapterVersion is empty")
+	}
+	if identity.CompatibilityVersion == "" {
+		t.Fatal("CompatibilityVersion is empty")
+	}
+	if identity.CertificationFingerprint == "" {
+		t.Fatal("CertificationFingerprint is empty")
+	}
+	repeat, ok := CanonicalProfileIdentity(ProfileCodexTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileCodexTmuxCLI) repeat = false, want true")
+	}
+	if identity.CertificationFingerprint != repeat.CertificationFingerprint {
+		t.Fatalf("CertificationFingerprint = %q, want stable %q", repeat.CertificationFingerprint, identity.CertificationFingerprint)
 	}
 }
 

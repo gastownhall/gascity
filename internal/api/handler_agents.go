@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 const lookPathCacheTTL = 30 * time.Second
@@ -615,7 +616,7 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if provider == "" && cfg != nil {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	sessionFile := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	sessionFile := workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
 	if sessionFile == "" {
 		return
 	}

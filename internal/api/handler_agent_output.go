@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
@@ -80,7 +81,7 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	path := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	path := workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
 	if path == "" {
 		return nil, nil
 	}
@@ -271,7 +272,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 
 	var logPath string
 	if workDir != "" {
-		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+		logPath = workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
 	}
 
 	// Check if agent is running.

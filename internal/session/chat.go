@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // staleKeyDetectDelay is how long to wait after starting a session before
@@ -548,10 +549,8 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
-	if sessionKey := b.Metadata["session_key"]; sessionKey != "" {
-		if path := sessionlog.FindSessionFileByID(searchPaths, workDir, sessionKey); path != "" {
-			return path, nil
-		}
+	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, nil
 	}
 
 	all, err := m.store.List(beads.ListQuery{
@@ -582,5 +581,5 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			}
 		}
 	}
-	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir), nil
+	return workertranscript.DiscoverPath(searchPaths, provider, workDir, ""), nil
 }

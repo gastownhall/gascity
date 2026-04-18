@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 var errSessionTemplateNotFound = errors.New("session template not found")
@@ -138,44 +139,40 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
-
-	buildResolved := func(resolved *config.ResolvedProvider, workDir string) (string, runtime.Config) {
-		if resolved == nil {
-			return cmd, runtime.Config{WorkDir: workDir}
-		}
-		resolvedInfo := info
-		resolvedInfo.Command = resolved.CommandString()
-		resolvedInfo.Provider = resolved.Name
-		resolvedInfo.ResumeFlag = resolved.ResumeFlag
-		resolvedInfo.ResumeStyle = resolved.ResumeStyle
-		resolvedInfo.ResumeCommand = resolved.ResumeCommand
-		return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
+	resolved, workDir := s.resolveSessionRuntime(info)
+	if resolved == nil {
+		return cmd, runtime.Config{WorkDir: info.WorkDir}
 	}
+	resolvedInfo := info
+	resolvedInfo.Command = resolved.CommandString()
+	resolvedInfo.Provider = resolved.Name
+	resolvedInfo.ResumeFlag = resolved.ResumeFlag
+	resolvedInfo.ResumeStyle = resolved.ResumeStyle
+	resolvedInfo.ResumeCommand = resolved.ResumeCommand
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
+}
 
-	// Check persisted kind to avoid agent/provider name collisions.
-	// If kind is "provider", skip the agent template lookup entirely.
+func (s *Server) resolveSessionRuntime(info session.Info) (*config.ResolvedProvider, string) {
 	kind := s.sessionKind(info.ID)
-
 	if kind != "provider" {
 		resolved, workDir, _, _, err := s.resolveSessionTemplate(info.Template)
 		if err == nil {
 			if info.WorkDir != "" {
 				workDir = info.WorkDir
 			}
-			return buildResolved(resolved, workDir)
+			return resolved, workDir
 		}
 	}
 
-	// Provider path (explicit kind=provider, or agent template not found).
 	resolved, err := s.resolveBareProvider(info.Template)
 	if err != nil {
-		return cmd, runtime.Config{WorkDir: info.WorkDir}
+		return nil, ""
 	}
 	workDir := info.WorkDir
 	if workDir == "" {
 		workDir = s.state.CityPath()
 	}
-	return buildResolved(resolved, workDir)
+	return resolved, workDir
 }
 
 // sessionKind reads the persisted mc_session_kind from bead metadata.
@@ -861,8 +858,12 @@ func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	if err := mgr.StopTurn(id); err != nil {
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Interrupt(r.Context(), worker.InterruptRequest{}); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -926,8 +927,13 @@ func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mgr := s.sessionManager(store)
-	if err := mgr.Respond(id, runtime.InteractionResponse{
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Respond(r.Context(), worker.InteractionResponse{
 		RequestID: body.RequestID,
 		Action:    body.Action,
 		Text:      body.Text,

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 	"github.com/spf13/cobra"
 )
 
@@ -89,12 +90,12 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
 	if logCtx.sessionKey != "" {
-		if path := sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey); path != "" {
+		if path := workertranscript.DiscoverKeyedPath(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionKey); path != "" {
 			return path
 		}
-		return sessionlog.FindProviderFallbackSessionFile(searchPaths, logCtx.provider, logCtx.workDir)
+		return workertranscript.DiscoverFallbackPath(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 	}
-	return sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
+	return workertranscript.DiscoverPath(searchPaths, logCtx.provider, logCtx.workDir, "")
 }
 
 func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
