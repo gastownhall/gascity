@@ -476,6 +476,33 @@ func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.S
 	})
 }
 
+func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) (worker.Handle, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, session.ErrSessionNotFound
+	}
+	if store != nil {
+		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
+			return s.workerHandleForSession(store, id)
+		} else if !errors.Is(err, session.ErrSessionNotFound) {
+			return nil, err
+		}
+	}
+	sp := s.state.SessionProvider()
+	if sp == nil {
+		return nil, session.ErrSessionNotFound
+	}
+	sessionID, err := sp.GetMeta(target, "GC_SESSION_ID")
+	if store != nil && err == nil && strings.TrimSpace(sessionID) != "" {
+		return s.workerHandleForSession(store, strings.TrimSpace(sessionID))
+	}
+	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  target,
+		ProviderName: target,
+	})
+}
+
 func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (*worker.SessionHandle, error) {
 	return worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager:     s.sessionManager(store),

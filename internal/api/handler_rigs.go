@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type rigResponse struct {
@@ -43,10 +43,11 @@ func (s *Server) handleRigList(w http.ResponseWriter, r *http.Request) {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	wantGit := r.URL.Query().Get("git") == "true"
+	store := s.state.CityBeadStore()
 
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		resp := buildRigResponse(cfg, rig, sp, cityName, s.state.CityPath())
+		resp := s.buildRigResponse(cfg, rig, store, sp, cityName, s.state.CityPath())
 		if wantGit {
 			resp.Git = fetchGitStatus(rig.Path)
 		}
@@ -60,10 +61,11 @@ func (s *Server) handleRig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	wantGit := r.URL.Query().Get("git") == "true"
+	store := s.state.CityBeadStore()
 
 	for _, rig := range cfg.Rigs {
 		if rig.Name == name {
-			resp := buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
+			resp := s.buildRigResponse(cfg, rig, store, sp, s.state.CityName(), s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}
@@ -141,20 +143,9 @@ func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
 		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
 		for _, ea := range expanded {
 			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
-			killedViaWorker := false
-			err := error(nil)
-			if store != nil {
-				if sessionID, resolveErr := session.ResolveSessionID(store, sessionName); resolveErr == nil {
-					if handle, handleErr := s.workerHandleForSession(store, sessionID); handleErr == nil {
-						err = handle.Kill(context.Background())
-						killedViaWorker = err == nil
-					} else {
-						err = handleErr
-					}
-				}
-			}
-			if !killedViaWorker {
-				err = sp.Stop(sessionName)
+			handle, err := s.workerHandleForSessionTarget(store, sessionName)
+			if err == nil {
+				err = handle.Kill(context.Background())
 			}
 			if err != nil {
 				// "not found" / "not running" are benign — agent wasn't running.
@@ -187,7 +178,7 @@ func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
-func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, store beads.Store, sp sessionLister, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -200,11 +191,13 @@ func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cit
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			if sp.IsRunning(sessionName) {
+			handle, _ := s.workerHandleForSessionTarget(store, sessionName)
+			obs, _ := worker.ObserveHandle(context.Background(), handle)
+			if obs.Running {
 				runningCount++
 			}
-			if t, err := sp.GetLastActivity(sessionName); err == nil && t.After(maxActivity) {
-				maxActivity = t
+			if obs.LastActivity != nil && obs.LastActivity.After(maxActivity) {
+				maxActivity = *obs.LastActivity
 			}
 		}
 	}
@@ -212,7 +205,7 @@ func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cit
 	resp := rigResponse{
 		Name:         rig.Name,
 		Path:         rig.Path,
-		Suspended:    rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Suspended:    s.rigSuspended(cfg, rig, store, sp, cityName, cityPath),
 		Prefix:       rig.Prefix,
 		AgentCount:   agentCount,
 		RunningCount: runningCount,
@@ -226,7 +219,7 @@ func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cit
 // rigSuspended computes effective suspended state for a rig by merging config
 // and runtime session metadata. A rig is suspended if the config says so, or
 // if all its agents are runtime-suspended via session metadata.
-func rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
+func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, store beads.Store, sp sessionLister, cityName, cityPath string) bool {
 	if rig.Suspended {
 		return true
 	}
@@ -240,7 +233,9 @@ func rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityNam
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
+			handle, _ := s.workerHandleForSessionTarget(store, sessionName)
+			obs, _ := worker.ObserveHandle(context.Background(), handle)
+			if obs.Suspended {
 				suspendedCount++
 			}
 		}

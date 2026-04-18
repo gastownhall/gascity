@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 func TestSessionHandleStartStopState(t *testing.T) {
@@ -773,6 +774,117 @@ func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T)
 	wantResume := "codex resume " + resumeID
 	if !strings.Contains(secondStart.Config.Command, wantResume) {
 		t.Fatalf("second start command = %q, want %q", secondStart.Config.Command, wantResume)
+	}
+}
+
+func TestSessionHandleAgentMappingsAndTranscriptUseWorkerBoundary(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "claude-project")
+	handle, _, _, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	handle.adapter.SearchPaths = []string{base}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+
+	slugDir := filepath.Join(base, sessionlog.ProjectSlug(workDir))
+	parentPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	if err := os.MkdirAll(filepath.Join(slugDir, info.SessionKey, "subagents"), 0o755); err != nil {
+		t.Fatalf("mkdir subagents: %v", err)
+	}
+	parentContent := `{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"}}` + "\n"
+	if err := os.WriteFile(parentPath, []byte(parentContent), 0o644); err != nil {
+		t.Fatalf("write parent transcript: %v", err)
+	}
+	agentPath := filepath.Join(slugDir, info.SessionKey, "subagents", "agent-helper.jsonl")
+	agentContent := strings.Join([]string{
+		`{"uuid":"a1","type":"system","parentToolUseId":"toolu_123"}`,
+		`{"uuid":"a2","parentUuid":"a1","type":"assistant","message":{"role":"assistant","content":"working"}}`,
+		`{"uuid":"a3","parentUuid":"a2","type":"result","message":{"role":"result"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(agentPath, []byte(agentContent), 0o644); err != nil {
+		t.Fatalf("write agent transcript: %v", err)
+	}
+
+	mappings, err := handle.AgentMappings(context.Background())
+	if err != nil {
+		t.Fatalf("AgentMappings: %v", err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("len(AgentMappings) = %d, want 1", len(mappings))
+	}
+	if mappings[0].AgentID != "helper" {
+		t.Fatalf("AgentMappings()[0].AgentID = %q, want helper", mappings[0].AgentID)
+	}
+	if mappings[0].ParentToolUseID != "toolu_123" {
+		t.Fatalf("AgentMappings()[0].ParentToolUseID = %q, want toolu_123", mappings[0].ParentToolUseID)
+	}
+
+	agentSession, err := handle.AgentTranscript(context.Background(), "helper")
+	if err != nil {
+		t.Fatalf("AgentTranscript: %v", err)
+	}
+	if agentSession == nil || agentSession.Session == nil {
+		t.Fatal("AgentTranscript returned nil session")
+	}
+	if agentSession.Session.Status != sessionlog.AgentStatusCompleted {
+		t.Fatalf("AgentTranscript().Session.Status = %q, want %q", agentSession.Session.Status, sessionlog.AgentStatusCompleted)
+	}
+	if len(agentSession.RawMessages) != 3 {
+		t.Fatalf("len(AgentTranscript().RawMessages) = %d, want 3", len(agentSession.RawMessages))
+	}
+}
+
+func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "Proceed?",
+	})
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseBlocked {
+		t.Fatalf("State().Phase = %s, want %s", state.Phase, PhaseBlocked)
+	}
+	if state.Pending == nil || state.Pending.RequestID != "req-1" {
+		t.Fatalf("State().Pending = %#v, want req-1", state.Pending)
+	}
+
+	if err := handle.Interrupt(context.Background(), InterruptRequest{}); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if err := handle.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if sp.IsRunning("legacy-worker") {
+		t.Fatal("legacy-worker should be stopped after Kill")
 	}
 }
 

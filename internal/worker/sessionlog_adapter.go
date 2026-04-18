@@ -40,6 +40,14 @@ type TranscriptResult struct {
 	RawMessages    []json.RawMessage
 }
 
+// AgentTranscriptResult wraps a provider-native subagent transcript so callers
+// do not depend on sessionlog discovery helpers directly.
+type AgentTranscriptResult struct {
+	TranscriptPath string
+	Session        *sessionlog.AgentSession
+	RawMessages    []json.RawMessage
+}
+
 // SessionLogAdapter exposes the normalized transcript contract while keeping
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
@@ -62,6 +70,31 @@ func (a SessionLogAdapter) DiscoverTranscript(provider, workDir, gcSessionID str
 // TailMeta reads model/context metadata from a discovered transcript path.
 func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 	return sessionlog.ExtractTailMetaFromSearchPaths(a.SearchPaths, path)
+}
+
+// AgentMappings lists subagent transcript mappings for a parent transcript.
+func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping, error) {
+	return sessionlog.FindAgentMappings(strings.TrimSpace(path))
+}
+
+// ReadAgentTranscript loads a subagent transcript while preserving raw
+// message fidelity for worker-owned API surfaces.
+func (a SessionLogAdapter) ReadAgentTranscript(path, agentID string) (*AgentTranscriptResult, error) {
+	sess, err := sessionlog.ReadAgentSession(strings.TrimSpace(path), strings.TrimSpace(agentID))
+	if err != nil {
+		return nil, err
+	}
+	result := &AgentTranscriptResult{
+		TranscriptPath: filepath.Clean(path),
+		Session:        sess,
+		RawMessages:    make([]json.RawMessage, 0, len(sess.Messages)),
+	}
+	for _, entry := range sess.Messages {
+		if len(entry.Raw) > 0 {
+			result.RawMessages = append(result.RawMessages, entry.Raw)
+		}
+	}
+	return result, nil
 }
 
 // ReadTranscript loads a provider transcript while preserving raw pagination

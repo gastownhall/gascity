@@ -217,18 +217,43 @@ session_id_flag = "--session-id"
 	}
 }
 
-func TestWorkerKillSessionTargetWithConfigFallsBackToProvider(t *testing.T) {
+func TestWorkerKillSessionTargetWithConfigResolvesRuntimeSessionMeta(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
 	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
-		t.Fatalf("sp.Start: %v", err)
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.Create(context.Background(), "worker", "Probe", "stub", t.TempDir(), "stub", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
 
-	if err := workerKillSessionTargetWithConfig("", nil, sp, nil, "orphan"); err != nil {
+	if err := workerKillSessionTargetWithConfig(cityDir, store, sp, cfg, info.SessionName); err != nil {
 		t.Fatalf("workerKillSessionTargetWithConfig: %v", err)
 	}
 	last := sp.Calls[len(sp.Calls)-1]
-	if last.Method != "Stop" || last.Name != "orphan" {
-		t.Fatalf("last runtime call = %#v, want Stop orphan", last)
+	if last.Method != "Stop" || last.Name != info.SessionName {
+		t.Fatalf("last runtime call = %#v, want Stop %q", last, info.SessionName)
 	}
 }
 

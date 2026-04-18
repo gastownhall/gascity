@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 var (
@@ -533,6 +534,26 @@ func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (
 	readReq.Provider = h.historyProvider(info)
 	readReq.TranscriptPath = path
 	return h.adapter.ReadTranscript(readReq)
+}
+
+// AgentMappings returns subagent mappings discovered from the worker's
+// transcript stream.
+func (h *SessionHandle) AgentMappings(ctx context.Context) ([]sessionlog.AgentMapping, error) {
+	path, err := h.TranscriptPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return h.adapter.AgentMappings(path)
+}
+
+// AgentTranscript returns a subagent transcript derived from the worker's
+// primary transcript stream.
+func (h *SessionHandle) AgentTranscript(ctx context.Context, agentID string) (*AgentTranscriptResult, error) {
+	path, err := h.TranscriptPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return h.adapter.ReadAgentTranscript(path, agentID)
 }
 
 // History returns the normalized worker transcript.
