@@ -353,9 +353,9 @@ func (h *SessionHandle) Create(ctx context.Context, mode CreateMode) (sessionpkg
 
 // Reset requests a fresh restart for the worker while preserving the bead.
 func (h *SessionHandle) Reset(context.Context) error {
-	id, err := h.ensureSessionID()
-	if err != nil {
-		return err
+	id := h.currentSessionID()
+	if id == "" {
+		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
 	}
 	return h.manager.RequestFreshRestart(id)
 }
