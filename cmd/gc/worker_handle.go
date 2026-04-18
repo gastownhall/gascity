@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -16,6 +17,64 @@ func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp run
 	return worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager: newSessionManagerWithConfig(cityPath, store, sp, cfg),
 		Session: spec,
+	})
+}
+
+func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
+	if resolved == nil {
+		return runtime.Config{}
+	}
+	return runtime.Config{
+		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
+		ReadyDelayMs:           resolved.ReadyDelayMs,
+		ProcessNames:           resolved.ProcessNames,
+		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+	}
+}
+
+func newWorkerSessionHandleForResolvedRuntimeWithConfig(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	alias, explicitName, template, title, command, provider, workDir, transport string,
+	resolved *config.ResolvedProvider,
+	metadata map[string]string,
+) (*worker.SessionHandle, error) {
+	if resolved == nil {
+		return nil, fmt.Errorf("resolved provider is required")
+	}
+	if strings.TrimSpace(command) == "" {
+		command = resolved.CommandString()
+	}
+	providerName := strings.TrimSpace(resolved.Name)
+	if providerName == "" {
+		providerName = strings.TrimSpace(provider)
+	}
+	if providerName == "" {
+		providerName = command
+		if idx := strings.IndexAny(providerName, " \t"); idx >= 0 {
+			providerName = providerName[:idx]
+		}
+	}
+	return newWorkerSessionHandleWithConfig(cityPath, store, sp, cfg, worker.SessionSpec{
+		Alias:        alias,
+		ExplicitName: explicitName,
+		Template:     template,
+		Title:        title,
+		Command:      command,
+		WorkDir:      workDir,
+		Provider:     providerName,
+		Transport:    transport,
+		Env:          resolved.Env,
+		Resume: session.ProviderResume{
+			ResumeFlag:    resolved.ResumeFlag,
+			ResumeStyle:   resolved.ResumeStyle,
+			ResumeCommand: resolved.ResumeCommand,
+			SessionIDFlag: resolved.SessionIDFlag,
+		},
+		Hints:    workerSessionCreateHints(resolved),
+		Metadata: metadata,
 	})
 }
 
