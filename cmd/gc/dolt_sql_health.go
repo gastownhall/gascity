@@ -29,17 +29,6 @@ var (
 	managedDoltSQLCommandTimeout       = 5 * time.Second
 )
 
-// The probe database is intentionally persistent. Dropping Dolt databases leaves
-// .dolt_dropped_databases backups, so the health check keeps a stable table and
-// rewrites a single row to test writability.
-var managedDoltReadOnlyProbeStatements = [...]string{
-	"CREATE DATABASE IF NOT EXISTS " + managedDoltProbeDatabase,
-	"CREATE TABLE IF NOT EXISTS " + managedDoltProbeDatabase + ".__probe (k INT PRIMARY KEY)",
-	"REPLACE INTO " + managedDoltProbeDatabase + ".__probe VALUES (1)",
-}
-
-var managedDoltReadOnlyProbeSQL = strings.Join(managedDoltReadOnlyProbeStatements[:], "; ") + ";"
-
 func managedDoltQueryProbe(host, port, user string) error {
 	if managedDoltPassword() != "" {
 		return managedDoltQueryProbeDirectFn(host, port, user)
@@ -58,15 +47,19 @@ func managedDoltReadOnlyState(host, port, user string) (string, error) {
 	if managedDoltPassword() != "" {
 		return managedDoltReadOnlyStateDirectFn(host, port, user)
 	}
-	_, err := runManagedDoltSQL(host, port, user, "-q", managedDoltReadOnlyProbeSQL)
-	if err == nil {
-		return "false", nil
+	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT @@global.read_only")
+	if err != nil {
+		return "unknown", err
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "read only") || strings.Contains(msg, "read-only") {
-		return "true", nil
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		switch strings.TrimSpace(line) {
+		case "1":
+			return "true", nil
+		case "0":
+			return "false", nil
+		}
 	}
-	return "unknown", err
+	return "unknown", fmt.Errorf("parse read_only from %q", strings.TrimSpace(out))
 }
 
 func managedDoltConnectionCount(host, port, user string) (string, error) {
@@ -187,14 +180,12 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	for _, query := range managedDoltReadOnlyProbeStatements {
-		if _, err := conn.ExecContext(ctx, query); err != nil {
-			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "read only") || strings.Contains(msg, "read-only") {
-				return "true", nil
-			}
-			return "unknown", err
-		}
+	var readOnly int
+	if err := conn.QueryRowContext(ctx, "SELECT @@global.read_only").Scan(&readOnly); err != nil {
+		return "unknown", err
+	}
+	if readOnly == 1 {
+		return "true", nil
 	}
 	return "false", nil
 }

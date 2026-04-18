@@ -1778,8 +1778,8 @@ func TestDoltStateReadOnlyCheckCmdDetectsReadOnly(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
-echo 'database is read only' >&2
-exit 1
+printf '@@global.read_only\n1\n'
+exit 0
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1794,7 +1794,9 @@ exit 1
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", string(invocation))
-	assertManagedDoltProbeWrites(t, "read-only-check invocation", string(invocation))
+	if !strings.Contains(string(invocation), "@@global.read_only") {
+		t.Fatalf("read-only-check must use @@global.read_only sysvar: %s", string(invocation))
+	}
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
@@ -1803,6 +1805,7 @@ func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
+printf '@@global.read_only\n0\n'
 exit 0
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
@@ -1901,9 +1904,9 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
-    echo 'database is read only' >&2
-    exit 1
+  *"sql -r csv -q SELECT @@global.read_only"*)
+    printf '@@global.read_only\n1\n'
+    exit 0
     ;;
   *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
     printf 'cnt\n812\n'
@@ -1939,7 +1942,9 @@ esac
 	}
 	text := string(invocation)
 	assertNoManagedDoltProbeDrop(t, "health-check read-only probe", text)
-	assertManagedDoltProbeWrites(t, "health-check read-only probe", text)
+	if !strings.Contains(text, "@@global.read_only") {
+		t.Fatalf("health-check read-only probe must use @@global.read_only sysvar: %s", text)
+	}
 	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
@@ -1986,7 +1991,7 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
-	if strings.Contains(text, "CREATE DATABASE IF NOT EXISTS __gc_probe") {
+	if strings.Contains(text, "@@global.read_only") {
 		t.Fatalf("health-check unexpectedly ran read-only probe: %s", text)
 	}
 	for _, want := range []string{"SELECT active_branch()", "information_schema.PROCESSLIST"} {
@@ -2025,7 +2030,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
+  *"sql -r csv -q SELECT @@global.read_only"*)
     echo 'probe exploded' >&2
     exit 1
     ;;
@@ -2418,11 +2423,12 @@ INNERPY
   *"SELECT active_branch()"*)
     exit 0
     ;;
-  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+  *"SELECT @@global.read_only"*)
     if [ -f "$READ_ONLY_ONCE" ]; then
       rm -f "$READ_ONLY_ONCE"
-      echo "read only" >&2
-      exit 1
+      printf '@@global.read_only\n1\n'
+    else
+      printf '@@global.read_only\n0\n'
     fi
     exit 0
     ;;
@@ -2857,7 +2863,8 @@ INNERPY
     echo "final health probe failed" >&2
     exit 1
     ;;
-  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+  *"sql -r csv -q SELECT @@global.read_only"*)
+    printf '@@global.read_only\n0\n'
     exit 0
     ;;
   *)

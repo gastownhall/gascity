@@ -166,7 +166,7 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	}
 }
 
-func TestGcBeadsBdReadOnlyFallbackDoesNotDropProbeDatabase(t *testing.T) {
+func TestGcBeadsBdReadOnlyFallbackUsesGlobalSysvar(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks: %v", err)
@@ -177,10 +177,15 @@ func TestGcBeadsBdReadOnlyFallbackDoesNotDropProbeDatabase(t *testing.T) {
 	}
 	script := string(scriptData)
 	assertNoManagedDoltProbeDrop(t, "gc-beads-bd read-only fallback", script)
-	if !strings.Contains(script, "CREATE TABLE IF NOT EXISTS __gc_probe.__probe") {
-		t.Fatalf("gc-beads-bd read-only fallback missing qualified persistent probe table")
+	if strings.Contains(script, "CREATE TABLE IF NOT EXISTS __gc_probe") {
+		t.Fatalf("gc-beads-bd read-only fallback must not write to probe database")
 	}
-	assertManagedDoltProbeWrites(t, "gc-beads-bd read-only fallback", script)
+	if strings.Contains(script, "REPLACE INTO __gc_probe") {
+		t.Fatalf("gc-beads-bd read-only fallback must not write to probe database")
+	}
+	if !strings.Contains(script, "@@global.read_only") {
+		t.Fatalf("gc-beads-bd read-only fallback must use @@global.read_only sysvar")
+	}
 }
 
 func TestGcBeadsBdInitRejectsManagedProbeDatabaseName(t *testing.T) {

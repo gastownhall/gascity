@@ -1003,15 +1003,17 @@ check_read_only() {
         esac
     fi
     local output
-    # Keep __gc_probe stable. Dropping Dolt databases leaves
-    # .dolt_dropped_databases backups behind.
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);" 2>&1) || true
-    case "$output" in
-        *"read only"*|*"READ ONLY"*|*"Read-only"*)
-            return 0  # Is read-only.
-            ;;
-    esac
-    return 1  # Writable.
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT @@global.read_only" 2>&1) || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            1) return 0 ;;
+            0) return 1 ;;
+        esac
+    done <<EOF
+$output
+EOF
+    return 1
 }
 
 load_health_check_from_gc() {

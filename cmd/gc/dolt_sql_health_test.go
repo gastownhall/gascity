@@ -10,19 +10,34 @@ import (
 	"time"
 )
 
-func TestManagedDoltReadOnlyProbeDoesNotDropProbeDatabase(t *testing.T) {
-	for _, query := range append(append([]string{}, managedDoltReadOnlyProbeStatements[:]...), managedDoltReadOnlyProbeSQL) {
-		assertNoManagedDoltProbeDrop(t, "read-only probe", query)
+func TestManagedDoltReadOnlyStateUsesGlobalSysvar(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$INVOCATION_FILE\"\nprintf '@@global.read_only\\n0\\n'\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	assertManagedDoltProbeWrites(t, "joined read-only probe", managedDoltReadOnlyProbeSQL)
-	foundWriteStatement := false
-	for _, query := range managedDoltReadOnlyProbeStatements {
-		if strings.Contains(query, "REPLACE INTO __gc_probe.__probe VALUES (1)") {
-			foundWriteStatement = true
-		}
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	state, err := managedDoltReadOnlyState("127.0.0.1", "3311", "root")
+	if err != nil {
+		t.Fatalf("managedDoltReadOnlyState() error = %v", err)
 	}
-	if !foundWriteStatement {
-		t.Fatal("read-only probe statements must include a write to __gc_probe.__probe")
+	if state != "false" {
+		t.Fatalf("managedDoltReadOnlyState() = %q, want false", state)
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	text := string(invocation)
+	if !strings.Contains(text, "@@global.read_only") {
+		t.Fatalf("managedDoltReadOnlyState did not use @@global.read_only sysvar: %s", text)
+	}
+	assertNoManagedDoltProbeDrop(t, "read-only state", text)
+	if strings.Contains(text, "__gc_probe") {
+		t.Fatalf("managedDoltReadOnlyState must not reference probe database: %s", text)
 	}
 }
 
@@ -35,13 +50,6 @@ func assertNoManagedDoltProbeDrop(t *testing.T, label, text string) {
 	}
 	if dropProbeTable.MatchString(text) {
 		t.Fatalf("%s must keep __gc_probe.__probe stable: %s", label, text)
-	}
-}
-
-func assertManagedDoltProbeWrites(t *testing.T, label, text string) {
-	t.Helper()
-	if !strings.Contains(text, "REPLACE INTO __gc_probe.__probe VALUES (1)") {
-		t.Fatalf("%s must write to __gc_probe.__probe: %s", label, text)
 	}
 }
 
