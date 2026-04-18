@@ -7002,6 +7002,16 @@
             }
           },
           {
+            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "type": "string"
+            }
+          },
+          {
             "description": "Agent base name.",
             "in": "path",
             "name": "base",
@@ -7009,18 +7019,6 @@
             "schema": {
               "description": "Agent base name.",
               "type": "string"
-            }
-          },
-          {
-            "description": "Number of compaction segments to return (default 1, 0 = all).",
-            "explode": false,
-            "in": "query",
-            "name": "tail",
-            "schema": {
-              "description": "Number of compaction segments to return (default 1, 0 = all).",
-              "format": "int64",
-              "minimum": 0,
-              "type": "integer"
             }
           },
           {
@@ -7455,6 +7453,16 @@
             }
           },
           {
+            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "type": "string"
+            }
+          },
+          {
             "description": "Agent directory (rig name).",
             "in": "path",
             "name": "dir",
@@ -7472,18 +7480,6 @@
             "schema": {
               "description": "Agent base name.",
               "type": "string"
-            }
-          },
-          {
-            "description": "Number of compaction segments to return (default 1, 0 = all).",
-            "explode": false,
-            "in": "query",
-            "name": "tail",
-            "schema": {
-              "description": "Number of compaction segments to return (default 1, 0 = all).",
-              "format": "int64",
-              "minimum": 0,
-              "type": "integer"
             }
           },
           {
@@ -8407,13 +8403,14 @@
             }
           },
           {
-            "description": "Maximum number of results to return.",
+            "description": "Maximum number of results to return. 0 = server default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return.",
+              "description": "Maximum number of results to return. 0 = server default.",
               "format": "int64",
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -9249,13 +9246,14 @@
             }
           },
           {
-            "description": "Maximum number of results to return.",
+            "description": "Maximum number of results to return. 0 = server default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return.",
+              "description": "Maximum number of results to return. 0 = server default.",
               "format": "int64",
+              "minimum": 0,
               "type": "integer"
             }
           }
@@ -9402,13 +9400,14 @@
             }
           },
           {
-            "description": "Maximum number of results to return.",
+            "description": "Maximum number of results to return. 0 = server default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return.",
+              "description": "Maximum number of results to return. 0 = server default.",
               "format": "int64",
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -10953,13 +10952,14 @@
             }
           },
           {
-            "description": "Maximum number of results to return.",
+            "description": "Maximum number of results to return. 0 = server default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return.",
+              "description": "Maximum number of results to return. 0 = server default.",
               "format": "int64",
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -14909,6 +14909,16 @@
             }
           },
           {
+            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "type": "string"
+            }
+          },
+          {
             "description": "Session ID, alias, or runtime session_name.",
             "in": "path",
             "name": "id",
@@ -14926,18 +14936,6 @@
             "schema": {
               "description": "Transcript format: conversation (default) or raw.",
               "type": "string"
-            }
-          },
-          {
-            "description": "Number of recent entries to return. 0 = default.",
-            "explode": false,
-            "in": "query",
-            "name": "tail",
-            "schema": {
-              "description": "Number of recent entries to return. 0 = default.",
-              "format": "int64",
-              "minimum": 0,
-              "type": "integer"
             }
           },
           {
@@ -15065,13 +15063,14 @@
             }
           },
           {
-            "description": "Maximum number of results to return.",
+            "description": "Maximum number of results to return. 0 = server default.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return.",
+              "description": "Maximum number of results to return. 0 = server default.",
               "format": "int64",
+              "minimum": 0,
               "type": "integer"
             }
           },

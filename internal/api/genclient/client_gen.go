@@ -2451,8 +2451,8 @@ type WorkspaceResponse struct {
 
 // GetV0CityByCityNameAgentByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByBaseOutput.
 type GetV0CityByCityNameAgentByBaseOutputParams struct {
-	// Tail Number of compaction segments to return (default 1, 0 = all).
-	Tail *int64 `form:"tail,omitempty" json:"tail,omitempty"`
+	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -2463,8 +2463,8 @@ type PostV0CityByCityNameAgentByBaseByActionParamsAction string
 
 // GetV0CityByCityNameAgentByDirByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByDirByBaseOutput.
 type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
-	// Tail Number of compaction segments to return (default 1, 0 = all).
-	Tail *int64 `form:"tail,omitempty" json:"tail,omitempty"`
+	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -2508,7 +2508,7 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Cursor Pagination cursor from a previous response's next_cursor field.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return.
+	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Status Filter by bead status.
@@ -2553,7 +2553,7 @@ type GetV0CityByCityNameConvoysParams struct {
 	// Cursor Pagination cursor from a previous response's next_cursor field.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return.
+	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -2568,7 +2568,7 @@ type GetV0CityByCityNameEventsParams struct {
 	// Cursor Pagination cursor from a previous response's next_cursor field.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return.
+	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Type Filter by event type.
@@ -2703,7 +2703,7 @@ type GetV0CityByCityNameMailParams struct {
 	// Cursor Pagination cursor from a previous response's next_cursor field.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return.
+	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Agent Filter by agent name.
@@ -2853,11 +2853,11 @@ type StreamSessionParams struct {
 
 // GetV0CityByCityNameSessionByIdTranscriptParams defines parameters for GetV0CityByCityNameSessionByIdTranscript.
 type GetV0CityByCityNameSessionByIdTranscriptParams struct {
+	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
+
 	// Format Transcript format: conversation (default) or raw.
 	Format *string `form:"format,omitempty" json:"format,omitempty"`
-
-	// Tail Number of recent entries to return. 0 = default.
-	Tail *int64 `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Pagination cursor: return entries before this UUID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
@@ -2868,7 +2868,7 @@ type GetV0CityByCityNameSessionsParams struct {
 	// Cursor Pagination cursor from a previous response's next_cursor field.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return.
+	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// State Filter by session state (e.g. active, closed).
@@ -6151,7 +6151,7 @@ func NewGetV0CityByCityNameAgentByBaseOutputRequest(server string, cityName stri
 
 		if params.Tail != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -6483,7 +6483,7 @@ func NewGetV0CityByCityNameAgentByDirByBaseOutputRequest(server string, cityName
 
 		if params.Tail != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -12993,9 +12993,9 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 	if params != nil {
 		queryValues := queryURL.Query()
 
-		if params.Format != nil {
+		if params.Tail != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -13009,9 +13009,9 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 
 		}
 
-		if params.Tail != nil {
+		if params.Format != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tail", *params.Tail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

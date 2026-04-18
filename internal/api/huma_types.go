@@ -82,10 +82,60 @@ type WaitParam struct {
 	Wait string `query:"wait" doc:"Block until state changes, then return. Value is a Go duration string (e.g. 30s, 1m)." required:"false"`
 }
 
+// TailParam is an embeddable input mixin for transcript/agent-output
+// endpoints that use the sessionlog "tail N compaction segments" shape.
+//
+// tail stays typed as a string on the wire so three request states are
+// distinguishable:
+//
+//   - absent ("")   → handler applies its own default (usually 1)
+//   - "0"           → return all segments (no pagination)
+//   - "N" where N>0 → return the last N segments
+//
+// A prior refactor typed this as int and collapsed the first two states
+// into "tail=0", which silently broke the "return all" contract. The
+// Resolve method validates non-negative integer format and returns 422
+// for garbage.
+type TailParam struct {
+	Tail string `query:"tail" required:"false" doc:"Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N."`
+}
+
+// Resolve validates Tail. Huma calls this during binding.
+func (t *TailParam) Resolve(ctx huma.Context) []error {
+	if t.Tail == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(t.Tail)
+	if err != nil || n < 0 {
+		return []error{&huma.ErrorDetail{
+			Location: "query.tail",
+			Message:  "tail must be a non-negative integer",
+			Value:    t.Tail,
+		}}
+	}
+	_ = n
+	return nil
+}
+
+// Compactions returns (n, provided). When provided is false, callers
+// should apply their own default. n is guaranteed valid because Resolve
+// rejected malformed input before the handler ran.
+func (t *TailParam) Compactions() (n int, provided bool) {
+	if t.Tail == "" {
+		return 0, false
+	}
+	n, _ = strconv.Atoi(t.Tail)
+	return n, true
+}
+
 // PaginationParam is an embeddable input mixin for paginated list endpoints.
+// Limit carries a minimum: validation tag so malformed requests (e.g.
+// limit=-1) fail Huma validation with 422 instead of silently defaulting
+// or — under older paginate() behavior — panicking with a slice-bounds
+// error.
 type PaginationParam struct {
 	Cursor string `query:"cursor" doc:"Pagination cursor from a previous response's next_cursor field." required:"false"`
-	Limit  int    `query:"limit" doc:"Maximum number of results to return." required:"false"`
+	Limit  int    `query:"limit" minimum:"0" doc:"Maximum number of results to return. 0 = server default." required:"false"`
 }
 
 // --- Shared output types ---

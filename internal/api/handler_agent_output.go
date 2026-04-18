@@ -30,9 +30,11 @@ type agentOutputResponse struct {
 }
 
 // trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
-// tail is a typed int from the query binding; before is the optional
-// UUID cursor. Zero tail means "caller did not override the default."
-func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, before string) (*agentOutputResponse, error) {
+// tail carries the client's ?tail= value; tailProvided reports whether
+// the client supplied the param at all. When tailProvided is false, we
+// apply the endpoint default (1 compaction); when tailProvided is true
+// and tail==0, we return all segments (sessionlog "no pagination" mode).
+func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, tailProvided bool, before string) (*agentOutputResponse, error) {
 	cfg := s.state.Config()
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	if workDir == "" {
@@ -53,7 +55,7 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	}
 
 	tail := 1
-	if tailInput > 0 {
+	if tailProvided {
 		tail = tailInput
 	}
 

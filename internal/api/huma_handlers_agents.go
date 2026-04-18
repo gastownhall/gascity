@@ -353,7 +353,8 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInput) (*struct {
 	Body agentOutputResponse
 }, error) {
-	return s.agentOutputByName(input.Name, input.Tail, input.Before)
+	tail, provided := input.Compactions()
+	return s.agentOutputByName(input.Name, tail, provided, input.Before)
 }
 
 // humaHandleAgentOutputQualified is the Huma-typed handler for
@@ -361,11 +362,17 @@ func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInpu
 func (s *Server) humaHandleAgentOutputQualified(_ context.Context, input *AgentOutputQualifiedInput) (*struct {
 	Body agentOutputResponse
 }, error) {
-	return s.agentOutputByName(input.QualifiedName(), input.Tail, input.Before)
+	tail, provided := input.Compactions()
+	return s.agentOutputByName(input.QualifiedName(), tail, provided, input.Before)
 }
 
-// agentOutputByName is the shared implementation for the agent output handlers.
-func (s *Server) agentOutputByName(name string, tail int, before string) (*struct {
+// agentOutputByName is the shared implementation for the agent output
+// handlers. tail carries the client's ?tail= value verbatim; provided
+// reports whether the client supplied ?tail= at all. When provided is
+// false, the handler applies the default (1 compaction). When provided
+// is true and tail==0, return all compactions (sessionlog's
+// "no pagination" mode).
+func (s *Server) agentOutputByName(name string, tail int, provided bool, before string) (*struct {
 	Body agentOutputResponse
 }, error) {
 	cfg := s.state.Config()
@@ -374,7 +381,7 @@ func (s *Server) agentOutputByName(name string, tail int, before string) (*struc
 		return nil, huma.Error404NotFound("agent " + name + " not found")
 	}
 
-	resp, err := s.trySessionLogOutputHuma(name, agentCfg, tail, before)
+	resp, err := s.trySessionLogOutputHuma(name, agentCfg, tail, provided, before)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
 	}

@@ -142,7 +142,11 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 	wantRaw := input.Format == "raw"
 
 	if path != "" {
-		tail := input.Tail
+		// Compactions() returns (n, provided). When the client omitted
+		// ?tail the transcript endpoint has historically returned all
+		// entries, so default to 0 (sessionlog's "no pagination"
+		// sentinel) rather than 1 compaction.
+		tail, _ := input.Compactions()
 		before := input.Before
 
 		if wantRaw {

@@ -97,16 +97,12 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 			}
 			fv = fv.Elem()
 		}
-		if fv.Kind() == reflect.String && fv.String() == "" {
+		// Skip zero values so empty/default fields don't bloat the cache
+		// key. reflect.Value.IsZero is Kind-safe, so uint64 / float /
+		// time.Duration fields no longer panic the way the previous
+		// fv.Int() path did for uint kinds.
+		if fv.IsZero() {
 			continue
-		}
-		if fv.Kind() == reflect.Bool && !fv.Bool() {
-			continue
-		}
-		if fv.Kind() == reflect.Int || fv.Kind() == reflect.Int64 || fv.Kind() == reflect.Uint64 {
-			if fv.Int() == 0 && fv.Kind() != reflect.Uint64 {
-				continue
-			}
 		}
 		*parts = append(*parts, fmt.Sprintf("%s=%v", tagName, fv.Interface()))
 	}

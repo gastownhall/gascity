@@ -75,9 +75,9 @@ type SessionIDInput struct {
 // SessionTranscriptInput is the Huma input for GET /v0/city/{cityName}/session/{id}/transcript.
 type SessionTranscriptInput struct {
 	CityScope
+	TailParam
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
-	Tail   int    `query:"tail" required:"false" minimum:"0" doc:"Number of recent entries to return. 0 = default."`
 	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
 }
 

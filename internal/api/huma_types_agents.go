@@ -139,17 +139,17 @@ func (i *AgentActionQualifiedInput) QualifiedName() string {
 // AgentOutputInput is the Huma input for GET /v0/city/{cityName}/agent/{base}/output.
 type AgentOutputInput struct {
 	CityScope
+	TailParam
 	Name   string `path:"base" doc:"Agent base name."`
-	Tail   int    `query:"tail" required:"false" minimum:"0" doc:"Number of compaction segments to return (default 1, 0 = all)."`
 	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
 }
 
 // AgentOutputQualifiedInput is the Huma input for GET /v0/city/{cityName}/agent/{dir}/{base}/output.
 type AgentOutputQualifiedInput struct {
 	CityScope
+	TailParam
 	Dir    string `path:"dir" doc:"Agent directory (rig name)."`
 	Base   string `path:"base" doc:"Agent base name."`
-	Tail   int    `query:"tail" required:"false" minimum:"0" doc:"Number of compaction segments to return (default 1, 0 = all)."`
 	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
 }
 
