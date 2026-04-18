@@ -59,10 +59,13 @@ func (g *Git) DefaultBranch() (string, error) {
 	if err != nil {
 		return "main", nil
 	}
-	// Output is like "refs/remotes/origin/main"
+	// Output is like "refs/remotes/origin/main" or "refs/remotes/origin/boylec/develop".
+	// Strip the fixed prefix rather than splitting on the last slash, which
+	// would lose a path segment for branch names containing slashes.
 	ref := strings.TrimSpace(out)
-	if i := strings.LastIndex(ref, "/"); i >= 0 {
-		return ref[i+1:], nil
+	const prefix = "refs/remotes/origin/"
+	if strings.HasPrefix(ref, prefix) {
+		return ref[len(prefix):], nil
 	}
 	return ref, nil
 }
