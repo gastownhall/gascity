@@ -2,8 +2,12 @@
 // API. It is produced by `cmd/gen-client` from the live OpenAPI 3.0
 // downgrade of the server's spec, processed through oapi-codegen v2.6.0.
 //
-// Phase 3 Fix 3a (plans/huma-openapi-migration.md): the typed client
-// replaces the hand-written CLI client at internal/api/client.go.
+// See specs/architecture.md §2 "The generated Go client" for the
+// three legitimate in-tree consumers of this package
+// (internal/api/client.go for CLI mutation coordination,
+// cmd/gc/cmd_events.go for direct event read/stream access, and
+// genclient_roundtrip_test.go as a Layer 2 conformance probe) and
+// for why it is not promoted as a public Go SDK.
 //
 // Regeneration:
 //
