@@ -4,12 +4,17 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
+
+// handoffInTestBinary reports whether gc is running inside a Go test binary.
+// Overridable for tests that need to exercise the full cmd.Execute() path.
+var handoffInTestBinary = testing.Testing
 
 func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
@@ -35,6 +40,10 @@ Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if handoffInTestBinary() {
+				fmt.Fprintln(stderr, "gc handoff: refusing to run inside a test binary (safety guard)") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			if cmdHandoff(args, target, stdout, stderr) != 0 {
 				return errExit
 			}
