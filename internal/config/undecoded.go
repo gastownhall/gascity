@@ -9,6 +9,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
+
 // CheckUndecodedKeys examines TOML metadata for keys that were present in
 // the input but not mapped to any struct field. For each unknown key, it
 // computes edit distance against known field names and suggests the closest
@@ -23,6 +25,10 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 	var warnings []string
 	for _, key := range undecoded {
 		keyStr := key.String()
+		if special, ok := specializedUndecodedWarning(source, keyStr); ok {
+			warnings = append(warnings, special)
+			continue
+		}
 		// Skip deeply nested keys — we only warn on section-level and
 		// field-level keys, not on sub-sub-fields of tables.
 		suggestion := suggestKey(keyStr, known)
@@ -33,6 +39,26 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 		warnings = append(warnings, w)
 	}
 	return warnings
+}
+
+func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []string {
+	if !md.IsDefined("agents") {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
+}
+
+func specializedUndecodedWarning(source, key string) (string, bool) {
+	switch key {
+	case "agent_defaults.provider", "agents.provider":
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.provider (or set provider per agent in agents/<name>/agent.toml)", source, key), true
+	case "agent_defaults.scope", "agents.scope":
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml", source, key), true
+	case "agent_defaults.install_agent_hooks", "agents.install_agent_hooks":
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.install_agent_hooks (or set install_agent_hooks per agent in agents/<name>/agent.toml)", source, key), true
+	default:
+		return "", false
+	}
 }
 
 // suggestKey finds the closest known key to the given unknown key using
