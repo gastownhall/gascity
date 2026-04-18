@@ -230,67 +230,55 @@ change based on what our two in-tree consumers need.
 
 ## Known gaps against these principles
 
-The principles above are the target. The current codebase violates
-several of them. Closing these is the concrete work under this plan.
+### Events-stream wire schema (Principle 7)
 
-### Opacity that must become structs (Principle 5)
+**Status: partial — registry infrastructure done, SSE projection not yet rewired.**
 
-- `huma_types_convoys.go:65-66` — `logicalNodeResponse = json.RawMessage`
-  and `scopeGroupResponse = json.RawMessage` are aliases to raw JSON.
-  The underlying shapes are convoy domain objects constructed in our
-  own code (see `convoy_sql.go:312,314`, `handler_convoy_dispatch.go:190,192`).
-  Model them as real structs.
-- `huma_types_formulas.go:86` — `formulaDetailResponse.Steps []map[string]any`
-  is constructed in `handler_formulas.go:192-225` with fixed keys
-  (`id`, `title`, `kind`, `type`, `assignee`, `labels`, `metadata`).
-  The outer frame is fully typed at the construction site. Replace
-  with a struct; if a subfield (e.g. `metadata`) truly holds
-  per-user-configured data, keep THAT subfield narrow and typed as
-  much as possible.
-- `convoy_event_stream.go:27` — `ConvoyEvent.AttemptSummary map[string]any`
-  is built in `workflowAttemptSummary` with fixed fields
-  (`attempt_count`, `active_attempt`, `max_attempts`). Convert to a
-  typed struct with pointer-valued optionals.
+The emission side is typed: every event emitter takes a sealed
+`events.Payload` value, and every registered payload type is defined
+in Go source (see `internal/events/payload.go`,
+`internal/api/event_payloads.go`, `internal/extmsg/events.go`). Twelve
+event types are registered today (seven `mail.*`, five `extmsg.*`,
+plus `extmsg.inbound` / `extmsg.outbound`). The bus stores payloads as
+`[]byte` per Principle 4's edge case; the registry knows how to decode
+each back into the correct Go type.
 
-### Event-bus emitters (Principle 7)
+**What remains to close the gap:**
 
-- `handler_mail.go:recordMailEvent` marshals `map[string]any{"rig": ..., "message": ...}`.
-  Replace with a typed `MailEventPayload` struct; emit typed; register
-  it in the event-type → Go-type map consumed by the SSE projection.
-- `handler_extmsg.go:extmsgEmitEvent` takes `map[string]any` and
-  marshals it. Callers in `huma_handlers_extmsg.go` construct known
-  shapes (ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
-  ExtMsgAdapterAdded, ExtMsgAdapterRemoved) — one typed struct per
-  event type.
-- Audit `internal/api/` for every other emission-site that passes
-  `map[string]any` to the event bus. Each corresponds to a discovered
-  event-type; each gets a typed payload struct.
+1. **SSE projection rewrite** for `/v0/events/stream` and
+   `/v0/city/{cityName}/events/stream`. Today both forward
+   `eventStreamEnvelope{Event, Workflow}` with `Event.Payload
+   json.RawMessage` as opaque bytes. They must instead call
+   `events.DecodePayload(event.Type, event.Payload)` per event and
+   emit a typed envelope. The Huma `eventTypeMap` on both SSE
+   registrations grows from one entry to one-per-registered-type so
+   the spec emits a discriminated-union (`oneOf`) wire schema.
+2. **Enumerate and type the remaining event types.** ~26 event-type
+   constants in `internal/events/events.go` (session.*, bead.*,
+   convoy.*, controller.*, city.*, order.*, provider.*) have no
+   registered payload. Many emit only `Actor`/`Subject`/`Message` and
+   map cleanly to `events.NoPayload`; some emission sites pass a
+   `json.RawMessage` payload (notably the beads-cache reconcile path
+   in `cmd/gc/api_state.go:111`) that needs a proper struct.
+3. **Unregistered-type policy.** Pick one and enforce in CI: (a)
+   strict — every event-type constant must have a registry entry or
+   startup panics; (b) lenient — unregistered types pass through as
+   opaque with a warning. Principle 7 argues for (a); gradual
+   migration may need (b) as a transitional state.
 
-### Middleware error body (Principle 8)
-
-- `middleware.go:24, 42` hand-marshals an error body because it runs
-  outside Huma's stack. Convert to pre-serialized
-  `application/problem+json` constants — one `var` per well-known
-  error, no runtime `json.Marshal`.
-
-### Raw pass-through review (Principle 6)
-
-- `session_frame_types.go` — the `SessionRawMessageFrame` hatch is
-  legitimate (third-party provider frames). Verify the doc comment
-  explains WHY the type cannot be enumerated; verify all first-party
-  provider frame shapes are modeled (Codex and Gemini are; audit that
-  the set is complete as new providers land).
-- `handler_provider_readiness.go:123` — `codexAuthFile.Tokens json.RawMessage`
-  is parsing an external-tool-owned file, not a wire type. Confirm no
-  handler response puts this value on the wire as-is; if it does,
-  model the typed cases we care about.
+Trigger: this gap matters for every external consumer of
+`/v0/events/stream`. Until the SSE projection is rewired, third-party
+clients still hand-parse `payload` as opaque bytes and build their
+own switch table. The infrastructure is in place; the wire payoff
+lands when the projection commits.
 
 ### Consumer alignment (ongoing)
 
 - The TS SPA consumes the published API contract via generated TS
-  types from `internal/api/openapi.json` and `openapi-fetch`. Any
-  `window.prompt` / `window.confirm` interactions and any remaining
-  ad-hoc endpoint strings go through typed helpers.
+  types from `internal/api/openapi.json` and `openapi-fetch`. SSE
+  path templates are checked against the spec at compile time via
+  `sseSupervisorEventsURL` / `sseCityEventsURL` / `sseSessionStreamURL`
+  in `cmd/gc/dashboard/web/src/api.ts`.
 - `gc events` (CLI) reflects the API's event-list and SSE-stream
   contracts exactly. The SSE `event:` field is a transport envelope
   (`event`, `tagged_event`, `heartbeat`); the semantic event type is
