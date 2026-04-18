@@ -234,7 +234,7 @@ non-interactively, or --file to initialize from an existing TOML config file.`,
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
-	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
+	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: source template's workspace.name if set, else target directory basename)")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "built-in workspace provider to use for the default mayor config")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
@@ -447,8 +447,9 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return 1
 	}
 
-	// --file creates a new city from a template; default to target dir name.
-	cityName := resolveCityName(nameOverride, cityPath)
+	// --file creates a new city from a template. Preserve the source's
+	// workspace.name if set; otherwise fall back to the target dir basename.
+	cityName := resolveCityName(nameOverride, cfg.Workspace.Name, cityPath)
 	cfg.Workspace.Name = cityName
 
 	// Create directory structure.
@@ -551,7 +552,18 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 				return code
 			}
 		}
-		cityName := resolveCityName(nameOverride, cityPath)
+		// Preserve the persisted workspace.name when no --name override
+		// was supplied, so the bootstrap message reports the real city
+		// name rather than the target dir basename.
+		var persistedName string
+		if nameOverride == "" {
+			if data, err := fs.ReadFile(tomlPath); err == nil {
+				if existing, perr := config.Parse(data); perr == nil {
+					persistedName = existing.Workspace.Name
+				}
+			}
+		}
+		cityName := resolveCityName(nameOverride, persistedName, cityPath)
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                              //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Bootstrapped city %q runtime scaffold.\n", cityName) //nolint:errcheck // best-effort stdout
 		return 0
@@ -576,7 +588,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// Build the initial city shape before writing prompt scaffolds so init
 	// only creates convention-discoverable prompt files for the agents the
 	// chosen city template actually declares.
-	cityName := resolveCityName(nameOverride, cityPath)
+	cityName := resolveCityName(nameOverride, "", cityPath)
 	var cfg config.City
 	switch {
 	case wiz.configName == "custom":
@@ -766,12 +778,21 @@ func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 }
 
 // resolveCityName returns the workspace name to use during init.
-// Priority: explicit --name flag > target directory basename.
-func resolveCityName(nameOverride, cityPath string) string {
-	if nameOverride != "" {
-		return nameOverride
+// Priority: explicit --name flag > name set on the source/template config > target directory basename.
+// sourceName is the workspace.name already present in a template TOML (for
+// `gc init --file` and `gc init --from`); pass "" at call sites that have no
+// such source, and the fallback becomes the target dir basename.
+// Matches runtime config.EffectiveCityName by trimming whitespace on all
+// inputs so a name with stray spaces resolves the same way at init time
+// and at runtime.
+func resolveCityName(nameOverride, sourceName, cityPath string) string {
+	if n := strings.TrimSpace(nameOverride); n != "" {
+		return n
 	}
-	return filepath.Base(cityPath)
+	if n := strings.TrimSpace(sourceName); n != "" {
+		return n
+	}
+	return strings.TrimSpace(filepath.Base(cityPath))
 }
 
 func cmdInitFromDirWithOptions(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
@@ -845,7 +866,9 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityName := resolveCityName(nameOverride, cityPath)
+	// --from copies a template city; preserve its workspace.name if set,
+	// otherwise fall back to the target dir basename.
+	cityName := resolveCityName(nameOverride, cfg.Workspace.Name, cityPath)
 	cfg.Workspace.Name = cityName
 	content, err := cfg.Marshal()
 	if err != nil {
