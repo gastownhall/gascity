@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -479,10 +478,10 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 		searchPaths := s.sessionLogSearchPaths
 		if searchPaths == nil && cfg != nil {
-			searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+			searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 		}
 		if searchPaths == nil {
-			searchPaths = sessionlog.DefaultSearchPaths()
+			searchPaths = worker.DefaultSearchPaths()
 		}
 		adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.

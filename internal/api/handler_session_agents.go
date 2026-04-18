@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -40,7 +39,7 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if mappings == nil {
-		mappings = []sessionlog.AgentMapping{}
+		mappings = []worker.AgentMapping{}
 	}
 	if len(mappings) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"agents": []any{}})
@@ -72,7 +71,7 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sessionlog.ValidateAgentID(agentID); err != nil {
+	if err := worker.ValidateAgentID(agentID); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
@@ -88,7 +87,7 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "no transcript found for session "+id)
 			return
 		}
-		if errors.Is(err, sessionlog.ErrAgentNotFound) {
+		if errors.Is(err, worker.ErrAgentNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "agent not found")
 		} else {
 			writeError(w, http.StatusInternalServerError, "internal", "failed to read agent transcript")
