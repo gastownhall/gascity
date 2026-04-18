@@ -984,19 +984,11 @@ func TestResolveReplySubject_AvoidsReStacking(t *testing.T) {
 	}
 }
 
-func TestResolveReplySubject_EmptyOriginalFallsBack(t *testing.T) {
-	store := beads.NewMemStore()
-	mp := beadmail.New(store)
-	mp.Send("alice", "bob", "", "body") //nolint:errcheck
-
-	got, err := resolveReplySubject(mp, "gc-1", "")
-	if err != nil {
-		t.Fatalf("resolveReplySubject: %v", err)
-	}
-	if got != "(no subject)" {
-		t.Errorf("subject = %q, want %q", got, "(no subject)")
-	}
-}
+// Note: the "empty original subject → (no subject)" fallback is covered by
+// TestDefaultReplySubject/empty and /whitespace-only. It can't be exercised
+// end-to-end through beadmail because beadmail.Send promotes the first body
+// line to Title when subject is empty — so the original never has an empty
+// Subject. The fallback is defensive for providers that don't auto-title.
 
 func TestResolveReplySubject_FetchErrorPropagates(t *testing.T) {
 	store := beads.NewMemStore()
