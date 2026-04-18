@@ -465,28 +465,35 @@ func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg
 }
 
 // Pending surfaces any current blocking interaction.
-func (h *SessionHandle) Pending(context.Context) (*PendingInteraction, error) {
+func (h *SessionHandle) Pending(ctx context.Context) (*PendingInteraction, error) {
+	pending, _, err := h.PendingStatus(ctx)
+	return pending, err
+}
+
+// PendingStatus reports both the current interaction, if any, and whether the
+// underlying runtime supports interactive blocking requests at all.
+func (h *SessionHandle) PendingStatus(context.Context) (*PendingInteraction, bool, error) {
 	id := h.currentSessionID()
 	if id == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	info, err := h.manager.Get(id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if info.Closed {
-		return nil, nil
+		return nil, false, nil
 	}
 	switch info.State {
 	case sessionpkg.StateAsleep, sessionpkg.StateSuspended, sessionpkg.StateDrained, sessionpkg.StateArchived:
-		return nil, nil
+		return nil, false, nil
 	}
 	pending, supported, err := h.manager.Pending(id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !supported || pending == nil {
-		return nil, nil
+		return nil, supported, nil
 	}
 	return &PendingInteraction{
 		RequestID: pending.RequestID,
@@ -494,7 +501,7 @@ func (h *SessionHandle) Pending(context.Context) (*PendingInteraction, error) {
 		Prompt:    pending.Prompt,
 		Options:   append([]string(nil), pending.Options...),
 		Metadata:  cloneStringMap(pending.Metadata),
-	}, nil
+	}, true, nil
 }
 
 // Respond resolves the current blocking interaction.
