@@ -15,12 +15,17 @@ import (
 )
 
 // extmsgEmitEvent builds an event emitter closure for extmsg handlers.
-func (s *Server) extmsgEmitEvent() func(string, string, map[string]any) {
+// The payload parameter is the extmsg.EventPayload sealed interface so
+// only the typed variants defined in internal/extmsg/events.go are
+// accepted — ad-hoc map[string]any emissions are a compile-time error
+// (Principle 7). The json.Marshal below is the internal bus
+// serialization permitted by the Principle 4 edge case.
+func (s *Server) extmsgEmitEvent() func(string, string, extmsg.EventPayload) {
 	ep := s.state.EventProvider()
 	if ep == nil {
-		return func(string, string, map[string]any) {}
+		return func(string, string, extmsg.EventPayload) {}
 	}
-	return func(eventType, subject string, payload map[string]any) {
+	return func(eventType, subject string, payload extmsg.EventPayload) {
 		b, err := json.Marshal(payload)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "extmsg: marshal event payload: %v\n", err)

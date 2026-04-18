@@ -22,7 +22,7 @@ type InboundResult struct {
 type InboundDeps struct {
 	Services  Services
 	Registry  *AdapterRegistry
-	EmitEvent func(eventType, subject string, payload map[string]any)
+	EmitEvent func(eventType, subject string, payload EventPayload)
 }
 
 // HandleInbound processes a raw inbound payload through the full pipeline:
@@ -115,11 +115,11 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	// Wake is handled by the caller (HTTP handler calls state.Poke()).
 	// Sessions discover unread entries via gc transcript check --inject.
 	if deps.EmitEvent != nil {
-		deps.EmitEvent("extmsg.inbound", result.TargetSessionID, map[string]any{
-			"provider":        msg.Conversation.Provider,
-			"conversation_id": msg.Conversation.ConversationID,
-			"actor":           msg.Actor.DisplayName,
-			"target_session":  result.TargetSessionID,
+		deps.EmitEvent("extmsg.inbound", result.TargetSessionID, InboundEventPayload{
+			Provider:       msg.Conversation.Provider,
+			ConversationID: msg.Conversation.ConversationID,
+			Actor:          msg.Actor.DisplayName,
+			TargetSession:  result.TargetSessionID,
 		})
 	}
 
@@ -189,11 +189,11 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 
 	// Step 4: Emit event.
 	if deps.EmitEvent != nil {
-		deps.EmitEvent("extmsg.inbound", result.TargetSessionID, map[string]any{
-			"provider":        msg.Conversation.Provider,
-			"conversation_id": msg.Conversation.ConversationID,
-			"actor":           msg.Actor.DisplayName,
-			"target_session":  result.TargetSessionID,
+		deps.EmitEvent("extmsg.inbound", result.TargetSessionID, InboundEventPayload{
+			Provider:       msg.Conversation.Provider,
+			ConversationID: msg.Conversation.ConversationID,
+			Actor:          msg.Actor.DisplayName,
+			TargetSession:  result.TargetSessionID,
 		})
 	}
 

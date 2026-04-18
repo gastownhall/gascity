@@ -249,19 +249,18 @@ func sortedProviderNames(providers map[string]mail.Provider) []string {
 	return deduped
 }
 
-// recordMailEvent emits a mail SSE event so WebSocket/SSE consumers receive
-// real-time updates for API-initiated operations (not just CLI-initiated ones).
-// Best-effort: silently skips if no event provider is configured.
+// recordMailEvent emits a mail SSE event so SSE consumers receive
+// real-time updates for API-initiated operations (not just CLI-initiated
+// ones). Best-effort: silently skips if no event provider is configured.
+// The input payload is typed (MailEventPayload); the json.Marshal below
+// is the internal bus serialization permitted by the Principle 4 edge
+// case for event-bus []byte payloads.
 func (s *Server) recordMailEvent(eventType, actor, subject, rig string, msg *mail.Message) {
 	ep := s.state.EventProvider()
 	if ep == nil {
 		return
 	}
-	payload := map[string]any{"rig": rig}
-	if msg != nil {
-		payload["message"] = msg
-	}
-	b, _ := json.Marshal(payload)
+	b, _ := json.Marshal(MailEventPayload{Rig: rig, Message: msg})
 	ep.Record(events.Event{
 		Type:    eventType,
 		Actor:   actor,

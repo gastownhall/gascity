@@ -182,10 +182,10 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		}
 	}
 
-	s.extmsgEmitEvent()(events.ExtMsgBound, input.Body.SessionID, map[string]any{
-		"provider":        input.Body.Conversation.Provider,
-		"conversation_id": input.Body.Conversation.ConversationID,
-		"session_id":      input.Body.SessionID,
+	s.extmsgEmitEvent()(events.ExtMsgBound, input.Body.SessionID, extmsg.BoundEventPayload{
+		Provider:       input.Body.Conversation.Provider,
+		ConversationID: input.Body.Conversation.ConversationID,
+		SessionID:      input.Body.SessionID,
 	})
 	out := &ExtMsgBindOutput{}
 	out.Body = binding
@@ -209,9 +209,9 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
 
-	s.extmsgEmitEvent()(events.ExtMsgUnbound, input.Body.SessionID, map[string]any{
-		"session_id": input.Body.SessionID,
-		"count":      len(unbound),
+	s.extmsgEmitEvent()(events.ExtMsgUnbound, input.Body.SessionID, extmsg.UnboundEventPayload{
+		SessionID: input.Body.SessionID,
+		Count:     len(unbound),
 	})
 	out := &ExtMsgUnbindOutput{}
 	out.Body = ExtMsgUnbindBody{Unbound: unbound}
@@ -273,10 +273,10 @@ func (s *Server) humaHandleExtMsgGroupEnsure(ctx context.Context, input *ExtMsgG
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
 
-	s.extmsgEmitEvent()(events.ExtMsgGroupCreated, group.ID, map[string]any{
-		"provider":        input.Body.RootConversation.Provider,
-		"conversation_id": input.Body.RootConversation.ConversationID,
-		"mode":            string(mode),
+	s.extmsgEmitEvent()(events.ExtMsgGroupCreated, group.ID, extmsg.GroupCreatedEventPayload{
+		Provider:       input.Body.RootConversation.Provider,
+		ConversationID: input.Body.RootConversation.ConversationID,
+		Mode:           string(mode),
 	})
 	out := &ExtMsgGroupEnsureOutput{}
 	out.Body = group
@@ -443,9 +443,9 @@ func (s *Server) humaHandleExtMsgAdapterRegister(_ context.Context, input *ExtMs
 	key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
 	reg.Register(key, adapter)
 
-	s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, name, map[string]any{
-		"provider":   input.Body.Provider,
-		"account_id": input.Body.AccountID,
+	s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, name, extmsg.AdapterEventPayload{
+		Provider:  input.Body.Provider,
+		AccountID: input.Body.AccountID,
 	})
 	out := &ExtMsgAdapterRegisterOutput{}
 	out.Body.Status = "registered"
@@ -465,9 +465,9 @@ func (s *Server) humaHandleExtMsgAdapterUnregister(_ context.Context, input *Ext
 	key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
 	reg.Unregister(key)
 
-	s.extmsgEmitEvent()(events.ExtMsgAdapterRemoved, input.Body.Provider+"/"+input.Body.AccountID, map[string]any{
-		"provider":   input.Body.Provider,
-		"account_id": input.Body.AccountID,
+	s.extmsgEmitEvent()(events.ExtMsgAdapterRemoved, input.Body.Provider+"/"+input.Body.AccountID, extmsg.AdapterEventPayload{
+		Provider:  input.Body.Provider,
+		AccountID: input.Body.AccountID,
 	})
 	out := &OKResponse{}
 	out.Body.Status = "unregistered"
