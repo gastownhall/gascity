@@ -9,6 +9,7 @@
 
 import createClient from "openapi-fetch";
 import type { components, paths } from "./generated/schema";
+import { client as sseClient } from "./generated/client.gen";
 import { logDebug, logError, logWarn } from "./logger";
 import { cityScope as currentCityScope } from "./state";
 
@@ -25,32 +26,6 @@ export function supervisorBaseURL(): string {
   return raw.replace(/\/+$/, "");
 }
 
-// SSE path templates checked against the generated OpenAPI `paths`
-// type at compile time. `openapi-fetch` can't drive SSE (EventSource
-// needs a string URL), so these helpers are the typed seam between
-// SSE callers and the spec: if a route is renamed in Huma and the
-// spec regenerates, the literal below stops matching `keyof paths`
-// and the TS build fails loudly instead of silently 404ing at
-// runtime.
-type SpecPath = keyof paths;
-
-export function sseSupervisorEventsURL(): string {
-  const path = "/v0/events/stream" satisfies SpecPath;
-  return `${supervisorBaseURL()}${path}`;
-}
-
-export function sseCityEventsURL(city: string): string {
-  const template = "/v0/city/{cityName}/events/stream" satisfies SpecPath;
-  return `${supervisorBaseURL()}${template.replace("{cityName}", encodeURIComponent(city))}`;
-}
-
-export function sseSessionStreamURL(city: string, sessionID: string): string {
-  const template = "/v0/city/{cityName}/session/{id}/stream" satisfies SpecPath;
-  return `${supervisorBaseURL()}${template
-    .replace("{cityName}", encodeURIComponent(city))
-    .replace("{id}", encodeURIComponent(sessionID))}`;
-}
-
 // cityScope reads the dashboard's current city from the `?city=...`
 // query parameter. Every per-city API call uses this value; callers
 // must handle the empty case (no city selected → supervisor-scope
@@ -64,9 +39,13 @@ export function hasCityScope(): boolean {
 }
 
 export type DashboardSchema = components["schemas"];
-export type CityEventRecord = DashboardSchema["Event"];
+// `WireEvent` / `WireTaggedEvent` are the list-endpoint shapes with
+// typed payload fields. `EventStreamEnvelope` /
+// `TaggedEventStreamEnvelope` are the SSE-stream shapes with the
+// same typed payload union.
+export type CityEventRecord = DashboardSchema["WireEvent"];
 export type CityEventStreamEnvelope = DashboardSchema["EventStreamEnvelope"];
-export type SupervisorEventRecord = DashboardSchema["TaggedEvent"];
+export type SupervisorEventRecord = DashboardSchema["WireTaggedEvent"];
 export type SupervisorEventStreamEnvelope = DashboardSchema["TaggedEventStreamEnvelope"];
 export type HeartbeatEvent = DashboardSchema["HeartbeatEvent"];
 export type SessionRecord = DashboardSchema["SessionResponse"];
@@ -80,6 +59,17 @@ export type CityInfoRecord = DashboardSchema["CityInfo"];
 // every mutation. Attaching it as a default request editor means
 // callers never have to remember the header.
 export const api = createClient<paths>({
+  baseUrl: supervisorBaseURL(),
+  headers: {
+    "X-GC-Request": "true",
+  },
+});
+
+// Configure the hey-api SSE client with the same base URL + CSRF
+// header. ./sse uses the generated streamEvents / streamSupervisorEvents
+// / streamSession functions, which dispatch through this shared
+// client instance.
+sseClient.setConfig({
   baseUrl: supervisorBaseURL(),
   headers: {
     "X-GC-Request": "true",

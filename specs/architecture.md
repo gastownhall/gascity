@@ -424,27 +424,37 @@ SSE that works with our shape.
 
 ### TypeScript (dashboard SPA)
 
-- **`@hey-api/openapi-ts`** — open-source generator that produces
-  typed clients for both REST and SSE. Uses `fetch()` +
-  `ReadableStream` for SSE (not `EventSource`), which means custom
-  auth headers, built-in retry with exponential backoff, and
-  async-generator consumer shapes. Generates typed
-  discriminated-union response types for SSE operations
-  (`Array<{event: 'event'; data: EventStreamEnvelope} | {event:
-  'heartbeat'; data: HeartbeatEvent}>`). Target TS tool for the
-  dashboard.
-- **`openapi-fetch`** — simpler typed-`fetch` wrapper. Does not
-  handle SSE. The dashboard currently uses this for REST and
-  hand-rolls SSE framing alongside it; a migration to
-  `@hey-api/openapi-ts` is planned to unify both and delete the
-  hand-rolled SSE decoder.
+- **`openapi-fetch`** — typed `fetch` wrapper, the tool the
+  dashboard uses for every REST call site. Typed path/body/response
+  against `openapi-typescript`-generated `schema.d.ts`. Minimal
+  runtime, well-documented, keeps REST call-site code short. Does
+  not handle SSE — that's what drives the dual-tool design below.
+- **`@hey-api/openapi-ts`** — open-source generator the dashboard
+  uses exclusively for SSE. Generates typed stream functions using
+  `fetch()` + `ReadableStream` (not `EventSource`), which means
+  custom auth headers work, retry with exponential backoff is
+  built in, and each stream has typed discriminated-union response
+  types keyed by the SSE `event` name. `sse.ts` is a thin callback
+  bridge over the generated `streamSupervisorEvents`,
+  `streamEvents`, and `streamSession` functions; the per-frame
+  JSON parsing, line buffering, and retry are all framework code.
 - **`openapi-typescript-codegen`** — unmaintained.
 - **OpenAPI Generator** (Java) — same pure-toolchain concern as Go.
 
-The narrower Go-side `oneOf` ceiling does not apply to TypeScript
-consumers. Once the hey-api migration lands, TS consumers receive
-envelope-plus-typed-payload discrimination automatically from the
-generated client with no hand-rolled SSE parsing in the SPA.
+The dual-tool design is pragmatic, not aspirational: each library
+handles what it's good at. `openapi-fetch` is the minimal typed
+surface for REST consumers (kept because it has zero impact on
+call-site code and the ecosystem has shifted to hey-api slowly
+enough that we'd gain nothing by churning every REST call today).
+`@hey-api/openapi-ts` is the only open-source TS tool that
+generates typed SSE stream clients, and it handles every aspect of
+the SSE wire that used to be hand-rolled in `sse.ts`.
+
+The Go-side `oneOf` ceiling described above does not apply to
+TypeScript consumers. SSE frames come typed and discriminated
+through the generated stream functions; consumers get automatic
+`switch (frame.event)` narrowing with no hand-written parser or
+type guard in the SPA.
 
 ## 7. What is out of scope
 
