@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
@@ -54,7 +55,13 @@ func (s *Server) checkSessionStream(_ context.Context, input *SessionStreamInput
 func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, send sse.Sender) {
 	state, err := s.resolveSessionStream(input)
 	if err != nil {
-		// Should not happen — precheck already succeeded.
+		// Invariant violation: precheck passed, body resolve failed.
+		// Session vanished between precheck and streaming start, or a
+		// race we didn't anticipate. Headers are already committed so
+		// we can't return an HTTP error — log so the next debugger has
+		// a starting point instead of a mute disconnect.
+		log.Printf("api: session-stream: resolve failed after precheck city=%s id=%s: %v",
+			input.CityName, input.ID, err)
 		return
 	}
 	info := state.info

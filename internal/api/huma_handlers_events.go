@@ -42,7 +42,11 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 
 	wires := make([]WireEvent, 0, len(evts))
 	for _, e := range evts {
-		wires = append(wires, toWireEvent(e))
+		w, ok := toWireEvent(e)
+		if !ok {
+			continue
+		}
+		wires = append(wires, w)
 	}
 
 	index := s.latestIndex()

@@ -66,36 +66,24 @@ type WireTaggedEvent struct {
 }
 
 // toWireEvent decodes the bus's opaque Payload into the registered
-// typed variant and returns the list-endpoint wire shape.
-// Unregistered event types or decode failures log loudly and fall
-// through with a nil payload — the registry-coverage test
-// (TestEveryKnownEventTypeHasRegisteredPayload) makes both paths
-// unreachable for any registered KnownEventTypes constant (Principle 7);
-// the log is for unregistered custom types and bus corruption
-// so operators can investigate.
-func toWireEvent(e events.Event) WireEvent {
+// typed variant and returns the list-endpoint wire shape. On decode
+// failure or unregistered event type it returns (WireEvent{}, false)
+// so the caller can omit the event from the list — the spec's §4
+// uniform decode-failure policy: skip + log, never emit a degraded
+// envelope with nil payload. The registry-coverage test
+// (TestEveryKnownEventTypeHasRegisteredPayload) makes both failure
+// paths unreachable for any KnownEventTypes constant (Principle 7);
+// the log is for bus corruption and unregistered custom types so
+// operators can investigate.
+func toWireEvent(e events.Event) (WireEvent, bool) {
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
 	if err != nil {
 		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
-		return WireEvent{
-			Seq:     e.Seq,
-			Type:    e.Type,
-			Ts:      e.Ts,
-			Actor:   e.Actor,
-			Subject: e.Subject,
-			Message: e.Message,
-		}
+		return WireEvent{}, false
 	}
 	if !registered {
 		log.Printf("api: events wire: unregistered event type %q seq=%d (add to events.KnownEventTypes and register a payload)", e.Type, e.Seq)
-		return WireEvent{
-			Seq:     e.Seq,
-			Type:    e.Type,
-			Ts:      e.Ts,
-			Actor:   e.Actor,
-			Subject: e.Subject,
-			Message: e.Message,
-		}
+		return WireEvent{}, false
 	}
 	payload, _ := decoded.(events.Payload)
 	return WireEvent{
@@ -106,16 +94,18 @@ func toWireEvent(e events.Event) WireEvent {
 		Subject: e.Subject,
 		Message: e.Message,
 		Payload: EventPayloadUnion{Value: payload},
-	}
+	}, true
 }
 
 // toWireTaggedEvent is the supervisor-scope analog of toWireEvent,
 // preserving the City tag the multiplexer attached to the event.
-func toWireTaggedEvent(te events.TaggedEvent) WireTaggedEvent {
-	return WireTaggedEvent{
-		WireEvent: toWireEvent(te.Event),
-		City:      te.City,
+// Same skip-not-degrade contract: returns ok=false on decode failure.
+func toWireTaggedEvent(te events.TaggedEvent) (WireTaggedEvent, bool) {
+	wire, ok := toWireEvent(te.Event)
+	if !ok {
+		return WireTaggedEvent{}, false
 	}
+	return WireTaggedEvent{WireEvent: wire, City: te.City}, true
 }
 
 // eventStreamEnvelope is the wire shape emitted on
@@ -151,13 +141,16 @@ type taggedEventStreamEnvelope struct {
 }
 
 // EventPayloadUnion wraps any registered events.Payload for wire
-// emission. Its JSON-marshal path emits the concrete variant's shape
+// emission. Its MarshalJSON emits the concrete variant's shape
 // directly (no wrapper object); its Schema registers a named
 // EventPayload oneOf component in the OpenAPI spec so generated
 // clients receive a discriminated union over every registered payload
-// type (Principle 7). The JSON (un)marshal methods are schema-
-// intentional per Principle 4's edge-case list: they enable the oneOf
-// wire shape, not opaque pass-through.
+// type (Principle 7). MarshalJSON is schema-intentional per Principle
+// 4's edge-case list: it enables the oneOf wire shape, not opaque
+// pass-through. No UnmarshalJSON is defined — the server is
+// marshal-only on this type, and absence of a custom unmarshaler
+// makes accidental in-process round-trips fail loudly at the
+// interface field rather than silently dropping bytes.
 type EventPayloadUnion struct {
 	Value events.Payload
 }
@@ -169,22 +162,6 @@ func (p EventPayloadUnion) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(p.Value)
-}
-
-// UnmarshalJSON preserves the raw bytes so callers that know the
-// event type (via the envelope's Type field) can decode the correct
-// variant through events.DecodePayload. The union type cannot pick a
-// variant on its own because the discriminator lives outside this
-// field.
-func (p *EventPayloadUnion) UnmarshalJSON(data []byte) error {
-	var v any
-	if err := json.Unmarshal(data, &v); err != nil {
-		return err
-	}
-	// Preserve as a generic map/slice; real consumers use the
-	// envelope's Type field with events.DecodePayload on the raw bytes
-	// from the SSE data line.
-	return nil
 }
 
 // Schema registers an "EventPayload" named component whose schema is

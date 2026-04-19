@@ -88,18 +88,27 @@ types; the spec drives everything downstream.
 
 ### The generated Go client
 
-`internal/api/genclient/` has three in-tree consumers:
+`internal/api/genclient/` has three in-tree consumer categories,
+governed by a structural rule: **direct consumption is allowed for
+endpoints that (a) do not participate in write-side fallback (no
+`ShouldFallback` path) and (b) do not require domain-type conversion
+at the adapter seam.** Anything that fails either test goes through
+`internal/api/client.go`.
 
 1. **CLI mutation coordination** via `internal/api/client.go`, used
    by `cmd/gc/apiroute.go` as described above. This is the only
    consumer for paths that mutate state and could race an in-process
-   supervisor.
-2. **CLI read/stream paths that use genclient directly** —
-   `cmd/gc/cmd_events.go` imports `internal/api/genclient` and calls
-   its typed methods for event listing and SSE following. Direct use
-   is allowed for read/stream paths where the mutation-coordination
-   concern does not apply; wrapping them through `client.go` would be
-   a pure pass-through.
+   supervisor, or that need domain-type conversion (e.g. typed
+   `session.SubmitIntent` from a string wire field). The adapter
+   also owns local-file fallback when the controller isn't running.
+2. **Read/stream CLI surfaces that import genclient directly** —
+   currently `cmd/gc/cmd_events.go`, which calls typed methods for
+   event listing and SSE following. Events have no write-side
+   fallback (no bus without a controller) and need no domain-type
+   conversion, so they satisfy the structural rule. Future
+   read-only CLI surfaces that meet the same two conditions are
+   allowed to import genclient directly; no case-by-case approval
+   needed.
 3. **Layer 2 conformance probe** —
    `genclient_roundtrip_test.go` exercises every generated method
    against a real supervisor so spec/reality drift fails CI.
@@ -173,10 +182,19 @@ typed, schema-registered struct, the principle holds.
 Protocol framing around domain data — HTTP status codes, HTTP
 response headers, SSE `id:` / `event:` / `data:` / retry line
 separators, chunked-encoding bytes — is not domain data and is not
-in scope for this principle. `internal/api/sse.go` hand-writes the
-SSE protocol-text lines around a typed `encoder.Encode(data)` call
-on a registered struct; the domain payload IS framework-encoded,
-the surrounding protocol literals are not JSON at all.
+in scope for this principle. The carve-out is direction-symmetric
+and covers two specific files: `internal/api/sse.go` (emitter)
+hand-writes the SSE protocol-text lines around a typed
+`encoder.Encode(data)` call on a registered struct, and
+`cmd/gc/cmd_events.go:sseDecoder` (consumer) hand-parses the same
+SSE protocol-text lines and `json.Unmarshal`s the `data:` payload
+into typed `genclient.*` structs. In both directions the domain
+payload IS framework-encoded/decoded; the surrounding protocol
+literals are not JSON at all.
+
+New SSE endpoints must register through `registerSSE` /
+`registerSSEStringID`; ad-hoc SSE handlers outside those helpers
+are not covered by this carve-out.
 
 Edge cases that are NOT wire and therefore exempt:
 
@@ -306,6 +324,15 @@ named schema variant so the wire stays uniform across event types.
 `TestEveryKnownEventTypeHasRegisteredPayload` fails CI if a new
 constant is added without registration; that's how the registry
 discipline stays load-bearing rather than best-effort.
+
+**Decode-failure policy (uniform across list and stream).** Decode
+failures and unregistered event types are omitted from list and
+stream output and logged via `log.Printf`; the wire never carries
+a degraded envelope with nil payload. A malformed event is a CI
+bug (the registry-coverage test above catches it before prod);
+emitting a typed envelope with `payload: null` would train
+consumers to tolerate broken payloads, defeating the point of
+§3.4. Clean omission plus a loud log is the contract.
 
 ### Discrimination design
 

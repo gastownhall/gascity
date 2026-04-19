@@ -106,6 +106,25 @@ export function getCachedCities(): CityInfoSummary[] {
   }));
 }
 
+// currentCityStatus classifies the selected city against the cached
+// cities list. Used by the boot sequence to decide whether to fire
+// every per-city panel fetch (which would 404 on an init_failed
+// city and produce a cascade of console errors) or render a single
+// "city is not running" banner and skip the fetches.
+export type CurrentCityStatus =
+  | { kind: "supervisor" } // no city selected; supervisor-scope view
+  | { kind: "running"; city: CityInfoSummary }
+  | { kind: "not-running"; city: CityInfoSummary }
+  | { kind: "unknown"; name: string }; // selected name not in cities list (stale link, etc.)
+
+export function currentCityStatus(): CurrentCityStatus {
+  const name = currentCity;
+  if (name === "") return { kind: "supervisor" };
+  const city = cachedCities.find((c) => c.name === name);
+  if (!city) return { kind: "unknown", name };
+  return city.running ? { kind: "running", city } : { kind: "not-running", city };
+}
+
 export function invalidateForEventType(type: string): void {
   if (!type) return;
   if (type.startsWith("session.") || type.startsWith("agent.")) {

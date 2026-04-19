@@ -347,7 +347,11 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 	}
 	wires := make([]WireTaggedEvent, 0, len(evts))
 	for _, e := range evts {
-		wires = append(wires, toWireTaggedEvent(e))
+		w, ok := toWireTaggedEvent(e)
+		if !ok {
+			continue
+		}
+		wires = append(wires, w)
 	}
 	out := &SupervisorEventListOutput{}
 	out.Body.Items = wires

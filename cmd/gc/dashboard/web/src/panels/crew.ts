@@ -4,6 +4,7 @@ import { byId, clear, el } from "../util/dom";
 import { calculateActivity, formatTimestamp, statusBadgeClass, truncate } from "../util/legacy";
 import { connectAgentOutput, type AgentOutputMessage, type SSEHandle } from "../sse";
 import { popPause, pushPause, showToast } from "../ui";
+import { logDebug } from "../logger";
 
 let logHandle: SSEHandle | null = null;
 let logSessionID = "";
@@ -248,6 +249,10 @@ function renderSimpleEmpty(container: HTMLElement, message: string): void {
 export function installCrewInteractions(): void {
   byId("log-drawer-close-btn")?.addEventListener("click", () => closeLogDrawer());
   byId("log-drawer-older-btn")?.addEventListener("click", () => {
+    logDebug("crew", "Load older transcript clicked", {
+      hasCursor: logBeforeCursor !== "",
+      sessionID: logSessionID,
+    });
     if (!logSessionID || !logBeforeCursor) return;
     void loadTranscript(logSessionID, true);
   });
@@ -327,10 +332,19 @@ async function loadTranscript(sessionID: string, prepend: boolean): Promise<void
     clear(messagesEl);
     messagesEl.append(fragment);
   }
+  messagesEl.append(loadingEl);
+  loadingEl.style.display = "none";
   countEl.textContent = String(logCount);
 
   logBeforeCursor = res.data.pagination?.truncated_before_message ?? "";
-  olderBtn.style.display = res.data.pagination?.has_older_messages ? "inline-flex" : "none";
+  olderBtn.style.display = res.data.pagination?.has_older_messages && logBeforeCursor ? "inline-flex" : "none";
+  logDebug("crew", "Transcript loaded", {
+    hasOlderMessages: res.data.pagination?.has_older_messages ?? false,
+    nextBeforeCursor: logBeforeCursor,
+    prepend,
+    sessionID,
+    turnCount: res.data.turns?.length ?? 0,
+  });
 }
 
 function appendStreamEvent(msg: AgentOutputMessage): void {
