@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // Command-side session handlers (create, patch, submit, message, stop, kill,
@@ -85,6 +86,26 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil, huma.Error500InternalServerError("no city config loaded")
+	}
+	agentCfg, ok := resolveSessionTemplateAgent(cfg, template)
+	if !ok {
+		return nil, huma.Error500InternalServerError("resolved agent template disappeared: " + template)
+	}
+	if alias != "" && agentCfg.SupportsMultipleSessions() {
+		alias = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, cfg.Rigs, alias, "")
+	}
+	explicitName, err := sessionExplicitNameForCreate(agentCfg, alias)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	workDirQualifiedName := workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, cfg.Rigs, alias, explicitName)
+	workDir, err = s.resolveSessionWorkDir(agentCfg, workDirQualifiedName)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
 
 	command := resolved.CommandString()
 	if len(resolved.OptionsSchema) > 0 {
@@ -116,14 +137,32 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 
 	mgr := s.sessionManager(store)
 	var info session.Info
-	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+	reservationIDs := []string{alias, explicitName}
+	reserveConcreteIdentity := agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
+	if reserveConcreteIdentity {
+		reservationIDs = append(reservationIDs, workDirQualifiedName)
+	}
+	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
 		if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
 			return aliasErr
 		}
+		if reserveConcreteIdentity && workDirQualifiedName != alias {
+			if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); aliasErr != nil {
+				return aliasErr
+			}
+		}
+		if nameErr := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); nameErr != nil {
+			return nameErr
+		}
+		if extraMeta == nil {
+			extraMeta = make(map[string]string)
+		}
+		extraMeta["agent_name"] = workDirQualifiedName
+		extraMeta["session_origin"] = "manual"
 		var createErr error
 		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
 			alias,
-			"",
+			explicitName,
 			template,
 			title,
 			command,

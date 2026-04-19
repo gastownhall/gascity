@@ -1052,12 +1052,13 @@ func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirId
 	}}
 	fs.cfg.NamedSessions = nil
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	for i := 0; i < 2; i++ {
-		req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant"}`))
+		req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant"}`))
 		req.Header.Set("Idempotency-Key", "pool-create-"+string(rune('a'+i)))
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("create #%d status = %d, want %d; body: %s", i+1, rec.Code, http.StatusAccepted, rec.Body.String())
 		}
@@ -1112,11 +1113,12 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 	}}
 	fs.cfg.NamedSessions = nil
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"ant-fenrir"}`))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"ant-fenrir"}`))
 	req.Header.Set("Idempotency-Key", "pool-alias-1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
@@ -1128,10 +1130,10 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 		t.Fatalf("Alias = %q, want canonical qualified alias", resp.Alias)
 	}
 
-	req = newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
+	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
 	req.Header.Set("Idempotency-Key", "pool-alias-2")
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("second create status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
