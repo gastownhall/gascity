@@ -8,6 +8,11 @@ Companion to [doc-pack-v2.md](doc-pack-v2.md) ([gastownhall/gascity#360](https:/
 
 > **Keeping in sync:** This file is the source of truth. When a GitHub issue is created, edit here, then update the issue body with `gh issue edit <N> --repo gastownhall/gascity --body-file <(sed -n '/^---BEGIN ISSUE---$/,/^---END ISSUE---$/{ /^---/d; p; }' issues/doc-packman.md)`.
 
+> [!IMPORTANT]
+> This document describes the pre-release Gas City v0.15.0 rollout.
+> Some PackV2 surfaces are still under active development; release-gated
+> caveats below use the form "As of release v0.15.0, ...".
+
 ## Status update — 2026-04-10
 
 The merge-wave design decisions now settled around `packs.lock` are:
@@ -24,8 +29,8 @@ The merge-wave design decisions now settled around `packs.lock` are:
   - no version-lock / upgrade semantics
   - `gc import install` should fail if the city depends on them, because
     install is the reproducibility gate
-- `pack.version` remains descriptive metadata for now. It does not
-  become the managed remote version source in this wave.
+- As of release v0.15.0, `pack.version` remains descriptive metadata. It
+  does not become the managed remote version source.
 - The remaining Track 6 work should be a narrow loader-read-path harvest
   that fits this contract, not a wholesale merge of the old branch.
 

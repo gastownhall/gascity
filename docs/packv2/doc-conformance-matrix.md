@@ -3,6 +3,11 @@
 This document turns the reconciled pack/city v.next docs into an
 executable conformance plan for the current Pack/City v2 rollout.
 
+> [!IMPORTANT]
+> This document describes the pre-release Gas City v0.15.0 rollout.
+> Some PackV2 surfaces are still under active development; release-gated
+> caveats below use the form "As of release v0.15.0, ...".
+
 The goal is not to restate the full design. The goal is to answer three
 practical questions:
 
@@ -52,7 +57,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Import target taxonomy | `source` stays the only public locator field; `gc import add` classifies the resolved target as plain directory, tagged git, untagged git, or invalid pack target, then synthesizes `version` accordingly (`none`, semver default, or `sha:`) | Unit + testscript | `cmd/gc/cmd_import.go`, `internal/packman/resolve.go` |
 | Rig imports | `[rigs.imports.<binding>]` in `city.toml` resolves for the targeted rig | Unit + testscript | `internal/config/pack.go`, `internal/config/compose.go` |
 | Agent discovery | `agents/<name>/` creates an agent without requiring `[[agent]]` | Unit | `internal/config/agent_discovery.go` |
-| Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze in this release wave: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
+| Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze as of release v0.15.0: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
 | Provider preset merge and lookup | Imported pack providers merge into the city provider map additively, city/local providers shadow imported ones on name collision, and provider lookup layers city overrides onto builtins when supported | Unit | `internal/config/pack.go`, `internal/config/resolve.go` |
 | Prompt naming | `prompt.md` is inert markdown and `prompt.template.md` enables template processing | Unit + testscript | `internal/config/agent_discovery.go`, `cmd/gc/prompt.go` |
 | Overlay discovery | pack-wide `overlay/` and agent-local `agents/<name>/overlay/` are discovered by convention | Unit | `internal/config/pack.go`, `internal/config/agent_discovery.go`, `internal/overlay/overlay.go` |

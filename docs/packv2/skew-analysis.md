@@ -4,7 +4,12 @@
 > from the release branch Go structs) against the reconciled pack v2 specs.
 > Revised through field-by-field walkthrough to reflect the **current
 > Pack/City v2 desired state** — not the ideal end-state, but what should
-> ship in this release wave.
+> ship as of release v0.15.0.
+
+> [!IMPORTANT]
+> This document describes the pre-release Gas City v0.15.0 rollout.
+> Some PackV2 surfaces are still under active development; release-gated
+> caveats below use the form "As of release v0.15.0, ...".
 
 ## Color key
 
@@ -66,7 +71,7 @@
 | 🟢 | `named_session` | []NamedSession | **Keep.** Legal in both pack.toml and city.toml, city wins. |
 | 🟢 | `rigs` | []Rig | **Keep in city.toml.** |
 | 🟢 | `patches` | Patches | **Keep.** `[[patches.agent]]` and `[[patches.providers]]` legal in both, city wins. `[[patches.rigs]]` city.toml only. |
-| 🟢 | `agent_defaults` | AgentDefaults | **Keep.** Legal in both pack.toml and city.toml, city wins. Surface stays as-is (no expansion in this wave). |
+| 🟢 | `agent_defaults` | AgentDefaults | **Keep.** Legal in both pack.toml and city.toml, city wins. As of release v0.15.0, the surface stays as-is (no expansion). |
 | 🟢 | `providers` | map[string]ProviderSpec | **Keep.** Legal in both, city wins. |
 | 🟡 | `formulas` | FormulasConfig | See `[formulas].dir` below. |
 | 🟢 | `beads` | BeadsConfig | **Keep in city.toml.** |
@@ -86,14 +91,14 @@
 
 | Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|-----------------------|
-| 🟡 | `name` | Required string | **Optional.** Transitional runtime identity field in this wave. Fresh `gc init` keeps it aligned with `pack.name`; `gc register` reads it when present but stores registration aliases in the machine-local supervisor registry without backfilling `city.toml`. Soft warning: full site-binding cutover remains later. | `.gc/` site binding (#600) |
-| 🟡 | `prefix` | String | **Optional.** Same treatment as `name`. Soft warning. | `.gc/` site binding (#600) |
-| 🟢 | `provider` | String | **Keep as-is in this wave.** Current runtime default-provider field. Corresponding `[agent_defaults].provider` is still unsupported and emits a migration warning — see `doc-conformance-matrix.md`. | Later default-provider redesign, not part of this rollout |
+| 🟡 | `name` | Required string | **Optional.** As of release v0.15.0, this remains a transitional runtime identity field. Fresh `gc init` keeps it aligned with `pack.name`; `gc register` reads it when present but stores registration aliases in the machine-local supervisor registry without backfilling `city.toml`. Soft warning: full site-binding cutover remains later. | `.gc/` site binding (#600) |
+| 🟡 | `prefix` | String | **Optional.** As of release v0.15.0, this gets the same treatment as `name`. Soft warning. | `.gc/` site binding (#600) |
+| 🟢 | `provider` | String | **Keep.** As of release v0.15.0, this is still the current runtime default-provider field. Corresponding `[agent_defaults].provider` is still unsupported and emits a migration warning — see `doc-conformance-matrix.md`. | Later default-provider redesign, not part of this rollout |
 | 🟡 | `start_command` | String | **Soft warning.** "Use per-agent `start_command` in `agent.toml` instead." | Per-agent `agent.toml` |
 | 🟡 | `suspended` | Boolean | **Soft warning.** "Use `gc suspend`/`gc resume` instead." | `.gc/` site binding |
 | 🟢 | `max_active_sessions` | Integer | **Keep as-is.** Deployment capacity. | Top-level city.toml field when `[workspace]` is dismantled |
 | 🟢 | `session_template` | String | **Keep as-is.** Deployment. | `[session]` when `[workspace]` is dismantled |
-| 🟢 | `install_agent_hooks` | []string | **Keep as-is in this wave.** No `[agent_defaults]` replacement is implemented yet; `[agent_defaults].install_agent_hooks` still warns. | Later hooks-default redesign |
+| 🟢 | `install_agent_hooks` | []string | **Keep.** As of release v0.15.0, no `[agent_defaults]` replacement is implemented yet; `[agent_defaults].install_agent_hooks` still warns. | Later hooks-default redesign |
 | 🟡 | `global_fragments` | []string | **Soft warning.** "Use `[agent_defaults] append_fragments` or explicit `{{ template }}` instead." | Removed (replaced by template-fragments) |
 | 🟡 | `includes` | []string | **Loud warning on schema 2.** V1 composition, use `[imports]`. | Removed |
 | 🟡 | `default_rig_includes` | []string | **Loud warning on schema 2.** Use `[defaults.rig.imports]` in pack.toml. | Removed |
@@ -121,13 +126,14 @@ In this rollout, `[[agent]]` gets a loud warning on schema 2. Agent fields below
 
 ### Legal in agent.toml
 
-All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface stays as-is in this wave (no expansion).
+All other agent fields are legal in `agent.toml`. As of release
+v0.15.0, the `[agent_defaults]` surface stays as-is (no expansion).
 
 | Status | Field | Notes |
 |--------|-------|-------|
 | 🟢 | `description` | |
 | 🟢 | `scope` | `"city"` or `"rig"` |
-| 🟢 | `suspended` | Stays in agent.toml in this wave; moves to `.gc/` post-release |
+| 🟢 | `suspended` | As of release v0.15.0, stays in agent.toml; moves to `.gc/` post-release |
 | 🟢 | `provider` | |
 | 🟢 | `start_command` | |
 | 🟢 | `args` | |
@@ -175,7 +181,8 @@ All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface sta
 | 🟢 | `allow_env_override` | Present | **Keep.** Not yet auto-applied at runtime. |
 | 🟢 | `append_fragments` | Present | **Keep.** Migration bridge for global_fragments/inject_fragments. |
 
-No expansion of `[agent_defaults]` surface in this wave.
+As of release v0.15.0, there is no expansion of the
+`[agent_defaults]` surface.
 
 ## FormulasConfig
 
@@ -220,9 +227,9 @@ All Import fields match spec. No changes needed.
 |--------|-------|----------|--------------------|
 | 🟡 | `inject_fragments` | Present | **Loud warning.** V1 remnant. |
 | 🟡 | `inject_fragments_append` | Present | **Loud warning.** V1 remnant. |
-| 🟢 | `prompt_template` | Path string | **Keep in this wave.** Post-release: convention-based via `patches/`. |
-| 🟢 | `overlay_dir` | Path string | **Keep in this wave.** Post-release: convention-based. |
-| 🟢 | `dir` + `name` targeting (AgentPatch) | Present | **Keep in this wave.** Qualified name targeting already works. |
+| 🟢 | `prompt_template` | Path string | **Keep.** As of release v0.15.0, this remains supported. Post-release: convention-based via `patches/`. |
+| 🟢 | `overlay_dir` | Path string | **Keep.** As of release v0.15.0, this remains supported. Post-release: convention-based. |
+| 🟢 | `dir` + `name` targeting (AgentPatch) | Present | **Keep.** As of release v0.15.0, qualified name targeting already works. |
 | 🟢 | All other override fields | Present | **Keep.** |
 
 ## PackSource
