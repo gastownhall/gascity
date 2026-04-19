@@ -588,8 +588,9 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			skills := cachedPackSkills(cache, impDir)
 			mcpTopoDirs := topoDirs
 
-			// When transitive = false, keep only agents directly defined
-			// by this import (not its own transitive dependencies).
+			// by this import. Nested pack dependencies reached through
+			// either [imports] or legacy [pack].includes stay hidden from
+			// the consumer.
 			if !imp.ImportIsTransitive() {
 				absImpDir, _ := filepath.Abs(impDir)
 				var direct []Agent
@@ -1178,8 +1179,9 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 		impSkills := cachedPackSkills(cache, impDir)
 
 		// When transitive = false, strip agents that came from the
-		// imported pack's own imports (i.e., transitive deps). We keep
-		// only agents whose SourceDir matches the import's own directory.
+		// imported pack's nested dependencies. We keep only agents
+		// whose SourceDir matches the import's own directory, which
+		// suppresses both nested [imports] and legacy [pack].includes.
 		if !imp.ImportIsTransitive() {
 			absImpDir, _ := filepath.Abs(impDir)
 			var direct []Agent

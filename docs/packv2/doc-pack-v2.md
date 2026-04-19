@@ -250,7 +250,7 @@ source = "../maintenance"
 transitive = false
 ```
 
-This is unusual — it means "I import this for my own use, but consumers of my pack should not see it." The typical use case is internal tooling or test-only dependencies.
+This is unusual — it means "I import this for my own use, but consumers of my pack should not see it." The typical use case is internal tooling or test-only dependencies. For legacy compatibility, nested `includes` pulled in by that imported pack are treated the same way and stay hidden too.
 
 A pack can explicitly re-export an imported pack to make its contents available under the re-exporting pack's namespace:
 

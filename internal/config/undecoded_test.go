@@ -270,6 +270,44 @@ allow_overlay = ["GC_HOME"]
 	}
 }
 
+func TestParseWithMetaSkipsMixedTableWarningWhenOverlapIsOnlyUnsupportedFutureKeys(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "claude"
+
+[agents]
+provider = "codex"
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			t.Fatalf("expected no mixed-table warning for unsupported future keys, got: %v", warnings)
+		}
+	}
+	foundUnsupported := false
+	foundAlias := false
+	for _, w := range warnings {
+		if strings.Contains(w, `keep using workspace.provider`) {
+			foundUnsupported = true
+		}
+		if strings.Contains(w, agentsAliasWarning) {
+			foundAlias = true
+		}
+	}
+	if !foundUnsupported {
+		t.Fatalf("expected unsupported-key guidance warning, got: %v", warnings)
+	}
+	if !foundAlias {
+		t.Fatalf("expected alias warning, got: %v", warnings)
+	}
+}
+
 func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T) {
 	tests := []struct {
 		name  string
