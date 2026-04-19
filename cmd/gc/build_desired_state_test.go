@@ -301,6 +301,68 @@ mode = "always"
 	}
 }
 
+func TestBuildDesiredState_TransitiveFalseSkipsNestedImportedNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	for path, contents := range map[string]string{
+		filepath.Join(cityPath, "city.toml"): `
+[workspace]
+name = "import-regression"
+provider = "claude"
+
+[imports.outer]
+source = "./assets/outer"
+transitive = false
+`,
+		filepath.Join(cityPath, "assets", "outer", "pack.toml"): `
+[pack]
+name = "outer"
+schema = 2
+
+[imports.inner]
+source = "../inner"
+
+[[named_session]]
+template = "captain"
+scope = "city"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "outer", "agents", "captain", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "outer", "agents", "captain", "prompt.md"):  "You are the outer captain.\n",
+		filepath.Join(cityPath, "assets", "inner", "pack.toml"): `
+[pack]
+name = "inner"
+schema = 2
+
+[[named_session]]
+template = "watcher"
+scope = "city"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "inner", "agents", "watcher", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "inner", "agents", "watcher", "prompt.md"):  "You are the inner watcher.\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
+	if _, ok := dsResult.State["outer__captain"]; !ok {
+		t.Fatalf("desired state missing outer__captain; keys=%v", mapKeys(dsResult.State))
+	}
+	if _, ok := dsResult.State["outer__watcher"]; ok {
+		t.Fatalf("desired state should not include nested named session when transitive=false; keys=%v", mapKeys(dsResult.State))
+	}
+}
+
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {

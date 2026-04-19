@@ -486,6 +486,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 					}
 				}
 				agents = direct
+				namedSessions = filterNamedSessionsBySourceDir(namedSessions, impDir)
 				commands = filterCommandsBySourceDir(commands, impDir)
 				doctors = filterDoctorsBySourceDir(doctors, impDir)
 			}
@@ -1044,6 +1045,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 				}
 			}
 			impAgents = direct
+			impNamedSessions = filterNamedSessionsBySourceDir(impNamedSessions, impDir)
 			impCommands = filterCommandsBySourceDir(impCommands, impDir)
 			impDoctors = filterDoctorsBySourceDir(impDoctors, impDir)
 		}
@@ -1490,6 +1492,21 @@ func cachedPackLocalWarnings(cache *packLoadCache, topoDir string) []string {
 		return nil
 	}
 	return append([]string(nil), result.localWarnings...)
+}
+
+func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir string) []NamedSession {
+	if len(namedSessions) == 0 {
+		return nil
+	}
+	absWant, _ := filepath.Abs(sourceDir)
+	var out []NamedSession
+	for _, named := range namedSessions {
+		absDir, _ := filepath.Abs(named.SourceDir)
+		if absDir == absWant {
+			out = append(out, named)
+		}
+	}
+	return out
 }
 
 func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor {

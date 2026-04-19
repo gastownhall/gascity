@@ -99,6 +99,72 @@ scope = "city"
 	}
 }
 
+func TestImport_TransitiveFalseSuppressesNestedNamedSessions(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[[agent]]
+name = "direct"
+scope = "city"
+
+[[named_session]]
+template = "direct"
+scope = "city"
+mode = "always"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[[agent]]
+name = "transitive"
+scope = "city"
+
+[[named_session]]
+template = "transitive"
+scope = "city"
+mode = "always"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, named := range cfg.NamedSessions {
+		found[named.QualifiedName()] = true
+	}
+	if !found["b.direct"] {
+		t.Fatalf("expected direct named session from b; got %v", found)
+	}
+	for qn := range found {
+		if strings.Contains(qn, "transitive") {
+			t.Fatalf("transitive=false should block nested named sessions; got %v", found)
+		}
+	}
+}
+
 func TestImport_InvalidPackSchemaInCityPackToml(t *testing.T) {
 	// A city pack.toml with invalid schema should produce a clear error.
 	dir := t.TempDir()
