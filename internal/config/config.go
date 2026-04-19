@@ -563,6 +563,8 @@ type PackMeta struct {
 	Version string `toml:"version"`
 	// Schema is the pack format version (currently 1).
 	Schema int `toml:"schema" jsonschema:"required"`
+	// Description is an optional human-readable pack summary.
+	Description string `toml:"description,omitempty"`
 	// RequiresGC is an optional minimum gc version requirement.
 	RequiresGC string `toml:"requires_gc,omitempty"`
 	// Includes lists other packs to compose into this one (V1 mechanism).
