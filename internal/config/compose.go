@@ -334,7 +334,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if root.Imports == nil {
 			root.Imports = make(map[string]Import)
 		}
+		if root.ImplicitImportBindings == nil {
+			root.ImplicitImportBindings = make(map[string]bool)
+		}
+		if root.BootstrapImportBindings == nil {
+			root.BootstrapImportBindings = make(map[string]bool)
+		}
 		addedImplicit := false
+		bootstrapSet := make(map[string]bool, len(bootstrapNames))
+		for _, name := range bootstrapNames {
+			bootstrapSet[name] = true
+		}
 		for name, imp := range implicitImports {
 			if _, exists := root.Imports[name]; exists {
 				continue
@@ -342,6 +352,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			root.Imports[name] = resolveImplicitImport(imp)
 			prov.Imports[name] = "(implicit)"
 			addedImplicit = true
+			root.ImplicitImportBindings[name] = true
+			if bootstrapSet[name] {
+				root.BootstrapImportBindings[name] = true
+			}
 		}
 		if addedImplicit && implicitPath != "" {
 			prov.Sources = append(prov.Sources, implicitPath)
