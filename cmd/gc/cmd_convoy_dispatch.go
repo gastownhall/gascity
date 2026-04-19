@@ -219,7 +219,7 @@ func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (bea
 }
 
 func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, beads.Bead, error) {
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, os.Stderr)
 	if err != nil {
 		return convoyStoreView{}, beads.Bead{}, fmt.Errorf("loading city config for bead %q: %w", beadID, err)
 	}
@@ -723,7 +723,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "gc workflow delete-source: %v\n", err)
 		return 1
@@ -867,7 +867,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", err)
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "gc workflow reopen-source: %v\n", err)
 		return 1

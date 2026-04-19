@@ -581,7 +581,7 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 	// migrated rigs (rig.path only in .gc/site.toml) are still waited
 	// for. A raw config.Load here would silently skip every migrated
 	// rig — the site binding wouldn't populate rig.Path.
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return nil
 	}
