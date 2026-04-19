@@ -38,7 +38,8 @@ func (s *Server) humaHandleOrderList(_ context.Context, _ *OrderListInput) (*Ord
 // humaHandleOrderGet is the Huma-typed handler for GET /v0/order/{name}.
 func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*struct {
 	Body orderResponse
-}, error) {
+}, error,
+) {
 	a, err := resolveOrder(s.state.Orders(), input.Name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
@@ -268,7 +269,8 @@ type orderHistoryEntry struct {
 // humaHandleOrderHistoryDetail is the Huma-typed handler for GET /v0/order/history/{bead_id}.
 func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHistoryDetailInput) (*struct {
 	Body orderHistoryDetailResponse
-}, error) {
+}, error,
+) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -333,7 +335,8 @@ type ordersFeedBody struct {
 // humaHandleOrdersFeed is the Huma-typed handler for GET /v0/orders/feed.
 func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput) (*struct {
 	Body ordersFeedBody
-}, error) {
+}, error,
+) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, huma.Error400BadRequest(scopeErr)

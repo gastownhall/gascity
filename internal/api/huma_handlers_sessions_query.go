@@ -65,9 +65,6 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		if pp.Limit < len(items) {
 			items = items[:pp.Limit]
 		}
-		if items == nil {
-			items = []sessionResponse{}
-		}
 		return &ListOutput[sessionResponse]{
 			Body: ListBody[sessionResponse]{Items: items, Total: len(items)},
 		}, nil

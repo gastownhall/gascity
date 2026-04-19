@@ -100,4 +100,3 @@ func (s *Server) humaHandleReadiness(ctx context.Context, input *ReadinessInput)
 
 	return &ReadinessOutput{Body: resp}, nil
 }
-

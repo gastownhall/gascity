@@ -15,22 +15,22 @@ import (
 )
 
 type workflowEventProjection struct {
-	Type            string                   `json:"type"`
-	WorkflowID      string                   `json:"workflow_id"`
-	RootBeadID      string                   `json:"root_bead_id"`
-	RootStoreRef    string                   `json:"root_store_ref"`
-	ScopeKind       string                   `json:"scope_kind"`
-	ScopeRef        string                   `json:"scope_ref"`
-	WatchGeneration string                   `json:"watch_generation"`
-	EventSeq        uint64                   `json:"event_seq"`
-	WorkflowSeq     uint64                   `json:"workflow_seq"`
-	EventTS         string                   `json:"event_ts"`
-	EventType       string                   `json:"event_type"`
-	Bead            workflowBeadResponse     `json:"bead"`
-	ChangedFields   []string                 `json:"changed_fields"`
-	LogicalNodeID   string                   `json:"logical_node_id"`
-	AttemptSummary  *WorkflowAttemptSummary  `json:"attempt_summary,omitempty"`
-	RequiresResync  bool                     `json:"requires_resync,omitempty"`
+	Type            string                  `json:"type"`
+	WorkflowID      string                  `json:"workflow_id"`
+	RootBeadID      string                  `json:"root_bead_id"`
+	RootStoreRef    string                  `json:"root_store_ref"`
+	ScopeKind       string                  `json:"scope_kind"`
+	ScopeRef        string                  `json:"scope_ref"`
+	WatchGeneration string                  `json:"watch_generation"`
+	EventSeq        uint64                  `json:"event_seq"`
+	WorkflowSeq     uint64                  `json:"workflow_seq"`
+	EventTS         string                  `json:"event_ts"`
+	EventType       string                  `json:"event_type"`
+	Bead            workflowBeadResponse    `json:"bead"`
+	ChangedFields   []string                `json:"changed_fields"`
+	LogicalNodeID   string                  `json:"logical_node_id"`
+	AttemptSummary  *WorkflowAttemptSummary `json:"attempt_summary,omitempty"`
+	RequiresResync  bool                    `json:"requires_resync,omitempty"`
 }
 
 // WorkflowAttemptSummary describes retry accounting for a workflow bead.

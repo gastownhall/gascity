@@ -19,7 +19,8 @@ import (
 func TestAgentList(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
@@ -47,7 +48,8 @@ func TestAgentListPoolExpansion(t *testing.T) {
 			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 3",
 		},
 	}
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
@@ -93,7 +95,8 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 	// Start 2 running sessions matching the pool pattern.
 	state.sp.Start(context.Background(), "myrig--polecat-1", runtime.Config{}) //nolint:errcheck
 	state.sp.Start(context.Background(), "myrig--polecat-2", runtime.Config{}) //nolint:errcheck
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
@@ -138,7 +141,8 @@ func TestAgentListUnlimitedImportedPoolDiscovery(t *testing.T) {
 	}
 	state.sp.Start(context.Background(), "myrig--gs__polecat-1", runtime.Config{}) //nolint:errcheck
 	state.sp.Start(context.Background(), "myrig--gs__polecat-2", runtime.Config{}) //nolint:errcheck
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
@@ -209,7 +213,8 @@ func TestAgentListFilterByRig(t *testing.T) {
 		{Name: "rig1", Path: filepath.Join(state.cityPath, "repos", "rig1")},
 		{Name: "rig2", Path: filepath.Join(state.cityPath, "repos", "rig2")},
 	}
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents?rig=rig1"), nil)
 	rec := httptest.NewRecorder()
@@ -235,7 +240,8 @@ func TestAgentListFilterByRunning(t *testing.T) {
 		{Name: "stopped-agent", MaxActiveSessions: intPtr(1)},
 	}
 	state.sp.Start(context.Background(), "running-agent", runtime.Config{}) //nolint:errcheck
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents?running=true"), nil)
 	rec := httptest.NewRecorder()
@@ -256,7 +262,8 @@ func TestAgentListFilterByRunning(t *testing.T) {
 
 func TestAgentGet(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
@@ -315,7 +322,8 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 
 func TestAgentGetNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent"), nil)
 	rec := httptest.NewRecorder()
@@ -330,7 +338,8 @@ func TestAgentOutputPeekFallback(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sp.SetPeekOutput("myrig--worker", "Hello from agent")
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
@@ -382,7 +391,8 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 
 func TestAgentOutputNotRunning(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
@@ -395,7 +405,8 @@ func TestAgentOutputNotRunning(t *testing.T) {
 
 func TestAgentSuspendResume(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// Suspend.
 	req := newPostRequest(cityURL(state, "/agent/myrig/worker/suspend"), nil)
@@ -444,7 +455,8 @@ func TestAgentRuntimeActionsRemoved(t *testing.T) {
 
 func TestAgentActionNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := newPostRequest(cityURL(state, "/agent/nonexistent/suspend"), nil)
 	rec := httptest.NewRecorder()
@@ -458,7 +470,8 @@ func TestAgentActionNotFound(t *testing.T) {
 func TestAgentActionNotMutator(t *testing.T) {
 	// fakeState (not fakeMutatorState) doesn't implement StateMutator.
 	state := newFakeState(t)
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := newPostRequest(cityURL(state, "/agent/myrig/worker/suspend"), nil)
 	rec := httptest.NewRecorder()
@@ -476,7 +489,8 @@ func TestAgentProviderAndDisplayName(t *testing.T) {
 		{Name: "worker", Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)},
 		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	}
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
@@ -538,7 +552,8 @@ func TestAgentStateEnum(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			state := newFakeState(t)
 			tt.setup(state)
-			srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
 
 			req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 			rec := httptest.NewRecorder()
@@ -561,7 +576,8 @@ func TestAgentPeekViaQueryParam(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sp.SetPeekOutput("myrig--worker", "line1\nline2\nline3")
-	srv := New(state); h := newTestCityHandlerWith(t, state, srv)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// Without ?peek=true — no last_output.
 	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)

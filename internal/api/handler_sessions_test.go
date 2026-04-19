@@ -137,7 +137,9 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 
 func TestHandleSessionList(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create two sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session A")
@@ -162,7 +164,9 @@ func TestHandleSessionList(t *testing.T) {
 
 func TestHandleSessionListFilterByState(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
@@ -189,7 +193,9 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 
 func TestHandleSessionListPagination(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create 3 sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
@@ -259,7 +265,9 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
 
@@ -291,7 +299,9 @@ func TestHandleSessionGet(t *testing.T) {
 
 func TestHandleSessionGetNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", cityURL(fs, "/session/nonexistent"), nil)
@@ -304,7 +314,9 @@ func TestHandleSessionGetNotFound(t *testing.T) {
 
 func TestHandleSessionSuspend(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 
@@ -333,7 +345,9 @@ func TestHandleSessionSuspend(t *testing.T) {
 // (the state machine only allows Suspend from Active/Asleep/Quarantined).
 func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
 
@@ -372,7 +386,9 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 func TestHandleSessionClose(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Close")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -435,7 +451,9 @@ func TestHandleSessionClose(t *testing.T) {
 
 func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Historical Wait")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -499,7 +517,9 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 
 func TestHandleSessionNoCityStore(t *testing.T) {
 	fs := newFakeState(t) // no cityBeadStore set
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
@@ -512,7 +532,9 @@ func TestHandleSessionNoCityStore(t *testing.T) {
 
 func TestHandleSessionWake(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held Session")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -588,7 +610,9 @@ func TestHandleSessionWake(t *testing.T) {
 
 func TestHandleSessionWakeClosed(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -605,7 +629,9 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 
 func TestHandleSessionGetByTemplateName(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Named Session")
 
@@ -633,7 +659,9 @@ func TestHandleSessionGetByTemplateName(t *testing.T) {
 
 func TestHandleSessionPatchTitle(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
@@ -658,7 +686,9 @@ func TestHandleSessionPatchTitle(t *testing.T) {
 
 func TestHandleSessionPatchAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
@@ -683,7 +713,9 @@ func TestHandleSessionPatchAlias(t *testing.T) {
 
 func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
@@ -705,7 +737,9 @@ func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 
 func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Create(
@@ -741,7 +775,9 @@ func TestHandleSessionPatchImmutableField(t *testing.T) {
 	// than the handler-side 403. This is a stricter error class for the
 	// same underlying constraint.
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
@@ -758,7 +794,9 @@ func TestHandleSessionPatchImmutableField(t *testing.T) {
 
 func TestHandleSessionListIncludesReason(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
 
@@ -796,7 +834,9 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
@@ -823,7 +863,9 @@ func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 	// are rejected by Huma's validation layer (422) rather than the
 	// handler-side 400.
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
@@ -839,7 +881,9 @@ func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 
 func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create two sessions with the same public alias.
 	info1 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 1")
@@ -858,7 +902,9 @@ func TestHandleSessionAmbiguousAlias(t *testing.T) {
 
 func TestHandleSessionGetEnrichment(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Enriched Session")
 
@@ -885,7 +931,9 @@ func TestHandleSessionGetEnrichment(t *testing.T) {
 
 func TestHandleSessionListPeek(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Peek Session")
 
@@ -907,7 +955,9 @@ func TestHandleSessionListPeek(t *testing.T) {
 
 func TestHandleSessionCreate(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -941,7 +991,9 @@ func TestHandleSessionCreate(t *testing.T) {
 
 func TestHandleSessionCreateAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"sky","async":true}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -972,7 +1024,9 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 
 func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Agent sessions are always async; messages are stored as initial_message
 	// in template_overrides for the reconciler to pick up.
@@ -1085,7 +1139,9 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 
 func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","async":true}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1142,7 +1198,9 @@ func TestMaterializeNamedSession_RebrandedSingletonKeepsTemplateWorkDirIdentity(
 
 func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","message":"hello"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1180,7 +1238,9 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 
 func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"sky"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1205,7 +1265,9 @@ func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 
 func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"myrig/worker"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1219,7 +1281,9 @@ func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 
 func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","alias":"myrig/worker"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1233,7 +1297,9 @@ func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) 
 
 func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"bad:name"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1247,7 +1313,9 @@ func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 
 func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","session_name":"mayor"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1264,7 +1332,9 @@ func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 
 func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","session_name":""}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1281,7 +1351,9 @@ func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 
 func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	first := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	firstW := httptest.NewRecorder()
@@ -1301,7 +1373,9 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 
 func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"worker"}`))
 	w := httptest.NewRecorder()
@@ -1365,7 +1439,9 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 
 func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker"}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1396,7 +1472,9 @@ func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 
 func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1430,7 +1508,9 @@ func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 
 func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
 	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
@@ -1464,7 +1544,9 @@ func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 
 func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create session with BOTH options AND a message.
 	// Regression: the old code overwrote template_overrides with just the
@@ -1505,7 +1587,9 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 
 func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1538,7 +1622,9 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 
 func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
@@ -1611,7 +1697,8 @@ func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t
 func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv); _ = h
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1647,7 +1734,9 @@ func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) 
 	// pattern:"\\S" validation on the body; Huma returns 422 before
 	// the handler runs, so no session materializes.
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"   "}`))
 	rec := httptest.NewRecorder()
@@ -1667,7 +1756,9 @@ func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) 
 
 func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateAliasedNamedWithTransport(
@@ -1703,7 +1794,9 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg.NamedSessions[0].Mode = "always"
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1736,7 +1829,9 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 		{Template: "worker", Dir: "rig-a"},
 		{Template: "worker", Dir: "rig-b"},
 	}
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err == nil || ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want ambiguous error", ok, err)
@@ -1756,7 +1851,9 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 
 func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNamedTarget(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1792,7 +1889,8 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv); _ = h
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1826,7 +1924,9 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 
 func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1876,7 +1976,8 @@ func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSa
 func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConflicts(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv); _ = h
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1906,7 +2007,9 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 
 func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	rec := httptest.NewRecorder()
 	req := newPostRequest(cityURL(fs, "/session/worker/wake"), nil)
@@ -1975,7 +2078,9 @@ func TestHandleSessionWakeCanceledNamedCreateRollsBack(t *testing.T) {
 func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2021,7 +2126,9 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2062,7 +2169,9 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -2102,7 +2211,9 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 
 func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -2130,7 +2241,9 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 
 func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Sky", "claude", t.TempDir(), "claude", "", nil, session.ProviderResume{}, runtime.Config{})
@@ -2155,7 +2268,9 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 
 func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -2176,7 +2291,9 @@ func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2218,7 +2335,9 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 
 func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2242,7 +2361,9 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2286,7 +2407,9 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2329,7 +2452,9 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 
 func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -2413,7 +2538,9 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2460,7 +2587,9 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 func TestHandleSessionGetActivity(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2550,7 +2679,9 @@ func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
 
 func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs); h := newTestCityHandlerWith(t, fs, srv); _ = h
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 

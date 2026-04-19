@@ -74,4 +74,3 @@ func (e *EventStreamInput) resolveAfterSeq() uint64 {
 	}
 	return 0
 }
-

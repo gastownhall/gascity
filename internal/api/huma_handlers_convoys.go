@@ -584,7 +584,8 @@ func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInpu
 // Backward-compatible alias for the convoy/workflow delete endpoint.
 func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDeleteInput) (*struct {
 	Body workflowDeleteResponse
-}, error) {
+}, error,
+) {
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
 		return nil, huma.Error400BadRequest("convoy id is required")

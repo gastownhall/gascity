@@ -85,19 +85,19 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	}
 
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
-		return fmt.Errorf("%w: agents: %v", ErrValidation, err)
+		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
 	if err := config.ValidateRigs(cfg.Rigs, cfg.Workspace.Name); err != nil {
-		return fmt.Errorf("%w: rigs: %v", ErrValidation, err)
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
-		return fmt.Errorf("%w: services: %v", ErrValidation, err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
-		return fmt.Errorf("%w: services: %v", ErrValidation, err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := validateProviders(cfg.Providers); err != nil {
-		return fmt.Errorf("%w: providers: %v", ErrValidation, err)
+		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
 	}
 
 	content, err := cfg.Marshal()
@@ -135,19 +135,19 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	}
 
 	if err := config.ValidateAgents(raw.Agents); err != nil {
-		return fmt.Errorf("%w: agents: %v", ErrValidation, err)
+		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
 	if err := config.ValidateRigs(raw.Rigs, raw.Workspace.Name); err != nil {
-		return fmt.Errorf("%w: rigs: %v", ErrValidation, err)
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	if err := config.ValidateServices(raw.Services); err != nil {
-		return fmt.Errorf("%w: services: %v", ErrValidation, err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(raw.Services); err != nil {
-		return fmt.Errorf("%w: services: %v", ErrValidation, err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := validateProviders(raw.Providers); err != nil {
-		return fmt.Errorf("%w: providers: %v", ErrValidation, err)
+		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
 	}
 
 	content, err := raw.Marshal()

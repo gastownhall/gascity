@@ -29,4 +29,3 @@ type ConfigValidateOutput struct {
 		Warnings []string `json:"warnings" doc:"Validation warnings."`
 	}
 }
-

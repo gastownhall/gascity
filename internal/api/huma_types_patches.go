@@ -79,7 +79,7 @@ type RigPatchGetInput struct {
 type RigPatchSetInput struct {
 	CityScope
 	Body struct {
-		Name      string `json:"name,omitempty" doc:"Rig name."`
+		Name      string  `json:"name,omitempty" doc:"Rig name."`
 		Path      *string `json:"path,omitempty" doc:"Override filesystem path."`
 		Prefix    *string `json:"prefix,omitempty" doc:"Override bead ID prefix."`
 		Suspended *bool   `json:"suspended,omitempty" doc:"Override suspended state."`
@@ -162,4 +162,3 @@ type StatusBody struct {
 }
 
 // Session types moved to huma_types_sessions.go.
-

@@ -36,7 +36,7 @@ func (s *SessionListInput) Resolve(ctx huma.Context) []error {
 type SessionGetInput struct {
 	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Peek bool `query:"peek" required:"false" doc:"Include last output preview."`
+	Peek bool   `query:"peek" required:"false" doc:"Include last output preview."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.
@@ -116,7 +116,7 @@ type SessionPatchInput struct {
 type SessionCloseInput struct {
 	CityScope
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Delete bool `query:"delete" required:"false" doc:"Permanently delete bead after closing."`
+	Delete bool   `query:"delete" required:"false" doc:"Permanently delete bead after closing."`
 }
 
 // SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.

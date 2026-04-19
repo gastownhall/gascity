@@ -28,7 +28,7 @@ func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInpu
 		return nil, huma.Error400BadRequest(scopeErr)
 	}
 
-	paths, status, _, msg := s.formulaSearchPaths(scopeKind, scopeRef)
+	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
 		if status == 404 {
 			return nil, huma.Error404NotFound(msg)
@@ -53,7 +53,8 @@ func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInpu
 // humaHandleFormulaRuns is the Huma-typed handler for GET /v0/formulas/{name}/runs.
 func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInput) (*struct {
 	Body formulaRunsResponse
-}, error) {
+}, error,
+) {
 	// Name non-empty-whitespace is enforced by minLength + pattern on FormulaRunsInput.
 	name := input.Name
 
@@ -61,7 +62,7 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 	if scopeErr != "" {
 		return nil, huma.Error400BadRequest(scopeErr)
 	}
-	if _, status, _, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
+	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
 		if status == 404 {
 			return nil, huma.Error404NotFound(msg)
 		}
@@ -91,7 +92,8 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 // the Resolve interface on FormulaDetailInput.
 func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDetailInput) (*struct {
 	Body formulaDetailResponse
-}, error) {
+}, error,
+) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return nil, huma.Error400BadRequest("formula name is required")
@@ -106,7 +108,7 @@ func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDeta
 		return nil, huma.Error400BadRequest("target is required")
 	}
 
-	paths, status, _, msg := s.formulaSearchPaths(scopeKind, scopeRef)
+	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
 	if status != 200 {
 		if status == 404 {
 			return nil, huma.Error404NotFound(msg)
@@ -140,12 +142,13 @@ type formulaFeedBody struct {
 // humaHandleFormulaFeed is the Huma-typed handler for GET /v0/formulas/feed.
 func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInput) (*struct {
 	Body formulaFeedBody
-}, error) {
+}, error,
+) {
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, huma.Error400BadRequest(scopeErr)
 	}
-	if _, status, _, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
+	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
 		if status == http.StatusNotFound {
 			return nil, huma.Error404NotFound(msg)
 		}

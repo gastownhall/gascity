@@ -117,4 +117,3 @@ type MailCountOutput struct {
 		Unread int `json:"unread" doc:"Unread message count."`
 	}
 }
-

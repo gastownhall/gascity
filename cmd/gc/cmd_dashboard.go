@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"net"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/cmd/gc/dashboard"
@@ -109,27 +107,12 @@ func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride strin
 	if cityPath == "" {
 		return "", fmt.Errorf("could not auto-discover the supervisor API; start the supervisor with %q or pass --api explicitly", "gc supervisor start")
 	}
-	if _, ok := discoverStandaloneDashboardAPI(cfg); ok {
+	if hasStandaloneDashboardAPI(cfg) {
 		return "", fmt.Errorf("dashboard requires the supervisor API; standalone city APIs do not expose /v0/city/{cityName}/... routes. Start the supervisor with %q or pass --api to a supervisor endpoint explicitly", "gc supervisor start")
 	}
 	return "", fmt.Errorf("could not auto-discover the supervisor API for %q; start the supervisor with %q or pass --api explicitly", cityPath, "gc supervisor start")
 }
 
-func discoverStandaloneDashboardAPI(cfg *config.City) (string, bool) {
-	if cfg == nil || cfg.API.Port <= 0 {
-		return "", false
-	}
-	bind := normalizeDashboardLocalBind(cfg.API.BindOrDefault())
-	return fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))), true
-}
-
-func normalizeDashboardLocalBind(bind string) string {
-	switch bind {
-	case "", "0.0.0.0":
-		return "127.0.0.1"
-	case "::", "[::]":
-		return "::1"
-	default:
-		return bind
-	}
+func hasStandaloneDashboardAPI(cfg *config.City) bool {
+	return cfg != nil && cfg.API.Port > 0
 }

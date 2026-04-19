@@ -58,15 +58,6 @@ var (
 
 type dataSourceKey struct{}
 
-// setDataSource annotates the request context with the data source used to
-// fulfill it (e.g., "memory", "cache", "bd_subprocess", "sql"). Handlers
-// call this so the logging middleware can include it in metrics.
-func setDataSource(r *http.Request, source string) {
-	if p, ok := r.Context().Value(dataSourceKey{}).(*string); ok {
-		*p = source
-	}
-}
-
 // withLogging wraps a handler with request logging and OTel metrics.
 func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

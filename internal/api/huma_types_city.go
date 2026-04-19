@@ -42,4 +42,3 @@ type ReadinessInput struct {
 type ReadinessOutput struct {
 	Body readinessResponse
 }
-

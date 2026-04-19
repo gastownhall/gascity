@@ -30,25 +30,25 @@ const (
 	maxFormulaRunsLimit     = 20
 )
 
-func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string, string) {
+func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string) {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil, http.StatusServiceUnavailable, "unavailable", "config is unavailable"
+		return nil, http.StatusServiceUnavailable, "config is unavailable"
 	}
 
 	switch scopeKind {
 	case "city":
 		if scopeRef != strings.TrimSpace(s.state.CityName()) {
-			return nil, http.StatusNotFound, "not_found", "city scope " + scopeRef + " not found"
+			return nil, http.StatusNotFound, "city scope " + scopeRef + " not found"
 		}
-		return cfg.FormulaLayers.City, http.StatusOK, "", ""
+		return cfg.FormulaLayers.City, http.StatusOK, ""
 	case "rig":
 		if s.state.BeadStore(scopeRef) == nil {
-			return nil, http.StatusNotFound, "not_found", "rig scope " + scopeRef + " not found"
+			return nil, http.StatusNotFound, "rig scope " + scopeRef + " not found"
 		}
-		return cfg.FormulaLayers.SearchPaths(scopeRef), http.StatusOK, "", ""
+		return cfg.FormulaLayers.SearchPaths(scopeRef), http.StatusOK, ""
 	default:
-		return nil, http.StatusBadRequest, "invalid", "scope_kind must be 'city' or 'rig'"
+		return nil, http.StatusBadRequest, "scope_kind must be 'city' or 'rig'"
 	}
 }
 
@@ -335,27 +335,6 @@ func formulaVarDefs(vars map[string]*formula.VarDef) []formulaVarDefResponse {
 		items = append(items, item)
 	}
 	return items
-}
-
-func queryFormulaVars(q map[string][]string) map[string]string {
-	if len(q) == 0 {
-		return nil
-	}
-	out := make(map[string]string)
-	for key, values := range q {
-		if !strings.HasPrefix(key, "var.") || len(values) == 0 {
-			continue
-		}
-		name := strings.TrimPrefix(key, "var.")
-		if name == "" {
-			continue
-		}
-		out[name] = values[len(values)-1]
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func recipeStepKind(step formula.RecipeStep) string {

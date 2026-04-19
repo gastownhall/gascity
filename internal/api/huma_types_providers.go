@@ -88,4 +88,3 @@ type ProviderDeleteInput struct {
 	CityScope
 	Name string `path:"name" doc:"Provider name."`
 }
-

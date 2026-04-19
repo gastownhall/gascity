@@ -33,7 +33,7 @@ type BlockingParam struct {
 // Resolve validates the blocking-query parameters. Implements huma.Resolver;
 // Huma calls this after binding the struct, so invalid values turn into
 // 422 responses rather than default-0 behavior.
-func (bp *BlockingParam) Resolve(ctx huma.Context) []error {
+func (bp *BlockingParam) Resolve(_ huma.Context) []error {
 	var errs []error
 	if bp.Index != "" {
 		if _, err := strconv.ParseUint(bp.Index, 10, 64); err != nil {
@@ -101,7 +101,7 @@ type TailParam struct {
 }
 
 // Resolve validates Tail. Huma calls this during binding.
-func (t *TailParam) Resolve(ctx huma.Context) []error {
+func (t *TailParam) Resolve(_ huma.Context) []error {
 	if t.Tail == "" {
 		return nil
 	}
@@ -266,4 +266,3 @@ type ProviderCreatedOutput struct {
 		Provider string `json:"provider" doc:"Created provider name."`
 	}
 }
-

@@ -107,14 +107,18 @@ DTO or SSE envelope.`,
 }
 
 func cmdEvents(apiURLOverride, typeFilter, sinceFlag string, payloadMatchArgs []string, stdout, stderr io.Writer) int {
-	scope, code := openEventsScope(apiURLOverride, stderr)
-	if code != 0 {
-		return code
+	if err := validateEventsSince(sinceFlag); err != nil {
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return 1
 	}
 	pm, err := parsePayloadMatch(payloadMatchArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	scope, code := openEventsScope(apiURLOverride, stderr)
+	if code != 0 {
+		return code
 	}
 	return doEvents(scope, typeFilter, sinceFlag, pm, stdout, stderr)
 }
@@ -128,16 +132,16 @@ func cmdEventsSeq(apiURLOverride string, stdout, stderr io.Writer) int {
 }
 
 func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []string, afterSeq uint64, afterCursor string, stdout, stderr io.Writer) int {
+	pm, err := parsePayloadMatch(payloadMatchArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	scope, code := openEventsScope(apiURLOverride, stderr)
 	if code != 0 {
 		return code
 	}
 	if err := validateEventsCursor(scope, afterSeq, afterCursor); err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	pm, err := parsePayloadMatch(payloadMatchArgs)
-	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -145,14 +149,6 @@ func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []strin
 }
 
 func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string, afterSeq uint64, afterCursor, timeoutFlag string, stdout, stderr io.Writer) int {
-	scope, code := openEventsScope(apiURLOverride, stderr)
-	if code != 0 {
-		return code
-	}
-	if err := validateEventsCursor(scope, afterSeq, afterCursor); err != nil {
-		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
-		return 1
-	}
 	timeout, err := time.ParseDuration(timeoutFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: invalid --timeout %q: %v\n", timeoutFlag, err) //nolint:errcheck
@@ -160,6 +156,14 @@ func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string
 	}
 	pm, err := parsePayloadMatch(payloadMatchArgs)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	scope, code := openEventsScope(apiURLOverride, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := validateEventsCursor(scope, afterSeq, afterCursor); err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -206,7 +210,7 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 			"gc supervisor start",
 		)
 	}
-	if _, ok := discoverStandaloneDashboardAPI(cfg); ok {
+	if hasStandaloneDashboardAPI(cfg) {
 		return eventsAPIScope{}, fmt.Errorf(
 			"gc events requires the supervisor API; standalone city APIs do not expose /v0/city/{cityName}/events. Start the supervisor with %q or pass --api to a supervisor endpoint explicitly",
 			"gc supervisor start",
@@ -239,6 +243,16 @@ func validateEventsCursor(scope eventsAPIScope, afterSeq uint64, afterCursor str
 	return nil
 }
 
+func validateEventsSince(sinceFlag string) error {
+	if strings.TrimSpace(sinceFlag) == "" {
+		return nil
+	}
+	if _, err := time.ParseDuration(sinceFlag); err != nil {
+		return fmt.Errorf("invalid --since %q: %w", sinceFlag, err)
+	}
+	return nil
+}
+
 func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) int {
 	client, err := scope.client()
 	if err != nil {
@@ -259,7 +273,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return printJSONLines(items, stdout, stderr)
 	}
 
-	items, _, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag)
+	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
@@ -370,7 +384,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 
 	resumeSeq := afterSeq
 	if resumeSeq > 0 {
-		items, _, err := fetchCityEvents(ctx, client, scope.cityName, "", "")
+		items, err := fetchCityEvents(ctx, client, scope.cityName, "", "")
 		if err != nil {
 			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 			return 1
@@ -395,11 +409,10 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	return streamCityEvents(ctx, client, scope.cityName, resumeSeq, typeFilter, payloadMatch, true, stdout, stderr)
 }
 
-func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]genclient.WireEvent, string, error) {
+func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]genclient.WireEvent, error) {
 	limit := int64(500)
 	var all []genclient.WireEvent
 	var cursor *string
-	index := "0"
 
 	for {
 		params := &genclient.GetV0CityByCityNameEventsParams{
@@ -414,23 +427,17 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		}
 		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
 		if err != nil {
-			return nil, "", fmt.Errorf("request failed: %w", err)
+			return nil, fmt.Errorf("request failed: %w", err)
 		}
 		if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
-			return nil, "", err
-		}
-		if resp.HTTPResponse != nil {
-			header := strings.TrimSpace(resp.HTTPResponse.Header.Get("X-GC-Index"))
-			if header != "" {
-				index = header
-			}
+			return nil, err
 		}
 		if resp.JSON200 == nil || resp.JSON200.Items == nil {
-			return all, index, nil
+			return all, nil
 		}
 		all = append(all, *resp.JSON200.Items...)
 		if resp.JSON200.NextCursor == nil || strings.TrimSpace(*resp.JSON200.NextCursor) == "" {
-			return all, index, nil
+			return all, nil
 		}
 		cursor = resp.JSON200.NextCursor
 	}
@@ -627,7 +634,7 @@ func streamCityEvents(ctx context.Context, client *genclient.ClientWithResponses
 			if ctx.Err() == context.DeadlineExceeded {
 				return 0
 			}
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				fmt.Fprintln(stderr, "gc events: stream ended before a matching event arrived") //nolint:errcheck
 				return 1
 			}
@@ -687,7 +694,7 @@ func streamSupervisorEvents(ctx context.Context, client *genclient.ClientWithRes
 			if ctx.Err() == context.DeadlineExceeded {
 				return 0
 			}
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				fmt.Fprintln(stderr, "gc events: stream ended before a matching event arrived") //nolint:errcheck
 				return 1
 			}
@@ -859,13 +866,6 @@ func taggedEnvelopesFor(items []genclient.WireTaggedEvent) []genclient.TaggedEve
 		})
 	}
 	return out
-}
-
-func derefString(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }
 
 func matchPayload(payload any, payloadMatch map[string][]string) bool {

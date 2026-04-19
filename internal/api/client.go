@@ -1,4 +1,4 @@
-// CLI client for the Gas City API. Phase 3 Fix 3a.
+// Package api contains the Gas City supervisor API and generated-client adapter.
 //
 // This file is a thin adapter over the generated client in
 // internal/api/genclient. The adapter preserves the small surface that
@@ -315,15 +315,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	return out, nil
 }
 
-// --- Adapter helpers ---
-
 var errClientUninitialized = errors.New("api client not initialized")
-
-// escapeName preserves slashes in qualified names for use in URL paths.
-// The generated client's path-param escaping percent-encodes slashes;
-// callers that want literal slashes (e.g., the city scope prefix) use
-// this helper to keep them intact.
-func escapeName(name string) string { return name }
 
 // checkMutation handles the (resp, err) tuple from a generated mutation
 // call and returns the (nil | connError | readOnlyError | generic error)

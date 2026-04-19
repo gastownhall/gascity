@@ -55,7 +55,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("tempfile: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(rec.Body.Bytes()); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp spec: %w", err)
@@ -79,5 +79,5 @@ func run() error {
 // generation is reflection-based and never calls resolver methods.
 type emptyResolver struct{}
 
-func (emptyResolver) ListCities() []api.CityInfo      { return nil }
-func (emptyResolver) CityState(name string) api.State { return nil }
+func (emptyResolver) ListCities() []api.CityInfo   { return nil }
+func (emptyResolver) CityState(_ string) api.State { return nil }

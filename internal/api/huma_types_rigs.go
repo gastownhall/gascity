@@ -67,4 +67,3 @@ type RigActionBody struct {
 	Killed []string `json:"killed,omitempty" doc:"Agents that were killed (restart only)."`
 	Failed []string `json:"failed,omitempty" doc:"Agents that failed to stop (restart only)."`
 }
-

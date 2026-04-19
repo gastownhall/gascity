@@ -31,6 +31,7 @@ type Payload interface {
 // additional per-variant fields.
 type NoPayload struct{}
 
+// IsEventPayload marks NoPayload as an events.Payload variant.
 func (NoPayload) IsEventPayload() {}
 
 // payloadRegistry holds the event-type → sample Payload mapping used

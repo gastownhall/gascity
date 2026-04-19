@@ -59,6 +59,22 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
+func TestEventListRejectsInvalidSince(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?since=notaduration"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid since duration") {
+		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
 func TestEventStream(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)

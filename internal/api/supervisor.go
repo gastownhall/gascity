@@ -237,21 +237,6 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	return srv
 }
 
-func supervisorServicePath(path string) bool {
-	if strings.HasPrefix(path, "/svc/") {
-		return true
-	}
-	if !strings.HasPrefix(path, "/v0/city/") {
-		return false
-	}
-	rest := strings.TrimPrefix(path, "/v0/city/")
-	idx := strings.IndexByte(rest, '/')
-	if idx < 0 {
-		return false
-	}
-	return strings.HasPrefix(rest[idx:], "/svc/")
-}
-
 // buildMultiplexer creates a Multiplexer from all running cities'
 // event providers.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {

@@ -12,10 +12,12 @@ import (
 // TODO(huma): replace with StatusBody once migration is complete.
 type statusResponse = StatusBody
 
-type agentCounts = StatusAgentCounts
-type rigCounts = StatusRigCounts
-type workCounts = StatusWorkCounts
-type mailCounts = StatusMailCounts
+type (
+	agentCounts = StatusAgentCounts
+	rigCounts   = StatusRigCounts
+	workCounts  = StatusWorkCounts
+	mailCounts  = StatusMailCounts
+)
 
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {

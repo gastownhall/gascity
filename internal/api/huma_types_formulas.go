@@ -178,4 +178,3 @@ type WorkflowDeleteInput struct {
 	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
 	Delete     bool   `query:"delete" required:"false" doc:"Permanently delete beads from store."`
 }
-

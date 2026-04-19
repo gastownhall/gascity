@@ -276,7 +276,8 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstPar
 		providerProbeCommandContext = originalCommandContext
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/provider-readiness?providers=claude,codex,gemini", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -363,7 +364,8 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstPar
 		providerProbeCommandContext = originalCommandContext
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/readiness?items=claude,codex,gemini,github_cli", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -413,7 +415,8 @@ func TestHandleProviderReadinessFreshBypassesCache(t *testing.T) {
 		providerProbeCommandContext = originalCommandContext
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=0", "claude", probeStatusNeedsAuth)
 
 	if err := os.WriteFile(
@@ -429,7 +432,8 @@ func TestHandleProviderReadinessFreshBypassesCache(t *testing.T) {
 }
 
 func TestHandleProviderReadinessRejectsUnknownProviders(t *testing.T) {
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/provider-readiness?providers=claude,unknown", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -440,7 +444,8 @@ func TestHandleProviderReadinessRejectsUnknownProviders(t *testing.T) {
 }
 
 func TestHandleReadinessRejectsUnknownItems(t *testing.T) {
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/readiness?items=claude,unknown", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -476,7 +481,8 @@ func TestHandleProviderReadinessReturnsNeedsAuthForCodexWithoutTokens(t *testing
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/provider-readiness?providers=codex"), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -520,7 +526,8 @@ func TestHandleProviderReadinessReturnsNeedsAuthForCodexWithEmptyTokensObject(t 
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=codex&fresh=1", "codex", probeStatusNeedsAuth)
 }
 
@@ -544,7 +551,8 @@ printf '%s\n' '{"loggedIn":false,"authMethod":"claude.ai","apiProvider":"firstPa
 		providerProbeCommandContext = originalCommandContext
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusNeedsAuth)
 }
 
@@ -568,7 +576,8 @@ printf '%s\n' 'not-json'
 		providerProbeCommandContext = originalCommandContext
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusProbeError)
 }
 
@@ -585,7 +594,8 @@ func TestHandleProviderReadinessReturnsNotInstalledWhenBinaryMissing(t *testing.
 	}()
 	providerProbeGOOS = "test"
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/provider-readiness?providers=claude,codex,gemini", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -643,7 +653,8 @@ func TestHandleProviderReadinessReturnsInvalidConfigurationForUnsupportedAuthMod
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/provider-readiness?providers=codex,gemini", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -690,7 +701,8 @@ func TestHandleProviderReadinessReturnsNeedsAuthForGeminiWithoutSelectedType(t *
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=gemini&fresh=1", "gemini", probeStatusNeedsAuth)
 }
 
@@ -727,7 +739,8 @@ func TestHandleProviderReadinessReturnsNeedsAuthForGeminiWithoutRefreshToken(t *
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=gemini&fresh=1", "gemini", probeStatusNeedsAuth)
 }
 
@@ -747,7 +760,8 @@ func TestHandleReadinessReturnsNeedsAuthForGitHubCLIWithoutHostsFile(t *testing.
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/readiness?items=github_cli&fresh=1"), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -782,7 +796,8 @@ func TestHandleReadinessReturnsConfiguredForGitHubCLIEnvToken(t *testing.T) {
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertGitHubCLIReadinessStatus(t, h, state, probeStatusConfigured)
 }
 
@@ -814,7 +829,8 @@ func TestHandleReadinessReturnsConfiguredForGitHubCLICustomConfigDir(t *testing.
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertGitHubCLIReadinessStatus(t, h, state, probeStatusConfigured)
 }
 
@@ -832,7 +848,8 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 	}()
 	providerProbeGOOS = "linux"
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertGitHubCLIReadinessStatus(t, h, state, probeStatusNotInstalled)
 }
 
@@ -862,7 +879,8 @@ func TestHandleReadinessReturnsNeedsAuthForGitHubCLIWithoutStoredTokens(t *testi
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertGitHubCLIReadinessStatus(t, h, state, probeStatusNeedsAuth)
 }
 
@@ -892,7 +910,8 @@ func TestHandleReadinessReturnsConfiguredForGitHubCLIAuthStatusFallback(t *testi
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertGitHubCLIReadinessStatus(t, h, state, probeStatusConfigured)
 }
 
@@ -922,7 +941,8 @@ func TestHandleReadinessReturnsProbeErrorForGitHubCLIMalformedHostsFile(t *testi
 		providerProbePathEnv = originalPathEnv
 	}()
 
-	state := newFakeState(t); h := newTestCityHandler(t, state)
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
 	assertGitHubCLIReadinessStatus(t, h, state, probeStatusProbeError)
 }
 

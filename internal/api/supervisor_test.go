@@ -462,6 +462,21 @@ func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	}
 }
 
+func TestSupervisorGlobalEventListRejectsInvalidSince(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+
+	req := httptest.NewRequest("GET", "/v0/events?since=notaduration", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid since duration") {
+		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
 func TestSupervisorGlobalEventListEmpty(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 

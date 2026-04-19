@@ -120,7 +120,7 @@ port = 9123
 	rigFlag = ""
 
 	calledServe := false
-	dashboardServeHook = func(_ int, apiURL string) error {
+	dashboardServeHook = func(_ int, _ string) error {
 		calledServe = true
 		return nil
 	}

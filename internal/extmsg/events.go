@@ -18,6 +18,7 @@ type InboundEventPayload struct {
 	TargetSession  string `json:"target_session"`
 }
 
+// IsEventPayload marks InboundEventPayload as an events.Payload variant.
 func (InboundEventPayload) IsEventPayload() {}
 
 // OutboundEventPayload is emitted on "extmsg.outbound" events.
@@ -28,6 +29,7 @@ type OutboundEventPayload struct {
 	MessageID      string `json:"message_id"`
 }
 
+// IsEventPayload marks OutboundEventPayload as an events.Payload variant.
 func (OutboundEventPayload) IsEventPayload() {}
 
 // BoundEventPayload is emitted on events.ExtMsgBound (binding a
@@ -38,6 +40,7 @@ type BoundEventPayload struct {
 	SessionID      string `json:"session_id"`
 }
 
+// IsEventPayload marks BoundEventPayload as an events.Payload variant.
 func (BoundEventPayload) IsEventPayload() {}
 
 // UnboundEventPayload is emitted on events.ExtMsgUnbound.
@@ -46,6 +49,7 @@ type UnboundEventPayload struct {
 	Count     int    `json:"count"`
 }
 
+// IsEventPayload marks UnboundEventPayload as an events.Payload variant.
 func (UnboundEventPayload) IsEventPayload() {}
 
 // GroupCreatedEventPayload is emitted on events.ExtMsgGroupCreated.
@@ -55,6 +59,7 @@ type GroupCreatedEventPayload struct {
 	Mode           string `json:"mode"`
 }
 
+// IsEventPayload marks GroupCreatedEventPayload as an events.Payload variant.
 func (GroupCreatedEventPayload) IsEventPayload() {}
 
 // AdapterEventPayload is emitted on events.ExtMsgAdapterAdded and
@@ -65,6 +70,7 @@ type AdapterEventPayload struct {
 	AccountID string `json:"account_id"`
 }
 
+// IsEventPayload marks AdapterEventPayload as an events.Payload variant.
 func (AdapterEventPayload) IsEventPayload() {}
 
 func init() {

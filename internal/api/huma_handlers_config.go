@@ -209,8 +209,8 @@ type annotatedProviderResponse struct {
 // configExplainResponse is the full response for GET /v0/config/explain.
 type configExplainResponse struct {
 	Agents    []annotatedAgentResponse             `json:"agents"`
-	Providers map[string]annotatedProviderResponse  `json:"providers"`
-	Patches   configExplainPatches                  `json:"patches"`
+	Providers map[string]annotatedProviderResponse `json:"providers"`
+	Patches   configExplainPatches                 `json:"patches"`
 }
 
 // configExplainPatches is the patch counts in the explain response.

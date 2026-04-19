@@ -79,12 +79,12 @@ type ExtMsgUnbindInput struct {
 	}
 }
 
-// ExtMsgUnbindOutput is the Huma output for POST /v0/extmsg/unbind.
 // ExtMsgUnbindBody is the response body for POST /v0/extmsg/unbind.
 type ExtMsgUnbindBody struct {
 	Unbound []extmsg.SessionBindingRecord `json:"unbound" doc:"Bindings that were removed."`
 }
 
+// ExtMsgUnbindOutput is the Huma output for POST /v0/extmsg/unbind.
 type ExtMsgUnbindOutput struct {
 	Body ExtMsgUnbindBody
 }

@@ -14,7 +14,7 @@ import (
 func TestCancelOnSendErrorCancelsContextOnFirstFailure(t *testing.T) {
 	sendErr := errors.New("client disconnected")
 	var sendCalls int
-	raw := sse.Sender(func(msg sse.Message) error {
+	raw := sse.Sender(func(_ sse.Message) error {
 		sendCalls++
 		return sendErr
 	})
@@ -46,7 +46,7 @@ func TestCancelOnSendErrorCancelsContextOnFirstFailure(t *testing.T) {
 // Happy path: when the underlying sender succeeds, the wrapper must not
 // cancel the context or stash an error.
 func TestCancelOnSendErrorPassesSuccessThrough(t *testing.T) {
-	raw := sse.Sender(func(msg sse.Message) error { return nil })
+	raw := sse.Sender(func(_ sse.Message) error { return nil })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

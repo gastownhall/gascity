@@ -26,6 +26,8 @@ type sessionPendingResponse struct {
 	Pending   *runtime.PendingInteraction `json:"pending,omitempty"`
 }
 
+// SessionStreamMessageEvent carries normalized conversation turns on the
+// session SSE stream.
 type SessionStreamMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
@@ -35,6 +37,8 @@ type SessionStreamMessageEvent struct {
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
+// SessionStreamRawMessageEvent carries provider-native transcript frames on
+// the session SSE stream.
 type SessionStreamRawMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`

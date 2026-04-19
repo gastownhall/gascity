@@ -28,7 +28,10 @@ func (e *IllegalTransitionError) Error() string {
 
 func (e *IllegalTransitionError) Unwrap() error { return ErrIllegalTransition }
 
-// StateMachine documents the valid session state transitions as a table.
+// TransitionCommand describes what triggered a state change. Naming follows
+// the verb the API or reconciler invoked, not the resulting state. This is
+// the language the handlers and reconciler already use, so the vocabulary
+// stays consistent.
 //
 // Session state today is managed ad-hoc across many manager methods
 // (Create, Suspend, Wake, Close, StopTurn, Kill, etc.). Each method encodes
@@ -36,44 +39,39 @@ func (e *IllegalTransitionError) Unwrap() error { return ErrIllegalTransition }
 // explicit reducer: it lists the allowed transitions in one place so code
 // reviews can catch illegal transitions and new handlers can check legality
 // without reading the entire manager.
-//
-// TransitionCommand describes what triggered a state change. Naming follows
-// the verb the API or reconciler invoked, not the resulting state. This is
-// the language the handlers and reconciler already use, so the vocabulary
-// stays consistent.
 type TransitionCommand string
 
 const (
-	// CmdCreate: a new session bead is written.
+	// CmdCreate writes a new session bead.
 	// Transitions: (nil) → StateCreating → StateActive.
 	CmdCreate TransitionCommand = "create"
 
-	// CmdReady: reconciler confirms the runtime process is alive.
+	// CmdReady confirms the runtime process is alive.
 	// Transitions: StateCreating → StateActive.
 	CmdReady TransitionCommand = "ready"
 
-	// CmdSuspend: operator explicitly pauses the session.
+	// CmdSuspend pauses the session by explicit operator request.
 	// Transitions: StateActive, StateAsleep, StateQuarantined → StateSuspended.
 	CmdSuspend TransitionCommand = "suspend"
 
-	// CmdWake: operator explicitly resumes a paused/asleep/quarantined/archived
+	// CmdWake resumes a paused/asleep/quarantined/archived
 	// session. Archived sessions can be reactivated back to active.
 	// Transitions: StateAsleep, StateSuspended, StateQuarantined, StateArchived → StateActive.
 	CmdWake TransitionCommand = "wake"
 
-	// CmdSleep: reconciler observes the runtime process exited normally.
+	// CmdSleep records that the runtime process exited normally.
 	// Transitions: StateActive → StateAsleep.
 	CmdSleep TransitionCommand = "sleep"
 
-	// CmdQuarantine: crash-loop threshold exceeded; block waking.
+	// CmdQuarantine blocks waking after the crash-loop threshold is exceeded.
 	// Transitions: StateActive, StateAsleep → StateQuarantined.
 	CmdQuarantine TransitionCommand = "quarantine"
 
-	// CmdDrain: begin graceful shutdown (complete in-flight work).
+	// CmdDrain begins graceful shutdown and lets in-flight work complete.
 	// Transitions: StateActive → StateDraining.
 	CmdDrain TransitionCommand = "drain"
 
-	// CmdArchive: session retained for history. May be called after a drain
+	// CmdArchive retains a session for history. May be called after a drain
 	// or directly from an active/asleep/suspended/quarantined session —
 	// archive is effectively "close but keep the bead for later
 	// reactivation" and is not gated on a prior drain.
@@ -81,7 +79,7 @@ const (
 	// StateDraining → StateArchived.
 	CmdArchive TransitionCommand = "archive"
 
-	// CmdClose: hard close (no in-flight work to drain).
+	// CmdClose hard-closes a session with no in-flight work to drain.
 	// Transitions: any non-closed state → StateClosed.
 	CmdClose TransitionCommand = "close"
 )

@@ -11,7 +11,6 @@ import (
 // Session handler shared helpers. Handler methods now live in
 // huma_handlers_sessions_query.go, _command.go, and _stream.go.
 
-
 // --- Huma error helpers for session endpoints ---
 //
 // These helpers emit RFC 9457 Problem Details via Huma's error constructors.

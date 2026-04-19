@@ -175,4 +175,3 @@ type AgentOutputStreamQualifiedInput struct {
 func (i *AgentOutputStreamQualifiedInput) QualifiedName() string {
 	return joinAgentQualifiedName(i.Dir, i.Base)
 }
-

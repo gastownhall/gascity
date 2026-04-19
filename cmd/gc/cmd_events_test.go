@@ -260,6 +260,27 @@ func TestParsePayloadMatch(t *testing.T) {
 	}
 }
 
+func TestCmdEventsValidatesLocalFlagsBeforeAPIDiscovery(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdEvents("", "", "notaduration", nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdEvents invalid since = 0, want non-zero")
+	}
+	if got := stderr.String(); !strings.Contains(got, "invalid --since") {
+		t.Fatalf("stderr = %q, want invalid --since", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = cmdEventsWatch("", "", nil, 0, "", "notaduration", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdEventsWatch invalid timeout = 0, want non-zero")
+	}
+	if got := stderr.String(); !strings.Contains(got, "invalid --timeout") {
+		t.Fatalf("stderr = %q, want invalid --timeout", got)
+	}
+}
+
 type testEventRoutes struct {
 	cityEvents       func(http.ResponseWriter, *http.Request)
 	cityStream       func(http.ResponseWriter, *http.Request)

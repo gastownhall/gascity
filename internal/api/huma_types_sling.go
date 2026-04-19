@@ -21,4 +21,3 @@ type SlingInput struct {
 		ScopeRef       string            `json:"scope_ref,omitempty" doc:"Scope reference."`
 	}
 }
-

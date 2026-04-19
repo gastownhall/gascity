@@ -55,4 +55,3 @@ type OrderDisableInput struct {
 	CityScope
 	Name string `path:"name" doc:"Order name or scoped name."`
 }
-

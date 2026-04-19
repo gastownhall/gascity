@@ -23,6 +23,7 @@ type MailEventPayload struct {
 	Message *mail.Message `json:"message,omitempty"`
 }
 
+// IsEventPayload marks MailEventPayload as an events.Payload variant.
 func (MailEventPayload) IsEventPayload() {}
 
 // BeadEventPayload is the shape of every bead.* event payload
@@ -33,6 +34,7 @@ type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }
 
+// IsEventPayload marks BeadEventPayload as an events.Payload variant.
 func (BeadEventPayload) IsEventPayload() {}
 
 func init() {

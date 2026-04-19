@@ -1,9 +1,10 @@
+// Package dashboard serves the static GC dashboard SPA.
 package dashboard
 
 import (
 	"bytes"
-	"encoding/json"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"

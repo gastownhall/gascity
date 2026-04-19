@@ -206,4 +206,3 @@ func (s *Server) humaHandleProviderDelete(_ context.Context, input *ProviderDele
 	resp.Body.Status = "deleted"
 	return resp, nil
 }
-

@@ -31,4 +31,3 @@ type ServiceRestartOutput struct {
 		Service string `json:"service" doc:"Service name."`
 	}
 }
-

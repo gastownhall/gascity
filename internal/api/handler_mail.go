@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
 
@@ -70,10 +69,6 @@ func (s *Server) findMailProviderByID(id string) (mail.Provider, string, error) 
 	return nil, "", firstErr
 }
 
-func (s *Server) resolveMailSendRecipient(r *http.Request, recipient string) (string, error) {
-	return s.resolveMailSendRecipientWithContext(r.Context(), recipient)
-}
-
 func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipient string) (string, error) {
 	recipient = strings.TrimSpace(recipient)
 	if recipient == "human" {
@@ -88,10 +83,6 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 		return resolved, nil
 	}
 	return s.resolveSessionIDMaterializingNamedWithContext(ctx, store, recipient)
-}
-
-func (s *Server) resolveMailQueryRecipients(r *http.Request, recipient string) []string {
-	return s.resolveMailQueryRecipientsWithContext(r.Context(), recipient)
 }
 
 func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {

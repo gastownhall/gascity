@@ -336,10 +336,10 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *SupervisorEventListInput) (*SupervisorEventListOutput, error) {
 	mux := sm.buildMultiplexer()
 	filter := events.Filter{Type: input.Type, Actor: input.Actor}
-	if v := strings.TrimSpace(input.Since); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			filter.Since = time.Now().Add(-d)
-		}
+	if d, ok, err := parseEventSince(input.Since); err != nil {
+		return nil, err
+	} else if ok {
+		filter.Since = time.Now().Add(-d)
 	}
 	evts, err := mux.ListAll(filter)
 	if err != nil {
@@ -473,4 +473,3 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		}
 	}
 }
-

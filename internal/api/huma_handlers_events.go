@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -29,10 +30,10 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		Type:  input.Type,
 		Actor: input.Actor,
 	}
-	if input.Since != "" {
-		if d, err := time.ParseDuration(input.Since); err == nil {
-			filter.Since = time.Now().Add(-d)
-		}
+	if d, ok, err := parseEventSince(input.Since); err != nil {
+		return nil, err
+	} else if ok {
+		filter.Since = time.Now().Add(-d)
 	}
 
 	evts, err := ep.List(filter)
@@ -80,6 +81,18 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	}, nil
 }
 
+func parseEventSince(value string) (time.Duration, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, false, huma.Error400BadRequest("invalid since duration: " + err.Error())
+	}
+	return d, true, nil
+}
+
 // humaHandleEventEmit is the Huma-typed handler for POST /v0/events.
 // Body validation (Type and Actor required) is enforced by struct tags
 // on EventEmitInput.
@@ -112,7 +125,7 @@ func (s *Server) checkEventStream(_ context.Context, _ *EventStreamInput) error 
 
 // streamEvents is the SSE streaming callback for GET /v0/events/stream. The
 // precheck has already verified the event provider exists. This function
-// creates a watcher and streams events until the context is cancelled.
+// creates a watcher and streams events until the context is canceled.
 // Heartbeat events are sent every 15s to keep the connection alive.
 func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send sse.Sender) {
 	ctx := hctx.Context()

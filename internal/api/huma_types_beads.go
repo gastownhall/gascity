@@ -103,4 +103,3 @@ type BeadDeleteInput struct {
 	CityScope
 	ID string `path:"id" doc:"Bead ID."`
 }
-

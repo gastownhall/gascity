@@ -141,13 +141,13 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 // humaHandleAgent is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{base} (unqualified form).
-func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
+func (s *Server) humaHandleAgent(_ context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
 	return s.agentByName(input.Name)
 }
 
 // humaHandleAgentQualified is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{dir}/{base} (qualified form).
-func (s *Server) humaHandleAgentQualified(ctx context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
+func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
 	return s.agentByName(input.QualifiedName())
 }
 
@@ -261,13 +261,13 @@ func (s *Server) humaHandleAgentCreate(_ context.Context, input *AgentCreateInpu
 
 // humaHandleAgentUpdate is the Huma-typed handler for
 // PATCH /v0/city/{cityName}/agent/{base}.
-func (s *Server) humaHandleAgentUpdate(ctx context.Context, input *AgentUpdateInput) (*OKResponse, error) {
+func (s *Server) humaHandleAgentUpdate(_ context.Context, input *AgentUpdateInput) (*OKResponse, error) {
 	return s.updateAgentByName(input.Name, input.Body.Provider, input.Body.Scope, input.Body.Suspended)
 }
 
 // humaHandleAgentUpdateQualified is the Huma-typed handler for
 // PATCH /v0/city/{cityName}/agent/{dir}/{base}.
-func (s *Server) humaHandleAgentUpdateQualified(ctx context.Context, input *AgentUpdateQualifiedInput) (*OKResponse, error) {
+func (s *Server) humaHandleAgentUpdateQualified(_ context.Context, input *AgentUpdateQualifiedInput) (*OKResponse, error) {
 	return s.updateAgentByName(input.QualifiedName(), input.Body.Provider, input.Body.Scope, input.Body.Suspended)
 }
 
@@ -287,13 +287,13 @@ func (s *Server) updateAgentByName(name, provider, scope string, suspended *bool
 
 // humaHandleAgentDelete is the Huma-typed handler for
 // DELETE /v0/city/{cityName}/agent/{base}.
-func (s *Server) humaHandleAgentDelete(ctx context.Context, input *AgentDeleteInput) (*OKResponse, error) {
+func (s *Server) humaHandleAgentDelete(_ context.Context, input *AgentDeleteInput) (*OKResponse, error) {
 	return s.deleteAgentByName(input.Name)
 }
 
 // humaHandleAgentDeleteQualified is the Huma-typed handler for
 // DELETE /v0/city/{cityName}/agent/{dir}/{base}.
-func (s *Server) humaHandleAgentDeleteQualified(ctx context.Context, input *AgentDeleteQualifiedInput) (*OKResponse, error) {
+func (s *Server) humaHandleAgentDeleteQualified(_ context.Context, input *AgentDeleteQualifiedInput) (*OKResponse, error) {
 	return s.deleteAgentByName(input.QualifiedName())
 }
 
@@ -312,13 +312,13 @@ func (s *Server) deleteAgentByName(name string) (*OKResponse, error) {
 
 // humaHandleAgentAction is the Huma-typed handler for
 // POST /v0/city/{cityName}/agent/{base}/{action}.
-func (s *Server) humaHandleAgentAction(ctx context.Context, input *AgentActionInput) (*OKResponse, error) {
+func (s *Server) humaHandleAgentAction(_ context.Context, input *AgentActionInput) (*OKResponse, error) {
 	return s.agentActionByName(input.Name, input.Action)
 }
 
 // humaHandleAgentActionQualified is the Huma-typed handler for
 // POST /v0/city/{cityName}/agent/{dir}/{base}/{action}.
-func (s *Server) humaHandleAgentActionQualified(ctx context.Context, input *AgentActionQualifiedInput) (*OKResponse, error) {
+func (s *Server) humaHandleAgentActionQualified(_ context.Context, input *AgentActionQualifiedInput) (*OKResponse, error) {
 	return s.agentActionByName(input.QualifiedName(), input.Action)
 }
 
@@ -352,7 +352,8 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 // (unqualified agent name, no rig prefix).
 func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInput) (*struct {
 	Body agentOutputResponse
-}, error) {
+}, error,
+) {
 	tail, provided := input.Compactions()
 	return s.agentOutputByName(input.Name, tail, provided, input.Before)
 }
@@ -361,7 +362,8 @@ func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInpu
 // GET /v0/agent/{dir}/{base}/output (qualified agent name with rig prefix).
 func (s *Server) humaHandleAgentOutputQualified(_ context.Context, input *AgentOutputQualifiedInput) (*struct {
 	Body agentOutputResponse
-}, error) {
+}, error,
+) {
 	tail, provided := input.Compactions()
 	return s.agentOutputByName(input.QualifiedName(), tail, provided, input.Before)
 }
@@ -374,7 +376,8 @@ func (s *Server) humaHandleAgentOutputQualified(_ context.Context, input *AgentO
 // "no pagination" mode).
 func (s *Server) agentOutputByName(name string, tail int, provided bool, before string) (*struct {
 	Body agentOutputResponse
-}, error) {
+}, error,
+) {
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {

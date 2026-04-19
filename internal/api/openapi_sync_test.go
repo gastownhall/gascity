@@ -70,5 +70,5 @@ func TestOpenAPISpecInSync(t *testing.T) {
 // generation is reflection-based and never calls resolver methods.
 type emptyTestResolver struct{}
 
-func (emptyTestResolver) ListCities() []api.CityInfo      { return nil }
-func (emptyTestResolver) CityState(name string) api.State { return nil }
+func (emptyTestResolver) ListCities() []api.CityInfo   { return nil }
+func (emptyTestResolver) CityState(_ string) api.State { return nil }

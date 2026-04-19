@@ -94,5 +94,5 @@ func writeSpec(path string, data []byte) {
 // generation is reflection-based and never calls resolver methods.
 type emptyResolver struct{}
 
-func (emptyResolver) ListCities() []api.CityInfo      { return nil }
-func (emptyResolver) CityState(name string) api.State { return nil }
+func (emptyResolver) ListCities() []api.CityInfo   { return nil }
+func (emptyResolver) CityState(_ string) api.State { return nil }

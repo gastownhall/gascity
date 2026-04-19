@@ -188,4 +188,3 @@ func cachedResponseAs[T any](s *Server, key string, index uint64) (T, bool) {
 	}
 	return zero, false
 }
-

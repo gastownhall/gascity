@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -234,21 +233,6 @@ func validateRequestedReadinessItems(items []string, allowed readinessItemSet, l
 		return nil, fmt.Errorf("%s is required", label)
 	}
 	return out, nil
-}
-
-func parseFreshParam(r *http.Request) (bool, error) {
-	fresh := strings.TrimSpace(r.URL.Query().Get("fresh"))
-	if fresh == "" {
-		return false, nil
-	}
-	switch fresh {
-	case "0":
-		return false, nil
-	case "1":
-		return true, nil
-	default:
-		return false, errors.New("fresh must be 0 or 1")
-	}
 }
 
 func workspaceHomeDir() (string, error) {

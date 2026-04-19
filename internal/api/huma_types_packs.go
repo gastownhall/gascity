@@ -10,4 +10,3 @@ package api
 type PackListInput struct {
 	CityScope
 }
-

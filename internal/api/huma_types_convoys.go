@@ -128,4 +128,3 @@ type ConvoyDeleteInput struct {
 	CityScope
 	ID string `path:"id" doc:"Convoy ID."`
 }
-
