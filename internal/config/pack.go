@@ -166,15 +166,28 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
 				warnings := cachedPackWarnings(cache, impDir)
+				doctors := cachedPackDoctors(cache, impDir)
 				if !imp.ImportIsTransitive() {
 					warnings = cachedPackLocalWarnings(cache, impDir)
+					absImpDir, _ := filepath.Abs(impDir)
+					var direct []Agent
+					for _, a := range agents {
+						absSrc, _ := filepath.Abs(a.SourceDir)
+						if absSrc == absImpDir {
+							direct = append(direct, a)
+						}
+					}
+					agents = direct
+					namedSessions = filterNamedSessionsBySourceDir(namedSessions, impDir)
+					services = filterServicesBySourceDir(services, impDir)
+					doctors = filterDoctorsBySourceDir(doctors, impDir)
 				}
 				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, warnings...)
 				if len(services) > 0 {
 					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
 				}
 				rigGlobals = append(rigGlobals, globals...)
-				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, impDir)...)
+				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 
 				// Stamp binding name on agents and named sessions.
 				// At the rig level, ALL agents from an import get the rig's
@@ -1535,6 +1548,18 @@ func filterCommandsBySourceDir(commands []DiscoveredCommand, sourceDir string) [
 		absDir, _ := filepath.Abs(cmd.SourceDir)
 		if absDir == absSource || strings.HasPrefix(absDir, absSource+string(filepath.Separator)) {
 			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+func filterServicesBySourceDir(services []Service, sourceDir string) []Service {
+	absSource, _ := filepath.Abs(sourceDir)
+	var out []Service
+	for _, service := range services {
+		absDir, _ := filepath.Abs(service.SourceDir)
+		if absDir == absSource || strings.HasPrefix(absDir, absSource+string(filepath.Separator)) {
+			out = append(out, service)
 		}
 	}
 	return out

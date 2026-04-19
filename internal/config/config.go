@@ -543,11 +543,9 @@ type Import struct {
 	// namespace. Consumers of the parent get this import's agents
 	// flattened under the parent's binding name.
 	Export bool `toml:"export,omitempty"`
-	// Transitive controls whether this import's own transitive pack
-	// dependencies are visible to the consumer. Defaults to true
-	// (transitive). Set to false to keep only content defined directly
-	// in the imported pack, suppressing nested dependencies reached
-	// through either [imports] or legacy [pack].includes.
+	// Transitive controls whether this import's own imports are visible
+	// to the consumer. Defaults to true (transitive). Set to false to
+	// suppress transitive resolution for this specific import.
 	Transitive *bool `toml:"transitive,omitempty"`
 	// Shadow controls shadow warnings when the importer defines an agent
 	// with the same name as one from this import. "warn" (default) emits
@@ -577,8 +575,8 @@ type PackMeta struct {
 	Requires []PackRequirement `toml:"requires,omitempty"`
 }
 
-// ImportIsTransitive returns whether an Import should resolve nested pack
-// dependencies transitively. Defaults to true if Transitive is nil.
+// ImportIsTransitive returns whether an Import should resolve
+// transitively. Defaults to true if Transitive is nil.
 func (imp *Import) ImportIsTransitive() bool {
 	if imp.Transitive == nil {
 		return true
