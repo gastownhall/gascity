@@ -414,7 +414,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		}
 	}
 
-	reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	reloadedCfg, prov, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	emitLoadCityConfigWarnings(stderr, prov)
 	if reloadedCfg != nil {
 		layers, ok := reloadedCfg.FormulaLayers.Rigs[name]
 		if !ok || len(layers) == 0 {
