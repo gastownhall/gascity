@@ -272,13 +272,22 @@ test-cover:
 cover: test-cover
 	go tool cover -func=coverage.txt
 
-## install-tools: install pinned golangci-lint
-install-tools: $(GOLANGCI_LINT)
+## install-tools: install pinned golangci-lint + oapi-codegen
+install-tools: $(GOLANGCI_LINT) install-oapi-codegen
 
 $(GOLANGCI_LINT):
 	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | \
 		sh -s -- -b $(BIN_DIR) v$(GOLANGCI_LINT_VERSION)
+
+## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
+## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
+.PHONY: install-oapi-codegen
+install-oapi-codegen:
+	@if ! command -v oapi-codegen >/dev/null; then \
+		echo "Installing oapi-codegen..." >&2; \
+		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
+	fi
 
 ## install-buildx: install docker buildx plugin
 install-buildx:
@@ -335,11 +344,7 @@ dashboard-ci: dashboard-check
 ## Used by CI to enforce that internal/api/openapi.json, docs/schema/openapi.{json,txt},
 ## docs/schema/events.{json,txt}, and internal/api/genclient/client_gen.go are
 ## all in lock-step with Huma.
-spec-ci:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+spec-ci: install-oapi-codegen
 	go run ./cmd/genspec
 	go generate ./internal/api/genclient
 	@if ! git diff --quiet -- internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt docs/schema/events.json docs/schema/events.txt internal/api/genclient/client_gen.go; then \
