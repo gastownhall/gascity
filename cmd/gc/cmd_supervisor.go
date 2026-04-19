@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -1441,6 +1442,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	_ = runStep("materializing_skills", func() error {
 		return runStage1SkillMaterialization(cityPath, cfg, stderr)
 	})
+
+	if err := runStep("projecting_mcp", func() error {
+		return runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr)
+	}); err != nil {
+		return fmt.Errorf("project MCP: %w", err)
+	}
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if err := runStep("validating_hooks", func() error {

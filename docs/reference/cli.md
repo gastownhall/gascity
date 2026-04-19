@@ -1765,10 +1765,15 @@ gc mail thread <thread-id>
 
 ## gc mcp
 
-List MCP catalog visibility for the current city pack.
+Inspect projected MCP config for a concrete target.
 
-The first MCP slice is list-only. Provider projection and reconciliation
-are later work.
+Projected MCP is target-specific. Use `gc mcp list --agent <name>` when
+the agent has a single deterministic projection target from config, or
+`gc mcp list --session <id>` for a live session target.
+
+When effective MCP exists for a target, GC adopts that provider-native
+MCP surface as managed runtime state. Later cleanup only removes files
+that GC already adopted.
 
 ```
 gc mcp
@@ -1776,11 +1781,11 @@ gc mcp
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc mcp list](#gc-mcp-list) | List visible MCP definitions |
+| [gc mcp list](#gc-mcp-list) | Show projected MCP servers |
 
 ## gc mcp list
 
-List the current city pack's visible MCP definitions, optionally scoped to an agent or session.
+Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
 
 ```
 gc mcp list [flags]
@@ -1788,8 +1793,8 @@ gc mcp list [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--agent` | string |  | show the effective MCP view for this agent |
-| `--session` | string |  | show the effective MCP view for this session |
+| `--agent` | string |  | show the projected MCP config for this agent |
+| `--session` | string |  | show the projected MCP config for this session |
 
 ## gc nudge
 
@@ -3080,4 +3085,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

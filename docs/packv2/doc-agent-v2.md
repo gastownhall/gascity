@@ -217,15 +217,22 @@ Promoting is an explicit human decision — skills don't automatically flow from
 
 MCP (Model Context Protocol) servers provide tools, resources, and prompts to agents over a runtime protocol. Unlike skills (which have a portable file standard), MCP server configuration is provider-specific — each provider embeds it in its own settings file. Gas City abstracts this with a provider-agnostic TOML format.
 
-> **First slice:** MCP discovery and listing are current-city-pack only. Imported-pack MCP catalogs, provider projection, and ownership/reconciliation are later slices.
-
-The first MCP CLI slice is list-only:
+`gc mcp list` is projected-only and target-specific:
 
 ```sh
-gc mcp list
 gc mcp list --agent polecat
 gc mcp list --session <id>
 ```
+
+Bare `gc mcp list` now errors because projected MCP depends on a concrete
+agent or session target.
+
+When a target has effective MCP, Gas City immediately adopts the
+provider-native MCP surface for that target as GC-managed runtime
+state. Cleanup only removes targets that GC previously adopted.
+GC also adds those runtime artifacts to the local `.gitignore`
+best-effort, and effective MCP changes participate in session
+fingerprints so affected sessions restart on drift.
 
 #### Definition format
 

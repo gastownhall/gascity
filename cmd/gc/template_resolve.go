@@ -379,6 +379,63 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 
+	// Step 11c: MCP projection integration. Provider-native MCP config is
+	// session/runtime state rather than passive content, so every deliverable
+	// target contributes a projection hash to the runtime fingerprint. When the
+	// session workdir differs from the scope root, tmux sessions reconcile the
+	// workdir-local target via a hidden PreStart command before launch.
+	scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
+	canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
+	mcpCity := p.city
+	if mcpCity == nil {
+		// Most production callers route through newAgentBuildParams and carry the
+		// fully-expanded city config. Tests sometimes construct agentBuildParams
+		// directly; keep a best-effort fallback so MCP still sees the city pack's
+		// top-level mcp/ and any explicit pack graph dirs instead of silently
+		// degrading all the way to agent-local MCP only.
+		mcpCity = &config.City{
+			Providers:         p.providers,
+			Rigs:              p.rigs,
+			PackGraphOnlyDirs: append([]string(nil), p.packDirs...),
+		}
+		if p.workspace != nil {
+			mcpCity.Workspace = *p.workspace
+		}
+		cityMCPDir := filepath.Join(p.cityPath, "mcp")
+		if info, err := os.Stat(cityMCPDir); err == nil && info.IsDir() {
+			mcpCity.PackMCPDir = cityMCPDir
+		}
+	}
+	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
+		p.cityPath,
+		p.cityName,
+		mcpCity,
+		cfgAgent,
+		qualifiedName,
+		workDir,
+		resolved.Kind,
+	)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
+	if mcpProjection.Provider != "" {
+		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
+		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
+		switch {
+		case stage1Delivers || stage2Delivers:
+			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)
+			if stage2Delivers {
+				projectAgent := templateNameFor(cfgAgent, qualifiedName)
+				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
+			}
+		case len(mcpCatalog.Servers) > 0:
+			return TemplateParams{}, fmt.Errorf(
+				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
+				qualifiedName, workDir, p.sessionProvider,
+			)
+		}
+	}
+
 	// Step 12: Build startup hints.
 	hints := agent.StartupHints{
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
