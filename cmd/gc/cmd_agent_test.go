@@ -201,6 +201,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 			`workspace.name redefined by "/city/defaults.toml"`,
 			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 			`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
 		},
 	})
 
@@ -213,6 +214,9 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
 		t.Fatalf("expected unsupported-key warning, got %q", output)
+	}
+	if !strings.Contains(output, "attachment-list fields") {
+		t.Fatalf("expected attachment deprecation warning, got %q", output)
 	}
 }
 
