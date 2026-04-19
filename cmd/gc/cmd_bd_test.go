@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,6 +154,191 @@ func TestResolveBdScopeTarget(t *testing.T) {
 				{Name: "gascity", Path: filepath.Join("rigs", "gascity")},
 			},
 		}
+func TestBdSubcommand(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"simple", []string{"create", "title"}, "create"},
+		{"with flags before", []string{"--verbose", "list"}, "list"},
+		{"empty", nil, ""},
+		{"only flags", []string{"--help"}, ""},
+		{"show with bead id", []string{"show", "gc-abc"}, "show"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bdSubcommand(tt.args)
+			if got != tt.want {
+				t.Errorf("bdSubcommand(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateBdScope(t *testing.T) {
+	cfgWithRigs := &config.City{
+		Rigs: []config.Rig{
+			{Name: "wren", Path: "/projects/wren", Prefix: "wr"},
+		},
+	}
+	cfgNoRigs := &config.City{}
+
+	tests := []struct {
+		name        string
+		cfg         *config.City
+		cityPath    string
+		resolvedDir string
+		rigName     string
+		args        []string
+		wantErr     bool
+	}{
+		{
+			name:        "mutating at city root with rigs — blocked",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"create", "new task"},
+			wantErr:     true,
+		},
+		{
+			name:        "mutating at city root no rigs — allowed",
+			cfg:         cfgNoRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"create", "new task"},
+			wantErr:     false,
+		},
+		{
+			name:        "mutating at rig dir — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/projects/wren",
+			rigName:     "",
+			args:        []string{"create", "new task"},
+			wantErr:     false,
+		},
+		{
+			name:        "mutating with explicit rig flag — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "wren",
+			args:        []string{"create", "new task"},
+			wantErr:     false,
+		},
+		{
+			name:        "read-only at city root with rigs — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"list"},
+			wantErr:     false,
+		},
+		{
+			name:        "show at city root with rigs — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"show", "wr-abc"},
+			wantErr:     false,
+		},
+		{
+			name:        "close at city root with rigs — blocked",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"close", "wr-abc"},
+			wantErr:     true,
+		},
+		{
+			name:        "note at city root with rigs — blocked",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"note", "wr-abc", "some note"},
+			wantErr:     true,
+		},
+		{
+			name:        "q (quick create) at city root with rigs — blocked",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"q", "quick task"},
+			wantErr:     true,
+		},
+		{
+			name:        "search at city root with rigs — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"search", "keyword"},
+			wantErr:     false,
+		},
+		{
+			name:        "no args at city root with rigs — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        nil,
+			wantErr:     false,
+		},
+		{
+			name:        "ready at city root with rigs — allowed",
+			cfg:         cfgWithRigs,
+			cityPath:    "/city",
+			resolvedDir: "/city",
+			rigName:     "",
+			args:        []string{"ready"},
+			wantErr:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateBdScope(tt.cfg, tt.cityPath, tt.resolvedDir, tt.rigName, tt.args)
+			if tt.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateBdScope_ErrorMessage(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "app", Path: "/app"}},
+	}
+	err := validateBdScope(cfg, "/city", "/city", "", []string{"create", "task"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "create") {
+		t.Errorf("error should mention subcommand, got: %s", msg)
+	}
+	if !strings.Contains(msg, "--rig") {
+		t.Errorf("error should mention --rig flag, got: %s", msg)
+	}
+}
+
+func TestResolveBdDir(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "wren", Path: "/projects/wren", Prefix: "projectwrenunity"},
+			{Name: "gascity", Path: "/projects/gascity"},
+		},
 	}
 
 	tests := []struct {

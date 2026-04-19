@@ -115,6 +115,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
+	// Scope guard: prevent mutating operations from accidentally targeting
+	// the city-root store when rigs are configured.
+	if err := validateBdScope(cfg, cityPath, target.ScopeRoot, rigName, bdArgs); err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
 		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
@@ -205,9 +212,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	// Auto-detect from bead IDs in args, but only accept candidates that
-	// actually exist in the resolved rig store. This keeps hyphenated flag
-	// values and other non-ID args from silently retargeting the command.
-	// Unbound rigs are skipped so we don't alias them to the city store.
+	// actually exist in the resolved rig store.
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
@@ -226,8 +231,6 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
 		return execStoreTarget{}, err
 	} else if ok {
-		// resolveRigForDir already skips unbound rigs, so rig.Path is
-		// guaranteed non-empty here.
 		return bdRigScopeTarget(cityPath, rig), nil
 	}
 
@@ -237,6 +240,81 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		Prefix:    config.EffectiveHQPrefix(cfg),
 	}, nil
 }
+
+// bdMutatingSubcommands lists bd subcommands that write to the bead store.
+// Used by the scope guard to prevent accidental writes to the wrong store.
+var bdMutatingSubcommands = map[string]bool{
+	"assign":      true,
+	"close":       true,
+	"comment":     true,
+	"create":      true,
+	"create-form": true,
+	"delete":      true,
+	"edit":        true,
+	"gate":        true,
+	"label":       true,
+	"link":        true,
+	"merge-slot":  true,
+	"note":        true,
+	"priority":    true,
+	"promote":     true,
+	"q":           true,
+	"reopen":      true,
+	"rename":      true,
+	"set-state":   true,
+	"defer":       true,
+	"undefer":     true,
+}
+
+// bdSubcommand extracts the first non-flag argument from bd args, which
+// is the bd subcommand (e.g., "create", "list", "show").
+func bdSubcommand(args []string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+// errRigScopeRequired is returned when a mutating bd operation would fall
+// back to the city-root store but rigs are configured, indicating the user
+// likely intended a rig-scoped store.
+var errRigScopeRequired = fmt.Errorf("rigs are configured but no --rig flag provided; specify --rig <name> to target the correct bead store")
+
+// validateBdScope checks whether a bd command is safe to run at the resolved
+// directory. When the resolved dir is the city root (fallback), the subcommand
+// is mutating, and rigs are configured, returns an error to prevent accidental
+// writes to the wrong store.
+//
+// The guard does NOT fire when:
+//   - An explicit --rig flag was provided (rigName is non-empty)
+//   - The resolved dir is a rig directory (not the city root fallback)
+//   - The subcommand is read-only (list, show, search, etc.)
+//   - No rigs are configured (single-store city)
+func validateBdScope(cfg *config.City, cityPath, resolvedDir, rigName string, args []string) error {
+	// Explicit rig flag was given — user knows what they're doing.
+	if rigName != "" {
+		return nil
+	}
+	// Resolved to a rig directory, not the city root fallback.
+	if filepath.Clean(resolvedDir) != filepath.Clean(cityPath) {
+		return nil
+	}
+	// No rigs configured — single-store city, no ambiguity.
+	if len(cfg.Rigs) == 0 {
+		return nil
+	}
+	// Read-only subcommand — safe at any scope.
+	sub := bdSubcommand(args)
+	if !bdMutatingSubcommands[sub] {
+		return nil
+	}
+	return fmt.Errorf("gc bd %s: %w", sub, errRigScopeRequired)
+}
+
+
 
 func bdRigForArg(cfg *config.City, arg string) (config.Rig, bool) {
 	if prefix := beadPrefix(arg); prefix != "" {
