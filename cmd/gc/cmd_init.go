@@ -599,6 +599,18 @@ func splitInitConfig(packName string, cfg *config.City) (initPackConfig, config.
 		)
 		cityCfg.Workspace.GlobalFragments = nil
 	}
+	if len(cfg.DefaultRigImports) > 0 {
+		defaults := packDefaults{
+			Rig: packRigDefaults{
+				Imports: make(map[string]config.Import, len(cfg.DefaultRigImports)),
+			},
+		}
+		for name, imp := range cfg.DefaultRigImports {
+			defaults.Rig.Imports[name] = imp
+		}
+		packCfg.Defaults = defaults
+		cityCfg.Workspace.DefaultRigIncludes = nil
+	}
 
 	return packCfg, cityCfg
 }

@@ -294,6 +294,12 @@ type City struct {
 	// paths should always build it; the field may be nil transiently
 	// during reload).
 	ResolvedProviders map[string]ResolvedProvider `toml:"-" json:"-"`
+	// DefaultRigImports holds the canonical [defaults.rig.imports] entries
+	// declared by the city root pack. Runtime-only.
+	DefaultRigImports map[string]Import `toml:"-" json:"-"`
+	// DefaultRigImportOrder preserves declaration order for
+	// [defaults.rig.imports]. Runtime-only.
+	DefaultRigImportOrder []string `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -2651,10 +2657,8 @@ func WizardCity(name, provider, startCommand string) City {
 // config. If startCommand is set, it takes precedence over provider.
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
-		Name:               name,
-		Includes:           []string{".gc/system/packs/gastown"},
-		DefaultRigIncludes: []string{".gc/system/packs/gastown"},
-		GlobalFragments:    []string{"command-glossary", "operational-awareness"},
+		Name:            name,
+		GlobalFragments: []string{"command-glossary", "operational-awareness"},
 	}
 	if startCommand != "" {
 		ws.StartCommand = startCommand
@@ -2665,6 +2669,13 @@ func GastownCity(name, provider, startCommand string) City {
 	maxRestarts := 5
 	return City{
 		Workspace: ws,
+		Imports: map[string]Import{
+			"gastown": {Source: ".gc/system/packs/gastown"},
+		},
+		DefaultRigImports: map[string]Import{
+			"gastown": {Source: ".gc/system/packs/gastown"},
+		},
+		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
 			PatrolInterval:  "30s",
 			MaxRestarts:     &maxRestarts,
