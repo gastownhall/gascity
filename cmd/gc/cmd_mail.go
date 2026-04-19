@@ -178,7 +178,7 @@ func cmdMailCheck(args []string, inject bool, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	target, ok := resolveInboxTarget(args, stderr, "gc mail check")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail check")
 	if !ok {
 		if inject {
 			return 0
@@ -590,7 +590,7 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	return resolvedMailTarget{}, false
 }
 
-func resolveInboxTarget(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	if len(args) > 0 {
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
 	}
@@ -1088,7 +1088,7 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	target, ok := resolveInboxTarget(args, stderr, "gc mail inbox")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
 	if !ok {
 		return 1
 	}
@@ -1414,7 +1414,7 @@ func cmdMailCount(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	target, ok := resolveInboxTarget(args, stderr, "gc mail count")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail count")
 	if !ok {
 		return 1
 	}
