@@ -13,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -119,7 +120,7 @@ func evaluateWakeReasons(
 	}
 
 	if !waitHold && sp != nil {
-		if name != "" && sp.IsAttached(name) {
+		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
 			reasons = append(reasons, WakeAttached)
 		}
 	}
@@ -383,7 +384,7 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 // commands continue to operate on the real repo even when agent sessions use
 // isolated work_dir sandboxes. Non-empty output means work exists. Agents
 // without a work_query produce no WakeWork reason.
-func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
+func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
 	if cfg == nil || runner == nil {
 		return nil
 	}
@@ -409,7 +410,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		}
 		seen[qn] = true
 		probeEnv := controllerQueryRuntimeEnv(cityDir, cfg, a)
-		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a)
+		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a, stderr)
 		if wq == "" {
 			continue
 		}
@@ -603,6 +604,9 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	if dt != nil && dt.get(session.ID) != nil {
 		return false
 	}
+	if isDeliberateSleepReason(session.Metadata["sleep_reason"]) {
+		return false
+	}
 	lastWoke := session.Metadata["last_woke_at"]
 	if lastWoke == "" {
 		return false
@@ -631,6 +635,16 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	_ = store.SetMetadata(session.ID, "last_woke_at", "")
 	session.Metadata["last_woke_at"] = ""
 	return true
+}
+
+func isDeliberateSleepReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
+		sleepReasonCityStop, "user-hold", "wait-hold":
+		return true
+	default:
+		return false
+	}
 }
 
 // recordChurn increments the churn counter and clears session_key on

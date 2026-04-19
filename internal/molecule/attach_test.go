@@ -131,8 +131,9 @@ func TestAttachBasic(t *testing.T) {
 }
 
 func TestAttachBasicGraphApplyPreservesWorkflowRootID(t *testing.T) {
+	prev := IsGraphApplyEnabled()
 	SetGraphApplyEnabled(true)
-	t.Cleanup(func() { SetGraphApplyEnabled(false) })
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
 	store := beads.NewMemStore()
 	root := setupWorkflow(t, store)

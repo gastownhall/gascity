@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	gcevents "github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -276,6 +277,19 @@ func verifyEvents(t *testing.T, cityDir, eventType string) {
 	}
 	if strings.TrimSpace(out) == "" {
 		t.Errorf("expected events of type %s, got empty output", eventType)
+	}
+}
+
+// verifyEventLog checks the persisted event log directly. Use it for
+// assertions after the city controller has stopped and the live API is gone.
+func verifyEventLog(t *testing.T, cityDir, eventType string) {
+	t.Helper()
+	items, err := gcevents.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), gcevents.Filter{Type: eventType})
+	if err != nil {
+		t.Fatalf("read event log for %s: %v", eventType, err)
+	}
+	if len(items) == 0 {
+		t.Errorf("expected events of type %s in event log", eventType)
 	}
 }
 

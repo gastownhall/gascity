@@ -50,6 +50,45 @@ func TestRunStage1SkillMaterializationCityScoped(t *testing.T) {
 	}
 }
 
+func TestRunStage1CityScopedDirMatchingRigDoesNotGetRigSharedSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+
+	rigPath := filepath.Join(cityPath, "rigs", "fe")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigSkills := filepath.Join(cityPath, "imports", "helper", "skills")
+	writeSkillSource(t, filepath.Join(rigSkills, "plan"))
+
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "tmux"},
+		Rigs:    []config.Rig{{Name: "fe", Path: rigPath}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   rigSkills,
+				BindingName: "helper",
+				PackName:    "helper",
+			}},
+		},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Dir: "fe", Provider: "claude"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("runStage1SkillMaterialization: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "helper.plan")); !os.IsNotExist(err) {
+		t.Fatalf("city-scoped agent should not receive rig-shared skill, lstat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".claude", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("rig sink should remain untouched for city-scoped agent, stat err=%v", err)
+	}
+}
+
 // TestRunStage1MaterializesIntoRigScope confirms that a rig-scoped
 // agent materializes into the rig path, not the city path.
 func TestRunStage1MaterializesIntoRigScope(t *testing.T) {
@@ -333,6 +372,93 @@ func TestRunStage1MaterializesBootstrapPackSkills(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("%q is not a symlink", link)
+	}
+}
+
+func TestRunStage1MaterializesAgentLocalWhenSharedCatalogFails(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	rigPath := filepath.Join(cityPath, "rigs", "fe")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	badRigCatalog := filepath.Join(cityPath, "broken-rig-catalog")
+	if err := os.Mkdir(badRigCatalog, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badRigCatalog, 0o755) })
+	if _, err := os.ReadDir(badRigCatalog); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	agentSkills := filepath.Join(cityPath, "agents", "polecat", "skills")
+	writeSkillSource(t, filepath.Join(agentSkills, "local-only"))
+
+	cfg := &config.City{
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Rigs:          []config.Rig{{Name: "fe", Path: rigPath}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{"fe": {{SourceDir: badRigCatalog, BindingName: "ops"}}},
+		Agents: []config.Agent{
+			{Name: "polecat", Scope: "rig", Dir: "fe", Provider: "claude", SkillsDir: agentSkills},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("runStage1SkillMaterialization: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "load shared skill catalog") {
+		t.Fatalf("stderr = %q, want shared catalog load warning", stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(rigPath, ".claude", "skills", "local-only")); err != nil {
+		t.Fatalf("agent-local skill should still materialize: %v", err)
+	}
+}
+
+func TestRunStage1SharedCatalogFailurePrunesStaleSharedSymlink(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+
+	skillsDir := filepath.Join(cityPath, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+
+	cfg := &config.City{
+		PackSkillsDir: skillsDir,
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("initial runStage1SkillMaterialization: %v", err)
+	}
+	link := filepath.Join(cityPath, ".claude", "skills", "plan")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("initial shared symlink missing: %v", err)
+	}
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	stderr.Reset()
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("second runStage1SkillMaterialization: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "load shared skill catalog") {
+		t.Fatalf("stderr = %q, want shared catalog load warning", stderr.String())
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("stale shared symlink should be pruned on catalog failure, lstat err=%v", err)
 	}
 }
 

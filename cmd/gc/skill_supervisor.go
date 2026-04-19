@@ -25,24 +25,38 @@ import (
 // root; acp runs in-process and doesn't read from it). Hybrid is
 // per-session-routed; conservatively ineligible until v0.15.2.
 //
-// Catalog load happens once per call and feeds every agent's
-// materialization in this tick. Per-agent errors (LoadAgentCatalog,
-// MaterializeAgent) are logged to stderr and do not abort the pass
-// — the supervisor should continue reconciling every other agent.
-// Catalog-level failures cause the whole pass to exit early with
-// the error logged inline so the caller doesn't double-log.
+// Catalog load happens once per scope per call and feeds every
+// agent's materialization in this tick. Per-agent errors
+// (LoadAgentCatalog, MaterializeAgent) are logged to stderr and do
+// not abort the pass — the supervisor should continue reconciling
+// every other agent. Shared-catalog load failures are also logged and
+// then downgraded to an empty shared desired set, while preserving
+// owned-root cleanup so stale gc-managed symlinks can still be pruned.
 func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.Writer) error {
 	if cfg == nil {
 		return nil
 	}
-	cityCat, err := materialize.LoadCityCatalog(cfg.PackSkillsDir)
-	if err != nil {
-		// Log inline and return nil so the supervisor tick's
-		// runStep wrapper doesn't double-log the same message.
-		if stderr != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load city skill catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+	catalogs := make(map[string]materialize.CityCatalog)
+	loadCatalog := func(rigName string) materialize.CityCatalog {
+		if cat, ok := catalogs[rigName]; ok {
+			return cat
 		}
-		return nil
+		cat, err := loadSharedSkillCatalog(cfg, rigName)
+		if err != nil {
+			if stderr != nil {
+				if rigName == "" {
+					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for city scope: %v\n", err) //nolint:errcheck // best-effort stderr
+				} else {
+					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for rig %q: %v\n", rigName, err) //nolint:errcheck // best-effort stderr
+				}
+			}
+			cat.Entries = nil
+			cat.Shadowed = nil
+			catalogs[rigName] = cat
+			return catalogs[rigName]
+		}
+		catalogs[rigName] = cat
+		return cat
 	}
 
 	for i := range cfg.Agents {
@@ -65,10 +79,9 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 			agentCat = materialize.AgentCatalog{}
 		}
 
+		rigName := agentRigScopeName(agent, cfg.Rigs)
+		cityCat := loadCatalog(rigName)
 		desired := materialize.EffectiveSet(cityCat, agentCat)
-		if len(desired) == 0 {
-			continue
-		}
 
 		// Resolve the agent's scope root to an absolute path. Use the
 		// un-canonicalized form here so the materializer writes into
@@ -85,6 +98,9 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		owned := append([]string{}, cityCat.OwnedRoots...)
 		if agentCat.OwnedRoot != "" {
 			owned = append(owned, agentCat.OwnedRoot)
+		}
+		if len(desired) == 0 && len(owned) == 0 {
+			continue
 		}
 
 		res, merr := materialize.Run(materialize.Request{

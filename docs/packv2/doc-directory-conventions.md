@@ -163,7 +163,7 @@ my-pack/
 ├── commands/
 ├── doctor/
 ├── patches/
-├── overlays/
+├── overlay/
 ├── skills/
 ├── mcp/
 ├── template-fragments/
@@ -185,7 +185,7 @@ my-city/
 ├── commands/
 ├── doctor/
 ├── patches/
-├── overlays/
+├── overlay/
 ├── skills/
 ├── mcp/
 ├── template-fragments/
@@ -247,7 +247,7 @@ That means it should trend away from holding:
 - prompt file paths
   - use `prompt.md`
 - overlay directory declarations
-  - use `overlays/` and `agents/<name>/overlay/`
+  - use `overlay/` and `agents/<name>/overlay/`
 - script directory declarations
   - there is no standard top-level `scripts/` directory in V2
 - command inventories for the simple case
@@ -404,7 +404,7 @@ As with commands:
 - `help.md` is the default well-known help file when present
 - the script that actually runs the check should live naturally alongside the manifest rather than depending on a special top-level `scripts/` directory
 
-### `overlays/`
+### `overlay/`
 
 Holds pack-wide overlay files applied to agents according to the V2 overlay rules.
 
@@ -516,7 +516,7 @@ The V2 loader should treat these directories as standard signals:
 - `commands/` means "discover command entries"
 - `doctor/` means "discover doctor entries"
 - `patches/` means "load prompt replacement files for imported agents"
-- `overlays/`, `skills/`, `mcp/`, `template-fragments/` mean "load pack-wide assets of those kinds" for the current city pack; imported-pack catalogs are later
+- `overlay/`, `skills/`, `mcp/`, `template-fragments/` mean "load pack-wide assets of those kinds" for the current city pack; imported-pack catalogs are later
 - `assets/` means "opaque pack-owned files; no convention-based discovery"
 
 The loader should not require explicit TOML path declarations for standard directories when convention is sufficient.
@@ -602,7 +602,7 @@ The current direction is:
 4. convention should replace path wiring where it actually helps
 5. the root city pack and imported packs should use the same pack-owned structure
 6. `assets/` is the one opaque top-level asset bucket
-7. `agents/`, `formulas/`, `orders/`, `commands/`, `doctor/`, `patches/`, `overlays/`, `skills/`, `mcp/`, `template-fragments/`, and `assets/` are the standard pack directories
+7. `agents/`, `formulas/`, `orders/`, `commands/`, `doctor/`, `patches/`, `overlay/`, `skills/`, `mcp/`, `template-fragments/`, and `assets/` are the standard pack directories
 8. commands and doctor checks currently lean toward per-entry directories with small manifests and local assets
 9. path-valued fields may point anywhere inside the same pack, including `assets/`
 10. pack-local paths should be flexible inside the pack and strict at the pack boundary

@@ -130,6 +130,12 @@ func TestConfigFingerprintIgnoresGCAlias(t *testing.T) {
 	if ConfigFingerprint(base) != ConfigFingerprint(withAlias) {
 		t.Error("GC_ALIAS should not affect config fingerprint")
 	}
+	if CoreFingerprint(base) != CoreFingerprint(withAlias) {
+		t.Error("GC_ALIAS should not affect core config fingerprint")
+	}
+	if CoreFingerprintBreakdown(base)["Env"] != CoreFingerprintBreakdown(withAlias)["Env"] {
+		t.Error("GC_ALIAS should not affect core env fingerprint breakdown")
+	}
 }
 
 func TestConfigFingerprintIgnoresNonAllowedGCVars(t *testing.T) {

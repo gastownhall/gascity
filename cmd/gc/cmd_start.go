@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
@@ -116,9 +117,10 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	return ps
 }
 
-// poolDeathInfo holds the on_death command and working directory for a pool instance.
+// poolDeathInfo holds the pre-expanded on_death command and working
+// directory for a pool instance.
 type poolDeathInfo struct {
-	Command string            // on_death shell command (pre-baked with instance QN)
+	Command string            // on_death shell command pre-expanded for the instance
 	Dir     string            // working directory for bd commands
 	Env     map[string]string // canonical runtime env for the agent scope
 }
@@ -126,7 +128,7 @@ type poolDeathInfo struct {
 // computePoolDeathHandlers builds a map from session name to death handler
 // for every pool instance (static for bounded pools, currently running for
 // unlimited). Used to detect and handle pool deaths.
-func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider) map[string]poolDeathInfo {
+func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider, stderr io.Writer) map[string]poolDeathInfo {
 	handlers := make(map[string]poolDeathInfo)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -142,6 +144,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			if cmd == "" {
 				continue
 			}
+			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
 			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
@@ -259,6 +262,10 @@ Use "gc supervisor run" for foreground operation.`,
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
+	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+}
+
+func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
 	if controllerMode || dryRunMode {
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
@@ -295,7 +302,7 @@ func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if code := registerCityWithSupervisor(cityPath, stdout, stderr, "gc start", true); code != 0 {
+	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
@@ -506,6 +513,15 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// itself; it never returns a non-nil error to its caller.
 	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
 
+	// Stage-1 MCP projection is a hard gate because it mutates the provider's
+	// active runtime config surface. Conflicting shared targets or projection
+	// write failures must block startup before sessions launch against stale or
+	// ambiguous MCP state.
+	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// Validate install_agent_hooks (workspace + all agents).
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		if err := hooks.Validate(ih); err != nil {
@@ -563,11 +579,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if controllerMode {
 		poolSessions := computePoolSessions(cfg, cityName, cityPath, sp)
-		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp)
-		watchDirs := config.WatchDirs(prov, cfg, cityPath)
+		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
+		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
-			newDrainOps(sp), poolSessions, poolDeathHandlers, watchDirs, recorder, eventProv, stdout, stderr)
+			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
 	}
 
 	// One-shot reconciliation (default): no drain (kill is fine).
@@ -777,10 +793,31 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
+	// When workDir == cityPath, relWorkDir is "." and path.Join collapses it.
 	relWorkDir := "."
 	if workDir != cityPath {
 		if r, err := filepath.Rel(cityPath, workDir); err == nil {
 			relWorkDir = r
+		}
+	}
+
+	// workDir-based hooks: gemini, codex, opencode, copilot, cursor, pi, omp.
+	for _, rel := range []string{
+		path.Join(".gemini", "settings.json"),
+		path.Join(".codex", "hooks.json"),
+		path.Join(".opencode", "plugins", "gascity.js"),
+		path.Join(".github", "hooks", "gascity.json"),
+		path.Join(".github", "copilot-instructions.md"),
+		path.Join(".cursor", "hooks.json"),
+		path.Join(".pi", "extensions", "gc-hooks.js"),
+		path.Join(".omp", "hooks", "gc-hook.ts"),
+	} {
+		abs := filepath.Join(workDir, rel)
+		if _, err := os.Stat(abs); err == nil {
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: abs, RelDst: path.Join(relWorkDir, rel),
+				Probed: true, ContentHash: runtime.HashPathContent(abs),
+			})
 		}
 	}
 
@@ -1064,7 +1101,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		count := 0
 		for _, qn := range instances {
 			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if sp.IsRunning(sn) {
+			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
 				count++
 			}
 		}
@@ -1089,7 +1126,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		// Fallback: individual IsRunning calls (original behavior).
 		count := 0
 		for sn := range expected {
-			if sp.IsRunning(sn) {
+			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
 				count++
 			}
 		}

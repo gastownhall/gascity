@@ -37,7 +37,7 @@ gc bd prime
 **2. Read the bead and metadata:**
 ```bash
 gc bd show {{issue}}
-gc bd show {{issue}} --json | jq '.metadata'
+gc bd show {{issue}} --json | jq '.[0].metadata'
 ```
 
 **Expected metadata:**
@@ -93,10 +93,10 @@ After the report is stored on the bead, notify the coordinator and close out.
 
 **1. Read metadata for the mail header:**
 ```bash
-COORD=$(gc bd show {{issue}} --json | jq -r '.metadata.coordinator // empty')
-REVIEW_ID=$(gc bd show {{issue}} --json | jq -r '.metadata.review_id // empty')
-PHASE=$(gc bd show {{issue}} --json | jq -r '.metadata.review_phase // empty')
-LEG=$(gc bd show {{issue}} --json | jq -r '.metadata.review_leg // empty')
+COORD=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.coordinator // empty')
+REVIEW_ID=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_id // empty')
+PHASE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_phase // empty')
+LEG=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_leg // empty')
 ```
 
 **2. If `COORD` is present, mail completion:**

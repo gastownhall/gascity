@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,204 @@ template = "mayor"
 	// Stdout should include the "materialized" summary line.
 	if !strings.Contains(stdout.String(), "materialized 1 skill") {
 		t.Errorf("stdout missing summary: %q", stdout.String())
+	}
+}
+
+func TestInternalMaterializeSkillsMaterializesImportedSharedSkills(t *testing.T) {
+	clearGCEnv(t)
+	rootDir := t.TempDir()
+	cityDir := filepath.Join(rootDir, "city")
+	packDir := filepath.Join(rootDir, "helper")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"city\"\nversion = \"0.1.0\"\nschema = 2\n\n[imports.helper]\nsource = \"../helper\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(helper): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte("[pack]\nname = \"helper\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(helper/pack.toml): %v", err)
+	}
+	writeSkillSource(t, filepath.Join(packDir, "skills", "plan"))
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	link := filepath.Join(workdir, ".claude", "skills", "helper.plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat(%s): %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+	tgt, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	wantTarget := filepath.Join(packDir, "skills", "plan")
+	if tgt != wantTarget {
+		t.Fatalf("symlink target = %q, want %q", tgt, wantTarget)
+	}
+}
+
+func TestInternalMaterializeSkillsCityScopedDirMatchingRigDoesNotMaterializeRigSharedSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	helperDir := filepath.Join(cityDir, "assets", "helper")
+	rigDir := filepath.Join(cityDir, "fe")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := os.MkdirAll(helperDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(helper): %v", err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "fe"
+path = %q
+
+[rigs.imports.helper]
+source = "./assets/helper"
+
+[[agent]]
+name = "mayor"
+scope = "city"
+dir = "fe"
+provider = "claude"
+start_command = "echo"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(helperDir, "pack.toml"), []byte("[pack]\nname = \"helper\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(helper/pack.toml): %v", err)
+	}
+	writeSkillSource(t, filepath.Join(helperDir, "skills", "plan"))
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".claude", "skills", "helper.plan")); !os.IsNotExist(err) {
+		t.Fatalf("city-scoped agent should not receive rig-shared skill, lstat err=%v", err)
+	}
+}
+
+func TestInternalMaterializeSkillsSharedCatalogFailurePrunesStaleSharedSymlink(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	skillsDir := filepath.Join(cityDir, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("initial exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("initial shared symlink missing: %v", err)
+	}
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("second exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "shared skill catalog unavailable") {
+		t.Fatalf("stderr = %q, want shared catalog warning", stderr.String())
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("stale shared symlink should be pruned on catalog failure, lstat err=%v", err)
 	}
 }
 

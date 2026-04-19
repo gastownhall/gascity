@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -380,6 +382,80 @@ func TestConvoyStoreCandidatesKeepFileProviderCityScoped(t *testing.T) {
 	got := convoyStoreCandidates(cfg, "/city", "HW-42")
 	if len(got) != 1 || got[0] != "/city" {
 		t.Fatalf("convoyStoreCandidates = %v, want [/city]", got)
+	}
+}
+
+func TestConvoyStoreCandidatesIncludeBdRigUnderLegacyFileCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "hello-world")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hw"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:   "hello-world",
+			Path:   rigDir,
+			Prefix: "HW",
+		}},
+	}
+
+	got := convoyStoreCandidates(cfg, cityDir, "HW-42")
+	want := []string{rigDir, cityDir}
+	if len(got) != len(want) {
+		t.Fatalf("convoyStoreCandidates len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("convoyStoreCandidates[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestConvoyStoreCandidatesIncludeMarkedFileRigUnderLegacyFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "hello-world")
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:   "hello-world",
+			Path:   rigDir,
+			Prefix: "HW",
+		}},
+	}
+
+	got := convoyStoreCandidates(cfg, cityDir, "HW-42")
+	want := []string{rigDir, cityDir}
+	if len(got) != len(want) {
+		t.Fatalf("convoyStoreCandidates len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("convoyStoreCandidates[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
 	}
 }
 

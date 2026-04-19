@@ -81,7 +81,7 @@ This belongs in:
 
 - `pack.toml`
 - pack-owned directories like `agents/`, `commands/`, `doctor/`,
-  `formulas/`, `orders/`, `template-fragments/`, `overlays/`, and `assets/`
+  `formulas/`, `orders/`, `template-fragments/`, `overlay/`, and `assets/`
 
 ### 2. City deployment choices
 

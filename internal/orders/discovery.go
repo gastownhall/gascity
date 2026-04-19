@@ -13,6 +13,10 @@ import (
 // then the deprecated subdirectory format, then the deprecated formulas/orders
 // legacy path.
 func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
+	return discoverRootWithOptions(fs, root, ScanOptions{})
+}
+
+func discoverRootWithOptions(fs fsys.FS, root ScanRoot, opts ScanOptions) ([]Order, error) {
 	found := make(map[string]Order)
 	var names []string
 
@@ -31,11 +35,11 @@ func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
 		return nil
 	}
 
-	if err := discoverFlatFiles(fs, root.Dir, found, add); err != nil {
+	if err := discoverFlatFiles(fs, root.Dir, found, add, opts); err != nil {
 		return nil, err
 	}
 	if err := discoverSubdirectoryOrders(fs, root.Dir, found, func(name, source string, data []byte) error {
-		log.Printf("warning: deprecated order path %s; rename to orders/%s.toml", source, name)
+		warnDeprecatedPath(opts, "warning: deprecated order path %s; rename to orders/%s.toml", source, name)
 		return add(name, source, data)
 	}); err != nil {
 		return nil, err
@@ -44,7 +48,7 @@ func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
 	legacyDir := legacyOrdersDir(root.FormulaLayer)
 	if legacyDir != "" && filepath.Clean(legacyDir) != filepath.Clean(root.Dir) {
 		if err := discoverSubdirectoryOrders(fs, legacyDir, found, func(name, source string, data []byte) error {
-			log.Printf("warning: deprecated order path %s; move to orders/%s.toml", source, name)
+			warnDeprecatedPath(opts, "warning: deprecated order path %s; move to orders/%s.toml", source, name)
 			return add(name, source, data)
 		}); err != nil {
 			return nil, err
@@ -58,7 +62,14 @@ func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
 	return result, nil
 }
 
-func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error) error {
+func warnDeprecatedPath(opts ScanOptions, format string, args ...any) {
+	if opts.SuppressDeprecatedPathWarnings {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error, opts ScanOptions) error {
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -90,7 +101,7 @@ func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(
 				continue
 			}
 			if legacy {
-				log.Printf("warning: deprecated order path %s; rename to orders/%s.toml", source, name)
+				warnDeprecatedPath(opts, "warning: deprecated order path %s; rename to orders/%s.toml", source, name)
 			}
 			if err := add(name, source, data); err != nil {
 				return err

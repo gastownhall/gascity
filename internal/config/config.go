@@ -23,6 +23,12 @@ import (
 // or underscores. Slashes, spaces, and dots are not allowed.
 var validAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
+// validNamedSessionTemplate matches a named_session template reference.
+// Root-authored named sessions may target imported PackV2 templates by
+// binding-qualified name ("binding.agent"), while rig scope is carried
+// separately by NamedSession.Dir during pack expansion.
+var validNamedSessionTemplate = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*(\.[a-zA-Z0-9][a-zA-Z0-9_-]*)?$`)
+
 const (
 	// ControlDispatcherAgentName is the built-in deterministic control lane for
 	// graph.v2 workflow control beads.
@@ -192,10 +198,32 @@ type City struct {
 	//   formulas/        — formula definitions
 	// Populated during pack expansion. Not from TOML.
 	PackDirs []string `toml:"-" json:"-"`
+	// PackGraphOnlyDirs is the city pack closure rooted at workspace.includes,
+	// including nested pack.includes and nested imports reached from those
+	// packs, ordered low→high precedence for MCP resolution.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackGraphOnlyDirs []string `toml:"-" json:"-"`
+	// ExplicitImportPackDirs is the ordered low→high city-level explicit-import
+	// pack closure used by MCP resolution. Runtime-only.
+	ExplicitImportPackDirs []string `toml:"-" json:"-"`
+	// ImplicitImportPackDirs is the ordered low→high city-level non-bootstrap
+	// implicit-import closure used by MCP resolution. Runtime-only.
+	ImplicitImportPackDirs []string `toml:"-" json:"-"`
+	// BootstrapImportPackDirs is the ordered low→high bootstrap implicit-import
+	// closure used by MCP resolution. Runtime-only.
+	BootstrapImportPackDirs []string `toml:"-" json:"-"`
 	// RigPackDirs maps rig name to its ordered pack directories.
 	// Used when rig packs differ from city packs.
 	// Populated during pack expansion. Not from TOML.
 	RigPackDirs map[string][]string `toml:"-" json:"-"`
+	// RigPackGraphOnlyDirs maps rig name to the rig's pack closure rooted at
+	// rig.includes, including nested pack.includes and nested imports reached
+	// from those packs, ordered low→high precedence for MCP resolution.
+	// Runtime-only.
+	RigPackGraphOnlyDirs map[string][]string `toml:"-" json:"-"`
+	// RigImportPackDirs maps rig name to the rig's explicit-import closure,
+	// ordered low→high precedence for MCP resolution. Runtime-only.
+	RigImportPackDirs map[string][]string `toml:"-" json:"-"`
 	// PackOverlayDirs is the ordered list of overlay/ directories
 	// from all loaded city packs. Contents are copied to each agent's
 	// workdir during startup (before the agent's own OverlayDir).
@@ -223,12 +251,40 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// PackSkills holds binding-qualified shared skill catalogs composed
+	// from city-level imported packs. Runtime-only.
+	PackSkills []DiscoveredSkillCatalog `toml:"-" json:"-"`
 	// PackSkillsDir holds the current city pack's shared skills catalog root.
 	// Runtime-only — not persisted to TOML or JSON.
 	PackSkillsDir string `toml:"-" json:"-"`
 	// PackMCPDir holds the current city pack's shared MCP catalog root.
 	// Runtime-only — not persisted to TOML or JSON.
 	PackMCPDir string `toml:"-" json:"-"`
+	// RigPackSkills maps rig name to the binding-qualified shared skill
+	// catalogs composed from that rig's imports. Runtime-only.
+	RigPackSkills map[string][]DiscoveredSkillCatalog `toml:"-" json:"-"`
+	// ImplicitImportBindings records which city-level import bindings were
+	// injected from ~/.gc/implicit-import.toml. Runtime-only.
+	ImplicitImportBindings map[string]bool `toml:"-" json:"-"`
+	// BootstrapImportBindings records which implicit-import bindings are
+	// bootstrap-managed. Runtime-only.
+	BootstrapImportBindings map[string]bool `toml:"-" json:"-"`
+	// ExplicitImportMCPBindings records the city-level explicit-import binding
+	// that currently owns each MCP pack dir after precedence flattening.
+	// Runtime-only.
+	ExplicitImportMCPBindings map[string]string `toml:"-" json:"-"`
+	// ImplicitImportMCPBindings records the city-level non-bootstrap implicit
+	// binding that currently owns each MCP pack dir after precedence
+	// flattening. Runtime-only.
+	ImplicitImportMCPBindings map[string]string `toml:"-" json:"-"`
+	// BootstrapImportMCPBindings records the bootstrap implicit-import binding
+	// that currently owns each MCP pack dir after precedence flattening.
+	// Runtime-only.
+	BootstrapImportMCPBindings map[string]string `toml:"-" json:"-"`
+	// RigImportMCPBindings records, per rig, the rig-import binding that
+	// currently owns each MCP pack dir after precedence flattening.
+	// Runtime-only.
+	RigImportMCPBindings map[string]map[string]string `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -1462,15 +1518,23 @@ type Agent struct {
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck is a shell command whose output determines desired session count.
 	// Optional override — when set, its output is the desired count (still clamped
-	// by all cap levels).
+	// by all cap levels). If it contains Go template placeholders, gc expands them
+	// using the same PathContext fields as work_dir (Agent, AgentBase, Rig,
+	// RigRoot, CityRoot, CityName) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
 	DrainTimeout string `toml:"drain_timeout,omitempty" jsonschema:"default=5m"`
 	// OnBoot is a shell command run once at controller startup for this agent.
+	// If it contains Go template placeholders, gc expands them using work_dir's
+	// PathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	OnBoot string `toml:"on_boot,omitempty"`
 	// OnDeath is a shell command run when a session dies unexpectedly.
+	// If it contains Go template placeholders, gc expands them using work_dir's
+	// PathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -1480,6 +1544,10 @@ type Agent struct {
 	NamepoolNames []string `toml:"-"`
 	// WorkQuery is the shell command to find available work for this agent.
 	// Used by gc hook and available in prompt templates as {{.WorkQuery}}.
+	// If it contains Go template placeholders, gc expands them using work_dir's
+	// PathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before probe, hook, and prompt-context execution. Prompt templates
+	// receive the expanded command, not the raw template literal.
 	// If unset, Gas City uses a three-tier default query:
 	//   1. in_progress work assigned to this session/alias (crash recovery)
 	//   2. ready work assigned to this session/alias (pre-assigned work)
@@ -1489,9 +1557,15 @@ type Agent struct {
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// Used by gc sling to make a bead visible to the target's work_query.
-	// The placeholder {} is replaced with the bead ID at runtime.
+	// Custom sling_query values may also use work_dir's PathContext fields
+	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName); gc expands those
+	// first, then replaces {} with the bead ID at runtime. Prompt and dry-run
+	// surfaces receive the expanded command before bead-ID substitution.
 	// Default for all agents:
 	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
+	// Explicit pins of that default preserve the built-in metadata-routing and
+	// idempotency fast path. bd-based custom commands with additional side
+	// effects are treated as custom and rerun when invoked.
 	// Routing is metadata-based; sling stamps the target template and the
 	// reconciler/scale_check paths decide when sessions are created.
 	// Custom sling_query and work_query can be overridden independently.
@@ -1772,6 +1846,13 @@ func (a *Agent) EffectiveSlingQuery() string {
 	if a.SlingQuery != "" {
 		return a.SlingQuery
 	}
+	return a.DefaultSlingQuery()
+}
+
+// DefaultSlingQuery returns the built-in metadata-routing sling query for
+// this agent. Callers outside config should prefer this helper over rebuilding
+// the command string to preserve the bd boundary invariant.
+func (a *Agent) DefaultSlingQuery() string {
 	return "bd update {} --set-metadata gc.routed_to=" + a.QualifiedName()
 }
 
@@ -2320,8 +2401,11 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		if s.Template == "" {
 			return fmt.Errorf("named_session[%d]: template is required", i)
 		}
-		if !validAgentName.MatchString(s.Template) {
-			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Template)
+		if !validNamedSessionTemplate.MatchString(s.Template) {
+			return fmt.Errorf(
+				"named_session[%d]: template %q must be an agent template name like %q or a binding-qualified name like %q",
+				i, s.Template, "agent", "binding.agent",
+			)
 		}
 		if s.Name != "" && !validAgentName.MatchString(s.Name) {
 			return fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)

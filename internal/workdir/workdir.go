@@ -86,6 +86,20 @@ func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a con
 	}
 }
 
+// ExpandCommandTemplate renders command using the same PathContext surface as
+// work_dir and session_setup templates. When cityName is empty, it falls back
+// to the city directory basename so callers don't have to duplicate that logic.
+func ExpandCommandTemplate(command, cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
+	if command == "" || !strings.Contains(command, "{{") {
+		return command, nil
+	}
+	if strings.TrimSpace(cityName) == "" {
+		cityName = filepath.Base(filepath.Clean(cityPath))
+	}
+	ctx := PathContextForQualifiedName(cityPath, cityName, a.QualifiedName(), a, rigs)
+	return ExpandTemplateStrict(command, ctx)
+}
+
 // SessionQualifiedName returns the canonical work_dir identity for a concrete
 // session instance. Single-session agents keep their template identity; pooled
 // agents use the alias or generated explicit name.

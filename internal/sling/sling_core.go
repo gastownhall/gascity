@@ -276,7 +276,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			return result, fmt.Errorf("%w", err)
 		}
 	} else {
-		slingCmd := BuildSlingCommand(a.EffectiveSlingQuery(), beadID)
+		slingCmd := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, deps.Stderr)
 		if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
@@ -892,7 +892,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 		} else {
-			slingCmd := BuildSlingCommand(a.EffectiveSlingQuery(), child.ID)
+			slingCmd := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), child.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, deps.Stderr)
 			if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
 				childResult.Failed = true
 				childResult.FailReason = err.Error()

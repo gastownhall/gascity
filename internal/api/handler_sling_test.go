@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,6 +80,41 @@ func TestSlingWithBead(t *testing.T) {
 	}
 	if resp["mode"] != "direct" {
 		t.Fatalf("mode = %q, want %q", resp["mode"], "direct")
+	}
+}
+
+func TestSlingLogsMalformedCustomSlingQueryWarning(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	for i := range state.cfg.Agents {
+		if state.cfg.Agents[i].QualifiedName() == "myrig/worker" {
+			state.cfg.Agents[i].SlingQuery = "bd update {} --set-metadata gc.routed_to={{.Rig"
+			break
+		}
+	}
+
+	var stderr bytes.Buffer
+	oldStderr := apiSlingStderr
+	apiSlingStderr = func() io.Writer { return &stderr }
+	t.Cleanup(func() { apiSlingStderr = oldStderr })
+
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(stderr.String(), "sling_query") {
+		t.Fatalf("stderr missing field name: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc.routed_to={{.Rig") {
+		t.Fatalf("stderr should redact raw template, got %q", stderr.String())
 	}
 }
 

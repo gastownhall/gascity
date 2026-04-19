@@ -28,6 +28,7 @@ type packConfig struct {
 	Pack          PackMeta                `toml:"pack"`
 	Imports       map[string]Import       `toml:"imports,omitempty"`
 	AgentDefaults AgentDefaults           `toml:"agent_defaults,omitempty"`
+	Defaults      packDefaults            `toml:"defaults,omitempty"`
 	Agents        []Agent                 `toml:"agent"`
 	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
 	Services      []Service               `toml:"service,omitempty"`
@@ -37,6 +38,14 @@ type packConfig struct {
 	Doctor        []PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands      []PackCommandEntry      `toml:"commands,omitempty"`
 	Global        PackGlobal              `toml:"global,omitempty"`
+}
+
+type packDefaults struct {
+	Rig packRigDefaults `toml:"rig,omitempty"`
+}
+
+type packRigDefaults struct {
+	Imports map[string]Import `toml:"imports,omitempty"`
 }
 
 // ExpandPacks resolves pack references on all rigs. For each rig
@@ -53,6 +62,10 @@ type packConfig struct {
 // (Layer 3). cityRoot is the city directory (parent of city.toml), used
 // for path resolution.
 func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string) error {
+	return expandPacks(cfg, fs, cityRoot, rigFormulaDirs, LoadOptions{})
+}
+
+func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions) error {
 	var expanded []Agent
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
@@ -65,6 +78,8 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		var rigAgents []Agent
 		var rigNamedSessions []NamedSession
 		var rigTopoDirs []string
+		var rigPackGraphOnlyDirs []string
+		var rigImportPackDirs []string
 		var rigGlobals []ResolvedPackGlobal
 		for _, ref := range topoRefs {
 			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
@@ -81,7 +96,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 			}
 
-			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCache(fs, topoPath, topoDir, cityRoot, rig.Name, nil, cache)
+			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCacheOptions(fs, topoPath, topoDir, cityRoot, rig.Name, nil, cache, opts)
 			if err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
@@ -89,7 +104,23 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				return fmt.Errorf("rig %q pack %q: [[service]] is only allowed in city-scoped packs", rig.Name, ref)
 			}
 			rigGlobals = append(rigGlobals, globals...)
+			packName := tcPackName(fs, topoPath)
+			cfg.PackCommands = appendDiscoveredCommands(
+				cfg.PackCommands,
+				stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...,
+			)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
+			skills := cachedPackSkills(cache, topoDir)
+			if packName == "" && len(skills) > 0 {
+				return fmt.Errorf("rig %q pack %q: discovered skills require [pack].name for binding", rig.Name, ref)
+			}
+			if cfg.RigPackSkills == nil {
+				cfg.RigPackSkills = make(map[string][]DiscoveredSkillCatalog)
+			}
+			cfg.RigPackSkills[rig.Name] = appendDiscoveredSkills(
+				cfg.RigPackSkills[rig.Name],
+				stampSkillBinding(skills, packName)...,
+			)
 
 			// Validate rig-scoped requirements.
 			for _, req := range reqs {
@@ -110,6 +141,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 			// Accumulate pack dirs for this rig.
 			rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
+			rigPackGraphOnlyDirs = appendUniqueLastWins(rigPackGraphOnlyDirs, topoDirs...)
 
 			// Keep only rig-scoped and unscoped agents for rig expansion.
 			agents = filterAgentsByScope(agents, false)
@@ -158,16 +190,48 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 
 				impPath := filepath.Join(impDir, packFile)
-				agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCache(
-					fs, impPath, impDir, cityRoot, rig.Name, nil, cache)
+				agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCacheOptions(
+					fs, impPath, impDir, cityRoot, rig.Name, nil, cache, opts)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
 				if len(services) > 0 {
 					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
 				}
+				commands := cachedPackCommands(cache, impDir)
+				doctors := cachedPackDoctors(cache, impDir)
+				skills := cachedPackSkills(cache, impDir)
+				if !imp.ImportIsTransitive() {
+					absImpDir, _ := filepath.Abs(impDir)
+					var direct []Agent
+					for _, a := range agents {
+						absSrc, _ := filepath.Abs(a.SourceDir)
+						if absSrc == absImpDir {
+							direct = append(direct, a)
+						}
+					}
+					agents = direct
+					commands = filterCommandsByPackDir(commands, impDir)
+					doctors = filterDoctorsByPackDir(doctors, impDir)
+					skills = filterSkillsByPackDir(skills, impDir)
+				}
 				rigGlobals = append(rigGlobals, globals...)
-				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, impDir)...)
+				if cfg.RigPackSkills == nil {
+					cfg.RigPackSkills = make(map[string][]DiscoveredSkillCatalog)
+				}
+				cfg.RigPackSkills[rig.Name] = appendDiscoveredSkills(
+					cfg.RigPackSkills[rig.Name],
+					stampImportedSkillBinding(skills, bindingName, imp.Export)...,
+				)
+				mcpTopoDirs := topoDirs
+
+				if !imp.ImportIsTransitive() {
+					mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
+				}
+				if cfg.RigImportMCPBindings == nil {
+					cfg.RigImportMCPBindings = make(map[string]map[string]string)
+				}
+				cfg.RigImportMCPBindings[rig.Name] = stampMCPDirBindings(cfg.RigImportMCPBindings[rig.Name], mcpTopoDirs, bindingName)
 
 				// Stamp binding name on agents and named sessions.
 				// At the rig level, ALL agents from an import get the rig's
@@ -177,6 +241,20 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 				for i := range namedSessions {
 					namedSessions[i].BindingName = bindingName
+				}
+				for i := range commands {
+					if commands[i].BindingName == "" {
+						commands[i].BindingName = bindingName
+					} else if imp.Export {
+						commands[i].BindingName = bindingName
+					}
+				}
+				for i := range doctors {
+					if doctors[i].BindingName == "" {
+						doctors[i].BindingName = bindingName
+					} else if imp.Export {
+						doctors[i].BindingName = bindingName
+					}
 				}
 
 				// Re-qualify depends_on with binding name now that it's stamped.
@@ -214,6 +292,11 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 						agents[i].PackName = packName
 					}
 				}
+				for i := range commands {
+					if commands[i].PackName == "" {
+						commands[i].PackName = packName
+					}
+				}
 
 				// Validate rig-scoped requirements.
 				for _, req := range reqs {
@@ -233,6 +316,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 
 				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
+				rigImportPackDirs = prependUniqueBlock(rigImportPackDirs, mcpTopoDirs...)
 
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
@@ -248,6 +332,8 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 				rigAgents = append(rigAgents, agents...)
 				rigNamedSessions = append(rigNamedSessions, namedSessions...)
+				cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
+				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 
 				if len(providers) > 0 {
 					if cfg.Providers == nil {
@@ -268,6 +354,18 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		}
 		if len(rigTopoDirs) > 0 {
 			cfg.RigPackDirs[rig.Name] = rigTopoDirs
+		}
+		if len(rigPackGraphOnlyDirs) > 0 {
+			if cfg.RigPackGraphOnlyDirs == nil {
+				cfg.RigPackGraphOnlyDirs = make(map[string][]string)
+			}
+			cfg.RigPackGraphOnlyDirs[rig.Name] = rigPackGraphOnlyDirs
+		}
+		if len(rigImportPackDirs) > 0 {
+			if cfg.RigImportPackDirs == nil {
+				cfg.RigImportPackDirs = make(map[string][]string)
+			}
+			cfg.RigImportPackDirs[rig.Name] = rigImportPackDirs
 		}
 
 		// Collect overlay/ dirs from rig pack dirs.
@@ -341,6 +439,10 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 // (formulaDirs, packRequirements, shadowWarnings, error). cityRoot is
 // the city directory.
 func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRequirement, []string, error) {
+	return expandCityPacks(cfg, fs, cityRoot, LoadOptions{})
+}
+
+func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) ([]string, []PackRequirement, []string, error) {
 	topos := cfg.Workspace.Includes
 	hasImports := len(cfg.Imports) > 0
 	if len(topos) == 0 && !hasImports {
@@ -351,6 +453,10 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	var allNamedSessions []NamedSession
 	var formulaDirs []string
 	var allPackDirs []string
+	var packGraphOnlyDirs []string
+	var explicitImportPackDirs []string
+	var implicitImportPackDirs []string
+	var bootstrapImportPackDirs []string
 	var allRequires []PackRequirement
 	var allGlobals []ResolvedPackGlobal
 	// Shared cache across all pack loads to deduplicate diamond DAGs.
@@ -379,7 +485,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 		}
 
-		agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCache(fs, topoPath, topoDir, cityRoot, "", nil, cache)
+		agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCacheOptions(fs, topoPath, topoDir, cityRoot, "", nil, cache, opts)
 		if err != nil {
 			// pack.toml may be missing if the pack was removed upstream after
 			// the repo was fetched. Skip gracefully.
@@ -398,9 +504,15 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 		}
 		cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...)
 		cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
+		skills := cachedPackSkills(cache, topoDir)
+		if packName == "" && len(skills) > 0 {
+			return nil, nil, nil, fmt.Errorf("city pack %q: discovered skills require [pack].name for shared binding", ref)
+		}
+		cfg.PackSkills = appendDiscoveredSkills(cfg.PackSkills, stampSkillBinding(skills, packName)...)
 
 		// Accumulate pack dirs (deduped).
 		allPackDirs = appendUnique(allPackDirs, topoDirs...)
+		packGraphOnlyDirs = appendUniqueLastWins(packGraphOnlyDirs, topoDirs...)
 
 		// Keep only city-scoped and unscoped agents for city expansion.
 		agents = filterAgentsByScope(agents, true)
@@ -452,13 +564,15 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 
 			impPath := filepath.Join(impDir, packFile)
-			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCache(
-				fs, impPath, impDir, cityRoot, "", nil, cache)
+			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCacheOptions(
+				fs, impPath, impDir, cityRoot, "", nil, cache, opts)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
 			commands := cachedPackCommands(cache, impDir)
 			doctors := cachedPackDoctors(cache, impDir)
+			skills := cachedPackSkills(cache, impDir)
+			mcpTopoDirs := topoDirs
 
 			// When transitive = false, keep only agents directly defined
 			// by this import (not its own transitive dependencies).
@@ -472,8 +586,10 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 					}
 				}
 				agents = direct
-				commands = filterCommandsBySourceDir(commands, impDir)
-				doctors = filterDoctorsBySourceDir(doctors, impDir)
+				commands = filterCommandsByPackDir(commands, impDir)
+				doctors = filterDoctorsByPackDir(doctors, impDir)
+				skills = filterSkillsByPackDir(skills, impDir)
+				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
 
 			// Stamp binding name on all agents and named sessions.
@@ -549,7 +665,21 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			cfg.Services = append(cfg.Services, services...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
+			if !slices.Contains(BootstrapManagedImportNames(), bindingName) {
+				cfg.PackSkills = appendDiscoveredSkills(cfg.PackSkills, stampImportedSkillBinding(skills, bindingName, imp.Export)...)
+			}
 			allPackDirs = appendUnique(allPackDirs, topoDirs...)
+			switch {
+			case cfg.BootstrapImportBindings != nil && cfg.BootstrapImportBindings[bindingName]:
+				bootstrapImportPackDirs = prependUniqueBlock(bootstrapImportPackDirs, mcpTopoDirs...)
+				cfg.BootstrapImportMCPBindings = stampMCPDirBindings(cfg.BootstrapImportMCPBindings, mcpTopoDirs, bindingName)
+			case cfg.ImplicitImportBindings != nil && cfg.ImplicitImportBindings[bindingName]:
+				implicitImportPackDirs = prependUniqueBlock(implicitImportPackDirs, mcpTopoDirs...)
+				cfg.ImplicitImportMCPBindings = stampMCPDirBindings(cfg.ImplicitImportMCPBindings, mcpTopoDirs, bindingName)
+			default:
+				explicitImportPackDirs = prependUniqueBlock(explicitImportPackDirs, mcpTopoDirs...)
+				cfg.ExplicitImportMCPBindings = stampMCPDirBindings(cfg.ExplicitImportMCPBindings, mcpTopoDirs, bindingName)
+			}
 
 			// Filter by scope for city expansion.
 			agents = filterAgentsByScope(agents, true)
@@ -582,6 +712,10 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 
 	// Store city pack dirs.
 	cfg.PackDirs = appendUnique(cfg.PackDirs, allPackDirs...)
+	cfg.PackGraphOnlyDirs = appendUniqueLastWins(cfg.PackGraphOnlyDirs, packGraphOnlyDirs...)
+	cfg.ExplicitImportPackDirs = appendUniqueLastWins(cfg.ExplicitImportPackDirs, explicitImportPackDirs...)
+	cfg.ImplicitImportPackDirs = appendUniqueLastWins(cfg.ImplicitImportPackDirs, implicitImportPackDirs...)
+	cfg.BootstrapImportPackDirs = appendUniqueLastWins(cfg.BootstrapImportPackDirs, bootstrapImportPackDirs...)
 
 	// Collect overlay/ dirs from pack dirs.
 	for _, dir := range allPackDirs {
@@ -864,6 +998,7 @@ type packLoadResult struct {
 	globals       []ResolvedPackGlobal
 	commands      []DiscoveredCommand
 	doctors       []DiscoveredDoctor
+	skills        []DiscoveredSkillCatalog
 }
 
 //nolint:unparam // compatibility wrapper keeps the recursion-set argument at the public helper boundary.
@@ -872,6 +1007,10 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 }
 
 func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
+	return loadPackWithCacheOptions(fs, topoPath, topoDir, cityRoot, rigName, seen, cache, LoadOptions{})
+}
+
+func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache, opts LoadOptions) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
 	// Initialize seen set on first call.
 	if seen == nil {
 		seen = make(map[string]bool)
@@ -912,8 +1051,15 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	}
 
 	var tc packConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
+	md, err := toml.Decode(string(data), &tc)
+	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %w", packFile, err)
+	}
+	if warnings := CheckUndecodedKeys(md, topoPath); len(warnings) > 0 {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %s", packFile, strings.Join(warnings, "; "))
+	}
+	if len(tc.Defaults.Rig.Imports) > 0 {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: [defaults.rig.imports] is only supported in a city root pack.toml", packFile)
 	}
 
 	if err := validatePackMeta(&tc.Pack); err != nil {
@@ -930,6 +1076,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	var includedGlobals []ResolvedPackGlobal
 	var includedCommands []DiscoveredCommand
 	var includedDoctors []DiscoveredDoctor
+	var includedSkills []DiscoveredSkillCatalog
 	includedProviders := make(map[string]ProviderSpec)
 
 	for _, inc := range tc.Pack.Includes {
@@ -939,8 +1086,8 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		}
 
 		incTopoPath := filepath.Join(incTopoDir, packFile)
-		incAgents, incNamedSessions, incProviders, incServices, incTopoDirs, incReqs, incGlobals, err := loadPackWithCache(
-			fs, incTopoPath, incTopoDir, cityRoot, rigName, seen, cache)
+		incAgents, incNamedSessions, incProviders, incServices, incTopoDirs, incReqs, incGlobals, err := loadPackWithCacheOptions(
+			fs, incTopoPath, incTopoDir, cityRoot, rigName, seen, cache, opts)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("include %q: %w", inc, err)
 		}
@@ -953,6 +1100,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		includedGlobals = append(includedGlobals, incGlobals...)
 		includedCommands = append(includedCommands, cachedPackCommands(cache, incTopoDir)...)
 		includedDoctors = append(includedDoctors, cachedPackDoctors(cache, incTopoDir)...)
+		includedSkills = append(includedSkills, cachedPackSkills(cache, incTopoDir)...)
 
 		// Merge providers: included first, no overwrite.
 		for name, spec := range incProviders {
@@ -985,13 +1133,14 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		}
 
 		impPath := filepath.Join(impDir, packFile)
-		impAgents, impNamedSessions, impProviders, impServices, impTopoDirs, impReqs, impGlobals, err := loadPackWithCache(
-			fs, impPath, impDir, cityRoot, rigName, seen, cache)
+		impAgents, impNamedSessions, impProviders, impServices, impTopoDirs, impReqs, impGlobals, err := loadPackWithCacheOptions(
+			fs, impPath, impDir, cityRoot, rigName, seen, cache, opts)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
 		impCommands := cachedPackCommands(cache, impDir)
 		impDoctors := cachedPackDoctors(cache, impDir)
+		impSkills := cachedPackSkills(cache, impDir)
 
 		// When transitive = false, strip agents that came from the
 		// imported pack's own imports (i.e., transitive deps). We keep
@@ -1006,8 +1155,9 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 				}
 			}
 			impAgents = direct
-			impCommands = filterCommandsBySourceDir(impCommands, impDir)
-			impDoctors = filterDoctorsBySourceDir(impDoctors, impDir)
+			impCommands = filterCommandsByPackDir(impCommands, impDir)
+			impDoctors = filterDoctorsByPackDir(impDoctors, impDir)
+			impSkills = filterSkillsByPackDir(impSkills, impDir)
 		}
 
 		// Stamp binding name on all agents and named sessions from this import.
@@ -1039,6 +1189,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 				impDoctors[i].BindingName = bindingName
 			}
 		}
+		impSkills = stampImportedSkillBinding(impSkills, bindingName, imp.Export)
 
 		// Read the imported pack name for provenance tracking.
 		impData, readErr := fs.ReadFile(impPath)
@@ -1064,6 +1215,11 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 				impDoctors[i].PackName = packName
 			}
 		}
+		for i := range impSkills {
+			if impSkills[i].PackName == "" {
+				impSkills[i].PackName = packName
+			}
+		}
 
 		includedAgents = append(includedAgents, impAgents...)
 		includedNamedSessions = append(includedNamedSessions, impNamedSessions...)
@@ -1073,6 +1229,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		includedGlobals = append(includedGlobals, impGlobals...)
 		includedCommands = append(includedCommands, impCommands...)
 		includedDoctors = append(includedDoctors, impDoctors...)
+		includedSkills = append(includedSkills, impSkills...)
 
 		for name, spec := range impProviders {
 			if _, exists := includedProviders[name]; !exists {
@@ -1103,14 +1260,18 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 	doctors = append(doctors, legacyPackDoctors(tc.Doctor, topoDir, tc.Pack.Name)...)
+	skills, err := DiscoverPackSkills(fs, topoDir, tc.Pack.Name)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, err
+	}
 
 	// V2 convention-based order discovery: top-level orders/ flat files are the
 	// standard layout. Deprecated locations are still discovered so pack loads
 	// surface migration warnings consistently.
-	if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
+	if _, err := orders.ScanRootsWithOptions(fs, []orders.ScanRoot{{
 		Dir:          filepath.Join(topoDir, "orders"),
 		FormulaLayer: filepath.Join(topoDir, "formulas"),
-	}}, nil); err != nil {
+	}}, nil, orders.ScanOptions{SuppressDeprecatedPathWarnings: opts.SuppressDeprecatedOrderWarnings}); err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 
@@ -1163,6 +1324,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	includedServices = append(includedServices, services...)
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
+	includedSkills = append(includedSkills, skills...)
 
 	// Apply pack-level patches to the merged agent list.
 	if !tc.Patches.IsEmpty() {
@@ -1236,6 +1398,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		globals:       allGlobals,
 		commands:      includedCommands,
 		doctors:       includedDoctors,
+		skills:        includedSkills,
 	})
 
 	return includedAgents, includedNamedSessions, mergedProviders, includedServices, topoDirs, allRequires, allGlobals, nil
@@ -1255,6 +1418,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		globals:       deepCopyResolvedPackGlobals(in.globals),
 		commands:      deepCopyCommands(in.commands),
 		doctors:       deepCopyDoctors(in.doctors),
+		skills:        deepCopySkills(in.skills),
 	}
 }
 
@@ -1417,28 +1581,83 @@ func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor 
 	return out
 }
 
-func filterCommandsBySourceDir(commands []DiscoveredCommand, sourceDir string) []DiscoveredCommand {
-	absSource, _ := filepath.Abs(sourceDir)
+func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCatalog {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return deepCopySkills(result.skills)
+}
+
+func filterCommandsByPackDir(commands []DiscoveredCommand, packDir string) []DiscoveredCommand {
+	absPackDir, _ := filepath.Abs(packDir)
 	var out []DiscoveredCommand
 	for _, cmd := range commands {
-		absDir, _ := filepath.Abs(cmd.SourceDir)
-		if absDir == absSource || strings.HasPrefix(absDir, absSource+string(filepath.Separator)) {
+		absDir, _ := filepath.Abs(cmd.PackDir)
+		if absDir == absPackDir {
 			out = append(out, cmd)
 		}
 	}
 	return out
 }
 
-func filterDoctorsBySourceDir(doctors []DiscoveredDoctor, sourceDir string) []DiscoveredDoctor {
-	absSource, _ := filepath.Abs(sourceDir)
+func filterDoctorsByPackDir(doctors []DiscoveredDoctor, packDir string) []DiscoveredDoctor {
+	absPackDir, _ := filepath.Abs(packDir)
 	var out []DiscoveredDoctor
 	for _, check := range doctors {
-		absDir, _ := filepath.Abs(check.SourceDir)
-		if absDir == absSource || strings.HasPrefix(absDir, absSource+string(filepath.Separator)) {
+		absDir, _ := filepath.Abs(check.PackDir)
+		if absDir == absPackDir {
 			out = append(out, check)
 		}
 	}
 	return out
+}
+
+func filterSkillsByPackDir(skills []DiscoveredSkillCatalog, packDir string) []DiscoveredSkillCatalog {
+	absPackDir, _ := filepath.Abs(packDir)
+	var out []DiscoveredSkillCatalog
+	for _, skill := range skills {
+		absDir, _ := filepath.Abs(skill.PackDir)
+		if absDir == absPackDir {
+			out = append(out, skill)
+		}
+	}
+	return out
+}
+
+func filterPackDirsByRoot(packDirs []string, rootDir string) []string {
+	absRoot, _ := filepath.Abs(rootDir)
+	var out []string
+	for _, dir := range packDirs {
+		absDir, _ := filepath.Abs(dir)
+		if absDir == absRoot {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+func stampMCPDirBindings(dst map[string]string, packDirs []string, binding string) map[string]string {
+	if len(packDirs) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(packDirs))
+	}
+	for _, dir := range packDirs {
+		if _, exists := dst[dir]; exists {
+			continue
+		}
+		dst[dir] = binding
+	}
+	return dst
 }
 
 func agentNameSet(agents []Agent) map[string]bool {
@@ -1485,11 +1704,47 @@ func appendDiscoveredDoctors(dst []DiscoveredDoctor, src ...DiscoveredDoctor) []
 	return dst
 }
 
+func appendDiscoveredSkills(dst []DiscoveredSkillCatalog, src ...DiscoveredSkillCatalog) []DiscoveredSkillCatalog {
+	for _, skill := range src {
+		duplicate := false
+		for _, existing := range dst {
+			if existing.SourceDir == skill.SourceDir && existing.BindingName == skill.BindingName {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			dst = append(dst, skill)
+		}
+	}
+	return dst
+}
+
 func stampDefaultBinding(commands []DiscoveredCommand, defaultBinding string) []DiscoveredCommand {
 	out := deepCopyCommands(commands)
 	for i := range out {
 		if out[i].BindingName == "" {
 			out[i].BindingName = defaultBinding
+		}
+	}
+	return out
+}
+
+func stampSkillBinding(skills []DiscoveredSkillCatalog, bindingName string) []DiscoveredSkillCatalog {
+	out := deepCopySkills(skills)
+	for i := range out {
+		if out[i].BindingName == "" {
+			out[i].BindingName = bindingName
+		}
+	}
+	return out
+}
+
+func stampImportedSkillBinding(skills []DiscoveredSkillCatalog, bindingName string, export bool) []DiscoveredSkillCatalog {
+	out := deepCopySkills(skills)
+	for i := range out {
+		if out[i].BindingName == "" || export {
+			out[i].BindingName = bindingName
 		}
 	}
 	return out
@@ -1508,6 +1763,12 @@ func deepCopyCommands(in []DiscoveredCommand) []DiscoveredCommand {
 
 func deepCopyDoctors(in []DiscoveredDoctor) []DiscoveredDoctor {
 	out := make([]DiscoveredDoctor, len(in))
+	copy(out, in)
+	return out
+}
+
+func deepCopySkills(in []DiscoveredSkillCatalog) []DiscoveredSkillCatalog {
+	out := make([]DiscoveredSkillCatalog, len(in))
 	copy(out, in)
 	return out
 }
@@ -1700,6 +1961,45 @@ func appendUnique(dst []string, items ...string) []string {
 		}
 	}
 	return dst
+}
+
+// appendUniqueLastWins appends items to dst while keeping only the
+// highest-precedence occurrence of each path. Re-seeing an item moves it to the
+// end of the slice.
+func appendUniqueLastWins(dst []string, items ...string) []string {
+	for _, item := range items {
+		filtered := dst[:0]
+		for _, existing := range dst {
+			if existing == item {
+				continue
+			}
+			filtered = append(filtered, existing)
+		}
+		dst = filtered
+		dst = append(dst, item)
+	}
+	return dst
+}
+
+// prependUniqueBlock prepends one precedence block ahead of dst, keeping the
+// first insertion of any shared path. This lets earlier processed root bindings
+// retain ownership of shared dependency dirs while still placing later sibling
+// roots at lower precedence under later-wins merges.
+func prependUniqueBlock(dst []string, items ...string) []string {
+	if len(items) == 0 {
+		return dst
+	}
+	out := make([]string, 0, len(items)+len(dst))
+	added := setFromSlice(dst)
+	for _, item := range items {
+		if added[item] {
+			continue
+		}
+		out = append(out, item)
+		added[item] = true
+	}
+	out = append(out, dst...)
+	return out
 }
 
 // setFromSlice builds a set from a string slice.

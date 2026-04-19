@@ -17,15 +17,21 @@ import (
 // graphApplyEnabled controls whether Instantiate uses the GraphApplyStore
 // batch path. When false, falls back to sequential bead creation.
 // Set by the daemon config loader from [daemon] formula_v2.
+//
+// Stored as atomic.Bool so config reload can race safely with in-flight
+// instantiation. Each instantiate call snapshots the value once via
+// IsGraphApplyEnabled.
 var graphApplyEnabled atomic.Bool
 
-// SetGraphApplyEnabled toggles the graph-batch apply path. Called from the
-// daemon config loader when [daemon] formula_v2 changes.
-func SetGraphApplyEnabled(enabled bool) {
-	graphApplyEnabled.Store(enabled)
+// SetGraphApplyEnabled sets the graph-apply batch instantiation flag. Safe
+// for concurrent use with IsGraphApplyEnabled; intended for the daemon
+// config loader and tests.
+func SetGraphApplyEnabled(v bool) {
+	graphApplyEnabled.Store(v)
 }
 
-// IsGraphApplyEnabled reports whether graph-batch apply is currently active.
+// IsGraphApplyEnabled reports whether graph-apply batch instantiation is
+// allowed. Safe for concurrent use.
 func IsGraphApplyEnabled() bool {
 	return graphApplyEnabled.Load()
 }

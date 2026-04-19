@@ -324,6 +324,11 @@ func TestControllerStatusLine(t *testing.T) {
 		want string
 	}{
 		{
+			name: "standalone running",
+			ctrl: ControllerJSON{Mode: "standalone", PID: 1234, Running: true},
+			want: "standalone-managed (PID 1234)",
+		},
+		{
 			name: "supervisor not running",
 			ctrl: ControllerJSON{Mode: "supervisor"},
 			want: "supervisor-managed (supervisor not running)",
@@ -331,22 +336,22 @@ func TestControllerStatusLine(t *testing.T) {
 		{
 			name: "supervisor city stopped",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321},
-			want: "supervisor (PID 4321, city stopped)",
+			want: "supervisor-managed (PID 4321, city stopped)",
 		},
 		{
 			name: "supervisor city starting bead store",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "starting_bead_store"},
-			want: "supervisor (PID 4321, starting bead store)",
+			want: "supervisor-managed (PID 4321, starting bead store)",
 		},
 		{
 			name: "supervisor city init failed",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "init_failed"},
-			want: "supervisor (PID 4321, init failed)",
+			want: "supervisor-managed (PID 4321, init failed)",
 		},
 		{
 			name: "supervisor running",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
-			want: "supervisor (PID 4321)",
+			want: "supervisor-managed (PID 4321)",
 		},
 	}
 
@@ -354,6 +359,81 @@ func TestControllerStatusLine(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := controllerStatusLine(tt.ctrl); got != tt.want {
 				t.Fatalf("controllerStatusLine(%+v) = %q, want %q", tt.ctrl, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestControllerStatusGuidance(t *testing.T) {
+	tests := []struct {
+		name string
+		ctrl ControllerJSON
+		want []string
+	}{
+		{
+			name: "standalone running",
+			ctrl: ControllerJSON{Mode: "standalone", PID: 1234, Running: true},
+			want: []string{
+				"Authority: standalone controller PID 1234",
+				"Next: gc stop /tmp/city && gc start /tmp/city to hand ownership to the supervisor",
+			},
+		},
+		{
+			name: "supervisor registered but down",
+			ctrl: ControllerJSON{Mode: "supervisor"},
+			want: []string{
+				"Authority: supervisor registry; no supervisor process is running",
+				"Next: gc start /tmp/city to start the supervisor and reconcile this city",
+			},
+		},
+		{
+			name: "supervisor city stopped",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+				"Next: gc start /tmp/city to ask the supervisor to start this city",
+			},
+		},
+		{
+			name: "supervisor starting",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "starting_bead_store"},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+				"Next: gc supervisor logs to inspect startup progress",
+			},
+		},
+		{
+			name: "supervisor init failed",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "init_failed"},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+				"Next: gc supervisor logs to see the init failure",
+			},
+		},
+		{
+			name: "supervisor running",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+			},
+		},
+		{
+			name: "unmanaged stopped",
+			ctrl: ControllerJSON{},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := controllerStatusGuidance(tt.ctrl, "/tmp/city")
+			if len(got) != len(tt.want) {
+				t.Fatalf("controllerStatusGuidance length = %d, want %d; got %#v", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("controllerStatusGuidance[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
 			}
 		})
 	}

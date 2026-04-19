@@ -167,6 +167,78 @@ func TestBuildSlingCommandSling(t *testing.T) {
 	}
 }
 
+func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	a := config.Agent{Name: "worker"}
+	template := "custom {} --route={{.Rig"
+
+	var buf strings.Builder
+	got := BuildSlingCommandForAgent("sling_query", template, "BL-42", cityPath, "", a, nil, &buf)
+
+	if got != "custom 'BL-42' --route={{.Rig" {
+		t.Fatalf("BuildSlingCommandForAgent() = %q, want %q", got, "custom 'BL-42' --route={{.Rig")
+	}
+	if !strings.Contains(buf.String(), "sling_query") {
+		t.Fatalf("stderr missing field name: %q", buf.String())
+	}
+	if strings.Contains(buf.String(), template) {
+		t.Fatalf("stderr should redact raw template, got %q", buf.String())
+	}
+}
+
+func TestCheckBeadStateCustomBDQueryNoIdempotency(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{
+		Name:       "mayor",
+		SlingQuery: "bd update {} --set-metadata gc.routed_to=mayor --set-metadata owner=ops",
+	}, SlingDeps{})
+
+	if result.Idempotent {
+		t.Fatal("expected Idempotent=false for user-defined bd sling_query")
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(result.Warnings), result.Warnings)
+	}
+	if !strings.Contains(result.Warnings[0], "already routed") {
+		t.Fatalf("expected routing warning, got %q", result.Warnings[0])
+	}
+}
+
+func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{
+		Name:       "mayor",
+		SlingQuery: "bd   update {}   --set-metadata gc.routed_to=mayor",
+	}, SlingDeps{})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for pinned default sling_query, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings for pinned default sling_query, got %v", result.Warnings)
+	}
+}
+
 func TestBeadPrefixSling(t *testing.T) {
 	tests := []struct {
 		id   string
@@ -467,6 +539,36 @@ func TestDoSlingValidatesRequiredDeps(t *testing.T) {
 			t.Errorf("expected Runner validation error, got %v", err)
 		}
 	})
+}
+
+func TestDoSlingCustomSlingQueryExpandsTemplateContext(t *testing.T) {
+	runner := newFakeRunner()
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigPath := filepath.Join(cityPath, "frontend")
+	a := config.Agent{
+		Name:       "worker",
+		Dir:        "frontend",
+		SlingQuery: "custom-dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "frontend", Path: rigPath}},
+	}
+
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = cityPath
+	deps.CityName = ""
+	opts := testOpts(a, "FR-99")
+	result, err := DoSling(opts, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.BeadID != "FR-99" {
+		t.Fatalf("result.BeadID = %q, want %q", result.BeadID, "FR-99")
+	}
+	want := "custom-dispatch 'FR-99' --route=frontend/worker --city=demo-city"
+	if len(runner.calls) != 1 || runner.calls[0] != want {
+		t.Fatalf("runner calls = %#v, want %#v", runner.calls, []string{want})
+	}
 }
 
 // --- Intent-based API tests ---

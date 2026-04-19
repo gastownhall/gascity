@@ -356,6 +356,45 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nSling={{ .SlingQuery }}")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		rigs:            []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		Dir:            "demo",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+		WorkQuery:      "echo {{.CityName}} {{.Rig}} {{.AgentBase}}",
+		SlingQuery:     "dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Work=echo demo-city demo worker") {
+		t.Fatalf("Prompt missing expanded WorkQuery: %q", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "Sling=dispatch {} --route=demo/worker --city=demo-city") {
+		t.Fatalf("Prompt missing expanded SlingQuery: %q", tp.Prompt)
+	}
+}
+
 func TestResolveTemplateClaudeProjectsCityDotClaudeSettingsIntoRuntimeFile(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {

@@ -73,13 +73,13 @@ Entry point. Read the warrant metadata from your wisp.
 
 **1. Read warrant details:**
 ```bash
-gc bd show <wisp-id> --json | jq '.metadata'
+gc bd show <wisp-id> --json | jq '.[0].metadata'
 ```
 Extract: `target`, `reason`, `requester`, `warrant_id`.
 
 **2. Verify the warrant bead exists and is open:**
 ```bash
-gc bd show {{warrant_id}} --json | jq '.status'
+gc bd show {{warrant_id}} --json | jq '.[0].status'
 ```
 If warrant is already closed (another dog handled it, or requester
 cancelled): close this step, burn the wisp, exit.

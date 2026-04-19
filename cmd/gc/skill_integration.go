@@ -260,7 +260,7 @@ func effectiveInjectAssignedSkills(agent *config.Agent) bool {
 
 // buildAssignedSkillsPromptFragment renders a markdown appendix that
 // lists every skill the agent sees, partitioned into (assigned-to-this-
-// agent, shared-with-every-agent-in-the-city). The goal is that agents
+// agent, shared-with-the-current-scope). The goal is that agents
 // sharing a scope-root sink (multiple city-scoped agents, multiple
 // rig-scoped agents on the same rig) can tell which skills are their
 // specialisation vs which are the shared set — the materialiser
@@ -314,7 +314,7 @@ func buildAssignedSkillsPromptFragment(
 	}
 
 	if len(shared) > 0 {
-		b.WriteString("### Shared (visible to every agent in this city)\n\n")
+		b.WriteString("### Shared in this scope\n\n")
 		writeSkillBullets(&b, shared, "origin")
 		b.WriteString("\n")
 	}

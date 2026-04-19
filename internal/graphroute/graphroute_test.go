@@ -47,6 +47,19 @@ func TestIsControlDispatcherKind(t *testing.T) {
 	}
 }
 
+func TestIsWorkflowTopologyKind(t *testing.T) {
+	for _, kind := range []string{"workflow", "scope", "spec"} {
+		if !IsWorkflowTopologyKind(kind) {
+			t.Errorf("expected true for %q", kind)
+		}
+	}
+	for _, kind := range []string{"", "task", "check", "fanout", "ralph"} {
+		if IsWorkflowTopologyKind(kind) {
+			t.Errorf("expected false for %q", kind)
+		}
+	}
+}
+
 func TestGraphRouteRigContext(t *testing.T) {
 	if got := GraphRouteRigContext("myrig/worker"); got != "myrig" {
 		t.Errorf("got %q, want myrig", got)
@@ -74,17 +87,112 @@ func TestGraphWorkflowRouteVars(t *testing.T) {
 
 func intPtr(v int) *int { return &v }
 
-func TestApplyGraphRouting_NonGraph(t *testing.T) {
-	// Non-graph recipe should be a no-op.
+func TestApplyGraphRouting_LegacyStampsRoutedTo(t *testing.T) {
+	// Legacy [[steps]] recipes (no graph.v2 root) must still stamp
+	// gc.routed_to on every non-root step so Agent.EffectiveWorkQuery
+	// tier-3 and pool scale_check can see the work. Regression for #796.
 	r := &formula.Recipe{
-		Steps: []formula.RecipeStep{{
-			Metadata: map[string]string{"gc.kind": "task"},
-		}},
+		Name: "mol-legacy",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-legacy", IsRoot: true, Metadata: map[string]string{}},
+			{ID: "mol-legacy.step1", Metadata: map[string]string{}},
+			{ID: "mol-legacy.step2", Metadata: map[string]string{}},
+		},
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
 	if err != nil {
-		t.Fatalf("unexpected error for non-graph recipe: %v", err)
+		t.Fatalf("unexpected error for legacy recipe: %v", err)
+	}
+	if got := r.Steps[0].Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("root gc.routed_to = %q, want empty (root carries routing via InstantiateSlingFormula, not graphroute)", got)
+	}
+	for i := 1; i < len(r.Steps); i++ {
+		if got := r.Steps[i].Metadata["gc.routed_to"]; got != "worker" {
+			t.Errorf("step %d (%s) gc.routed_to = %q, want worker", i, r.Steps[i].ID, got)
+		}
+	}
+}
+
+func TestApplyGraphRouting_LegacyNilAgent(t *testing.T) {
+	// Legacy path stamps gc.routed_to from the routedTo argument without
+	// needing agent resolution — the order-dispatch caller passes a=nil.
+	r := &formula.Recipe{
+		Name: "mol-legacy",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-legacy", IsRoot: true, Metadata: map[string]string{}},
+			{ID: "mol-legacy.step1", Metadata: map[string]string{}},
+		},
+	}
+	err := ApplyGraphRouting(r, nil, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := r.Steps[1].Metadata["gc.routed_to"]; got != "worker" {
+		t.Errorf("step gc.routed_to = %q, want worker", got)
+	}
+}
+
+func TestApplyGraphRouting_LegacyNilCfg(t *testing.T) {
+	// ApplyGraphRouting is a no-op whenever cfg is nil.
+	r := &formula.Recipe{
+		Steps: []formula.RecipeStep{
+			{IsRoot: true, Metadata: map[string]string{}},
+			{ID: "step1", Metadata: map[string]string{}},
+		},
+	}
+	err := ApplyGraphRouting(r, nil, "worker", nil, "", "", "", "", nil, "city", nil, Deps{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := r.Steps[1].Metadata["gc.routed_to"]; ok {
+		t.Error("expected no routing when cfg is nil")
+	}
+}
+
+func TestApplyGraphRouting_LegacyOverwritesExistingRouting(t *testing.T) {
+	// Legacy stamping mirrors graph.v2 AssignGraphStepRoute: unconditional
+	// overwrite on every non-topology step.
+	r := &formula.Recipe{
+		Name: "mol-legacy",
+		Steps: []formula.RecipeStep{
+			{IsRoot: true, Metadata: map[string]string{}},
+			{ID: "step1", Metadata: map[string]string{"gc.routed_to": "stale-agent"}},
+		},
+	}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := r.Steps[1].Metadata["gc.routed_to"]; got != "worker" {
+		t.Errorf("expected overwrite to worker, got %q", got)
+	}
+}
+
+func TestApplyGraphRouting_LegacySkipsWorkflowKinds(t *testing.T) {
+	// Defensive: if a legacy recipe somehow contains a step with
+	// gc.kind=workflow/scope/spec, skip routing on it — those are
+	// workflow-topology kinds and legacy formulas don't activate the
+	// workflow machinery.
+	r := &formula.Recipe{
+		Name: "mol-legacy",
+		Steps: []formula.RecipeStep{
+			{IsRoot: true, Metadata: map[string]string{}},
+			{ID: "scope", Metadata: map[string]string{"gc.kind": "scope"}},
+			{ID: "work", Metadata: map[string]string{}},
+		},
+	}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := r.Steps[1].Metadata["gc.routed_to"]; ok {
+		t.Error("expected scope-kind step to be skipped")
+	}
+	if got := r.Steps[2].Metadata["gc.routed_to"]; got != "worker" {
+		t.Errorf("work step gc.routed_to = %q, want worker", got)
 	}
 }
 

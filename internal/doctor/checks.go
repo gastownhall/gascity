@@ -1,11 +1,13 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -674,8 +676,255 @@ func (c *BeadsStoreCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *BeadsStoreCheck) Fix(_ *CheckContext) error { return nil }
 
+// BDSplitStoreCheck warns when legacy bd embedded/server store directories
+// coexist and the inactive store still contains Dolt data.
+type BDSplitStoreCheck struct {
+	cityPath  string
+	name      string
+	scopePath string
+}
+
+// NewBDSplitStoreCheck creates a city-level split-store check.
+func NewBDSplitStoreCheck(scopePath string) *BDSplitStoreCheck {
+	return &BDSplitStoreCheck{cityPath: scopePath, name: "bd-split-store", scopePath: scopePath}
+}
+
+// NewRigBDSplitStoreCheck creates a rig-level split-store check.
+func NewRigBDSplitStoreCheck(cityPath string, rig config.Rig) *BDSplitStoreCheck {
+	return &BDSplitStoreCheck{cityPath: cityPath, name: "rig:" + rig.Name + ":bd-split-store", scopePath: rig.Path}
+}
+
+// Name returns the check identifier.
+func (c *BDSplitStoreCheck) Name() string { return c.name }
+
+// Run detects legacy split bd store directories and reports inactive Dolt repos.
+func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	beadsDir := filepath.Join(c.scopePath, ".beads")
+	serverDir := filepath.Join(beadsDir, "dolt")
+	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	serverExists := splitStoreDirExists(serverDir)
+	embeddedExists := splitStoreDirExists(embeddedDir)
+	if !serverExists || !embeddedExists {
+		r.Status = StatusOK
+		r.Message = "no legacy split store detected"
+		return r
+	}
+
+	serverRepos, serverErr := doltReposUnder(serverDir)
+	embeddedRepos, embeddedErr := doltReposUnder(embeddedDir)
+	if serverErr != nil || embeddedErr != nil {
+		r.Status = StatusWarning
+		r.Message = "could not inspect legacy bd split store directories"
+		r.FixHint = "inspect .beads/dolt and .beads/embeddeddolt manually before deleting either directory"
+		if serverErr != nil {
+			r.Details = append(r.Details, fmt.Sprintf("scan .beads/dolt: %v", serverErr))
+		}
+		if embeddedErr != nil {
+			r.Details = append(r.Details, fmt.Sprintf("scan .beads/embeddeddolt: %v", embeddedErr))
+		}
+		return r
+	}
+
+	activeSource, activeStore := c.activeBDStore(beadsDir)
+	if activeStore == "" {
+		if len(serverRepos)+len(embeddedRepos) == 0 {
+			r.Status = StatusOK
+			r.Message = "legacy split store directories present but no Dolt repos found"
+			return r
+		}
+		r.Status = StatusWarning
+		r.Message = "legacy split store detected: both .beads/dolt and .beads/embeddeddolt contain or may contain data, but no active local store was identified"
+		r.Details = splitStoreDetails("unknown", activeSource, serverRepos, embeddedRepos)
+		r.FixHint = splitStoreFixHint("unknown")
+		return r
+	}
+
+	inactiveStore := "embeddeddolt"
+	inactiveRepos := embeddedRepos
+	if activeStore == "embeddeddolt" {
+		inactiveStore = "dolt"
+		inactiveRepos = serverRepos
+	}
+	if len(inactiveRepos) == 0 {
+		r.Status = StatusOK
+		r.Message = "legacy split store directories present but inactive store is empty"
+		return r
+	}
+
+	r.Status = StatusWarning
+	r.Message = fmt.Sprintf("legacy split store detected: active .beads/%s (%s), inactive .beads/%s contains %d Dolt repo(s)", activeStore, activeSource, inactiveStore, len(inactiveRepos))
+	r.Details = splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos)
+	r.FixHint = splitStoreFixHint(activeStore)
+	return r
+}
+
+// CanFix returns false; reconciliation requires explicit user review.
+func (c *BDSplitStoreCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *BDSplitStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+func (c *BDSplitStoreCheck) activeBDStore(beadsDir string) (string, string) {
+	activeSource, activeStore := activeBDStoreFromMetadata(filepath.Join(beadsDir, "metadata.json"))
+	if c.cityPath == "" {
+		return activeSource, activeStore
+	}
+	if !scopeUsesBDDoltStore(c.cityPath, c.scopePath) {
+		return activeSource, ""
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, c.cityPath, c.scopePath, "")
+	if err != nil {
+		if source, ok := c.rawNonLocalEndpointSource(); ok {
+			return source, ""
+		}
+		if source, ok := c.rawCityNonLocalEndpointSource(); ok {
+			return source, ""
+		}
+		return activeSource, activeStore
+	}
+	if resolved.Kind != contract.ScopeConfigAuthoritative {
+		if source, ok := c.rawCityNonLocalEndpointSource(); ok {
+			return source, ""
+		}
+		return activeSource, activeStore
+	}
+	switch resolved.State.EndpointOrigin {
+	case contract.EndpointOriginManagedCity:
+		if sameDoctorScope(c.cityPath, c.scopePath) {
+			return "canonical endpoint_origin=" + string(resolved.State.EndpointOrigin), "dolt"
+		}
+		return "canonical endpoint_origin=" + string(resolved.State.EndpointOrigin), ""
+	case contract.EndpointOriginCityCanonical, contract.EndpointOriginExplicit, contract.EndpointOriginInheritedCity:
+		return "canonical endpoint_origin=" + string(resolved.State.EndpointOrigin), ""
+	default:
+		return activeSource, activeStore
+	}
+}
+
+func (c *BDSplitStoreCheck) rawNonLocalEndpointSource() (string, bool) {
+	return rawNonLocalEndpointSource(c.scopePath)
+}
+
+func (c *BDSplitStoreCheck) rawCityNonLocalEndpointSource() (string, bool) {
+	if sameDoctorScope(c.cityPath, c.scopePath) {
+		return "", false
+	}
+	return rawNonLocalEndpointSource(c.cityPath)
+}
+
+func rawNonLocalEndpointSource(scopePath string) (string, bool) {
+	cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopePath, ".beads", "config.yaml"))
+	if err != nil || !ok {
+		return "", false
+	}
+	switch cfg.EndpointOrigin {
+	case contract.EndpointOriginCityCanonical, contract.EndpointOriginExplicit, contract.EndpointOriginInheritedCity:
+		return "canonical endpoint_origin=" + string(cfg.EndpointOrigin), true
+	default:
+		return "", false
+	}
+}
+
+func activeBDStoreFromMetadata(path string) (string, string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	var meta struct {
+		Database string `json:"database"`
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", ""
+	}
+	mode := strings.ToLower(strings.TrimSpace(meta.DoltMode))
+	database := strings.ToLower(strings.TrimSpace(meta.Database))
+	backend := strings.ToLower(strings.TrimSpace(meta.Backend))
+	declaresNonDoltStore := (database != "" && database != "dolt") || (backend != "" && backend != "dolt")
+	declaresDoltStore := database == "dolt" || backend == "dolt"
+	if mode != "" && declaresNonDoltStore && !declaresDoltStore {
+		return mode, ""
+	}
+	switch mode {
+	case "server":
+		return "metadata.json dolt_mode=" + mode, "dolt"
+	case "embedded", "local":
+		return "metadata.json dolt_mode=" + mode, "embeddeddolt"
+	default:
+		return mode, ""
+	}
+}
+
+func sameDoctorScope(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRepos []string) []string {
+	activeLine := "active store: unknown"
+	recoveryLine := "recovery: export from copies of the legacy stores, review with bd import --dry-run, then import into the current or intended active store"
+	if activeStore != "unknown" && activeStore != "" {
+		activeLine = fmt.Sprintf("active store: .beads/%s (%s)", activeStore, activeSource)
+		recoveryLine = "recovery: export from a copy of the inactive store, review with bd import --dry-run, then import into the active store"
+	}
+	details := []string{
+		activeLine,
+		fmt.Sprintf(".beads/dolt repositories: %s", describeRepoList(serverRepos)),
+		fmt.Sprintf(".beads/embeddeddolt repositories: %s", describeRepoList(embeddedRepos)),
+		recoveryLine,
+	}
+	return details
+}
+
+func splitStoreFixHint(activeStore string) string {
+	if activeStore == "" || activeStore == "unknown" {
+		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store; keep both directories until reconciled"
+	}
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store; keep both directories until reconciled"
+}
+
+func describeRepoList(repos []string) string {
+	if len(repos) == 0 {
+		return "(none)"
+	}
+	return strings.Join(repos, ", ")
+}
+
+func doltReposUnder(root string) ([]string, error) {
+	var repos []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if d.Name() == ".dolt" {
+			return filepath.SkipDir
+		}
+		if !splitStoreDirExists(filepath.Join(path, ".dolt")) {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." {
+			rel = filepath.Base(path)
+		}
+		repos = append(repos, filepath.ToSlash(rel))
+		return filepath.SkipDir
+	})
+	sort.Strings(repos)
+	return repos, err
+}
+
+func splitStoreDirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, string, bool, error) {
-	if !usesBDDoltStore(cityPath) {
+	if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 		return contract.DoltConnectionTarget{}, "", false, nil
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
@@ -710,16 +959,25 @@ func providerUsesBDDoltStore(provider string) bool {
 	if provider == "" || provider == "bd" {
 		return true
 	}
-	if strings.HasPrefix(provider, "exec:") && filepath.Base(strings.TrimPrefix(provider, "exec:")) == "gc-beads-bd" {
+	if strings.HasPrefix(provider, "exec:") && doctorExecProviderBase(provider) == "gc-beads-bd" {
 		return true
 	}
 	return false
+}
+
+func doctorExecProviderBase(provider string) string {
+	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
+	return strings.TrimSuffix(filepath.Base(script), ".sh")
 }
 
 func effectiveDoctorBeadsProvider(cityPath string) string {
 	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
 		return v
 	}
+	return configuredDoctorBeadsProvider(cityPath)
+}
+
+func configuredDoctorBeadsProvider(cityPath string) string {
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return "bd"
@@ -727,8 +985,67 @@ func effectiveDoctorBeadsProvider(cityPath string) string {
 	return cfg.Beads.Provider
 }
 
-func usesBDDoltStore(cityPath string) bool {
-	return providerUsesBDDoltStore(effectiveDoctorBeadsProvider(cityPath))
+func scopeUsesBDDoltStore(cityPath, scopePath string) bool {
+	resolvedScope := resolveDoctorScopePath(cityPath, scopePath)
+	if explicit, ok := scopedDoctorBeadsProviderOverride(cityPath, resolvedScope); ok {
+		return providerUsesBDDoltStore(explicit)
+	}
+	provider := effectiveDoctorBeadsProvider(cityPath)
+	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
+		provider = configuredDoctorBeadsProvider(cityPath)
+	}
+	if sameDoctorScope(resolvedScope, cityPath) {
+		return providerUsesBDDoltStore(provider)
+	}
+	if strings.HasPrefix(strings.TrimSpace(provider), "exec:") && !providerUsesBDDoltStore(provider) {
+		return false
+	}
+	if doctorScopeHasBDMetadata(resolvedScope) {
+		return true
+	}
+	if doctorScopeHasFileStoreMarker(resolvedScope) {
+		return false
+	}
+	return providerUsesBDDoltStore(provider)
+}
+
+func scopedDoctorBeadsProviderOverride(cityPath, scopePath string) (string, bool) {
+	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
+	if provider == "" {
+		return "", false
+	}
+	scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT"))
+	if scopedRoot == "" {
+		return provider, true
+	}
+	if sameDoctorScope(resolveDoctorScopePath(cityPath, scopedRoot), scopePath) {
+		return provider, true
+	}
+	return "", false
+}
+
+func resolveDoctorScopePath(cityPath, scopePath string) string {
+	scopePath = strings.TrimSpace(scopePath)
+	if scopePath == "" {
+		scopePath = cityPath
+	}
+	if !filepath.IsAbs(scopePath) {
+		scopePath = filepath.Join(cityPath, scopePath)
+	}
+	return filepath.Clean(scopePath)
+}
+
+func doctorScopeHasBDMetadata(scopePath string) bool {
+	info, err := os.Stat(filepath.Join(scopePath, ".beads", "metadata.json"))
+	return err == nil && !info.IsDir()
+}
+
+func doctorScopeHasFileStoreMarker(scopePath string) bool {
+	if doctorScopeHasBDMetadata(scopePath) {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(scopePath, ".gc", "beads.json"))
+	return err == nil && !info.IsDir()
 }
 
 // DoltServerCheck verifies the dolt server is running and reachable.

@@ -34,10 +34,31 @@ immediate reconcile.`,
 
 // cmdRestart stops the city, then re-starts it under the supervisor.
 func cmdRestart(args []string, stdout, stderr io.Writer) int {
+	nameOverride, err := restartRegistrationName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if code := cmdStop(args, stdout, stderr); code != 0 {
 		return code
 	}
-	return doStart(args, false /*controllerMode*/, stdout, stderr)
+	return doStartWithNameOverride(args, false /*controllerMode*/, stdout, stderr, nameOverride)
+}
+
+func restartRegistrationName(args []string) (string, error) {
+	dir, err := resolveStartDir(args)
+	if err != nil {
+		return "", err
+	}
+	cityPath, err := requireBootstrappedCity(dir)
+	if err != nil {
+		return "", err
+	}
+	entry, registered, err := registeredCityEntry(cityPath)
+	if err != nil || !registered {
+		return "", err
+	}
+	return entry.EffectiveName(), nil
 }
 
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
@@ -130,7 +151,12 @@ func doRigRestart(
 		if !a.SupportsInstanceExpansion() {
 			// Non-expanding template.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
-			if sp.IsRunning(sn) {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", sn, err) //nolint:errcheck
+				return 1
+			}
+			if running {
 				targets = append(targets, stopTarget{
 					name:     sn,
 					template: a.QualifiedName(),
@@ -142,7 +168,12 @@ func doRigRestart(
 		} else {
 			// Pool agent: resolve live instances from beads first, then legacy discovery.
 			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr) {
-				if !sp.IsRunning(ref.sessionName) {
+				running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", ref.sessionName, err) //nolint:errcheck
+					return 1
+				}
+				if !running {
 					continue
 				}
 				targets = append(targets, stopTarget{
@@ -159,7 +190,7 @@ func doRigRestart(
 	if dependencyCfg == nil {
 		dependencyCfg = &config.City{Agents: agents}
 	}
-	killed := stopTargetsBounded(targets, dependencyCfg, sp, rec, eventActor(), io.Discard, stderr)
+	killed := stopTargetsBounded(targets, dependencyCfg, store, sp, rec, eventActor(), io.Discard, stderr)
 
 	fmt.Fprintf(stdout, "Restarted %d agent(s) in rig '%s' (killed sessions; reconciler will restart)\n", killed, rigName) //nolint:errcheck // best-effort stdout
 	return 0

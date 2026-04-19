@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +116,27 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	// Give the event log a moment.
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify session.stopped event exists.
-	verifyEvents(t, cityDir, "session.stopped")
+	// The city API is gone after gc stop, but the event log is persistent.
+	verifyEventLogEventually(t, cityDir, "session.stopped")
+}
+
+func verifyEventLogEventually(t *testing.T, cityDir, eventType string) {
+	t.Helper()
+
+	eventLog := filepath.Join(cityDir, ".gc", "events.jsonl")
+	deadline := time.Now().Add(5 * time.Second)
+	needle := `"type":"` + eventType + `"`
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(eventLog)
+		if err == nil && strings.Contains(string(data), needle) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	data, err := os.ReadFile(eventLog)
+	if err != nil {
+		t.Fatalf("reading event log: %v", err)
+	}
+	t.Fatalf("event log missing %s:\n%s", eventType, string(data))
 }

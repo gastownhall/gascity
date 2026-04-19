@@ -108,6 +108,12 @@ func TestHookInjectFormatsOutput(t *testing.T) {
 	if !strings.Contains(out, "gc hook") {
 		t.Errorf("stdout missing 'gc hook' hint: %q", out)
 	}
+	if !strings.Contains(out, "bd update <id> --claim") {
+		t.Errorf("stdout missing claim command: %q", out)
+	}
+	if !strings.Contains(out, "bd close <id>") {
+		t.Errorf("stdout missing close command: %q", out)
+	}
 }
 
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
@@ -370,6 +376,52 @@ dir = "myrig"
 	// GC_RIG stays empty — this assertion catches that regression.
 	if !strings.Contains(out, "rig=myrig") {
 		t.Fatalf("stdout = %q, want GC_RIG=myrig (rig-matching loop must find the rig)", out)
+	}
+}
+
+func TestCmdHookExpandsTemplateCommandsWithCityFallback(t *testing.T) {
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
+	cityDir := filepath.Join(t.TempDir(), "demo-city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[[rigs]]
+name = "frontend"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "args=demo-city frontend worker") {
+		t.Fatalf("stdout = %q, want expanded city/rig/agent-base template", stdout.String())
 	}
 }
 

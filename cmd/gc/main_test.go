@@ -5,6 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -111,6 +115,75 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 	return out
 }
 
+type schemaField struct {
+	Name string
+	Tag  string
+	Type string
+}
+
+func loadStructFields(t *testing.T, path, typeName string) []schemaField {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				t.Fatalf("%s in %s is not a struct", typeName, path)
+			}
+			var fields []schemaField
+			for _, field := range st.Fields.List {
+				if len(field.Names) != 1 {
+					continue
+				}
+				tag := ""
+				if field.Tag != nil {
+					tag = strings.Trim(field.Tag.Value, "`")
+				}
+				var typeBuf bytes.Buffer
+				if err := format.Node(&typeBuf, fset, field.Type); err != nil {
+					t.Fatalf("format %s.%s type: %v", typeName, field.Names[0].Name, err)
+				}
+				fields = append(fields, schemaField{
+					Name: field.Names[0].Name,
+					Tag:  tag,
+					Type: typeBuf.String(),
+				})
+			}
+			return fields
+		}
+	}
+	t.Fatalf("type %s not found in %s", typeName, path)
+	return nil
+}
+
+func normalizeSchemaTag(tag string) string {
+	for _, part := range strings.Split(tag, " ") {
+		if strings.HasPrefix(part, `toml:"`) {
+			return strings.ReplaceAll(part, ",omitempty", "")
+		}
+	}
+	return ""
+}
+
+func normalizeSchemaType(typ string) string {
+	typ = strings.ReplaceAll(typ, "config.", "")
+	typ = strings.ReplaceAll(typ, "initPackMeta", "PackMeta")
+	return typ
+}
+
 func TestMain(m *testing.M) {
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
@@ -213,6 +286,78 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.Contains(longOut, "built:") {
 		t.Errorf("stdout missing 'built:': %q", longOut)
+	}
+}
+
+func TestRootInvalidTopLevelFlagPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--version"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([--version]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "gc: unknown flag: --version") {
+		t.Fatalf("stderr missing unknown flag message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc [flags]") {
+		t.Fatalf("stderr missing root usage, got:\n%s", errOut)
+	}
+}
+
+func TestRootUnknownCommandPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"bogus"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([bogus]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, `gc: unknown command "bogus"`) {
+		t.Fatalf("stderr missing unknown command message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc [flags]") {
+		t.Fatalf("stderr missing root usage, got:\n%s", errOut)
+	}
+}
+
+func TestSubcommandInvalidFlagPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "--bogus"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([version --bogus]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "gc: unknown flag: --bogus") {
+		t.Fatalf("stderr missing unknown flag message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc version [flags]") {
+		t.Fatalf("stderr missing version usage, got:\n%s", errOut)
+	}
+}
+
+func TestSubcommandInvalidArgsPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "extra"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([version extra]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, `gc: unknown command "extra" for "gc version"`) {
+		t.Fatalf("stderr missing invalid argument message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc version [flags]") {
+		t.Fatalf("stderr missing version usage, got:\n%s", errOut)
 	}
 }
 
@@ -636,6 +781,54 @@ prefix = "fe"
 			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
 		}
 	})
+
+	t.Run("gc_city_path_env_fallback", func(t *testing.T) {
+		cityDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		old := cityFlag
+		cityFlag = ""
+		t.Cleanup(func() { cityFlag = old })
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", cityDir)
+
+		got, err := resolveCity()
+		if err != nil {
+			t.Fatalf("resolveCity() error: %v", err)
+		}
+		if got != cityDir {
+			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
+		}
+	})
+
+	t.Run("gc_dir_env_fallback", func(t *testing.T) {
+		cityDir := t.TempDir()
+		workDir := filepath.Join(cityDir, "rigs", "demo")
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		old := cityFlag
+		cityFlag = ""
+		t.Cleanup(func() { cityFlag = old })
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", workDir)
+
+		got, err := resolveCity()
+		if err != nil {
+			t.Fatalf("resolveCity() error: %v", err)
+		}
+		if got != cityDir {
+			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
+		}
+	})
 }
 
 // --- doRigAdd (with fsys.Fake) ---
@@ -654,7 +847,7 @@ func TestDoRigAddCreatesDirIfMissing(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -674,7 +867,7 @@ func TestDoRigAddMkdirRigPathFails(t *testing.T) {
 	f.Errors["/projects/myapp"] = fmt.Errorf("permission denied")
 
 	var stderr bytes.Buffer
-	code := doRigAdd(f, "/city", "/projects/myapp", "", "", "", false, false, &bytes.Buffer{}, &stderr)
+	code := doRigAdd(f, "/city", "/projects/myapp", nil, "", "", false, false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigAdd = %d, want 1", code)
 	}
@@ -688,7 +881,7 @@ func TestDoRigAddNotADirectory(t *testing.T) {
 	f.Files["/projects/myapp"] = []byte("not a dir") // file, not directory
 
 	var stderr bytes.Buffer
-	code := doRigAdd(f, "/city", "/projects/myapp", "", "", "", false, false, &bytes.Buffer{}, &stderr)
+	code := doRigAdd(f, "/city", "/projects/myapp", nil, "", "", false, false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigAdd = %d, want 1", code)
 	}
@@ -718,7 +911,7 @@ func TestDoRigAddWithGit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -748,7 +941,7 @@ func TestDoRigAddWithoutGit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1421,14 +1614,14 @@ func TestDoInitSuccess(t *testing.T) {
 		"formulas",
 		"orders",
 		"template-fragments",
-		"overlays",
+		"overlay",
 		"assets",
 	} {
 		if !f.Dirs[filepath.Join("/bright-lights", dir)] {
 			t.Errorf("%s/ not created", dir)
 		}
 	}
-	for _, dir := range []string{"packs", "prompts"} {
+	for _, dir := range []string{"overlays", "packs", "prompts"} {
 		if f.Dirs[filepath.Join("/bright-lights", dir)] {
 			t.Errorf("%s/ should not be created by init", dir)
 		}
@@ -1451,11 +1644,11 @@ func TestDoInitSuccess(t *testing.T) {
 		t.Errorf("pack.toml missing schema 2:\n%s", packToml)
 	}
 
-	// Verify written config parses correctly.
-	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
-	cfg, err := config.Parse(data)
+	// Verify the full composed config loads correctly from pack.toml +
+	// city.toml + convention-discovered agents.
+	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("loading written config: %v", err)
 	}
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "bright-lights")
@@ -1466,8 +1659,14 @@ func TestDoInitSuccess(t *testing.T) {
 	if cfg.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "mayor")
 	}
-	if cfg.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", cfg.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if !strings.HasSuffix(cfg.Agents[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md")) {
+		t.Errorf("Agents[0].PromptTemplate = %q, want suffix %q", cfg.Agents[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md"))
+	}
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("len(NamedSessions) = %d, want 1", len(cfg.NamedSessions))
+	}
+	if got := cfg.NamedSessions[0].QualifiedName(); got != "mayor" {
+		t.Errorf("NamedSessions[0] = %q, want mayor", got)
 	}
 }
 
@@ -1483,14 +1682,6 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
 name = "bright-lights"
-
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
-[[named_session]]
-template = "mayor"
-mode = "always"
 `
 	if got != want {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
@@ -1500,9 +1691,180 @@ mode = "always"
 	packWant := `[pack]
 name = "bright-lights"
 schema = 2
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
 `
 	if packGot != packWant {
 		t.Errorf("pack.toml content:\ngot:\n%s\nwant:\n%s", packGot, packWant)
+	}
+}
+
+func TestDoInitGastownWritesTransitionalPackShape(t *testing.T) {
+	f := fsys.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/bright-lights", wizardConfig{configName: "gastown", provider: "claude"}, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	cityToml := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
+	if strings.Contains(cityToml, "\nincludes = [\".gc/system/packs/gastown\"]") {
+		t.Fatalf("city.toml should not keep city-wide includes in fresh init:\n%s", cityToml)
+	}
+	if strings.Contains(cityToml, "global_fragments") {
+		t.Fatalf("city.toml should not keep legacy global_fragments in fresh init:\n%s", cityToml)
+	}
+	if !strings.Contains(cityToml, `default_rig_includes = [".gc/system/packs/gastown"]`) {
+		t.Fatalf("city.toml missing transitional default_rig_includes compatibility:\n%s", cityToml)
+	}
+
+	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
+	if !strings.Contains(packToml, `includes = [".gc/system/packs/gastown"]`) {
+		t.Fatalf("pack.toml missing gastown include:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "[agent_defaults]") || !strings.Contains(packToml, "append_fragments") {
+		t.Fatalf("pack.toml missing migrated append_fragments bridge:\n%s", packToml)
+	}
+}
+
+func TestSplitInitConfigMovesPackOwnedFields(t *testing.T) {
+	maxActive := 5
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "bright-lights",
+			Includes:        []string{"./packs/gastown"},
+			GlobalFragments: []string{"workspace-frag"},
+		},
+		Imports: map[string]config.Import{
+			"helper": {Source: "./packs/helper"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"claude": {},
+		},
+		Agents: []config.Agent{
+			{
+				Name:              "mayor",
+				PromptTemplate:    "agents/mayor/prompt.template.md",
+				MaxActiveSessions: &maxActive,
+				ScaleCheck:        "echo 3",
+			},
+		},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+		Services: []config.Service{
+			{Name: "api"},
+			{Name: "dashboard", PublishMode: "direct"},
+		},
+		Formulas: config.FormulasConfig{Dir: "formula-dir"},
+		Patches: config.Patches{
+			Agents: []config.AgentPatch{{Name: "mayor"}},
+		},
+		AgentDefaults: config.AgentDefaults{
+			AppendFragments: []string{"pack-frag"},
+		},
+	}
+
+	packCfg, cityCfg := splitInitConfig("bright-lights", cfg)
+
+	if len(cityCfg.Agents) != 0 {
+		t.Fatalf("cityCfg.Agents = %d, want 0", len(cityCfg.Agents))
+	}
+	if len(cityCfg.NamedSessions) != 0 {
+		t.Fatalf("cityCfg.NamedSessions = %d, want 0", len(cityCfg.NamedSessions))
+	}
+	if len(cityCfg.Imports) != 0 {
+		t.Fatalf("cityCfg.Imports = %d, want 0", len(cityCfg.Imports))
+	}
+	if len(cityCfg.Providers) != 0 {
+		t.Fatalf("cityCfg.Providers = %d, want 0", len(cityCfg.Providers))
+	}
+	if len(cityCfg.Services) != 1 || cityCfg.Services[0].Name != "dashboard" {
+		t.Fatalf("cityCfg.Services = %+v, want one direct dashboard service", cityCfg.Services)
+	}
+	if cityCfg.Formulas.Dir != "" {
+		t.Fatalf("cityCfg.Formulas.Dir = %q, want empty", cityCfg.Formulas.Dir)
+	}
+	if !cityCfg.Patches.IsEmpty() {
+		t.Fatalf("cityCfg.Patches should be empty, got %#v", cityCfg.Patches)
+	}
+	if len(cityCfg.Workspace.Includes) != 0 {
+		t.Fatalf("cityCfg.Workspace.Includes = %v, want empty", cityCfg.Workspace.Includes)
+	}
+	if len(cityCfg.Workspace.GlobalFragments) != 0 {
+		t.Fatalf("cityCfg.Workspace.GlobalFragments = %v, want empty", cityCfg.Workspace.GlobalFragments)
+	}
+
+	if len(packCfg.Agents) != 1 {
+		t.Fatalf("packCfg.Agents = %d, want 1", len(packCfg.Agents))
+	}
+	if packCfg.Agents[0].MaxActiveSessions == nil || *packCfg.Agents[0].MaxActiveSessions != 5 {
+		t.Fatalf("packCfg.Agents[0].MaxActiveSessions = %v, want 5", packCfg.Agents[0].MaxActiveSessions)
+	}
+	if packCfg.Agents[0].ScaleCheck != "echo 3" {
+		t.Fatalf("packCfg.Agents[0].ScaleCheck = %q, want %q", packCfg.Agents[0].ScaleCheck, "echo 3")
+	}
+	if len(packCfg.NamedSessions) != 1 {
+		t.Fatalf("packCfg.NamedSessions = %d, want 1", len(packCfg.NamedSessions))
+	}
+	if len(packCfg.Services) != 1 || packCfg.Services[0].Name != "api" {
+		t.Fatalf("packCfg.Services = %+v, want one api service", packCfg.Services)
+	}
+	if packCfg.Formulas.Dir != "formula-dir" {
+		t.Fatalf("packCfg.Formulas.Dir = %q, want %q", packCfg.Formulas.Dir, "formula-dir")
+	}
+	if len(packCfg.Patches.Agents) != 1 || packCfg.Patches.Agents[0].Name != "mayor" {
+		t.Fatalf("packCfg.Patches = %+v, want mayor patch", packCfg.Patches)
+	}
+	if len(packCfg.Imports) != 1 {
+		t.Fatalf("packCfg.Imports = %d, want 1", len(packCfg.Imports))
+	}
+	if _, ok := packCfg.Imports["helper"]; !ok {
+		t.Fatalf("packCfg.Imports missing helper: %+v", packCfg.Imports)
+	}
+	if len(packCfg.Pack.Includes) != 1 || packCfg.Pack.Includes[0] != "./packs/gastown" {
+		t.Fatalf("packCfg.Pack.Includes = %v, want [./packs/gastown]", packCfg.Pack.Includes)
+	}
+	if len(packCfg.Providers) != 1 {
+		t.Fatalf("packCfg.Providers = %d, want 1", len(packCfg.Providers))
+	}
+	if got := packCfg.AgentDefaults.AppendFragments; len(got) != 2 || got[0] != "pack-frag" || got[1] != "workspace-frag" {
+		t.Fatalf("packCfg.AgentDefaults.AppendFragments = %v, want [pack-frag workspace-frag]", got)
+	}
+}
+
+func TestInitPackSchemaStaysInSyncWithCanonicalPackSchema(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+
+	gotPack := loadStructFields(t, filepath.Join(repoRoot, "cmd", "gc", "cmd_init.go"), "initPackConfig")
+	wantPack := loadStructFields(t, filepath.Join(repoRoot, "internal", "config", "pack.go"), "packConfig")
+	if len(gotPack) != len(wantPack) {
+		t.Fatalf("initPackConfig fields = %v, want %v", gotPack, wantPack)
+	}
+	for i := range wantPack {
+		if gotPack[i].Name != wantPack[i].Name ||
+			normalizeSchemaTag(gotPack[i].Tag) != normalizeSchemaTag(wantPack[i].Tag) ||
+			normalizeSchemaType(gotPack[i].Type) != normalizeSchemaType(wantPack[i].Type) {
+			t.Fatalf("initPackConfig field[%d] = %+v, want %+v", i, gotPack[i], wantPack[i])
+		}
+	}
+
+	gotMeta := loadStructFields(t, filepath.Join(repoRoot, "cmd", "gc", "cmd_init.go"), "initPackMeta")
+	wantMeta := loadStructFields(t, filepath.Join(repoRoot, "internal", "config", "config.go"), "PackMeta")
+	if len(gotMeta) != len(wantMeta) {
+		t.Fatalf("initPackMeta fields = %v, want %v", gotMeta, wantMeta)
+	}
+	for i := range wantMeta {
+		if gotMeta[i].Name != wantMeta[i].Name ||
+			normalizeSchemaTag(gotMeta[i].Tag) != normalizeSchemaTag(wantMeta[i].Tag) ||
+			normalizeSchemaType(gotMeta[i].Type) != normalizeSchemaType(wantMeta[i].Type) {
+			t.Fatalf("initPackMeta field[%d] = %+v, want %+v", i, gotMeta[i], wantMeta[i])
+		}
 	}
 }
 
@@ -2026,23 +2388,29 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 		t.Errorf("stdout missing wizard message: %q", out)
 	}
 
-	// Verify written config has one agent and provider.
+	// Verify written config keeps the provider in city.toml and still loads
+	// a convention-discovered mayor agent.
 	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
-	cfg, err := config.Parse(data)
+	raw, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
 	}
-	if cfg.Workspace.Provider != "claude" {
-		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
+	if raw.Workspace.Provider != "claude" {
+		t.Errorf("Workspace.Provider = %q, want %q", raw.Workspace.Provider, "claude")
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
+	if err != nil {
+		t.Fatalf("loading written config: %v", err)
 	}
-	if cfg.Agents[0].Name != "mayor" {
-		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "mayor")
+	explicit := explicitAgents(cfg.Agents)
+	if len(explicit) != 1 {
+		t.Fatalf("len(explicitAgents) = %d, want 1", len(explicit))
 	}
-	if cfg.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", cfg.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if explicit[0].Name != "mayor" {
+		t.Errorf("explicitAgents[0].Name = %q, want %q", explicit[0].Name, "mayor")
+	}
+	if !strings.HasSuffix(explicit[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md")) {
+		t.Errorf("explicitAgents[0].PromptTemplate = %q, want suffix %q", explicit[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md"))
 	}
 	// Verify provider appears in TOML.
 	if !strings.Contains(string(data), `provider = "claude"`) {
@@ -2066,15 +2434,19 @@ func TestDoInitWithCustomCommand(t *testing.T) {
 
 	// Verify written config has start_command and no provider.
 	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
-	cfg, err := config.Parse(data)
+	raw, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
 	}
-	if cfg.Workspace.StartCommand != "my-agent --auto" {
-		t.Errorf("Workspace.StartCommand = %q, want %q", cfg.Workspace.StartCommand, "my-agent --auto")
+	if raw.Workspace.StartCommand != "my-agent --auto" {
+		t.Errorf("Workspace.StartCommand = %q, want %q", raw.Workspace.StartCommand, "my-agent --auto")
 	}
-	if cfg.Workspace.Provider != "" {
-		t.Errorf("Workspace.Provider = %q, want empty", cfg.Workspace.Provider)
+	if raw.Workspace.Provider != "" {
+		t.Errorf("Workspace.Provider = %q, want empty", raw.Workspace.Provider)
+	}
+	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
+	if err != nil {
+		t.Fatalf("loading written config: %v", err)
 	}
 	if len(cfg.Agents) != 1 {
 		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
@@ -2110,8 +2482,8 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != ".gc/system/packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [.gc/system/packs/gastown]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.Includes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty (moved to pack.toml)", cfg.Workspace.Includes)
 	}
 	if len(cfg.Workspace.DefaultRigIncludes) != 1 || cfg.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
 		t.Errorf("Workspace.DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", cfg.Workspace.DefaultRigIncludes)
@@ -2119,6 +2491,10 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	// No inline agents.
 	if len(cfg.Agents) != 0 {
 		t.Errorf("len(Agents) = %d, want 0 (agents come from pack)", len(cfg.Agents))
+	}
+	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
+	if !strings.Contains(packToml, `includes = [".gc/system/packs/gastown"]`) {
+		t.Errorf("pack.toml missing gastown include:\n%s", packToml)
 	}
 	// Daemon config.
 	if cfg.Daemon.PatrolInterval != "30s" {
@@ -2139,20 +2515,24 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// Custom template → DefaultCity (one mayor, no provider).
+	// Custom template → mayor discovered from agents/mayor.
 	data := f.Files[filepath.Join("/my-city", "city.toml")]
-	cfg, err := config.Parse(data)
+	raw, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
+	}
+	if raw.Workspace.Provider != "" {
+		t.Errorf("Workspace.Provider = %q, want empty", raw.Workspace.Provider)
+	}
+	cfg, err := loadCityConfigFS(f, filepath.Join("/my-city", "city.toml"))
+	if err != nil {
+		t.Fatalf("loading written config: %v", err)
 	}
 	if len(cfg.Agents) != 1 {
 		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
 	}
 	if cfg.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "mayor")
-	}
-	if cfg.Workspace.Provider != "" {
-		t.Errorf("Workspace.Provider = %q, want empty", cfg.Workspace.Provider)
 	}
 }
 
@@ -2334,20 +2714,29 @@ scale_check = "echo 3"
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("len(Agents) = %d, want 2", len(cfg.Agents))
+	if len(cfg.Agents) != 0 {
+		t.Fatalf("len(raw city Agents) = %d, want 0", len(cfg.Agents))
 	}
-	if cfg.Agents[1].Name != "worker" {
-		t.Errorf("Agents[1].Name = %q, want %q", cfg.Agents[1].Name, "worker")
+
+	composed, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading composed config: %v", err)
 	}
-	if cfg.Agents[1].MaxActiveSessions == nil {
+	explicit := explicitAgents(composed.Agents)
+	if len(explicit) != 2 {
+		t.Fatalf("len(explicitAgents) = %d, want 2", len(explicit))
+	}
+	if explicit[1].Name != "worker" {
+		t.Errorf("Agents[1].Name = %q, want %q", explicit[1].Name, "worker")
+	}
+	if explicit[1].MaxActiveSessions == nil {
 		t.Fatal("Agents[1].MaxActiveSessions is nil, want non-nil")
 	}
-	if *cfg.Agents[1].MaxActiveSessions != 5 {
-		t.Errorf("Agents[1].MaxActiveSessions = %d, want 5", *cfg.Agents[1].MaxActiveSessions)
+	if *explicit[1].MaxActiveSessions != 5 {
+		t.Errorf("Agents[1].MaxActiveSessions = %d, want 5", *explicit[1].MaxActiveSessions)
 	}
-	if cfg.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", cfg.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if explicit[0].PromptTemplate != "agents/mayor/prompt.template.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", explicit[0].PromptTemplate, "agents/mayor/prompt.template.md")
 	}
 
 	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
@@ -2357,6 +2746,12 @@ scale_check = "echo 3"
 	if !strings.Contains(string(packData), `name = "bright-lights"`) {
 		t.Errorf("pack.toml missing pack name:\n%s", packData)
 	}
+	if !strings.Contains(string(packData), "[[agent]]") || !strings.Contains(string(packData), `prompt_template = "agents/mayor/prompt.template.md"`) {
+		t.Errorf("pack.toml missing moved agents:\n%s", packData)
+	}
+	if !strings.Contains(string(packData), `max_active_sessions = 5`) || !strings.Contains(string(packData), `scale_check = "echo 3"`) {
+		t.Errorf("pack.toml missing worker scaling config:\n%s", packData)
+	}
 	if _, err := os.Stat(filepath.Join(cityPath, "agents", "mayor", "prompt.template.md")); err != nil {
 		t.Errorf("agents/mayor/prompt.template.md missing: %v", err)
 	}
@@ -2364,6 +2759,131 @@ scale_check = "echo 3"
 		if _, err := os.Stat(filepath.Join(cityPath, dir)); !os.IsNotExist(err) {
 			t.Errorf("%s/ should not be created by init: %v", dir, err)
 		}
+	}
+}
+
+func TestCmdInitFromTOMLFilePreservesPackTemplateSections(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sharedPack := filepath.Join(dir, "shared")
+	if err := os.MkdirAll(sharedPack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedPack, "pack.toml"), []byte(`[pack]
+name = "shared"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := filepath.Join(dir, "template.toml")
+	tomlContent := []byte(`[workspace]
+name = "placeholder"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[pack]
+version = "0.1.0"
+requires_gc = ">=0.16.0"
+includes = ["../shared"]
+
+[[pack.requires]]
+scope = "city"
+agent = "mayor"
+
+[[doctor]]
+name = "check-env"
+script = "doctor/check-env.sh"
+
+[[commands]]
+name = "status"
+description = "show status"
+long_description = "docs/status.md"
+script = "commands/status.sh"
+
+[formulas]
+dir = "custom-formulas"
+
+[[service]]
+name = "api"
+kind = "workflow"
+
+[[service]]
+name = "dashboard"
+kind = "proxy_process"
+publish_mode = "direct"
+
+[global]
+session_live = ["echo live"]
+`)
+	if err := os.WriteFile(src, tomlContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFile(fsys.OSFS{}, src, cityPath, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFile = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	packToml := string(packData)
+	for _, want := range []string{
+		`name = "bright-lights"`,
+		`version = "0.1.0"`,
+		`requires_gc = ">=0.16.0"`,
+		`includes = ["../shared"]`,
+		`[[pack.requires]]`,
+		`agent = "mayor"`,
+		`[[doctor]]`,
+		`script = "doctor/check-env.sh"`,
+		`[[commands]]`,
+		`script = "commands/status.sh"`,
+		`dir = "custom-formulas"`,
+		`[[service]]`,
+		`name = "api"`,
+		`[global]`,
+		`session_live = ["echo live"]`,
+	} {
+		if !strings.Contains(packToml, want) {
+			t.Fatalf("pack.toml missing %q:\n%s", want, packToml)
+		}
+	}
+
+	composed, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading composed config: %v", err)
+	}
+	if composed.Formulas.Dir != "custom-formulas" {
+		t.Fatalf("Formulas.Dir = %q, want %q", composed.Formulas.Dir, "custom-formulas")
+	}
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	if !strings.Contains(string(cityData), `publish_mode = "direct"`) || !strings.Contains(string(cityData), `name = "dashboard"`) {
+		t.Fatalf("city.toml missing direct service:\n%s", string(cityData))
+	}
+	if len(composed.Services) != 2 {
+		t.Fatalf("len(Services) = %d, want 2", len(composed.Services))
+	}
+	if composed.Services[0].Name != "api" || composed.Services[1].Name != "dashboard" {
+		t.Fatalf("Services = %+v, want [api dashboard]", composed.Services)
+	}
+	if len(composed.PackGlobals) != 1 || len(composed.PackGlobals[0].SessionLive) != 1 || composed.PackGlobals[0].SessionLive[0] != "echo live" {
+		t.Fatalf("PackGlobals = %+v, want one session_live command", composed.PackGlobals)
 	}
 }
 
@@ -3654,6 +4174,194 @@ prompt_template = "prompts/mayor.md"
 	}
 	if got := strings.TrimSpace(string(data)); got != "sess-123" {
 		t.Errorf("persisted session ID = %q, want %q", got, "sess-123")
+	}
+}
+
+func TestDoPrimeGeminiHookPersistsProviderSessionKey(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptsDir, "probe.md"), []byte("probe prompt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+provider = "gemini"
+
+[[agent]]
+name = "probe"
+prompt_template = "prompts/probe.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title: "probe",
+		Type:  "task",
+		Labels: []string{
+			"gc:session",
+			"template:probe",
+		},
+		Metadata: map[string]string{
+			"template":     "probe",
+			"provider":     "gemini",
+			"session_name": "probe",
+			"state":        "active",
+			"work_dir":     dir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "probe")
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GEMINI_SESSION_ID", "gemini-provider-session")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "gemini-provider-session" {
+		t.Fatalf("session_key = %q, want Gemini provider session id", got)
+	}
+}
+
+func TestDoPrimeHookFallsBackToGCTemplateForManualSessionAlias(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const promptContent = "worker inference probe prompt\n"
+	if err := os.WriteFile(filepath.Join(promptsDir, "probe.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "probe"
+prompt_template = "prompts/probe.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_ALIAS", "probe-live")
+	t.Setenv("GC_TEMPLATE", "probe")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, promptContent) {
+		t.Fatalf("stdout = %q, want probe prompt", out)
+	}
+	if strings.Contains(out, defaultPrimePrompt) || strings.Contains(out, "Check for available work") {
+		t.Fatalf("stdout = %q, want no default worker prompt", out)
+	}
+}
+
+func TestDoPrimeHookFallsBackToSessionTemplateForManualSessionAlias(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const promptContent = "worker inference probe prompt\n"
+	if err := os.WriteFile(filepath.Join(promptsDir, "probe.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "probe"
+prompt_template = "prompts/probe.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "probe",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:probe"},
+		Metadata: map[string]string{
+			"alias":        "probe-live",
+			"template":     "probe",
+			"session_name": "s-probe-live",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_ALIAS", "probe-live")
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_TEMPLATE", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, promptContent) {
+		t.Fatalf("stdout = %q, want probe prompt", out)
+	}
+	if strings.Contains(out, defaultPrimePrompt) || strings.Contains(out, "Check for available work") {
+		t.Fatalf("stdout = %q, want no default worker prompt", out)
 	}
 }
 

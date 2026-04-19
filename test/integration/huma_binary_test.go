@@ -41,9 +41,12 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	writeSupervisorConfig(t, gcHome, port)
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
+	cityRoot := filepath.Join(gcHome, "city")
 	env := append(os.Environ(),
 		"GC_HOME="+gcHome,
 		"XDG_RUNTIME_DIR="+runtimeDir,
+		"GC_BEADS=file",
+		"GC_DOLT=skip",
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -60,7 +63,12 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	}
 	var supervisorLog strings.Builder
 	go func() { _, _ = io.Copy(&supervisorLog, stderr) }()
+	cityRegistered := false
 	t.Cleanup(func() {
+		if cityRegistered {
+			runCLIAllowError(t, bin, env, "gc unregister", "unregister", cityRoot)
+		}
+		runCLIAllowError(t, bin, env, "gc supervisor stop --wait", "supervisor", "stop", "--wait")
 		cancel()
 		_ = cmd.Wait()
 		if t.Failed() {
@@ -97,26 +105,30 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	// its real socket. Together these prove the full stack wires through
 	// the typed API for both supervisor-scope and per-city commands.
 
-	// 1) `gc cities list` — supervisor scope, no city required.
-	runCLI(t, bin, env, "gc cities list", "cities", "list")
-
-	// 2) `gc cities` (default action) — legacy alias still must work.
+	// 1) `gc cities` — supervisor scope, no city required.
 	runCLI(t, bin, env, "gc cities", "cities")
 
-	// 3) Create a city the supervisor can see, then exercise per-city commands.
-	cityRoot := filepath.Join(gcHome, "city")
-	runCLI(t, bin, env, "gc init", "init", cityRoot, "--provider", "claude")
+	// 2) Create a minimal city the supervisor can register without relying on
+	// any real provider or agent runtime.
+	if err := os.MkdirAll(cityRoot, 0o755); err != nil {
+		t.Fatalf("create city root: %v", err)
+	}
+	cityConfig := "[workspace]\nname = \"humatest\"\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(cityRoot, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
 	runCLI(t, bin, env, "gc register", "register", cityRoot, "--name", "humatest")
+	cityRegistered = true
 
 	// Give the supervisor a moment to pick up the registered city.
 	cityListURL := baseURL + "/v0/cities"
 	waitForCityRegistered(t, cityListURL, "humatest", 5*time.Second)
 
-	// 4) `gc city status` — resolves the city, calls per-city status.
-	runCLI(t, bin, env, "gc city status", "--city", "humatest", "status")
+	// 3) `gc city status` — resolves the city path, then calls per-city status.
+	runCLI(t, bin, env, "gc city status", "--city", cityRoot, "status")
 
-	// 5) `gc agents list` — per-city, exercises a different domain handler.
-	runCLI(t, bin, env, "gc agents list", "--city", "humatest", "agents", "list")
+	// 4) `gc session list` — per-city, exercises a different domain handler.
+	runCLI(t, bin, env, "gc session list", "--city", cityRoot, "session", "list")
 }
 
 // runCLI executes a gc subcommand against the live supervisor and fails
@@ -132,6 +144,15 @@ func runCLI(t *testing.T, bin string, env []string, label string, args ...string
 	}
 	if len(out) == 0 {
 		t.Fatalf("%s produced no output", label)
+	}
+}
+
+func runCLIAllowError(t *testing.T, bin string, env []string, label string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Logf("%s during cleanup: %v\noutput: %s", label, err, string(out))
 	}
 }
 

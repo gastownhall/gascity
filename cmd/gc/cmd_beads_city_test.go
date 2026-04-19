@@ -749,22 +749,22 @@ func writeCityEndpointCityConfigWithCompat(t *testing.T, cityDir string, dolt co
 	if dolt.Host != "" || dolt.Port != 0 {
 		content.WriteString("\n[dolt]\n")
 		if dolt.Host != "" {
-			content.WriteString(fmt.Sprintf("host = %q\n", dolt.Host))
+			fmt.Fprintf(&content, "host = %q\n", dolt.Host) //nolint:errcheck
 		}
 		if dolt.Port != 0 {
-			content.WriteString(fmt.Sprintf("port = %d\n", dolt.Port))
+			fmt.Fprintf(&content, "port = %d\n", dolt.Port) //nolint:errcheck
 		}
 	}
 	for _, rig := range rigs {
 		content.WriteString("\n[[rigs]]\n")
-		content.WriteString(fmt.Sprintf("name = %q\n", rig.Name))
-		content.WriteString(fmt.Sprintf("path = %q\n", rig.Path))
-		content.WriteString(fmt.Sprintf("prefix = %q\n", rig.Prefix))
+		fmt.Fprintf(&content, "name = %q\n", rig.Name)     //nolint:errcheck
+		fmt.Fprintf(&content, "path = %q\n", rig.Path)     //nolint:errcheck
+		fmt.Fprintf(&content, "prefix = %q\n", rig.Prefix) //nolint:errcheck
 		if rig.DoltHost != "" {
-			content.WriteString(fmt.Sprintf("dolt_host = %q\n", rig.DoltHost))
+			fmt.Fprintf(&content, "dolt_host = %q\n", rig.DoltHost) //nolint:errcheck
 		}
 		if rig.DoltPort != "" {
-			content.WriteString(fmt.Sprintf("dolt_port = %q\n", rig.DoltPort))
+			fmt.Fprintf(&content, "dolt_port = %q\n", rig.DoltPort) //nolint:errcheck
 		}
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content.String()), 0o644); err != nil {

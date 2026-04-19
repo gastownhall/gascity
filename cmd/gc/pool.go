@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type poolSessionRef struct {
@@ -329,6 +330,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
+	cityName := workdirutil.CityName(cityPath, cfg)
 	for _, a := range cfg.Agents {
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
@@ -337,6 +339,7 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		if cmd == "" {
 			continue
 		}
+		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
 		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 		if _, err := runner(cmd, dir, controllerQueryRuntimeEnv(cityPath, cfg, &a)); err != nil {
 			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr

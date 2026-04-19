@@ -16,6 +16,7 @@ import (
 // agentBuildParams holds shared, per-city parameters for building agents.
 // These are constant across all agents in a single buildDesiredState call.
 type agentBuildParams struct {
+	city            *config.City
 	cityName        string
 	cityPath        string
 	workspace       *config.Workspace
@@ -56,6 +57,14 @@ type agentBuildParams struct {
 	// fingerprints or PreStart injection. The load error is logged to
 	// stderr at params-construction time.
 	skillCatalog *materialize.CityCatalog
+	// rigSkillCatalogs caches rig-specific shared catalogs. Each entry
+	// includes city-shared skills plus any rig-import shared catalogs.
+	rigSkillCatalogs map[string]*materialize.CityCatalog
+	// failedRigSkillCatalogs tracks rig scopes whose shared catalog
+	// failed to load for this build. Agents in those rigs must not
+	// fall back to the city catalog or they will inject stage-2 skill
+	// hooks that reload the broken rig catalog and fail at runtime.
+	failedRigSkillCatalogs map[string]bool
 
 	// sessionProvider is cfg.Session.Provider (the city-level session
 	// runtime selector: "" / "tmux" / "subprocess" / "acp" / "k8s" /
@@ -67,6 +76,7 @@ type agentBuildParams struct {
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := &agentBuildParams{
+		city:            cfg,
 		cityName:        cityName,
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
@@ -94,7 +104,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 	// fingerprints or PreStart, which matches the spec's "no spurious
 	// drain-restart cycles on remote-runtime agents" principle when
 	// discovery breaks transiently.
-	cat, err := materialize.LoadCityCatalog(cfg.PackSkillsDir)
+	cat, err := loadSharedSkillCatalog(cfg, "")
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (skills will not contribute to fingerprints this tick)\n", err) //nolint:errcheck // best-effort stderr
@@ -102,7 +112,41 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 	} else {
 		params.skillCatalog = &cat
 	}
+	for rigName := range cfg.RigPackSkills {
+		cat, err := loadSharedSkillCatalog(cfg, rigName)
+		if err != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog rig %q %v (skills will not contribute to fingerprints this tick)\n", rigName, err) //nolint:errcheck // best-effort stderr
+			}
+			if params.failedRigSkillCatalogs == nil {
+				params.failedRigSkillCatalogs = make(map[string]bool)
+			}
+			params.failedRigSkillCatalogs[rigName] = true
+			continue
+		}
+		if params.rigSkillCatalogs == nil {
+			params.rigSkillCatalogs = make(map[string]*materialize.CityCatalog)
+		}
+		catCopy := cat
+		params.rigSkillCatalogs[rigName] = &catCopy
+	}
 	return params
+}
+
+func (p *agentBuildParams) sharedSkillCatalogForAgent(agent *config.Agent) *materialize.CityCatalog {
+	if p == nil || agent == nil {
+		return nil
+	}
+	rigName := agentRigScopeName(agent, p.rigs)
+	if rigName != "" && p.failedRigSkillCatalogs != nil && p.failedRigSkillCatalogs[rigName] {
+		return nil
+	}
+	if p.rigSkillCatalogs != nil && rigName != "" {
+		if cat := p.rigSkillCatalogs[rigName]; cat != nil {
+			return cat
+		}
+	}
+	return p.skillCatalog
 }
 
 // effectiveOverlayDirs merges city-level and rig-level pack overlay dirs.

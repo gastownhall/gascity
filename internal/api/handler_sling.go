@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -42,6 +43,8 @@ type slingResponse struct {
 	Warnings       []string `json:"warnings,omitempty"`
 }
 
+var apiSlingStderr = func() io.Writer { return os.Stderr }
+
 // execSling calls the intent-based Sling API directly. The Huma handler
 // humaHandleSling performs all validation before calling this.
 //
@@ -79,6 +82,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
+		Stderr:   apiSlingStderr(),
 	}
 	sl, err := sling.New(deps)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -19,6 +20,194 @@ func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
 	if doctorSkipsDoltChecks(cityDir) {
 		t.Fatal("doctorSkipsDoltChecks() = true, want false for exec:gc-beads-bd")
+	}
+}
+
+func TestDoctorSkipsDoltChecksDetectsBdRigUnderFileBackedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if doctorSkipsDoltChecks(cityDir) {
+		t.Fatal("doctorSkipsDoltChecks() = true, want false for bd-backed rig")
+	}
+}
+
+func TestDoDoctorRunsCityDoltCheckForInheritedBdRigUnderFileBackedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "config.yaml"), contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	oldCityCheck := newDoctorDoltServerCheck
+	oldRigCheck := newDoctorRigDoltServerCheck
+	var citySkip, rigSkip *bool
+	newDoctorDoltServerCheck = func(cityPath string, skip bool) *doctor.DoltServerCheck {
+		citySkip = &skip
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, skip bool) *doctor.RigDoltServerCheck {
+		rigSkip = &skip
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+	t.Cleanup(func() {
+		newDoctorDoltServerCheck = oldCityCheck
+		newDoctorRigDoltServerCheck = oldRigCheck
+	})
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+
+	if citySkip == nil || *citySkip {
+		t.Fatalf("city dolt check skip = %v, want false when a bd-backed rig inherits the city endpoint", citySkip)
+	}
+	if rigSkip == nil || *rigSkip {
+		t.Fatalf("rig dolt check skip = %v, want false for bd-backed rig", rigSkip)
+	}
+}
+
+func TestDoDoctorRunsDoltTopologyForBdRigUnderFileBackedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "rig.example.com"
+dolt_port = "3308"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	oldCityCheck := newDoctorDoltServerCheck
+	oldRigCheck := newDoctorRigDoltServerCheck
+	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+	t.Cleanup(func() {
+		newDoctorDoltServerCheck = oldCityCheck
+		newDoctorRigDoltServerCheck = oldRigCheck
+	})
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+
+	if !strings.Contains(stdout.String(), "canonical/compat Dolt drift") {
+		t.Fatalf("doctor output missing Dolt topology drift:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+}
+
+func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(cityDir, ".beads", "dolt", "hq", ".dolt"),
+		filepath.Join(cityDir, ".beads", "embeddeddolt", "legacy", ".dolt"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	origCityFlag := cityFlag
+	cityFlag = cityDir
+	t.Cleanup(func() { cityFlag = origCityFlag })
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "bd-split-store") {
+		t.Fatalf("doctor output missing bd-split-store check:\n%s", out)
+	}
+	if !strings.Contains(out, "legacy split store") {
+		t.Fatalf("doctor output missing split-store warning:\n%s", out)
 	}
 }
 

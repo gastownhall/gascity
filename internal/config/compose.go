@@ -33,12 +33,24 @@ type Provenance struct {
 	Warnings []string
 }
 
+// LoadOptions controls optional config-loading behavior.
+type LoadOptions struct {
+	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
+	// migration warnings produced while discovering pack orders.
+	SuppressDeprecatedOrderWarnings bool
+}
+
 // LoadWithIncludes loads a city.toml and merges all included fragments.
 // Includes are NOT recursive — fragments cannot include other fragments.
 // Extra includes (from CLI -f flags) are appended after the root's
 // include list and processed identically.
 // Returns the fully-merged config, provenance tracking, and any error.
 func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, *Provenance, error) {
+	return LoadWithIncludesOptions(fs, path, LoadOptions{}, extraIncludes...)
+}
+
+// LoadWithIncludesOptions loads a city.toml with the supplied load options.
+func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -52,6 +64,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	prov := newProvenance(path)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
 	root.ResolvedWorkspaceName = filepath.Base(cityRoot)
+	cityAgentsForProvenance := root.Agents
 
 	// V2: if a pack.toml exists alongside city.toml, it is the city's
 	// definition layer. Parse it and merge its content (imports, agents,
@@ -60,12 +73,19 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// deployment (rigs, substrates, capacity) plus any inline agents.
 	cityImportCount := len(root.Imports)
 	packExists := false
+	var rootPackIncludes []string
+	var rootPackGlobals []ResolvedPackGlobal
+	var rootPackRequires []PackRequirement
 	packPath := filepath.Join(cityRoot, packFile)
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
 		var pc packConfig
-		if _, decErr := toml.Decode(string(packData), &pc); decErr != nil {
+		md, decErr := toml.Decode(string(packData), &pc)
+		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
+		}
+		if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
+			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
 		}
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
@@ -73,6 +93,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		// Preserve the city.toml agents so they can override pack-defined
 		// and convention-discovered agents.
 		cityAgents := append([]Agent{}, root.Agents...)
+		cityAgentsForProvenance = cityAgents
+		rootPackIncludes = append([]string(nil), pc.Pack.Includes...)
+		rootPackRequires = append([]PackRequirement(nil), pc.Pack.Requires...)
 		// Dedup: city.toml agents override pack.toml agents with the same
 		// name. Build a set of city.toml agent names and skip pack.toml
 		// agents that would duplicate.
@@ -97,6 +120,13 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 				}
 			}
 		}
+		defaultRigIncludes, err := defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		if len(defaultRigIncludes) > 0 {
+			root.Workspace.DefaultRigIncludes = append(defaultRigIncludes, root.Workspace.DefaultRigIncludes...)
+		}
 		// Merge pack.toml providers (pack is base, city wins).
 		if len(pc.Providers) > 0 {
 			if root.Providers == nil {
@@ -110,15 +140,40 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		}
 		// Merge named sessions.
 		root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
+		// Merge root-pack services as the portable base layer. city.toml
+		// services stay later in the slice and therefore remain the more
+		// local declaration when callers inspect the merged config.
+		if len(pc.Services) > 0 {
+			packServices := make([]Service, len(pc.Services))
+			copy(packServices, pc.Services)
+			for i := range packServices {
+				if packServices[i].PublishMode == "direct" {
+					return nil, nil, fmt.Errorf("city pack.toml: service %q: packs may not set publish_mode=direct", packServices[i].Name)
+				}
+				packServices[i].SourceDir = cityRoot
+			}
+			root.Services = append(packServices, root.Services...)
+		}
 		// Merge patches (accumulated, applied later).
 		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
 		root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
 		root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
+		// Merge formulas config with pack.toml as the base and city.toml as
+		// the more local override.
+		if root.Formulas.Dir == "" {
+			root.Formulas = pc.Formulas
+		}
 		// Merge pack-level agent defaults before city fragments so the
 		// city layer can append on top of the portable baseline.
 		mergedAgentDefaults := pc.AgentDefaults
 		mergeAgentDefaults(&mergedAgentDefaults, root.AgentDefaults, packPath, nil)
 		root.AgentDefaults = mergedAgentDefaults
+		if len(pc.Global.SessionLive) > 0 {
+			rootPackGlobals = append(rootPackGlobals, ResolvedPackGlobal{
+				SessionLive: resolveConfigDirInCommands(pc.Global.SessionLive, cityRoot),
+				PackName:    pc.Pack.Name,
+			})
+		}
 		// Track pack.toml agents in provenance.
 		trackAgents(prov, pc.Agents, packPath)
 		prov.Sources = append(prov.Sources, packPath)
@@ -162,6 +217,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		if err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
+		trackAgents(prov, packDiscoveredAgents, packPath)
 		root.Agents = append([]Agent{}, packAgents...)
 		root.Agents = append(root.Agents, packDiscoveredAgents...)
 		root.Agents = append(root.Agents, cityAgents...)
@@ -176,7 +232,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	}
 
 	// Track root's resources.
-	trackAgents(prov, root.Agents, path)
+	trackAgents(prov, cityAgentsForProvenance, path)
 	trackRigs(prov, root.Rigs, path)
 	trackWorkspace(prov, rootMeta, path)
 
@@ -241,6 +297,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Skip packs already reachable from user includes or top-level imports
 	// (avoids duplicate agent errors when a user pack transitively includes
 	// a system pack).
+	root.Workspace.Includes = append(rootPackIncludes, root.Workspace.Includes...)
 	existingPacks := resolvedPackNames(root.Workspace.Includes, root.Imports, fs, cityRoot)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
@@ -277,7 +334,17 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		if root.Imports == nil {
 			root.Imports = make(map[string]Import)
 		}
+		if root.ImplicitImportBindings == nil {
+			root.ImplicitImportBindings = make(map[string]bool)
+		}
+		if root.BootstrapImportBindings == nil {
+			root.BootstrapImportBindings = make(map[string]bool)
+		}
 		addedImplicit := false
+		bootstrapSet := make(map[string]bool, len(bootstrapNames))
+		for _, name := range bootstrapNames {
+			bootstrapSet[name] = true
+		}
 		for name, imp := range implicitImports {
 			if _, exists := root.Imports[name]; exists {
 				continue
@@ -285,6 +352,10 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 			root.Imports[name] = resolveImplicitImport(imp)
 			prov.Imports[name] = "(implicit)"
 			addedImplicit = true
+			root.ImplicitImportBindings[name] = true
+			if bootstrapSet[name] {
+				root.BootstrapImportBindings[name] = true
+			}
 		}
 		if addedImplicit && implicitPath != "" {
 			prov.Sources = append(prov.Sources, implicitPath)
@@ -292,10 +363,11 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	}
 
 	// Expand city packs before patches (so patches can target city-topo agents).
-	cityTopoFormulas, cityReqs, shadowWarnings, ctErr := ExpandCityPacks(root, fs, cityRoot)
+	cityTopoFormulas, cityReqs, shadowWarnings, ctErr := expandCityPacks(root, fs, cityRoot, opts)
 	if ctErr != nil {
 		return nil, nil, ctErr
 	}
+	cityReqs = append(cityReqs, rootPackRequires...)
 	prov.Warnings = append(prov.Warnings, shadowWarnings...)
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
@@ -314,7 +386,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// resources stamped from packs (for example gascity/refinery named sessions).
 	rigFormulaDirs := make(map[string][]string)
 	if HasPackRigs(root.Rigs) {
-		if err := ExpandPacks(root, fs, cityRoot, rigFormulaDirs); err != nil {
+		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, opts); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
 		}
 		// Track pack-expanded agents in provenance.
@@ -342,6 +414,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	}
 
 	// Apply [global] sections from packs to agents in scope.
+	root.PackGlobals = append(root.PackGlobals, rootPackGlobals...)
 	applyPackGlobals(root)
 
 	// Validate city-scoped pack requirements.
@@ -954,6 +1027,75 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	normalizeAgentDefaultsAlias(&cfg, md)
 	warnings := CheckUndecodedKeys(md, source)
 	return &cfg, md, warnings, nil
+}
+
+// LoadRootPackDefaultRigIncludes loads default rig includes from the root
+// city pack without expanding the full config. Edit paths use this to honor
+// pack v2 defaults while still writing only city.toml.
+func LoadRootPackDefaultRigIncludes(fs fsys.FS, cityRoot string) ([]string, error) {
+	packPath := filepath.Join(cityRoot, packFile)
+	packData, err := fs.ReadFile(packPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("loading city pack.toml: %w", err)
+	}
+	var pc packConfig
+	md, err := toml.Decode(string(packData), &pc)
+	if err != nil {
+		return nil, fmt.Errorf("parsing city pack.toml: %w", err)
+	}
+	if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
+		return nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
+	}
+	return defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+}
+
+func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
+	if len(defaults.Rig.Imports) == 0 {
+		return nil, nil
+	}
+	names := orderedDefaultRigImportNames(defaults.Rig.Imports, md)
+
+	includes := make([]string, 0, len(names))
+	for _, name := range names {
+		imp := defaults.Rig.Imports[name]
+		if strings.TrimSpace(imp.Source) == "" {
+			return nil, fmt.Errorf("defaults.rig.imports.%s.source is required", name)
+		}
+		includes = append(includes, imp.Source)
+	}
+	return includes, nil
+}
+
+func orderedDefaultRigImportNames(imports map[string]Import, md toml.MetaData) []string {
+	if len(imports) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(imports))
+	names := make([]string, 0, len(imports))
+	for _, key := range md.Keys() {
+		if len(key) < 4 || key[0] != "defaults" || key[1] != "rig" || key[2] != "imports" {
+			continue
+		}
+		name := key[3]
+		if _, ok := imports[name]; ok && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	if len(names) == len(imports) {
+		return names
+	}
+	remaining := make([]string, 0, len(imports)-len(names))
+	for name := range imports {
+		if !seen[name] {
+			remaining = append(remaining, name)
+		}
+	}
+	sort.Strings(remaining)
+	return append(names, remaining...)
 }
 
 func newProvenance(rootPath string) *Provenance {

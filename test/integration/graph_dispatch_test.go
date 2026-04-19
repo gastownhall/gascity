@@ -182,6 +182,16 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 		unregisterCityCommandEnv(cityDir)
 		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			cleanupTestCityDir(cityDir)
+			if _, err := os.Stat(cityDir); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		beadsEntries, _ := os.ReadDir(filepath.Join(cityDir, ".beads"))
+		t.Fatalf("graph workflow city cleanup did not quiesce; .beads entries=%v", beadsEntries)
 	})
 
 	return cityDir

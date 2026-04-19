@@ -24,6 +24,11 @@ type FS interface {
 	// Stat returns file info for the named file.
 	Stat(name string) (os.FileInfo, error)
 
+	// Lstat returns file info for the named file without following symlinks.
+	// Callers that must reject symlinked targets should call Lstat and check
+	// the mode's ModeSymlink bit before touching the path.
+	Lstat(name string) (os.FileInfo, error)
+
 	// ReadDir reads the named directory and returns its entries.
 	ReadDir(name string) ([]os.DirEntry, error)
 
@@ -58,6 +63,11 @@ func (OSFS) ReadFile(name string) ([]byte, error) {
 // Stat delegates to [os.Stat].
 func (OSFS) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
+}
+
+// Lstat delegates to [os.Lstat].
+func (OSFS) Lstat(name string) (os.FileInfo, error) {
+	return os.Lstat(name)
 }
 
 // ReadDir delegates to [os.ReadDir].

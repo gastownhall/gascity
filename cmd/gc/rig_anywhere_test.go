@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,26 @@ func writeRigAnywhereCityToml(t *testing.T, cityPath, toml string) {
 		t.Fatalf("MarshalForWrite: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRigAnywhereLegacyOrderPack(t *testing.T, cityPath string) {
+	t.Helper()
+	legacyOrderDir := filepath.Join(cityPath, ".gc", "system", "packs", "maintenance", "formulas", "orders", "legacy-health")
+	if err := os.MkdirAll(legacyOrderDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "system", "packs", "maintenance", "pack.toml"), []byte(`[pack]
+name = "maintenance"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyOrderDir, "order.toml"), []byte(`[order]
+formula = "mol-legacy-health"
+gate = "manual"
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -494,7 +515,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "custom-name", "", false, false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "custom-name", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -529,7 +550,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -557,7 +578,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 
 		// First add succeeds.
 		var stdout1, stderr1 bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, city1, rigDir1, "", "shared-name", "", false, false, &stdout1, &stderr1)
+		code := doRigAdd(fsys.OSFS{}, city1, rigDir1, nil, "shared-name", "", false, false, &stdout1, &stderr1)
 		if code != 0 {
 			t.Fatalf("first doRigAdd = %d, stderr: %s", code, stderr1.String())
 		}
@@ -577,7 +598,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stdout2, stderr2 bytes.Buffer
-		code = doRigAdd(fsys.OSFS{}, city2, rigDir2, "", "shared-name", "", false, false, &stdout2, &stderr2)
+		code = doRigAdd(fsys.OSFS{}, city2, rigDir2, nil, "shared-name", "", false, false, &stdout2, &stderr2)
 		// The global registry conflict is a warning, not an error. The rig still
 		// gets added to city.toml. Check that the warning is emitted.
 		if code != 0 {
@@ -607,7 +628,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -634,7 +655,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -664,14 +685,14 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		var stdout1, stderr1 bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout1, &stderr1)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", false, false, &stdout1, &stderr1)
 		if code != 0 {
 			t.Fatalf("first doRigAdd = %d, stderr: %s", code, stderr1.String())
 		}
 
 		// Re-add should succeed without duplicates.
 		var stdout2, stderr2 bytes.Buffer
-		code = doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout2, &stderr2)
+		code = doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", false, false, &stdout2, &stderr2)
 		if code != 0 {
 			t.Fatalf("re-add doRigAdd = %d, stderr: %s", code, stderr2.String())
 		}
@@ -711,7 +732,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -741,7 +762,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 
 		// First add with city1.
 		var stdout1, stderr1 bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, city1, rigDir, "", "", "", false, false, &stdout1, &stderr1)
+		code := doRigAdd(fsys.OSFS{}, city1, rigDir, nil, "", "", false, false, &stdout1, &stderr1)
 		if code != 0 {
 			t.Fatalf("first doRigAdd = %d, stderr: %s", code, stderr1.String())
 		}
@@ -760,7 +781,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 		writeRigAnywhereCityToml(t, city2, toml2)
 
 		var stdout2, stderr2 bytes.Buffer
-		code = doRigAdd(fsys.OSFS{}, city2, rigDir, "", "", "", false, false, &stdout2, &stderr2)
+		code = doRigAdd(fsys.OSFS{}, city2, rigDir, nil, "", "", false, false, &stdout2, &stderr2)
 		if code != 0 {
 			t.Fatalf("second doRigAdd = %d, stderr: %s", code, stderr2.String())
 		}
@@ -999,6 +1020,133 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		if ok {
 			t.Error("rig should be removed from cities.toml when no other city has it")
 		}
+	})
+
+	t.Run("does_not_emit_deprecated_order_warnings_from_unrelated_registered_city", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "quiet-remove")
+		rigDir := filepath.Join(t.TempDir(), "quiet-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := "[workspace]\nname = \"quiet-remove\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"quiet-rig\"\npath = \"" + rigDir + "\"\n"
+		writeRigAnywhereCityToml(t, cityPath, toml)
+
+		unrelatedCity := setupCity(t, "unrelated-noisy")
+		unrelatedTOML := `[workspace]
+name = "unrelated-noisy"
+includes = ["missing-pack"]
+
+[[agent]]
+name = "mayor"
+
+[packs.missing-pack]
+source = "https://example.com/missing.git"
+ref = "main"
+path = "packs/missing"
+`
+		writeRigAnywhereCityToml(t, unrelatedCity, unrelatedTOML)
+		writeRigAnywhereLegacyOrderPack(t, unrelatedCity)
+
+		reg := registryAt(t, gcHome)
+		if err := reg.Register(cityPath, "quiet-remove"); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.Register(unrelatedCity, "unrelated-noisy"); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.RegisterRig(rigDir, "quiet-rig", cityPath); err != nil {
+			t.Fatal(err)
+		}
+
+		var logs bytes.Buffer
+		oldWriter := log.Writer()
+		oldFlags := log.Flags()
+		oldPrefix := log.Prefix()
+		log.SetOutput(&logs)
+		log.SetFlags(0)
+		log.SetPrefix("")
+		t.Cleanup(func() {
+			log.SetOutput(oldWriter)
+			log.SetFlags(oldFlags)
+			log.SetPrefix(oldPrefix)
+		})
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("quiet-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+		if strings.Contains(logs.String(), "deprecated order path") {
+			t.Fatalf("cmdRigRemove emitted unrelated order migration warning:\n%s", logs.String())
+		}
+		if !strings.Contains(logs.String(), "not found, skipping") {
+			t.Fatalf("cmdRigRemove suppressed non-order config diagnostics; logs:\n%s", logs.String())
+		}
+		if !strings.Contains(stdout.String(), "Removed rig 'quiet-rig'") {
+			t.Fatalf("stdout = %q, want removal confirmation", stdout.String())
+		}
+	})
+
+	t.Run("does_not_emit_deprecated_order_warnings_from_new_default_city", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityA := setupCity(t, "quiet-default-a")
+		cityB := setupCity(t, "quiet-default-b")
+		rigDir := filepath.Join(t.TempDir(), "quiet-default-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, cp := range []string{cityA, cityB} {
+			toml := "[workspace]\nname = \"" + filepath.Base(cp) + "\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"quiet-default-rig\"\npath = \"" + rigDir + "\"\n"
+			writeRigAnywhereCityToml(t, cp, toml)
+		}
+		writeRigAnywhereLegacyOrderPack(t, cityB)
+
+		reg := registryAt(t, gcHome)
+		if err := reg.Register(cityA, "quiet-default-a"); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.Register(cityB, "quiet-default-b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.RegisterRig(rigDir, "quiet-default-rig", cityA); err != nil {
+			t.Fatal(err)
+		}
+
+		var logs bytes.Buffer
+		oldWriter := log.Writer()
+		oldFlags := log.Flags()
+		oldPrefix := log.Prefix()
+		log.SetOutput(&logs)
+		log.SetFlags(0)
+		log.SetPrefix("")
+		t.Cleanup(func() {
+			log.SetOutput(oldWriter)
+			log.SetFlags(oldFlags)
+			log.SetPrefix(oldPrefix)
+		})
+
+		cityFlag = cityA
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("quiet-default-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+		if strings.Contains(logs.String(), "deprecated order path") {
+			t.Fatalf("cmdRigRemove emitted new default city order migration warning:\n%s", logs.String())
+		}
+		entry, ok := reg.LookupRigByName("quiet-default-rig")
+		if !ok {
+			t.Fatal("rig should remain registered in the new default city")
+		}
+		assertSameTestPath(t, entry.DefaultCity, cityB)
 	})
 
 	t.Run("clears_default_when_removed_city_was_default", func(t *testing.T) {

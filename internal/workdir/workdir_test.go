@@ -124,6 +124,19 @@ func TestResolveWorkDirPathStrictRejectsInvalidTemplate(t *testing.T) {
 	}
 }
 
+func TestExpandCommandTemplateFallsBackToCityDirBase(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	agent := config.Agent{Name: "worker"}
+
+	got, err := ExpandCommandTemplate("echo {{.CityName}}", cityPath, "", agent, nil)
+	if err != nil {
+		t.Fatalf("ExpandCommandTemplate() error = %v, want nil", err)
+	}
+	if got != "echo demo-city" {
+		t.Fatalf("ExpandCommandTemplate() = %q, want %q", got, "echo demo-city")
+	}
+}
+
 func TestConfiguredRigNameMatchesSymlinkAliasPath(t *testing.T) {
 	root := t.TempDir()
 	realRoot := filepath.Join(root, "real")

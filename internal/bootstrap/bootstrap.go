@@ -352,13 +352,13 @@ func writeImplicitFile(path string, imports map[string]implicitImport) error {
 	for _, name := range names {
 		imp := imports[name]
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("[imports.%q]\n", name))
-		b.WriteString(fmt.Sprintf("source = %q\n", imp.Source))
+		fmt.Fprintf(&b, "[imports.%q]\n", name)      //nolint:errcheck
+		fmt.Fprintf(&b, "source = %q\n", imp.Source) //nolint:errcheck
 		if imp.Version != "" {
-			b.WriteString(fmt.Sprintf("version = %q\n", imp.Version))
+			fmt.Fprintf(&b, "version = %q\n", imp.Version) //nolint:errcheck
 		}
 		if imp.Commit != "" {
-			b.WriteString(fmt.Sprintf("commit = %q\n", imp.Commit))
+			fmt.Fprintf(&b, "commit = %q\n", imp.Commit) //nolint:errcheck
 		}
 	}
 

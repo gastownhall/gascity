@@ -63,6 +63,9 @@ func expandRalph(step *Step) ([]*Step, error) {
 	control := cloneStep(step)
 	control.Ralph = nil
 	control.Children = nil
+	// Runtime control metadata keeps legacy ralph keys so existing controller
+	// and dispatch paths remain stable while the public formula surface uses
+	// the canonical "check" spelling.
 	control.Metadata = withMetadata(control.Metadata, map[string]string{
 		"gc.kind":          "ralph",
 		"gc.step_id":       step.ID,
@@ -85,6 +88,8 @@ func expandRalph(step *Step) ([]*Step, error) {
 	iteration.Ralph = nil
 	iteration.OnComplete = nil
 	iteration.Children = nil
+	// These runtime keys are internal control-bead metadata, not user-facing
+	// formula syntax, so they intentionally retain legacy ralph naming.
 	iteration.Metadata = withMetadata(iteration.Metadata, map[string]string{
 		"gc.attempt":       strconv.Itoa(attempt),
 		"gc.step_id":       step.ID,

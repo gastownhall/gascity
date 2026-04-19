@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -321,9 +322,9 @@ func TestBuildSlingCommand(t *testing.T) {
 		{"custom {} script {}", "ID-1", "custom 'ID-1' script 'ID-1'"},
 	}
 	for _, tt := range tests {
-		got := buildSlingCommand(tt.template, tt.beadID)
+		got := sling.BuildSlingCommand(tt.template, tt.beadID)
 		if got != tt.want {
-			t.Errorf("buildSlingCommand(%q, %q) = %q, want %q", tt.template, tt.beadID, got, tt.want)
+			t.Errorf("BuildSlingCommand(%q, %q) = %q, want %q", tt.template, tt.beadID, got, tt.want)
 		}
 	}
 }
@@ -343,6 +344,38 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("gc.routed_to = %q, want mayor", bead.Metadata["gc.routed_to"])
+	}
+	if !strings.Contains(stdout.String(), "Slung BL-42") {
+		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
+	}
+}
+
+func TestDoSlingPinnedDefaultSlingQueryUsesBuiltInRouting(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "mayor",
+		MaxActiveSessions: intPtr(1),
+		SlingQuery:        "bd update {} --set-metadata gc.routed_to=mayor",
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("got %d runner calls, want 0 for pinned default sling_query: %v", len(runner.calls), runner.calls)
 	}
 	bead, err := deps.Store.Get("BL-42")
 	if err != nil {
@@ -818,6 +851,36 @@ func TestDoSlingCustomSlingQuery(t *testing.T) {
 	}
 }
 
+func TestDoSlingCustomSlingQueryExpandsTemplateContext(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigPath := filepath.Join(cityPath, "frontend")
+	a := config.Agent{
+		Name:       "worker",
+		Dir:        "frontend",
+		SlingQuery: "custom-dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "frontend", Path: rigPath}},
+		Agents: []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = cityPath
+	deps.CityName = ""
+	opts := testOpts(a, "FR-99")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	want := "custom-dispatch 'FR-99' --route=frontend/worker --city=demo-city"
+	if runner.calls[0] != want {
+		t.Errorf("runner call = %q, want %q", runner.calls[0], want)
+	}
+}
+
 func TestCmdSlingUsesRigScopedFileStoreForBuiltInRouting(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
@@ -887,6 +950,45 @@ dir = "frontend"
 	}
 	if len(cityBeads) != 0 {
 		t.Fatalf("city store bead count = %d, want 0: %#v", len(cityBeads), cityBeads)
+	}
+}
+
+func TestSlingStoreEnvUsesRigBdRuntimeForMixedProviderRig(t *testing.T) {
+	cityDir := t.TempDir()
+	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+	rigDir := filepath.Join(cityDir, "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"repo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+
+	env := slingStoreEnv(cfg, cityDir, rigDir)
+	if got := env["GC_DOLT_PORT"]; got != wantPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	}
+	if got := env["GC_RIG"]; got != "repo" {
+		t.Fatalf("GC_RIG = %q, want %q", got, "repo")
 	}
 }
 
@@ -2716,7 +2818,7 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
 }
 
-func TestOnFormulaPoolAttachmentLeavesLegacyStepsUnrouted(t *testing.T) {
+func TestOnFormulaPoolAttachmentRoutesLegacyStepsToTarget(t *testing.T) {
 	dir := testFormulaDir(t)
 	content := `
 formula = "multi-step"
@@ -2789,8 +2891,15 @@ needs = ["prep"]
 		if bead.ParentID == "BL-42" {
 			t.Fatalf("internal bead %s ParentID = %q, want not outer bead", bead.ID, bead.ParentID)
 		}
-		if bead.Metadata["gc.routed_to"] != "" {
-			t.Fatalf("internal bead %s gc.routed_to = %q, want empty", bead.ID, bead.Metadata["gc.routed_to"])
+		// Regression for #796: legacy [[steps]] formulas must stamp
+		// gc.routed_to on every internal step bead so EffectiveWorkQuery
+		// tier-3 and pool scale_check see the work. The sling target is
+		// "repo/polecat".
+		if bead.Ref == "" {
+			continue
+		}
+		if got := bead.Metadata["gc.routed_to"]; got != a.QualifiedName() {
+			t.Fatalf("internal bead %s gc.routed_to = %q, want %q", bead.ID, got, a.QualifiedName())
 		}
 	}
 }
@@ -3002,6 +3111,34 @@ func TestDryRunSingleBead(t *testing.T) {
 	// Zero mutations.
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (dry-run): %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunSingleBeadExpandsSlingQuerySummary(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "/city/frontend"}},
+	}
+	a := config.Agent{
+		Name:       "worker",
+		Dir:        "frontend",
+		SlingQuery: "custom-dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+	q := &fakeQuerier{bead: beads.Bead{ID: "FR-42", Title: "Implement login page", Type: "task", Status: "open"}}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "FR-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Sling query: custom-dispatch {} --route=frontend/worker --city=test-city") {
+		t.Fatalf("stdout missing expanded sling query: %s", out)
 	}
 }
 

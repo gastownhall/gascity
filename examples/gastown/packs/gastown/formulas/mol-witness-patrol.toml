@@ -169,7 +169,7 @@ Our job is to ensure work reaches the branch so it's schedulable.
 
 Read the bead metadata to find the worktree and branch:
 ```bash
-META=$(gc bd show <bead> --json | jq '.metadata')
+META=$(gc bd show <bead> --json | jq '.[0].metadata')
 WORKTREE=$(echo "$META" | jq -r '.worktree // empty')
 BRANCH=$(echo "$META" | jq -r '.branch // empty')
 ```

@@ -601,6 +601,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 	checks := map[string]string{
 		"GC_CITY":         cityDir,
 		"GC_CITY_PATH":    cityDir,
+		"BEADS_DIR":       filepath.Join(rigDir, ".beads"),
 		"GC_STORE_ROOT":   rigDir,
 		"GC_STORE_SCOPE":  "rig",
 		"GC_BEADS_PREFIX": "fe",
@@ -1114,7 +1115,23 @@ func (f *closeFailStore) CloseAll(_ []string, _ map[string]string) (int, error) 
 	return f.closeN, fmt.Errorf("close failed")
 }
 
+type labelFailListStore struct {
+	beads.Store
+	failLabel string
+}
+
+func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == s.failLabel {
+		return nil, fmt.Errorf("list failed for %s", query.Label)
+	}
+	return s.Store.List(query)
+}
+
 // --- helpers ---
+
+func successfulExec(context.Context, string, string, []string) ([]byte, error) {
+	return nil, nil
+}
 
 // buildOrderDispatcherFromList builds a dispatcher from pre-scanned orders,
 // bypassing the filesystem scan. Returns nil if no auto-dispatchable orders.
@@ -1125,9 +1142,15 @@ func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep event
 // buildOrderDispatcherFromListExec builds a dispatcher with exec runner support.
 func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep events.Provider, execRun ExecRunner, rec events.Recorder) orderDispatcher {
 	var auto []orders.Order
+	cfg := &config.City{}
+	seenRigs := make(map[string]bool)
 	for _, a := range aa {
 		if a.Gate != "manual" {
 			auto = append(auto, a)
+		}
+		if a.Rig != "" && !seenRigs[a.Rig] {
+			cfg.Rigs = append(cfg.Rigs, config.Rig{Name: a.Rig, Path: a.Rig})
+			seenRigs[a.Rig] = true
 		}
 	}
 	if len(auto) == 0 {
@@ -1141,13 +1164,14 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 	}
 	return &memoryOrderDispatcher{
 		aa: auto,
-		storeFn: func() (beads.Store, error) {
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
 		},
 		ep:      ep,
 		execRun: execRun,
 		rec:     rec,
 		stderr:  &bytes.Buffer{},
+		cfg:     cfg,
 	}
 }
 
@@ -1372,6 +1396,350 @@ pool = "worker"
 	work := workBeadByOrderLabel(t, store, "order-run:file-order")
 	if work.Metadata["gc.routed_to"] != "worker" {
 		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "worker")
+	}
+}
+
+func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	cityLayer := filepath.Join(cityDir, "formulas")
+	rigLayer := filepath.Join(rigDir, "formulas")
+	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+formula = "test-formula"
+gate = "cooldown"
+interval = "1m"
+pool = "worker"
+`)
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(test-formula): %v", err)
+	}
+	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "ct"},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, rigLayer},
+			},
+		},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	cityRuns := trackingBeads(t, cityStore, "order-run:rig-digest:rig:frontend")
+	if len(cityRuns) != 0 {
+		t.Fatalf("city store has %d rig order bead(s), want 0", len(cityRuns))
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	work := workBeadByOrderLabel(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if work.Metadata["gc.routed_to"] != "frontend/worker" {
+		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "frontend/worker")
+	}
+}
+
+func TestBuildOrderDispatcherRigOrderHonorsLegacyCityRunHistory(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	cityLayer := filepath.Join(cityDir, "formulas")
+	rigLayer := filepath.Join(rigDir, "formulas")
+	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+formula = "test-formula"
+gate = "cooldown"
+interval = "24h"
+pool = "worker"
+`)
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(test-formula): %v", err)
+	}
+	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "legacy rig digest run",
+		Labels: []string{"order-run:rig-digest:rig:frontend"},
+	}); err != nil {
+		t.Fatalf("Create(legacy city run): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "ct"},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, rigLayer},
+			},
+		},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if len(rigRuns) != 0 {
+		t.Fatalf("rig store has %d new run bead(s), want 0 because legacy city run is still inside cooldown", len(rigRuns))
+	}
+}
+
+func TestOrderDispatchSkipsRigOrderWhenLegacyCityFallbackUnavailable(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "rig-digest",
+			Rig:          "frontend",
+			Gate:         "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			Pool:         "worker",
+			FormulaLayer: sharedTestFormulaDir,
+		}},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			if target.ScopeKind == "city" {
+				return nil, fmt.Errorf("legacy city store unavailable")
+			}
+			return rigStore, nil
+		},
+		execRun:    shellExecRunner,
+		rec:        events.Discard,
+		stderr:     stderr,
+		maxTimeout: time.Minute,
+		cfg: &config.City{
+			Rigs: []config.Rig{{
+				Name: "frontend",
+				Path: "frontend",
+			}},
+		},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if len(rigRuns) != 0 {
+		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy city fallback cannot be checked", len(rigRuns))
+	}
+	if !strings.Contains(stderr.String(), "legacy city store") {
+		t.Fatalf("stderr missing legacy fallback error:\n%s", stderr.String())
+	}
+}
+
+func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order:release-watch:rig:frontend",
+	}
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    "release-watch",
+			Rig:     "frontend",
+			Gate:    "event",
+			On:      events.BeadClosed,
+			Exec:    "true",
+			Pool:    "worker",
+			Timeout: "1m",
+		}},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			if target.ScopeKind == "city" {
+				return legacyStore, nil
+			}
+			return rigStore, nil
+		},
+		ep:      eventLog,
+		execRun: successfulExec,
+		rec:     events.Discard,
+		stderr:  stderr,
+		cfg: &config.City{
+			Rigs: []config.Rig{{
+				Name: "frontend",
+				Path: "frontend",
+			}},
+		},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	rigRuns := trackingBeads(t, rigStore, "order-run:release-watch:rig:frontend")
+	if len(rigRuns) != 0 {
+		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy event cursor cannot be read", len(rigRuns))
+	}
+	if !strings.Contains(stderr.String(), "event cursor") {
+		t.Fatalf("stderr missing event cursor error:\n%s", stderr.String())
+	}
+}
+
+func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:rig-digest:rig:frontend",
+	}
+
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    "rig-digest",
+			Rig:     "frontend",
+			Gate:    "condition",
+			Check:   "true",
+			Exec:    "true",
+			Pool:    "worker",
+			Timeout: "1m",
+		}},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			if target.ScopeKind == "city" {
+				return legacyStore, nil
+			}
+			return rigStore, nil
+		},
+		execRun: successfulExec,
+		rec:     events.Discard,
+		stderr:  stderr,
+		cfg: &config.City{
+			Rigs: []config.Rig{{
+				Name: "frontend",
+				Path: "frontend",
+			}},
+		},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if len(rigRuns) != 0 {
+		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy open-work state cannot be read", len(rigRuns))
+	}
+	if !strings.Contains(stderr.String(), "open work") {
+		t.Fatalf("stderr missing open-work error:\n%s", stderr.String())
+	}
+}
+
+func TestOrderDispatchSkipsRigCooldownWhenLegacyLastRunReadFails(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:rig-digest:rig:frontend",
+	}
+
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "rig-digest",
+			Rig:          "frontend",
+			Gate:         "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			Pool:         "worker",
+			FormulaLayer: sharedTestFormulaDir,
+		}},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			if target.ScopeKind == "city" {
+				return legacyStore, nil
+			}
+			return rigStore, nil
+		},
+		execRun:    shellExecRunner,
+		rec:        events.Discard,
+		stderr:     stderr,
+		maxTimeout: time.Minute,
+		cfg: &config.City{
+			Rigs: []config.Rig{{
+				Name: "frontend",
+				Path: "frontend",
+			}},
+		},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if len(rigRuns) != 0 {
+		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy last-run state cannot be read", len(rigRuns))
+	}
+	if !strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("stderr missing last-run error:\n%s", stderr.String())
 	}
 }
 

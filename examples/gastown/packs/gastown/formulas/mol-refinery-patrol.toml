@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 1
+version = 2
 
 [vars]
 [vars.run_tests]
@@ -116,7 +116,7 @@ WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
 
 If found: read the bead metadata to confirm it has a branch:
 ```bash
-gc bd show $WORK --json | jq '.metadata'
+gc bd show $WORK --json | jq '.[0].metadata'
 ```
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
@@ -142,8 +142,8 @@ description = """
 
 Read the work bead metadata:
 ```bash
-BRANCH=$(gc bd show $WORK --json | jq -r '.metadata.branch')
-TARGET=$(gc bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
+BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
+TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 ```
 
 Fetch and attempt mechanical rebase:
@@ -221,8 +221,8 @@ If any check or test FAILED:
 
 Read the current branch and target again:
 ```bash
-BRANCH=$(gc bd show $WORK --json | jq -r '.metadata.branch')
-TARGET=$(gc bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
+BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
+TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 ```
 
 1. Diagnose: branch regression or pre-existing on target?
@@ -271,11 +271,100 @@ description = """
 
 Read the merge target and merge strategy from the work bead metadata:
 ```bash
-BRANCH=$(gc bd show $WORK --json | jq -r '.metadata.branch')
-TARGET=$(gc bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
-MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"')
+BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
+TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
+MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
+EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
+ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
 if [ "$MERGE_STRATEGY" = "pr" ]; then
   MERGE_STRATEGY="mr"
+fi
+if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
+  echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
+  MERGE_STRATEGY="mr"
+fi
+
+block_existing_pr() {
+  reason="$1"
+  gc bd update $WORK \
+    --assignee="" \
+    --set-metadata merge_result=blocked \
+    --set-metadata gc.routed_to=human \
+    --set-metadata blocked_reason="$reason"
+  gc mail send mayor/ -s "ESCALATION: invalid existing_pr for $WORK" -m "$reason
+Work bead: $WORK
+Existing PR: $EXISTING_PR
+Branch: $BRANCH
+Target: $TARGET"
+  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+  gc bd update "$NEXT" --assignee=$GC_AGENT
+  CURRENT_WISP=${GC_BEAD_ID:-}
+  if [ -n "$CURRENT_WISP" ]; then
+    gc bd mol burn "$CURRENT_WISP" --force
+  else
+    echo "Could not infer current wisp; burn this wisp manually after recording the summary."
+  fi
+  echo "$reason"
+  echo "STOP. Existing PR metadata needs human correction."
+  gc runtime drain-ack
+  exit 1
+}
+
+pr_lookup_missing() {
+  case "$1" in
+    *"Could not resolve to a PullRequest"*|*"could not resolve to a PullRequest"*|*"no pull requests found"*|*"Not Found"*|*"not found"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
+  if [ -z "$BRANCH" ] || [ "$BRANCH" = "null" ]; then
+    block_existing_pr "metadata.existing_pr is set but metadata.branch is missing."
+  fi
+
+  if [ -z "$ORIGIN_REPO" ]; then
+    echo "Could not resolve origin repository for existing PR validation. STOP. Debug and retry without mutating bead state."
+    gc runtime drain-ack
+    exit 1
+  fi
+
+  EXISTING_PR_ERR=$(mktemp)
+  EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")
+  EXISTING_PR_STATUS=$?
+  EXISTING_PR_ERROR=$(cat "$EXISTING_PR_ERR")
+  rm -f "$EXISTING_PR_ERR"
+  if [ "$EXISTING_PR_STATUS" -ne 0 ] || [ -z "$EXISTING_PR_INFO" ]; then
+    if pr_lookup_missing "$EXISTING_PR_ERROR"; then
+      block_existing_pr "Existing PR $EXISTING_PR was not found or is not accessible."
+    fi
+    echo "Could not resolve existing PR $EXISTING_PR. STOP. Debug and retry without mutating bead state."
+    [ -n "$EXISTING_PR_ERROR" ] && echo "$EXISTING_PR_ERROR"
+    gc runtime drain-ack
+    exit 1
+  fi
+
+  EXISTING_PR_STATE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.state')
+  EXISTING_PR_HEAD=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRefName')
+  EXISTING_PR_BASE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.baseRefName')
+  EXISTING_PR_URL=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.url')
+  EXISTING_PR_REPO=$(printf '%s\n' "$EXISTING_PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')
+  EXISTING_PR_HEAD_REPO=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')
+
+  if [ "$EXISTING_PR_STATE" != "OPEN" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR is $EXISTING_PR_STATE, want OPEN."
+  fi
+  if [ "$EXISTING_PR_HEAD" != "$BRANCH" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR targets branch $EXISTING_PR_HEAD, want $BRANCH."
+  fi
+  if [ "$EXISTING_PR_BASE" != "$TARGET" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR targets base $EXISTING_PR_BASE, want $TARGET."
+  fi
+  if [ "$EXISTING_PR_REPO" != "$ORIGIN_REPO" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR belongs to repo $EXISTING_PR_REPO, want $ORIGIN_REPO."
+  fi
+  if [ "$EXISTING_PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO."
+  fi
 fi
 ```
 
@@ -322,10 +411,14 @@ request and treats PR creation as the terminal handoff for this work bead.
 git checkout temp
 git push origin HEAD:$BRANCH --force-with-lease
 ```
+If `--force-with-lease` fails, the existing PR branch moved after your
+fetch. STOP, fetch the latest branch, rebase your temp branch again, and
+retry with `--force-with-lease`. Do not use plain `--force`.
 
-**2. Create or discover the pull request:**
+**2. Reuse, create, or discover the pull request:**
 ```bash
-ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.title')
+EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
+ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.[0].title')
 PR_BODY=$(cat <<EOF
 ## Summary
 
@@ -338,27 +431,91 @@ Automated pull request published by Gastown Refinery.
 EOF
 )
 
-PR_URL=$(gh pr create \
-  --base "$TARGET" \
-  --head "$BRANCH" \
-  --title "$ISSUE_TITLE ($WORK)" \
-  --body "$PR_BODY" 2>/dev/null || true)
+if [ -n "$EXISTING_PR" ]; then
+  PR_REF="$EXISTING_PR"
+else
+  PR_URL=$(gh pr create \
+    --base "$TARGET" \
+    --head "$BRANCH" \
+    --title "$ISSUE_TITLE ($WORK)" \
+    --body "$PR_BODY" 2>/dev/null || true)
 
-if [ -z "$PR_URL" ]; then
-  PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+  if [ -z "$PR_URL" ]; then
+    PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+  fi
+  PR_REF="$BRANCH"
 fi
 ```
 
 **3. Verify the pull request exists:**
 ```bash
-PR_INFO=$(gh pr view "$BRANCH" --json url,number,state -q '.url + " " + (.number|tostring) + " " + .state')
-echo "$PR_INFO"
+PR_ERR=$(mktemp)
+PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$PR_REF" 2>"$PR_ERR")
+PR_STATUS=$?
+PR_ERROR=$(cat "$PR_ERR")
+rm -f "$PR_ERR"
+if [ "$PR_STATUS" -ne 0 ] || [ -z "$PR_INFO" ]; then
+  if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then
+    block_existing_pr "Existing PR $EXISTING_PR was not found or is not accessible."
+  fi
+  echo "Pull request $PR_REF was not found."
+  [ -n "$PR_ERROR" ] && echo "$PR_ERROR"
+  gc runtime drain-ack
+  exit 1
+fi
+PR_URL=$(printf '%s\n' "$PR_INFO" | jq -r '.url')
+PR_NUMBER=$(printf '%s\n' "$PR_INFO" | jq -r '.number')
+PR_STATE=$(printf '%s\n' "$PR_INFO" | jq -r '.state')
+PR_HEAD=$(printf '%s\n' "$PR_INFO" | jq -r '.headRefName')
+PR_BASE=$(printf '%s\n' "$PR_INFO" | jq -r '.baseRefName')
+PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')
+PR_HEAD_REPO=$(printf '%s\n' "$PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')
+echo "$PR_URL $PR_NUMBER $PR_STATE $PR_HEAD $PR_BASE $PR_REPO $PR_HEAD_REPO"
+if [ "$PR_STATE" != "OPEN" ]; then
+  if [ -n "$EXISTING_PR" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR is $PR_STATE, want OPEN."
+  fi
+  echo "Pull request $PR_REF is $PR_STATE, want OPEN."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ "$PR_HEAD" != "$BRANCH" ]; then
+  if [ -n "$EXISTING_PR" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR targets branch $PR_HEAD, want $BRANCH."
+  fi
+  echo "Pull request $PR_REF targets branch $PR_HEAD, want $BRANCH."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ "$PR_BASE" != "$TARGET" ]; then
+  if [ -n "$EXISTING_PR" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR targets base $PR_BASE, want $TARGET."
+  fi
+  echo "Pull request $PR_REF targets base $PR_BASE, want $TARGET."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ "$PR_REPO" != "$ORIGIN_REPO" ]; then
+  if [ -n "$EXISTING_PR" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO."
+  fi
+  echo "Pull request $PR_REF belongs to repo $PR_REPO, want $ORIGIN_REPO."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ "$PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
+  if [ -n "$EXISTING_PR" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR head repo $PR_HEAD_REPO, want $ORIGIN_REPO."
+  fi
+  echo "Pull request $PR_REF head repo $PR_HEAD_REPO, want $ORIGIN_REPO."
+  gc runtime drain-ack
+  exit 1
+fi
 ```
 If this command fails or prints empty output: STOP. Debug and retry. Do NOT continue.
 
 **4. Record PR metadata and close the work bead:**
 ```bash
-PR_NUMBER=$(gh pr view "$BRANCH" --json number -q '.number')
 gc bd update $WORK \
   --set-metadata merge_result=pull_request \
   --set-metadata pr_url="$PR_URL" \

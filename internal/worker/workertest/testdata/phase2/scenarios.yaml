@@ -1,0 +1,139 @@
+version: 1
+scenarios:
+  - id: startup-outcome-bound
+    runner: fake-worker
+    phase: phase2
+    kind: startup
+    description: Bounded startup outcome for the deterministic helper.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-BRINGUP-001]
+  - id: startup-command-materialization
+    runner: fake-worker
+    phase: phase2
+    kind: startup_materialization
+    description: Startup command materialization for canonical worker profiles.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-START-001]
+  - id: startup-runtime-config-materialization
+    runner: fake-worker
+    phase: phase2
+    kind: startup_materialization
+    description: Runtime config materialization for resolved worker startup state.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-START-002]
+  - id: input-initial-message-first-start
+    runner: fake-worker
+    phase: phase2
+    kind: input_delivery
+    description: Initial message delivery on the first worker start.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INPUT-001]
+  - id: input-initial-message-resume
+    runner: fake-worker
+    phase: phase2
+    kind: input_delivery
+    description: Initial message suppression after the first start is recorded.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INPUT-002]
+  - id: input-override-defaults
+    runner: fake-worker
+    phase: phase2
+    kind: input_delivery
+    description: Default launch flags remain stable when initial messages are overridden.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INPUT-003]
+  - id: transcript-diagnostics
+    runner: fake-worker
+    phase: phase2
+    kind: transcript
+    description: Malformed transcript diagnostics for degraded and fail-closed history loads.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-TX-003]
+  - id: interaction-signal
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Standalone blocked interaction signal surfaced by the helper.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-000]
+  - id: interaction-pending
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Pending structured interaction visible through the runtime seam.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-001]
+  - id: interaction-respond
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Pending structured interaction clears when approved.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-002]
+  - id: interaction-reject
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Mismatched interaction responses are rejected without clearing state.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-003]
+  - id: interaction-instance-local-dedup
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Interaction deduplication remains scoped to the worker instance.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-004]
+  - id: interaction-durable-history
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Structured interactions remain durable in normalized history.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-005]
+  - id: interaction-lifecycle-history
+    runner: fake-worker
+    phase: phase2
+    kind: interaction
+    description: Dismissed and resumed interaction lifecycle records are stable.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-INT-006]
+  - id: tool-event-normalization
+    runner: fake-worker
+    phase: phase2
+    kind: tool
+    description: Tool use and tool result substrate events survive normalization.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-TOOL-001]
+  - id: tool-event-open-tail
+    runner: fake-worker
+    phase: phase2
+    kind: tool
+    description: Unresolved tool use evidence remains visible at the transcript tail.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-TOOL-002]
+  - id: real-transport-proof
+    runner: tmux-real-transport
+    phase: phase2
+    kind: real_transport
+    description: Non-certifying proof that production tmux launch and nudge transport can carry canonical profile startup input.
+    certification: proof_only
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-TRANSPORT-001]

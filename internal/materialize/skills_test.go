@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -246,6 +247,102 @@ func TestLoadCityCatalogBootstrapMerge(t *testing.T) {
 	// City root + every bootstrap pack root that contributed.
 	if len(cat.OwnedRoots) < 3 {
 		t.Fatalf("want >=3 owned roots (city + 2 bootstrap), got %v", cat.OwnedRoots)
+	}
+}
+
+func TestLoadCityCatalogImportedPackSkills(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	cityPack := t.TempDir()
+	importedPack := t.TempDir()
+
+	cityDir := filepath.Join(cityPack, "skills")
+	importedDir := filepath.Join(importedPack, "skills")
+	mkSkill(t, cityDir, "city-only")
+	mkSkill(t, importedDir, "plan")
+
+	cat, err := LoadCityCatalog(cityDir, config.DiscoveredSkillCatalog{
+		SourceDir:   importedDir,
+		PackDir:     importedPack,
+		PackName:    "tools",
+		BindingName: "ops",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]string, len(cat.Entries))
+	for _, e := range cat.Entries {
+		got[e.Name] = e.Origin
+	}
+	want := map[string]string{
+		"city-only": "city",
+		"ops.plan":  "ops",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries: got %v, want %v", got, want)
+	}
+
+	if len(cat.OwnedRoots) != 2 {
+		t.Fatalf("owned roots = %v, want 2 roots", cat.OwnedRoots)
+	}
+}
+
+func TestLoadCityCatalogPreservesOwnedRootsOnReadError(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	pack := t.TempDir()
+	skillsDir := filepath.Join(pack, "skills")
+	mkSkill(t, skillsDir, "alpha")
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	cat, err := LoadCityCatalog(skillsDir)
+	if err == nil {
+		t.Fatal("LoadCityCatalog should fail when skills dir is unreadable")
+	}
+	if len(cat.OwnedRoots) != 1 {
+		t.Fatalf("owned roots = %v, want 1 root preserved on error", cat.OwnedRoots)
+	}
+	wantRoot, absErr := filepath.Abs(skillsDir)
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if cat.OwnedRoots[0] != wantRoot {
+		t.Fatalf("owned root = %q, want %q", cat.OwnedRoots[0], wantRoot)
+	}
+}
+
+func TestLoadCityCatalogPreservesLaterImportedOwnedRootsOnEarlyReadError(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	laterDir := filepath.Join(t.TempDir(), "later", "skills")
+	mkSkill(t, laterDir, "beta")
+
+	tooLongDir := filepath.Join(t.TempDir(), strings.Repeat("x", 5000))
+	cat, err := LoadCityCatalog("",
+		config.DiscoveredSkillCatalog{
+			SourceDir:   tooLongDir,
+			BindingName: "broken",
+		},
+		config.DiscoveredSkillCatalog{
+			SourceDir:   laterDir,
+			BindingName: "later",
+		},
+	)
+	if err == nil {
+		t.Fatal("LoadCityCatalog should fail when an imported skills dir cannot be stated")
+	}
+
+	wantLater, absErr := filepath.Abs(laterDir)
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if !slices.Contains(cat.OwnedRoots, wantLater) {
+		t.Fatalf("owned roots = %v, want later imported root %q preserved", cat.OwnedRoots, wantLater)
 	}
 }
 

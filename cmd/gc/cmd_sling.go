@@ -19,10 +19,10 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -257,19 +257,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		return 1
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
-	storeEnv := map[string]string{}
-	switch provider := rawBeadsProvider(cityPath); {
-	case provider == "file":
-		// Built-in routing now goes through beads.Store; custom queries own any
-		// provider-specific shell environment when they opt out of that path.
-	case strings.HasPrefix(provider, "exec:"):
-		// Explicit custom sling_query commands own their env for exec providers.
-	default:
-		storeEnv = bdRuntimeEnv(cityPath)
-		if !samePath(storeDir, cityPath) {
-			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
-		}
-	}
+	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
 
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
@@ -343,9 +331,27 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			}
 			return out, nil
 		},
+		Stderr: stderr,
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
+}
+
+func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
+	storeEnv := map[string]string{}
+	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
+	case provider == "file":
+		// Built-in routing now goes through beads.Store; custom queries own any
+		// provider-specific shell environment when they opt out of that path.
+	case strings.HasPrefix(provider, "exec:"):
+		// Explicit custom sling_query commands own their env for exec providers.
+	default:
+		storeEnv = bdRuntimeEnv(cityPath)
+		if !samePath(storeDir, cityPath) {
+			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+		}
+	}
+	return storeEnv
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).
@@ -462,7 +468,7 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
-			slingCmd := buildSlingCommand(agentCfg.EffectiveSlingQuery(), req.BeadID)
+			slingCmd := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs, r.deps.Stderr)
 			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
 			return err
 		}
@@ -882,11 +888,6 @@ func slingFormulaUsesTargetBranch(formula string) bool {
 // the bead store and returns it as GC_SLING_TARGET. Default routing uses
 // gc.routed_to metadata for all agents, but custom sling_query templates may
 // still rely on the resolved concrete session target.
-// buildSlingCommand replaces {} in the sling query template with the bead ID.
-// The bead ID is shell-quoted to prevent command injection.
-func buildSlingCommand(template, beadID string) string {
-	return strings.ReplaceAll(template, "{}", shellquote.Quote(beadID))
-}
 
 // formatBeadLabel formats a bead ID with optional title for display.
 func formatBeadLabel(id, title string) string {
@@ -964,8 +965,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			step.Metadata["gc.run_target"] = routedTo
 			continue
 		}
-		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope", "spec":
+		if sling.IsWorkflowTopologyKind(step.Metadata["gc.kind"]) {
 			continue
 		}
 		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
@@ -1261,7 +1261,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		sp0 := scaleParamsFor(a)
 		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
 			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
-			if sp.IsRunning(sn) {
+			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
+			if err == nil && running {
 				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
 				if !ok {
 					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
@@ -1346,12 +1347,24 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 
 func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
-	running := sp.IsRunning(target.sessionName)
+	obs, err := workerObserveNudgeTarget(target, store, sp)
+	running := err == nil && obs.Running
 	now := time.Now()
-	if running && tryDeliverWaitIdleNudge(target, sp, "sling", msg) {
-		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-		fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
-		return
+	if running {
+		handle, err := workerHandleForNudgeTarget(target, store, sp)
+		if err == nil {
+			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+				Text:     msg,
+				Delivery: worker.NudgeDeliveryWaitIdle,
+				Source:   "sling",
+				Wake:     worker.NudgeWakeLiveOnly,
+			})
+			if nudgeErr == nil && result.Delivered {
+				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
+				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+				return
+			}
+		}
 	}
 
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, store, newQueuedNudge(target.agent.QualifiedName(), msg, "sling", now)); err != nil {
@@ -1387,7 +1400,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 	w("")
 
 	// Target section.
-	printTarget(w, a)
+	printTarget(w, a, deps.CityPath, deps.CityName, deps.Cfg.Rigs, io.Discard)
 
 	// Formula mode.
 	if opts.IsFormula {
@@ -1405,7 +1418,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  This creates a wisp and returns its root bead ID.")
 		w("")
 
-		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), "<wisp-root>")
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), "<wisp-root>", deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
@@ -1466,7 +1479,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("")
 		}
 
-		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), opts.BeadOrFormula)
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), opts.BeadOrFormula, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {
@@ -1501,7 +1514,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	w("")
 
 	// Target section.
-	printTarget(w, a)
+	printTarget(w, a, deps.CityPath, deps.CityName, deps.Cfg.Rigs, io.Discard)
 
 	// Work section — container.
 	w("Work:")
@@ -1558,7 +1571,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	// Route commands.
 	w("Route commands (not executed):")
 	for _, c := range open {
-		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), c.ID)
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), c.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, io.Discard)
 		w("  " + routeCmd)
 	}
 	w("")
@@ -1573,7 +1586,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 }
 
 // printTarget prints the Target section for dry-run output.
-func printTarget(w func(string), a config.Agent) {
+func printTarget(w func(string), a config.Agent, cityPath, cityName string, rigs []config.Rig, stderr io.Writer) {
 	w("Target:")
 	if a.SupportsInstanceExpansion() {
 		sp := scaleParamsFor(&a)
@@ -1585,7 +1598,7 @@ func printTarget(w func(string), a config.Agent) {
 	} else {
 		w("  Agent:       " + a.QualifiedName() + " (non-expanding template)")
 	}
-	sq := a.EffectiveSlingQuery()
+	sq := expandAgentCommandTemplate(cityPath, cityName, &a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	w("  Sling query: " + sq)
 	if !isCustomSlingQuery(a) {
 		if a.SupportsInstanceExpansion() {
@@ -1635,7 +1648,8 @@ func printNudgePreview(w func(string), a config.Agent, cityName string,
 	st := cfg.Workspace.SessionTemplate
 	w("Nudge:")
 	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
-	if sp.IsRunning(sn) {
+	running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+	if err == nil && running {
 		w("  Would nudge " + a.QualifiedName() + " (session " + sn + ").")
 		w("  Currently: running ✓")
 	} else {
@@ -1647,7 +1661,7 @@ func printNudgePreview(w func(string), a config.Agent, cityName string,
 // isCustomSlingQuery returns true if the agent has a user-defined sling_query
 // (not the auto-generated default).
 func isCustomSlingQuery(a config.Agent) bool {
-	return a.SlingQuery != ""
+	return sling.IsCustomSlingQuery(a)
 }
 
 // looksLikeBeadID reports whether s matches the bead ID pattern: an

@@ -55,7 +55,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze in this release wave: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
 | Provider preset merge and lookup | Imported pack providers merge into the city provider map additively, city/local providers shadow imported ones on name collision, and provider lookup layers city overrides onto builtins when supported | Unit | `internal/config/pack.go`, `internal/config/resolve.go` |
 | Prompt naming | `prompt.md` is inert markdown and `prompt.template.md` enables template processing | Unit + testscript | `internal/config/agent_discovery.go`, `cmd/gc/prompt.go` |
-| Overlay discovery | pack-wide `overlays/` and agent-local `agents/<name>/overlay/` are discovered by convention | Unit | `internal/config/agent_discovery.go`, `internal/overlay/overlay.go` |
+| Overlay discovery | pack-wide `overlay/` and agent-local `agents/<name>/overlay/` are discovered by convention | Unit | `internal/config/pack.go`, `internal/config/agent_discovery.go`, `internal/overlay/overlay.go` |
 | Provider overlay filtering | only `per-provider/<provider>/` content for the effective provider is materialized | Unit | `internal/overlay/overlay.go` |
 | Namepool convention | `agents/<name>/namepool.txt` is discovered by convention | Unit | `internal/config/agent_discovery.go` |
 | Template fragments | `template-fragments/` and `agents/<name>/template-fragments/` are discovered and rendered into template prompts | Unit + testscript | `cmd/gc/prompt.go` |
@@ -69,7 +69,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Commands discovery | The default `commands/<name>/run.sh` discovery path works; final manifest shape remains non-gating | Unit + testscript | `internal/config/command_discovery.go` |
 | Doctor discovery | The default `doctor/<name>/run.sh` discovery path works | Unit + testscript | `internal/config/doctor_discovery.go` |
 | Legacy migration rewrite | `gc doctor` inventories legacy Pack/City v1 usage and `gc doctor --fix` performs the safe mechanical rewrites for agent directories, prompt/overlay/namepool moves, and import-oriented composition. Legacy remote `workspace.includes` is a hard-break migration issue, not a runtime compatibility target. | Testscript | `cmd/gc/doctor_v2_checks.go`, migration fix path TBD |
-| Registration naming | `gc register --name` persists `workspace.name` to the chosen registration name before registering; plain `gc register` uses `workspace.name` if present, otherwise `pack.name`, and backfills `workspace.name` before registering | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
+| Registration naming | `gc register --name` stores the chosen machine-local alias in the supervisor registry without mutating `city.toml`; plain `gc register` uses `workspace.name` if present, otherwise `pack.name`, and stores that value in the registry without backfilling `workspace.name` | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
 
 ## Add To CI When Warning Plumbing Lands
 

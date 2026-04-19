@@ -89,6 +89,8 @@ type Client struct {
 	initErr  error  // set when NewClient failed to build the transport (malformed baseURL, etc.)
 }
 
+const sessionMessageTimeout = 4 * time.Minute
+
 // SessionSubmitResponse is the domain-facing shape of POST
 // /v0/city/{cityName}/session/{id}/submit's 202 body. It intentionally
 // shadows genclient.SessionSubmitOutputBody instead of re-exporting it
@@ -316,6 +318,20 @@ func (c *Client) KillSession(id string) error {
 		return err
 	}
 	resp, err := c.cw.PostV0CityByCityNameSessionByIdKillWithResponse(context.Background(), c.cityName, id)
+	return checkMutation(resp, err)
+}
+
+// SendSessionMessage delivers a message to a session via the compatibility
+// POST /v0/city/{cityName}/session/{id}/messages endpoint.
+func (c *Client) SendSessionMessage(id, message string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
+	defer cancel()
+	resp, err := c.cw.SendSessionMessageWithResponse(ctx, c.cityName, id, genclient.SendSessionMessageJSONRequestBody{
+		Message: message,
+	})
 	return checkMutation(resp, err)
 }
 

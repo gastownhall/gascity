@@ -44,16 +44,19 @@ Work beads carry structured metadata for lifecycle tracking and handoff:
 
 | Field | Set by | When | Description |
 |-------|--------|------|-------------|
-| `worktree` | polecat (branch-setup) | Early | Absolute path to git worktree |
+| `work_dir` | polecat (branch-setup) | Early | Absolute path to git worktree |
 | `branch` | polecat (branch-setup) | Early | Source branch name |
 | `target` | polecat (submit) | Late | Target branch (default: {{ .DefaultBranch }}) |
+| `existing_pr` | caller | Before dispatch | Existing PR URL to reuse instead of creating another PR |
+| `pr_url` | refinery | PR handoff | Canonical PR URL recorded after validation |
 | `rejection_reason` | refinery (on failure) | On reject | Why the merge was rejected |
 
-**On branch-setup:** You record `worktree` and `branch` immediately.
+**On branch-setup:** You record `work_dir` and `branch` immediately.
 This enables crash recovery — the witness can find and salvage your work.
 
 **On submission:** You update `branch` (may have changed after rebase),
-set `target`, then reassign to refinery.
+set `target`, then reassign to refinery. If `existing_pr` is present, leave
+it for refinery to validate and canonicalize into `pr_url`.
 
 **On rejection:** The refinery puts the bead back in the pool with
 `rejection_reason` set and the branch intact. A new polecat picks it up,
@@ -61,7 +64,7 @@ sees the existing branch and reason, and resumes instead of redoing everything.
 
 Read metadata:
 ```bash
-gc bd show <issue> --json | jq '.metadata'
+gc bd show <issue> --json | jq '.[0].metadata'
 ```
 
 ## Work Protocol
@@ -129,8 +132,8 @@ conflict, test failure, etc.), and resubmit. Don't redo all the work.
 
 ```bash
 # Check for rejection
-gc bd show <issue> --json | jq -r '.metadata.rejection_reason // empty'
-gc bd show <issue> --json | jq -r '.metadata.branch // empty'
+gc bd show <issue> --json | jq -r '.[0].metadata.rejection_reason // empty'
+gc bd show <issue> --json | jq -r '.[0].metadata.branch // empty'
 
 # If both exist: resume the branch, fix the issue, resubmit
 ```

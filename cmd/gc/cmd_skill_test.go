@@ -65,6 +65,65 @@ func TestSkillListAgentCatalog(t *testing.T) {
 	}
 }
 
+func TestSkillListImportedSharedCatalog(t *testing.T) {
+	clearGCEnv(t)
+	rootDir := t.TempDir()
+	cityDir := filepath.Join(rootDir, "city")
+	packDir := filepath.Join(rootDir, "helper")
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, packDir, "pack.toml", "[pack]\nname = \"helper\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeCatalogFile(t, packDir, "skills/code-review/SKILL.md", "imported skill")
+	writeCatalogFile(t, cityDir, "pack.toml", "[pack]\nname = \"city\"\nversion = \"0.1.0\"\nschema = 2\n\n[imports.helper]\nsource = \"../helper\"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"helper.code-review", "helper"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("skill list output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSkillListAgentCityScopedDirMatchingRigDoesNotShowRigSharedSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "fe")
+	rigSkills := filepath.Join(cityDir, "imports", "helper", "skills")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogFile(t, cityDir, "imports/helper/skills/plan/SKILL.md", "rig-import skill")
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: rigDir}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   rigSkills,
+				BindingName: "helper",
+				PackName:    "helper",
+			}},
+		},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Dir: "fe"},
+		},
+	}
+
+	entries, err := listVisibleSkillEntries(cityDir, cfg, nil, "mayor", "")
+	if err != nil {
+		t.Fatalf("listVisibleSkillEntries: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name == "helper.plan" {
+			t.Fatalf("city-scoped agent should not list rig-shared skill: %+v", entries)
+		}
+	}
+}
+
 func TestSkillListSessionCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

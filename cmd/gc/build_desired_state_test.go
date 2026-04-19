@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -177,6 +178,68 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
 		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
+func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
+		Providers: map[string]config.ProviderSpec{
+			"test": {Command: "echo", PromptMode: "none"},
+		},
+		Agents: []config.Agent{{
+			Name:              "probe",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 1",
+			WorkDir:           "worker",
+			InstallAgentHooks: []string{"gemini"},
+		}},
+	}
+
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(first.State) != 1 {
+		t.Fatalf("first desired state size = %d, want 1", len(first.State))
+	}
+	var firstTP TemplateParams
+	for _, tp := range first.State {
+		firstTP = tp
+	}
+
+	hookPath := filepath.Join(cityPath, "worker", ".gemini", "settings.json")
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("stat gemini hook %q: %v", hookPath, err)
+	}
+
+	firstCfg := templateParamsToConfig(firstTP)
+	wantRelDst := path.Join("worker", ".gemini", "settings.json")
+	foundHook := false
+	for _, entry := range firstCfg.CopyFiles {
+		if entry.RelDst != wantRelDst {
+			continue
+		}
+		foundHook = true
+		if entry.Src != hookPath {
+			t.Fatalf("CopyFiles hook src = %q, want %q", entry.Src, hookPath)
+		}
+	}
+	if !foundHook {
+		t.Fatalf("first fingerprint missing gemini hook copy file %q: %#v", wantRelDst, firstCfg.CopyFiles)
+	}
+
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(second.State) != 1 {
+		t.Fatalf("second desired state size = %d, want 1", len(second.State))
+	}
+	var secondTP TemplateParams
+	for _, tp := range second.State {
+		secondTP = tp
+	}
+	secondCfg := templateParamsToConfig(secondTP)
+
+	if got, want := runtime.CoreFingerprint(secondCfg), runtime.CoreFingerprint(firstCfg); got != want {
+		t.Fatalf("core fingerprint changed after hook install: got %q want %q", got, want)
 	}
 }
 
@@ -989,6 +1052,53 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 	}
 	if dbSlots != 1 {
 		t.Fatalf("db desired slots = %d, want 1", dbSlots)
+	}
+}
+
+func TestRefreshDesiredStateWithSessionBeadsIncludesManualCreatedDuringBuild(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	staleSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load stale snapshot: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "debug api",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:api"},
+		Metadata: map[string]string{
+			"template":       "api",
+			"session_name":   "s-gc-late",
+			"state":          "creating",
+			"manual_session": "true",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "api",
+			StartCommand:      "echo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(0),
+		}},
+	}
+
+	result := buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, nil, staleSnapshot, nil, io.Discard)
+	if _, ok := result.State["s-gc-late"]; ok {
+		t.Fatalf("stale session snapshot unexpectedly included late manual session")
+	}
+	latestSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load latest snapshot: %v", err)
+	}
+	refreshed := refreshDesiredStateWithSessionBeads(result, "test-city", cityPath, cfg, runtime.NewFake(), store, latestSnapshot, io.Discard)
+	tp, ok := refreshed.State["s-gc-late"]
+	if !ok {
+		t.Fatalf("expected refreshed desired state to include late manual session, got keys %v", mapKeys(refreshed.State))
+	}
+	if !tp.ManualSession {
+		t.Fatalf("refreshed manual session flag = false, want true")
 	}
 }
 
@@ -2159,10 +2269,10 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 // paths in buildDesiredState. Different paths (rediscovery, store-backed
 // dependency-floor, realizePoolDesiredSessions) were feeding the same
 // session bead through resolveTemplate with either the base qualified
-// name or a deep-copied instance-agent qualified name. GC_ALIAS is part
-// of the CoreFingerprint allow-list, so the resulting fingerprint flipped
-// every tick and the reconciler drained the live session as config drift.
-// See PR #833.
+// name or a deep-copied instance-agent qualified name. Before GC_ALIAS
+// was excluded from CoreFingerprint, that identity mismatch flipped the
+// fingerprint every tick and the reconciler drained the live session as
+// config drift. See PRs #833 and #869.
 //
 // Pool-instance agents with a stamped pool_slot must resolve to the
 // instance identity; named beads must resolve to the named identity;
@@ -2304,11 +2414,12 @@ func TestSessionBeadConfigAgent_UsesMultipleSessionShapeForMaxZero(t *testing.T)
 // the store-backed dependency-floor path used the base agent identity
 // ("rig/db") while the no-store path used the pool-instance identity
 // ("rig/db-1"). Both paths build FingerprintExtra from their agent and
-// feed qualifiedName into resolveTemplate → GC_ALIAS. GC_ALIAS is part
-// of CoreFingerprint. If a live dep-floor session ever had its bead
-// touched by both code paths, or the system transitioned from no-store
-// to store-backed mid-lifetime, the divergent shape drove the reconciler
-// to declare config drift and drain.
+// feed qualifiedName into resolveTemplate. If a live dep-floor session
+// ever had its bead touched by both code paths, or the system transitioned
+// from no-store to store-backed mid-lifetime, the divergent shape drove
+// the reconciler to declare config drift and drain. GC_ALIAS is no longer
+// a fingerprint input, but the canonicalization still protects the
+// remaining identity-sensitive inputs and runtime-visible identity.
 //
 // The fix canonicalizes the store-backed path onto instance identity to
 // match the no-store branch and realizePoolDesiredSessions. This test
@@ -2395,10 +2506,10 @@ func TestEnsureDependencyOnlyTemplate_StoreBackedUsesInstanceIdentity(t *testing
 // TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 // is the round-trip regression for PR #833's canonicalization. It locks in the
 // actual invariant the fix promises: a pool-managed session bead produces the
-// same CoreFingerprint-contributing (GC_ALIAS, GC_TEMPLATE, FingerprintExtra)
-// triple whether it is resolved through realizePoolDesiredSessions or through
-// canonicalSessionIdentity (the shared helper rediscovery and the store-backed
-// dependency-floor path both use).
+// same identity shape and same CoreFingerprint-contributing (GC_TEMPLATE,
+// FingerprintExtra) pair whether it is resolved through realizePoolDesiredSessions
+// or through canonicalSessionIdentity (the shared helper rediscovery and the
+// store-backed dependency-floor path both use).
 //
 // Catching a regression here matters because the drift bug was silent — the
 // reconciler just drained live sessions every other tick. If a future change
@@ -2473,7 +2584,7 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 	}
 
 	if realizeAlias := realizeTP.Env["GC_ALIAS"]; realizeAlias != helperQN {
-		t.Fatalf("realize GC_ALIAS = %q, canonical helper qn = %q — divergence will oscillate CoreFingerprint across rediscovery/realize",
+		t.Fatalf("realize GC_ALIAS = %q, canonical helper qn = %q — runtime identity diverged across rediscovery/realize",
 			realizeAlias, helperQN)
 	}
 	if want := "gascity/dog"; realizeTP.Env["GC_TEMPLATE"] != want {
@@ -2495,5 +2606,108 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 	// field that drove the original oscillation.
 	if _, has := realizeTP.FPExtra["pool.check"]; has {
 		t.Errorf("realize FPExtra still contains pool.check — fix incomplete: %v", realizeTP.FPExtra)
+	}
+}
+
+// TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate verifies that
+// {{.Rig}} in a pool agent's scale_check is substituted with the configured
+// rig name before the shell command runs — regression test for #793.
+//
+// The scale_check grep-counts the expanded rig name. Literal "{{.Rig}}"
+// never matches the target rig name, so the broken (pre-fix) behavior
+// returns 0; the fixed behavior returns 1 for both rig-specific commands,
+// proving per-rig substitution is happening on each branch.
+func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigAlpha := filepath.Join(cityPath, "alpha")
+	rigBeta := filepath.Join(cityPath, "beta")
+	if err := os.MkdirAll(rigAlpha, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigBeta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: rigAlpha},
+			{Name: "beta", Path: rigBeta},
+		},
+		Agents: []config.Agent{
+			{
+				Name:              "ant",
+				Dir:               "alpha",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				ScaleCheck:        "echo {{.Rig}} | grep -c alpha",
+			},
+			{
+				Name:              "ant",
+				Dir:               "beta",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				ScaleCheck:        "echo {{.Rig}} | grep -c beta",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	alphaCount, ok := dsResult.ScaleCheckCounts["alpha/ant"]
+	if !ok {
+		t.Fatalf("ScaleCheckCounts missing alpha/ant; got %#v", dsResult.ScaleCheckCounts)
+	}
+	if alphaCount != 1 {
+		t.Errorf("alpha/ant scale_check count = %d, want 1 (expansion of {{.Rig}} -> alpha makes grep match)", alphaCount)
+	}
+
+	betaCount, ok := dsResult.ScaleCheckCounts["beta/ant"]
+	if !ok {
+		t.Fatalf("ScaleCheckCounts missing beta/ant; got %#v", dsResult.ScaleCheckCounts)
+	}
+	if betaCount != 1 {
+		t.Errorf("beta/ant scale_check count = %d, want 1 (expansion of {{.Rig}} -> beta makes grep match)", betaCount)
+	}
+}
+
+// TestBuildDesiredState_NamedSessionWorkQueryExpandsRigTemplate verifies that
+// {{.Rig}} in a named-session agent's work_query is substituted before the
+// controller's work-readiness probe runs — regression test for #793, named
+// session path at build_desired_state.go:341.
+func TestBuildDesiredState_NamedSessionWorkQueryExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(cityPath, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			Dir:               "alpha",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+			// work_query must produce non-empty output for on_demand demand.
+			// When {{.Rig}} is expanded the echo yields "alpha", which is
+			// treated as ready work. Unexpanded, the literal "{{.Rig}}" is
+			// still non-empty — so to discriminate, use a grep filter.
+			WorkQuery: "echo {{.Rig}} | grep alpha",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "alpha/dog",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	if !dsResult.NamedSessionDemand["alpha/dog"] {
+		t.Errorf("NamedSessionDemand[alpha/dog] = false, want true (work_query {{.Rig}} should expand to alpha and grep match)")
 	}
 }

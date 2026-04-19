@@ -113,7 +113,7 @@ $ cd ~/my-city
 
 ~/my-city
 $ ls
-agents  assets  city.toml  commands  doctor  formulas  orders  overlays  pack.toml  template-fragments
+agents  assets  city.toml  commands  doctor  formulas  orders  overlay  pack.toml  template-fragments
 ```
 
 At the top level of the city directory:
@@ -161,7 +161,9 @@ To check on the status of your city, use `gc status`:
 ~/my-city
 $ gc status
 my-city  /Users/csells/my-city
-  Controller: standalone (PID 83621)
+  Controller: standalone-managed (PID 83621)
+  Authority: standalone controller PID 83621
+  Next: gc stop /Users/csells/my-city && gc start /Users/csells/my-city to hand ownership to the supervisor
   Suspended:  no
 
 Agents:

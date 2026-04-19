@@ -169,7 +169,7 @@ on_exhausted = "hard_fail"
 // AdoptPR is the test-local adopt-pr workflow fixture.
 const AdoptPR = `description = """
 Test-local adopt-pr workflow used by integration tests.
-Exercises a body scope, setup retries, a Ralph loop, compose.expand fan-out,
+Exercises a body scope, setup retries, a Check loop, compose.expand fan-out,
 Gemini soft-fail retries, finalize, and teardown.
 """
 formula = "mol-adopt-pr-v2"
@@ -220,13 +220,13 @@ on_exhausted = "hard_fail"
 id = "review-loop"
 title = "Review loop"
 needs = ["rebase-check"]
-description = "Ralph loop for iterative review and fixes."
+description = "Check loop for iterative review and fixes."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
-[steps.ralph]
+[steps.check]
 max_attempts = 5
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gc/scripts/checks/adopt-pr-review-approved.sh"
 timeout = "10m"
@@ -240,7 +240,7 @@ description = "Expanded via compose.expand."
 id = "apply-fixes"
 title = "Apply fixes"
 needs = ["review-pipeline"]
-description = "Apply review feedback and mark the Ralph verdict."
+description = "Apply review feedback and mark the Check verdict."
 
 [steps.children.retry]
 max_attempts = 3
@@ -278,7 +278,7 @@ on_exhausted = "hard_fail"
 // PersonalWork is the test-local personal-work workflow fixture.
 const PersonalWork = `description = """
 Test-local personal-work workflow used by integration tests.
-Exercises two Ralph loops, two compose.expand sites, pooled fan-out,
+Exercises two Check loops, two compose.expand sites, pooled fan-out,
 Gemini soft-fail retries, and body teardown without depending on private
 production formulas.
 """
@@ -332,13 +332,13 @@ on_exhausted = "hard_fail"
 id = "design-review-loop"
 title = "Design review loop"
 needs = ["workspace-setup"]
-description = "Ralph loop for iterative design review."
+description = "Check loop for iterative design review."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
-[steps.ralph]
+[steps.check]
 max_attempts = 5
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gc/scripts/checks/design-review-approved.sh"
 timeout = "10m"
@@ -352,7 +352,7 @@ description = "Expanded via compose.expand."
 id = "apply-design-changes"
 title = "Apply design changes"
 needs = ["design-review-pipeline"]
-description = "Apply design review feedback and mark the Ralph verdict."
+description = "Apply design review feedback and mark the Check verdict."
 
 [steps.children.retry]
 max_attempts = 3
@@ -373,13 +373,13 @@ on_exhausted = "hard_fail"
 id = "code-review-loop"
 title = "Code review loop"
 needs = ["implement"]
-description = "Ralph loop for iterative code review."
+description = "Check loop for iterative code review."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
-[steps.ralph]
+[steps.check]
 max_attempts = 5
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gc/scripts/checks/code-review-approved.sh"
 timeout = "10m"
@@ -393,7 +393,7 @@ description = "Expanded via compose.expand."
 id = "apply-code-fixes"
 title = "Apply code fixes"
 needs = ["review-pipeline"]
-description = "Apply code review feedback and mark the Ralph verdict."
+description = "Apply code review feedback and mark the Check verdict."
 
 [steps.children.retry]
 max_attempts = 3

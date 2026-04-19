@@ -129,9 +129,9 @@ func (s *Server) cachedResponse(key string, index uint64) (any, bool) {
 }
 
 // storeResponse caches the typed value under (key, index). No JSON work is
-// performed here; Huma re-serializes on each cache hit at the handler
-// boundary. The map is capped at responseCacheMaxEntries with TTL-based
-// eviction on insert.
+// performed here; Huma serializes on output and cache hits clone through
+// cachedResponseAs. The map is capped at responseCacheMaxEntries with
+// TTL-based eviction on insert.
 func (s *Server) storeResponse(key string, index uint64, v any) {
 	if key == "" {
 		return

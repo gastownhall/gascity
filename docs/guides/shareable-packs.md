@@ -41,7 +41,7 @@ code-review-pack/
 ├── doctor/
 │   └── check-review-tools/
 │       └── run.sh
-├── overlays/
+├── overlay/
 ├── skills/
 ├── mcp/
 ├── template-fragments/

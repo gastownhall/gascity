@@ -90,12 +90,14 @@ Polecats set these metadata fields before assigning a work bead to you:
 - `branch` — source branch name (REQUIRED)
 - `target` — target branch (optional, defaults to {{ .DefaultBranch }})
 - `merge_strategy` — handoff mode (optional, defaults to `direct`)
+- `existing_pr` — existing PR URL to reuse in `mr` / `pr` mode
 
 Read them mechanically:
 ```bash
-gc bd show $WORK --json | jq -r '.metadata.branch'
-gc bd show $WORK --json | jq -r '.metadata.target // "{{ .DefaultBranch }}"'
-gc bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"'
+gc bd show $WORK --json | jq -r '.[0].metadata.branch'
+gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
+gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"'
+gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'
 ```
 
 Never infer a branch name. If `metadata.branch` is missing, reject the bead.
@@ -123,6 +125,19 @@ A new polecat picks up the bead, sees `metadata.branch` and
 In `mr` mode, this pack treats PR creation as the terminal handoff for the
 direct-bead workflow. Record `pr_url` on the work bead, close the bead, and
 leave the source branch intact for the PR lifecycle.
+
+In `mr` / `pr` mode, if `metadata.existing_pr` is set, reuse that PR URL.
+Do not call `gh pr create` for the work bead. Before pushing or closing
+the bead, verify `gh pr view` reports an open same-repository PR whose
+`headRefName` equals `metadata.branch` and whose `baseRefName` equals
+`metadata.target`; then record the canonical PR URL as `pr_url` and close
+the bead when the branch has been pushed. If validation fails, record a
+durable blocked reason on the bead and escalate to mayor instead of
+closing the work.
+
+If `metadata.existing_pr` is present while `merge_strategy` is unset or
+`direct`, treat the handoff as `mr`. An existing PR cannot be validated
+and then ignored by landing directly to the target branch.
 
 ---
 
@@ -162,7 +177,7 @@ alert the witness, not `gc mail send`.
 | Find assigned work | `gc bd list --assignee="$GC_ALIAS" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
-| Read work metadata | `gc bd show $WORK --json \| jq '.metadata'` |
+| Read work metadata | `gc bd show $WORK --json \| jq '.[0].metadata'` |
 | Set metadata field | `gc bd update $WORK --set-metadata key=value` |
 | Remove metadata field | `gc bd update $WORK --unset-metadata key` |
 | Fetch remote branches | `git fetch --prune origin` |

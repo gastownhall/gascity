@@ -149,9 +149,8 @@ func TestE2E_Overlay(t *testing.T) {
 	overlayRel := createOverlayDir(t, cityDir)
 
 	// Update agent config with overlay_dir.
-	city.Workspace.Name = filepath.Base(cityDir)
 	city.Agents[0].OverlayDir = overlayRel
-	writeE2EToml(t, cityDir, city)
+	rewriteE2ETomlPreservingNamedSessions(t, cityDir, city)
 
 	// Start the city.
 	out, err := gc("", "start", cityDir)

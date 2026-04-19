@@ -10,11 +10,17 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
+)
+
+var (
+	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -46,7 +52,31 @@ health. Use --fix to attempt automatic repairs.`,
 
 // doDoctor runs all health checks and prints results.
 func doctorSkipsDoltChecks(cityPath string) bool {
-	return !cityUsesBdStoreContract(cityPath) || os.Getenv("GC_DOLT") == "skip"
+	if os.Getenv("GC_DOLT") == "skip" {
+		return true
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return !cityUsesBdStoreContract(cityPath)
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+}
+
+func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, cityPath, rig.Path)
+		if err != nil || !explicit {
+			return true
+		}
+	}
+	return false
 }
 
 type doltTopologyCheck struct {
@@ -62,7 +92,7 @@ func (c *doltTopologyCheck) Name() string { return "dolt-topology" }
 
 func (c *doltTopologyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
-	if !cityUsesBdStoreContract(c.cityPath) {
+	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
 		r.Status = doctor.StatusOK
 		r.Message = "not using bd-backed Dolt topology"
 		return r
@@ -104,7 +134,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	cfg, cfgErr := loadCityConfig(cityPath)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
-		if cityUsesBdStoreContract(cityPath) {
+		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			d.Register(newDoltTopologyCheck(cityPath, cfg))
 		}
 		if cfg.Dolt.Host != "" || cfg.Dolt.Port != 0 {
@@ -126,6 +156,8 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
+		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
@@ -167,11 +199,12 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	// Data checks.
 	if cfgErr == nil {
+		d.Register(doctor.NewBDSplitStoreCheck(cityPath))
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	skipDolt := doctorSkipsDoltChecks(cityPath)
-	d.Register(doctor.NewDoltServerCheck(cityPath, skipDolt))
+	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
@@ -190,8 +223,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			}
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
+			d.Register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			d.Register(doctor.NewRigDoltServerCheck(cityPath, rig, skipDolt))
+			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 		}

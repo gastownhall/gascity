@@ -27,6 +27,11 @@ func IsControlDispatcherKind(kind string) bool {
 	return graphroute.IsControlDispatcherKind(kind)
 }
 
+// IsWorkflowTopologyKind delegates to graphroute.
+func IsWorkflowTopologyKind(kind string) bool {
+	return graphroute.IsWorkflowTopologyKind(kind)
+}
+
 // GraphRouteRigContext delegates to graphroute.
 func GraphRouteRigContext(route string) string {
 	return graphroute.GraphRouteRigContext(route)

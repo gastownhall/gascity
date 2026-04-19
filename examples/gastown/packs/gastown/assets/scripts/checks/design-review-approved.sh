@@ -19,6 +19,20 @@ json_payload() {
     awk 'found || /^[[:space:]]*[[{]/{ found=1; print }'
 }
 
+bd_json() {
+    local attempt=0
+    local output=""
+    while [ "$attempt" -lt 10 ]; do
+        if output=$(bd "$@" 2>/dev/null | json_payload) && [ -n "$output" ]; then
+            printf '%s\n' "$output"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    return 1
+}
+
 load_verdict() {
     local apply_ref="$1"
     local root_id="$2"
@@ -76,7 +90,7 @@ if [ -z "$BEAD_ID" ]; then
     exit 1
 fi
 
-BEAD_JSON=$(bd show "$BEAD_ID" --json 2>/dev/null | json_payload)
+BEAD_JSON=$(bd_json show "$BEAD_ID" --json)
 ATTEMPT=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.attempt"] // "") else (.metadata["gc.attempt"] // "") end' 2>/dev/null || printf '')
 ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.root_bead_id"] // "") else (.metadata["gc.root_bead_id"] // "") end' 2>/dev/null || printf '')
 if [ -z "$ATTEMPT" ] || [ -z "$ROOT_ID" ]; then

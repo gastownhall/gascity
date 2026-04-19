@@ -14,7 +14,7 @@ This is a companion to [doc-pack-v2.md](doc-pack-v2.md), which covers the pack/c
 
 Agent definitions are split across `[[agent]]` TOML tables and filesystem assets (prompts, overlays, scripts) scattered in separate directory trees. This creates six problems:
 v
-1. **Scattered identity.** There's no single place to understand what an agent is. Adding an agent means editing city.toml *and* creating files in multiple directories (`prompts/`, `overlays/`, `scripts/`).
+1. **Scattered identity.** There's no single place to understand what an agent is. Adding an agent means editing city.toml *and* creating files in multiple directories (`prompts/`, `overlay/`, `scripts/`).
 
 2. **Invisible prompt injection.** Every `.md` file is secretly a Go template. Fragments get injected via `global_fragments` and `inject_fragments` without appearing in the prompt file itself. You can't read a prompt and know what the agent actually sees.
 
@@ -72,7 +72,7 @@ my-city/
 │   └── mayor/
 │       ├── agent.toml
 │       └── prompt.md
-├── overlays/                  # city-wide overlays (all agents)
+├── overlay/                   # city-wide overlays (all agents)
 │   ├── per-provider/
 │   │   ├── claude/
 │   │   │   ├── .claude/
@@ -137,8 +137,8 @@ Overlays are files materialized into the agent's working directory before it sta
 
 Layering order (later wins on file collision):
 
-1. City-wide `overlays/` — universal files (everything outside `per-provider/`)
-2. City-wide `overlays/per-provider/<provider>/` — provider-matched
+1. City-wide `overlay/` — universal files (everything outside `per-provider/`)
+2. City-wide `overlay/per-provider/<provider>/` — provider-matched
 3. Agent-specific `agents/<name>/overlay/` — universal files
 4. Agent-specific `agents/<name>/overlay/per-provider/<provider>/` — provider-matched
 
@@ -217,15 +217,44 @@ Promoting is an explicit human decision — skills don't automatically flow from
 
 MCP (Model Context Protocol) servers provide tools, resources, and prompts to agents over a runtime protocol. Unlike skills (which have a portable file standard), MCP server configuration is provider-specific — each provider embeds it in its own settings file. Gas City abstracts this with a provider-agnostic TOML format.
 
-> **First slice:** MCP discovery and listing are current-city-pack only. Imported-pack MCP catalogs, provider projection, and ownership/reconciliation are later slices.
-
-The first MCP CLI slice is list-only:
+`gc mcp list` is projected-only and target-specific:
 
 ```sh
-gc mcp list
 gc mcp list --agent polecat
 gc mcp list --session <id>
 ```
+
+> **Breaking change:** bare `gc mcp list` with no target flag now
+> errors. Projected MCP depends on a concrete agent or session target,
+> so the un-targeted form has no well-defined meaning. Automation that
+> previously ran `gc mcp list` as a pack-inventory check must switch
+> to `--agent` or `--session`.
+
+When a target has effective MCP, Gas City adopts the provider-native MCP
+surface as GC-managed runtime state. On first adoption the existing
+provider-native content is snapshotted to
+`.gc/mcp-adopted/<provider>/<timestamp>.<ext>` and a one-line warning
+is emitted to stderr, so hand-authored `.mcp.json`/`settings.json`/
+`config.toml` entries can be recovered. Symlinked targets are rejected
+unconditionally — managed targets must be regular files.
+
+Cleanup on each stage-1 reconcile walks `.gc/mcp-managed/` under the
+city root and every **still-attached** rig and removes managed
+markers/targets that no longer have a claimant (agent removed from
+`city.toml`, provider changed, MCP dir deleted). Rigs detached from
+`city.toml` are no longer reachable from the configured roots, so their
+managed markers persist and must be cleaned up manually or via explicit
+`gc rig detach` tooling. GC also adds managed runtime artifacts to the
+local `.gitignore` best-effort, and effective MCP changes participate
+in session fingerprints so affected sessions restart on drift.
+
+> **Template expansion and TOML escaping.** `.template.toml` files are
+> expanded by Go `text/template` *before* TOML parsing. Values that
+> contain `"`, `\`, or newlines can produce invalid TOML — the parse
+> error will point at the expanded file, not your template. Either
+> keep secret values simple strings (no embedded quotes/backslashes)
+> or escape them yourself with Go's `printf "%q"` template function
+> so the expanded output is valid TOML.
 
 #### Definition format
 

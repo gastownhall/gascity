@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"sort"
 	"strings"
 
@@ -15,17 +16,23 @@ func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *conf
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
 		return nil
 	}
-	if !cityUsesBdStoreContract(cityPath) {
-		return nil
-	}
 	var source map[string]string
 	if rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
+			if !scopeUsesManagedBdStoreContract(cityPath, rigRoot) {
+				return nil
+			}
 			source = bdRuntimeEnvForRig(cityPath, cfg, rigRoot)
 		} else {
+			if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+				return nil
+			}
 			source = bdRuntimeEnv(cityPath)
 		}
 	} else {
+		if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+			return nil
+		}
 		source = bdRuntimeEnv(cityPath)
 	}
 	if len(source) == 0 {
@@ -99,8 +106,9 @@ func prefixedWorkQueryForProbe(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	agentCfg *config.Agent,
+	stderr io.Writer,
 ) string {
-	return prefixedWorkQueryForProbeWithEnv(controllerQueryEnv(cityPath, cfg, agentCfg), cfg, cityPath, cityName, store, sessionBeads, agentCfg)
+	return prefixedWorkQueryForProbeWithEnv(controllerQueryEnv(cityPath, cfg, agentCfg), cfg, cityPath, cityName, store, sessionBeads, agentCfg, stderr)
 }
 
 func prefixedWorkQueryForProbeWithEnv(
@@ -111,12 +119,17 @@ func prefixedWorkQueryForProbeWithEnv(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	agentCfg *config.Agent,
+	stderr io.Writer,
 ) string {
-	_ = cityPath
 	if agentCfg == nil {
 		return ""
 	}
 	command := strings.TrimSpace(agentCfg.EffectiveWorkQuery())
+	// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped agents probe with
+	// rig-specific metadata. Mirrors the scale_check expansion in
+	// build_desired_state.go; #793. Malformed templates are logged to
+	// stderr (when supplied) and fall back to the raw command.
+	command = expandAgentCommandTemplate(cityPath, cityName, agentCfg, cfg.Rigs, "work_query", command, stderr)
 	if command == "" || agentCfg.SupportsMultipleSessions() {
 		return prefixShellEnv(queryEnv, command)
 	}

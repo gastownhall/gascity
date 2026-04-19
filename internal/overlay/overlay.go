@@ -150,7 +150,7 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 }
 
 // PerProviderDir is the conventional subdirectory name for provider-specific
-// overlay files. Files in overlays/per-provider/<provider>/ are copied to the
+// overlay files. Files in overlay/per-provider/<provider>/ are copied to the
 // agent's working directory only when the agent's resolved provider matches.
 const PerProviderDir = "per-provider"
 

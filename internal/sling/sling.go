@@ -7,6 +7,7 @@ package sling
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // BeadQuerier can retrieve a single bead by ID.
@@ -104,6 +106,7 @@ type SlingDeps struct {
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
+	Stderr               io.Writer
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution
@@ -340,6 +343,26 @@ func BuildSlingCommand(template, beadID string) string {
 	return strings.ReplaceAll(template, "{}", shellquote.Quote(beadID))
 }
 
+// BuildSlingCommandForAgent expands any PathContext placeholders in a custom
+// sling_query, then replaces {} with the bead ID. Malformed templates fall back
+// to the raw sling_query so routing behavior remains non-fatal.
+func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig, stderr io.Writer) string {
+	if strings.Contains(template, "{{") {
+		expanded, err := workdirutil.ExpandCommandTemplate(template, cityPath, cityName, a, rigs)
+		if err != nil {
+			if stderr != nil {
+				if fieldName == "" {
+					fieldName = "sling_query"
+				}
+				fmt.Fprintf(stderr, "BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)\n", a.QualifiedName(), fieldName, err) //nolint:errcheck
+			}
+		} else {
+			template = expanded
+		}
+	}
+	return BuildSlingCommand(template, beadID)
+}
+
 // FormatBeadLabel formats a bead ID with optional title for display.
 func FormatBeadLabel(id, title string) string {
 	if title != "" {
@@ -421,11 +444,20 @@ func LooksLikeBeadID(s string) bool {
 	return false
 }
 
-// IsCustomSlingQuery reports whether the agent has a custom sling_query
-// (not the default bd-based one).
+func normalizeSlingQuery(query string) string {
+	return strings.Join(strings.Fields(query), " ")
+}
+
+// IsCustomSlingQuery reports whether the agent has a user-defined sling_query
+// whose behavior differs from the built-in metadata-stamping default. Explicit
+// pins of the documented default command retain default routing semantics;
+// bd-based queries with extra side effects still count as custom.
 func IsCustomSlingQuery(a config.Agent) bool {
-	q := strings.TrimSpace(a.EffectiveSlingQuery())
-	return q != "" && !strings.HasPrefix(q, "bd ")
+	q := strings.TrimSpace(a.SlingQuery)
+	if q == "" {
+		return false
+	}
+	return normalizeSlingQuery(q) != normalizeSlingQuery(a.DefaultSlingQuery())
 }
 
 // BeadPriorityOverride reads the priority from an existing bead for use

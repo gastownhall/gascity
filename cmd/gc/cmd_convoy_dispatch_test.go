@@ -1219,6 +1219,46 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeExpandsTemplateCommandsWithCityFallback(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "demo-city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[[rigs]]
+name = "frontend"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevList := workflowServeList
+	t.Cleanup(func() { workflowServeList = prevList })
+
+	var gotQuery string
+	workflowServeList = func(workQuery, _ string, _ map[string]string) ([]hookBead, error) {
+		gotQuery = workQuery
+		return nil, os.ErrDeadlineExceeded
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+
+	err := runWorkflowServe("worker", false, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), os.ErrDeadlineExceeded.Error()) {
+		t.Fatalf("runWorkflowServe error = %v, want wrapped %v", err, os.ErrDeadlineExceeded)
+	}
+	if gotQuery != "bd demo-city frontend worker" {
+		t.Fatalf("workflowServe query = %q, want %q", gotQuery, "bd demo-city frontend worker")
+	}
+}
+
 func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	eventsDir := t.TempDir()
 	ep := newTestProvider(t, eventsDir)
@@ -1260,6 +1300,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	wfcAgent := config.Agent{Name: "control-dispatcher", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}
 	err := runWorkflowServeFollow(
 		wfcAgent,
+		wfcAgent.EffectiveWorkQuery(),
 		t.TempDir(),
 		nil,
 		io.Discard,

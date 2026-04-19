@@ -24,6 +24,7 @@ func newSkillCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Output includes:
   - City pack skills (skills/<name>/SKILL.md under the city root)
+  - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
   - Bootstrap implicit-import pack skills (e.g. core)
   - With --agent/--session: that agent's agents/<name>/skills/ catalog
 
@@ -52,7 +53,7 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List visible skills",
-		Long:  "List the current city pack's visible skills, optionally scoped to an agent or session.",
+		Long:  "List the current shared and agent-local visible skills, optionally scoped to an agent or session.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) != "" && strings.TrimSpace(sessionID) != "" {
@@ -101,6 +102,7 @@ func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Stor
 	// listing reflects what the materializer actually delivers.
 	entries = append(entries, discoverBootstrapSkillEntries()...)
 	if strings.TrimSpace(agentName) == "" && strings.TrimSpace(sessionID) == "" {
+		entries = append(entries, discoverImportedSkillEntries(sharedSkillCatalogInputs(cfg, currentRigContext(cfg)))...)
 		sortVisibilityEntries(entries)
 		return entries, nil
 	}
@@ -110,6 +112,7 @@ func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Stor
 	}
 	// Every agent sees the entire city+bootstrap catalog plus its own
 	// agent-local skills. No attachment filtering.
+	entries = append(entries, discoverImportedSkillEntries(sharedSkillCatalogInputs(cfg, agentRigScopeName(agent, cfg.Rigs)))...)
 	entries = append(entries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
 	sortVisibilityEntries(entries)
 	return entries, nil
@@ -204,6 +207,44 @@ func discoverSkillEntries(root, source string) []visibilityEntry {
 	return discoverSkillDirEntries(filepath.Join(root, "skills"), "skills", source)
 }
 
+func discoverImportedSkillEntries(catalogs []config.DiscoveredSkillCatalog) []visibilityEntry {
+	var out []visibilityEntry
+	for _, catalog := range catalogs {
+		source := strings.TrimSpace(catalog.BindingName)
+		if source == "" {
+			source = strings.TrimSpace(catalog.PackName)
+		}
+		entries, err := os.ReadDir(catalog.SourceDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				continue
+			}
+			skillPath := filepath.Join(catalog.SourceDir, name, "SKILL.md")
+			if info, err := os.Stat(skillPath); err != nil || info.IsDir() {
+				continue
+			}
+			publicName := name
+			if catalog.BindingName != "" {
+				publicName = catalog.BindingName + "." + name
+			}
+			out = append(out, visibilityEntry{
+				Name:   publicName,
+				Source: source,
+				Path:   filepath.ToSlash(skillPath),
+			})
+		}
+	}
+	sortVisibilityEntries(out)
+	return out
+}
+
 func discoverAgentSkillEntries(root, agentName, source string) []visibilityEntry {
 	return discoverSkillDirEntries(filepath.Join(root, "agents", agentName, "skills"), filepath.Join("agents", agentName, "skills"), source)
 }
@@ -234,49 +275,6 @@ func discoverSkillDirEntries(dir, relBase, source string) []visibilityEntry {
 	}
 	sortVisibilityEntries(out)
 	return out
-}
-
-func discoverMcpEntries(root, source string) []visibilityEntry {
-	return discoverMcpDirEntries(filepath.Join(root, "mcp"), "mcp", source)
-}
-
-func discoverAgentMcpEntries(root, agentName, source string) []visibilityEntry {
-	return discoverMcpDirEntries(filepath.Join(root, "agents", agentName, "mcp"), filepath.Join("agents", agentName, "mcp"), source)
-}
-
-func discoverMcpDirEntries(dir, relBase, source string) []visibilityEntry {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var out []visibilityEntry
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name, ok := mcpIdentityForFilename(entry.Name())
-		if !ok {
-			continue
-		}
-		out = append(out, visibilityEntry{
-			Name:   name,
-			Source: source,
-			Path:   filepath.ToSlash(filepath.Join(relBase, entry.Name())),
-		})
-	}
-	sortVisibilityEntries(out)
-	return out
-}
-
-func mcpIdentityForFilename(name string) (string, bool) {
-	switch {
-	case strings.HasSuffix(name, ".template.toml"):
-		return strings.TrimSuffix(name, ".template.toml"), true
-	case strings.HasSuffix(name, ".toml"):
-		return strings.TrimSuffix(name, ".toml"), true
-	default:
-		return "", false
-	}
 }
 
 func sortVisibilityEntries(entries []visibilityEntry) {

@@ -119,7 +119,7 @@ func startCityUnderSupervisor(t *testing.T, c *helpers.City) string {
 		if err != nil {
 			return false
 		}
-		return !strings.Contains(out, "Controller: standalone")
+		return !strings.Contains(out, "Controller: standalone-managed")
 	}, 20*time.Second) {
 		out, err := c.GC("status", c.Dir)
 		t.Fatalf("standalone controller did not stop before supervisor handoff: %v\n%s", err, out)

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
@@ -69,6 +70,35 @@ func TestAgentScopeRoot(t *testing.T) {
 			got := agentScopeRoot(&c.agent, "/city", rigs)
 			if got != c.want {
 				t.Fatalf("agentScopeRoot(%+v) = %q, want %q", c.agent, got, c.want)
+			}
+		})
+	}
+}
+
+func TestAgentRigScopeName(t *testing.T) {
+	t.Parallel()
+
+	rigs := []config.Rig{
+		{Name: "fe", Path: "/rigs/fe"},
+		{Name: "be", Path: "/rigs/be"},
+	}
+	cases := []struct {
+		name  string
+		agent *config.Agent
+		want  string
+	}{
+		{name: "nil agent", agent: nil, want: ""},
+		{name: "city-scoped matching dir stays city", agent: &config.Agent{Scope: "city", Dir: "fe"}, want: ""},
+		{name: "rig-scoped matching dir uses rig", agent: &config.Agent{Scope: "rig", Dir: "fe"}, want: "fe"},
+		{name: "empty scope matching dir defaults to rig", agent: &config.Agent{Dir: "be"}, want: "be"},
+		{name: "plain dir not a rig", agent: &config.Agent{Dir: "workdir"}, want: ""},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := agentRigScopeName(c.agent, rigs); got != c.want {
+				t.Fatalf("agentRigScopeName(%+v) = %q, want %q", c.agent, got, c.want)
 			}
 		})
 	}
@@ -182,6 +212,46 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 	})
 }
 
+func TestSharedSkillCatalogForAgentDoesNotFallBackWhenRigCatalogFails(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "city-shared"))
+
+	badRigCatalog := filepath.Join(cityPath, "broken-rig-catalog")
+	if err := os.Mkdir(badRigCatalog, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badRigCatalog, 0o755) })
+	if _, err := os.ReadDir(badRigCatalog); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Rigs:          []config.Rig{{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   badRigCatalog,
+				BindingName: "ops",
+				PackName:    "helper",
+			}},
+		},
+	}
+
+	var stderr strings.Builder
+	params := newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, &stderr)
+	if params.skillCatalog == nil {
+		t.Fatal("city skill catalog should still load")
+	}
+	if got := params.sharedSkillCatalogForAgent(&config.Agent{Name: "rig-agent", Scope: "rig", Dir: "fe"}); got != nil {
+		t.Fatalf("sharedSkillCatalogForAgent() = %+v, want nil when rig catalog load fails", got)
+	}
+	if !strings.Contains(stderr.String(), `LoadCityCatalog rig "fe"`) {
+		t.Fatalf("stderr = %q, want rig catalog load error", stderr.String())
+	}
+}
+
 func TestMergeSkillFingerprintEntries(t *testing.T) {
 	t.Parallel()
 
@@ -291,7 +361,7 @@ func TestBuildAssignedSkillsPromptFragmentPartitions(t *testing.T) {
 		"### Assigned to you",
 		"`mayor-planning` — Mayor-only strategy",
 		"`planning` — Mayor's planning override",
-		"### Shared (visible to every agent in this city)",
+		"### Shared in this scope",
 		"`code-review` — Review pull requests *(city)*",
 		"`gc-work` — Working with beads *(core)*",
 	}

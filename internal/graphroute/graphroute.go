@@ -61,6 +61,19 @@ func IsControlDispatcherKind(kind string) bool {
 	}
 }
 
+// IsWorkflowTopologyKind reports whether a gc.kind value identifies a
+// workflow-topology step (root workflow, scope latch, or formula spec).
+// Routing never lands on these — they exist to structure the graph, not
+// to be claimed by an agent.
+func IsWorkflowTopologyKind(kind string) bool {
+	switch kind {
+	case "workflow", "scope", "spec":
+		return true
+	default:
+		return false
+	}
+}
+
 // IsCompiledGraphWorkflow reports whether a compiled recipe is a graph.v2
 // workflow.
 func IsCompiledGraphWorkflow(recipe *formula.Recipe) bool {
@@ -426,8 +439,7 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			}
 			continue
 		}
-		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope", "spec":
+		if IsWorkflowTopologyKind(step.Metadata["gc.kind"]) {
 			continue
 		}
 		binding, err := ResolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolvingSet, routeVars, defaultRoute, routingRigContext, store, cityName, cfg, deps)
@@ -443,10 +455,22 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 	return nil
 }
 
-// ApplyGraphRouting decorates a compiled recipe with routing metadata if it
-// is a graph.v2 workflow. No-op for non-graph recipes.
+// ApplyGraphRouting decorates a compiled recipe with routing metadata.
+// For graph.v2 workflows it delegates to DecorateGraphWorkflowRecipe. For
+// legacy [[steps]] recipes it stamps gc.routed_to on every non-root step
+// so EffectiveWorkQuery tier-3 and pool scale_check can see the work
+// (fixes #796). Returns early with no effect when cfg is nil.
 func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City, deps Deps) error {
-	if !IsCompiledGraphWorkflow(recipe) || cfg == nil {
+	if recipe == nil || cfg == nil {
+		return nil
+	}
+
+	// Legacy path runs before agent resolution: it needs only the routedTo
+	// string, and skipping the ResolveAgent call avoids a config-map lookup
+	// and Agent deep-copy on every controller tick that dispatches a legacy
+	// order.
+	if !IsCompiledGraphWorkflow(recipe) {
+		stampLegacyRecipeRouting(recipe, routedTo)
 		return nil
 	}
 
@@ -469,13 +493,35 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 
 	var sessionName string
 	if !agentutil.IsMultiSessionAgent(a) {
-		if true {
-			sessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-			if sessionName == "" {
-				return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
-			}
+		sessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		if sessionName == "" {
+			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
 		}
 	}
 	routeVars := GraphWorkflowRouteVars(recipe, vars)
 	return DecorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, routedTo, sessionName, store, cityName, cfg, deps)
+}
+
+// stampLegacyRecipeRouting mirrors the graph.v2 path in ApplyGraphRouteBinding:
+// routing is set unconditionally on every non-root, non-topology step. The
+// root bead is excluded because InstantiateSlingFormula stamps it via the
+// SlingResult path.
+func stampLegacyRecipeRouting(recipe *formula.Recipe, routedTo string) {
+	routedTo = strings.TrimSpace(routedTo)
+	if recipe == nil || routedTo == "" {
+		return
+	}
+	for i := range recipe.Steps {
+		step := &recipe.Steps[i]
+		if step.IsRoot {
+			continue
+		}
+		if IsWorkflowTopologyKind(step.Metadata["gc.kind"]) {
+			continue
+		}
+		if step.Metadata == nil {
+			step.Metadata = make(map[string]string, 1)
+		}
+		step.Metadata["gc.routed_to"] = routedTo
+	}
 }

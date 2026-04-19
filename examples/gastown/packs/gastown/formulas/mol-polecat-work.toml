@@ -33,7 +33,7 @@ refinery. Resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 7
+version = 8
 
 [[steps]]
 id = "workspace-setup"
@@ -60,7 +60,7 @@ git fetch --prune origin
 
 Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(gc bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -90,16 +90,41 @@ Worktrees are scoped to the work bead (not the agent name) so that:
 
 Check if `metadata.branch` already records a branch:
 ```bash
-BRANCH=$(gc bd show {{issue}} --json | jq -r '.metadata.branch // empty')
+BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
 ```
 
-**If branch exists in metadata** — check it out:
+**If branch exists in metadata** — treat it as authoritative. This
+metadata may come from rejection recovery or from a caller that wants
+work applied to an existing branch. Fetch the named remote branch first.
+If `origin/$BRANCH` exists, make the local branch fast-forward to that
+remote tip or stop on divergence:
 ```bash
-git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/"$BRANCH"
+git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || \
+    echo "Could not fetch metadata.branch=$BRANCH from origin. Checking local refs before stopping."
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+        git checkout "$BRANCH" || exit 1
+        git merge --ff-only "origin/$BRANCH" || {
+            echo "Local branch $BRANCH diverged from origin/$BRANCH."
+            echo "STOP. Reconcile the branch before continuing."
+            gc runtime drain-ack
+            exit 1
+        }
+    else
+        git checkout --track -b "$BRANCH" "origin/$BRANCH" || exit 1
+    fi
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git checkout "$BRANCH" || exit 1
+else
+    echo "metadata.branch=$BRANCH was set but no local or origin branch exists."
+    echo "STOP. Do not create a different branch."
+    gc runtime drain-ack
+    exit 1
+fi
 ```
 If resuming a rejected branch, rebase onto latest base:
 ```bash
-REJECTION=$(gc bd show {{issue}} --json | jq -r '.metadata.rejection_reason // empty')
+REJECTION=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.rejection_reason // empty')
 if [ -n "$REJECTION" ]; then
     git rebase origin/{{base_branch}}
     # If conflicts: resolve them (this is likely the rejection reason)
@@ -172,7 +197,10 @@ gc bd update {{issue}} \
   --notes "Implemented: <brief summary>"
 ```
 Branch was recorded in workspace-setup and is already in metadata.
-This adds the target for the refinery.
+This adds the target for the refinery. If an existing pull request was
+provided by the caller, `metadata.existing_pr` is preserved for refinery
+validation. The refinery records canonical `pr_url` only after verifying
+the PR is open and matches the branch, base, and origin repository.
 
 **5. Reassign to refinery:**
 ```bash

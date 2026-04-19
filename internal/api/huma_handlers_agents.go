@@ -8,7 +8,6 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
@@ -117,7 +116,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 
 			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
-				s.enrichSessionMeta(&resp, a, ea.qualifiedName, cfg)
+				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 			}
 
 			agents = append(agents, resp)
@@ -225,7 +224,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
 
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
-		s.enrichSessionMeta(&resp, agentCfg, name, cfg)
+		s.enrichSessionMeta(&resp, agentCfg, name)
 	}
 
 	return &IndexOutput[agentResponse]{
@@ -425,10 +424,12 @@ func (s *Server) agentOutputByName(name string, tail int, provided bool, before 
 // resolveAgentStream() so precheck failures turn into proper HTTP errors
 // before the SSE response is committed.
 type agentStreamState struct {
-	name    string
-	logPath string
-	running bool
-	cfg     *config.City
+	name           string
+	logPath        string
+	provider       string
+	running        bool
+	cfg            *config.City
+	resolveLogPath func() string
 }
 
 // resolveAgentStream is shared between the precheck and stream callback.
@@ -442,32 +443,36 @@ func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 	}
 
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	}
-
-	var logPath string
-	if workDir != "" {
-		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
-	}
+	provider := transcriptState.provider
+	logPath := transcriptState.path
 
 	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	sessionName := transcriptState.sessionName
 	running := sp.IsRunning(sessionName)
 
 	if logPath == "" && !running {
 		return nil, huma.Error404NotFound("agent " + name + " not running")
 	}
 	return &agentStreamState{
-		name:    name,
-		logPath: logPath,
-		running: running,
-		cfg:     cfg,
+		name:     name,
+		logPath:  logPath,
+		provider: provider,
+		running:  running,
+		cfg:      cfg,
+		resolveLogPath: func() string {
+			if workDir == "" {
+				return ""
+			}
+			resolved, err := s.resolveAgentTranscript(name, agentCfg)
+			if err != nil {
+				return ""
+			}
+			return resolved.path
+		},
 	}, nil
 }
 
@@ -499,9 +504,10 @@ func (s *Server) doStreamAgentOutput(hctx huma.Context, name string, send sse.Se
 		hctx.SetHeader("GC-Agent-Status", "stopped")
 	}
 	ctx := hctx.Context()
+	workerOps := s.watchAgentWorkerOperationSignals(ctx, state.name, state.cfg)
 	if state.logPath != "" {
-		s.streamSessionLog(ctx, send, state.name, state.logPath)
+		s.streamSessionLogHuma(ctx, send, state.name, state.provider, state.logPath, state.resolveLogPath, workerOps)
 	} else {
-		s.streamPeekOutput(ctx, send, state.name, state.cfg)
+		s.streamPeekOutputHuma(ctx, send, state.name, s.agentWorkerHandle(state.name, state.cfg), workerOps)
 	}
 }

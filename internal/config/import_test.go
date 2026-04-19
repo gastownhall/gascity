@@ -1433,6 +1433,57 @@ scope = "city"
 	t.Error("polecat named session not found")
 }
 
+func TestImport_RootNamedSessionCanTargetImportedTemplate(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "employees-pack")
+
+	for _, d := range []string{cityDir, packDir} {
+		mustMkdirAll(t, d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "corp"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "corp"
+schema = 2
+
+[imports.employees]
+source = "../employees-pack"
+
+[[named_session]]
+template = "employees.penny"
+name = "corp--penny-root"
+mode = "on_demand"
+`)
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "employees-pack"
+schema = 2
+
+[[agent]]
+name = "penny"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "employees.penny" {
+		t.Fatalf("TemplateQualifiedName() = %q, want employees.penny", got)
+	}
+	if agent := FindAgent(cfg, cfg.NamedSessions[0].TemplateQualifiedName()); agent == nil {
+		t.Fatal("FindAgent() = nil, want imported employees.penny template")
+	} else if got := agent.QualifiedName(); got != "employees.penny" {
+		t.Fatalf("QualifiedName() = %q, want employees.penny", got)
+	}
+}
+
 func TestImport_ReExportNestedPreservesInnerBinding(t *testing.T) {
 	// outer exports inner, inner imports util (not exported).
 	// Agents from inner should be flattened to outer's binding.

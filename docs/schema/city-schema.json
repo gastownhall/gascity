@@ -169,7 +169,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command whose output determines desired session count.\nOptional override — when set, its output is the desired count (still clamped\nby all cap levels)."
+          "description": "ScaleCheck is a shell command whose output determines desired session count.\nOptional override — when set, its output is the desired count (still clamped\nby all cap levels). If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir (Agent, AgentBase, Rig,\nRigRoot, CityRoot, CityName) before running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -178,11 +178,11 @@
         },
         "on_boot": {
           "type": "string",
-          "description": "OnBoot is a shell command run once at controller startup for this agent."
+          "description": "OnBoot is a shell command run once at controller startup for this agent.\nIf it contains Go template placeholders, gc expands them using work_dir's\nPathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
         },
         "on_death": {
           "type": "string",
-          "description": "OnDeath is a shell command run when a session dies unexpectedly."
+          "description": "OnDeath is a shell command run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using work_dir's\nPathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
         },
         "namepool": {
           "type": "string",
@@ -190,11 +190,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nIf it contains Go template placeholders, gc expands them using work_dir's\nPathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore probe, hook, and prompt-context execution. Prompt templates\nreceive the expanded command, not the raw template literal.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this session config.\nUsed by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+          "description": "SlingQuery is the command template to route a bead to this session config.\nUsed by gc sling to make a bead visible to the target's work_query.\nCustom sling_query values may also use work_dir's PathContext fields\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName); gc expands those\nfirst, then replaces {} with the bead ID at runtime. Prompt and dry-run\nsurfaces receive the expanded command before bead-ID substitution.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nExplicit pins of that default preserve the built-in metadata-routing and\nidempotency fast path. bd-based custom commands with additional side\neffects are treated as custom and rerun when invoked.\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
         },
         "idle_timeout": {
           "type": "string",

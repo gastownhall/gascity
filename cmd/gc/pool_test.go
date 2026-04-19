@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -815,6 +816,38 @@ func TestRunPoolOnBootUsesCanonicalRigEnv(t *testing.T) {
 	}
 }
 
+func TestRunPoolOnBootExpandsTemplateCommands(t *testing.T) {
+	var ran []string
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigRoot := filepath.Join(cityPath, "frontend")
+	runner := func(cmd, _ string, _ map[string]string) (string, error) {
+		ran = append(ran, cmd)
+		return "", nil
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "frontend", Path: rigRoot}},
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				Dir:               "frontend",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+				OnBoot:            "echo {{.CityName}} {{.Rig}} {{.AgentBase}}",
+			},
+		},
+	}
+
+	runPoolOnBoot(cfg, cityPath, runner, io.Discard)
+
+	if len(ran) != 1 {
+		t.Fatalf("ran %d commands, want 1", len(ran))
+	}
+	if ran[0] != "echo demo-city frontend worker" {
+		t.Fatalf("on_boot command = %q, want %q", ran[0], "echo demo-city frontend worker")
+	}
+}
+
 func TestComputePoolDeathHandlers(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
@@ -825,7 +858,7 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		},
 	}
 
-	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake())
+	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake(), nil)
 
 	// dog has max=3, so 3 handlers (dog-1, dog-2, dog-3).
 	// cat has max=1, skipped. mayor is not a pool.
@@ -857,7 +890,7 @@ func TestComputePoolDeathHandlersUsesRigRootForRigScopedPools(t *testing.T) {
 		},
 	}
 
-	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake())
+	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake(), nil)
 	if len(handlers) != 2 {
 		t.Fatalf("len(handlers) = %d, want 2", len(handlers))
 	}
@@ -865,6 +898,67 @@ func TestComputePoolDeathHandlersUsesRigRootForRigScopedPools(t *testing.T) {
 		if info.Dir != rigRoot {
 			t.Fatalf("handler[%s].Dir = %q, want %q", sessionName, info.Dir, rigRoot)
 		}
+	}
+}
+
+func TestComputePoolDeathHandlersExpandsTemplateCommands(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigRoot := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "frontend", Path: rigRoot}},
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				Dir:               "frontend",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+				OnDeath:           "echo {{.CityName}} {{.Rig}} {{.AgentBase}}",
+			},
+		},
+	}
+
+	handlers := computePoolDeathHandlers(cfg, "demo-city", cityPath, runtime.NewFake(), nil)
+	if len(handlers) != 2 {
+		t.Fatalf("len(handlers) = %d, want 2", len(handlers))
+	}
+	for sessionName, info := range handlers {
+		if !strings.Contains(info.Command, "echo demo-city frontend worker-") {
+			t.Fatalf("handler[%s].Command = %q, want expanded on_death template", sessionName, info.Command)
+		}
+	}
+}
+
+func TestComputePoolDeathHandlersLogsTemplateExpansionWarning(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+				OnDeath:           "echo {{.Rig",
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	handlers := computePoolDeathHandlers(cfg, "demo-city", t.TempDir(), runtime.NewFake(), &stderr)
+	if len(handlers) != 2 {
+		t.Fatalf("len(handlers) = %d, want 2", len(handlers))
+	}
+	for sessionName, info := range handlers {
+		if info.Command != "echo {{.Rig" {
+			t.Fatalf("handler[%s].Command = %q, want raw command fallback", sessionName, info.Command)
+		}
+	}
+	if !strings.Contains(stderr.String(), "on_death") {
+		t.Fatalf("stderr missing field name: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "echo {{.Rig") {
+		t.Fatalf("stderr should redact raw template, got %q", stderr.String())
 	}
 }
 
@@ -884,7 +978,7 @@ func TestComputePoolDeathHandlersUsesCanonicalRigEnv(t *testing.T) {
 	cfg.Agents[0].MinActiveSessions = intPtr(0)
 	cfg.Agents[0].MaxActiveSessions = intPtr(2)
 
-	handlers := computePoolDeathHandlers(cfg, "test", cityPath, runtime.NewFake())
+	handlers := computePoolDeathHandlers(cfg, "test", cityPath, runtime.NewFake(), nil)
 	if len(handlers) != 2 {
 		t.Fatalf("len(handlers) = %d, want 2", len(handlers))
 	}
