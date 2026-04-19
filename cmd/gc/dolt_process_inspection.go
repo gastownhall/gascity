@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -74,7 +75,9 @@ func findPortHolderPID(port string) int {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return 0
 	}
-	out, err := exec.Command("lsof", "-i", ":"+strings.TrimSpace(port), "-sTCP:LISTEN", "-t").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+strings.TrimSpace(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
 		return 0
 	}

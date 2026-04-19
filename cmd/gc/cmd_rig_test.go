@@ -2437,7 +2437,7 @@ name = "mayor"
 	isolateRigRegistryEnv(t)
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}

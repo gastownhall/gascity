@@ -1,25 +1,11 @@
 package main
 
 import (
-	"io"
-
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
-
-func newSessionManager(store beads.Store, sp runtime.Provider) *session.Manager {
-	cityPath, err := resolveCity()
-	if err != nil {
-		return session.NewManager(store, sp)
-	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		return session.NewManagerWithCityPath(store, sp, cityPath)
-	}
-	return newSessionManagerWithConfig(cityPath, store, sp, cfg)
-}
 
 func newSessionManagerWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) *session.Manager {
 	if cfg == nil {

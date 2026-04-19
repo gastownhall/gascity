@@ -523,7 +523,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	needsBd := false
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		needsBd = workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 	} else {

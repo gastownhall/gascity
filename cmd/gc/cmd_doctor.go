@@ -54,7 +54,7 @@ func doctorSkipsDoltChecks(cityPath string) bool {
 	if os.Getenv("GC_DOLT") == "skip" {
 		return true
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return !cityUsesBdStoreContract(cityPath)
 	}

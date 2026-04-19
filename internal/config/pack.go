@@ -1022,15 +1022,20 @@ type packLoadResult struct {
 }
 
 func parsePackConfigWithMeta(data []byte, source string) (packConfig, []string, error) {
+	cfg, _, warnings, err := parsePackConfigWithMetadata(data, source)
+	return cfg, warnings, err
+}
+
+func parsePackConfigWithMetadata(data []byte, source string) (packConfig, toml.MetaData, []string, error) {
 	var cfg packConfig
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
-		return packConfig{}, nil, err
+		return packConfig{}, md, nil, err
 	}
 	normalizePackAgentDefaultsAlias(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
-	return cfg, warnings, nil
+	return cfg, md, warnings, nil
 }
 
 func normalizePackAgentDefaultsAlias(cfg *packConfig, meta toml.MetaData) {
@@ -1095,9 +1100,12 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("loading %s: %w", packFile, err)
 	}
 
-	tc, packWarnings, err := parsePackConfigWithMeta(data, topoPath)
+	tc, md, packWarnings, err := parsePackConfigWithMetadata(data, topoPath)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %w", packFile, err)
+	}
+	if fatalWarnings := fatalUndecodedWarnings(md, topoPath); len(fatalWarnings) > 0 {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %s", packFile, strings.Join(fatalWarnings, "; "))
 	}
 	if len(tc.Defaults.Rig.Imports) > 0 {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: [defaults.rig.imports] is only supported in a city root pack.toml", packFile)

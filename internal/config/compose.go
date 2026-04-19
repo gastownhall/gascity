@@ -79,9 +79,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	packPath := filepath.Join(cityRoot, packFile)
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
-		pc, packWarnings, decErr := parsePackConfigWithMeta(packData, packPath)
+		pc, md, packWarnings, decErr := parsePackConfigWithMetadata(packData, packPath)
 		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
+		}
+		if fatalWarnings := fatalUndecodedWarnings(md, packPath); len(fatalWarnings) > 0 {
+			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(fatalWarnings, "; "))
 		}
 		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {

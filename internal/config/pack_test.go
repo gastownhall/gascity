@@ -419,15 +419,15 @@ name = "test"
 [pack]
 name = "test"
 schema = 2
-description = "silently accepted before issue 783"
+legacy_unknown = "silently accepted before issue 783"
 `)
 
 	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
 	if err == nil {
 		t.Fatal("expected error for unknown root pack.toml field")
 	}
-	if !strings.Contains(err.Error(), `unknown field "pack.description"`) {
-		t.Fatalf("error = %v, want unknown field detail for pack.description", err)
+	if !strings.Contains(err.Error(), `unknown field "pack.legacy_unknown"`) {
+		t.Fatalf("error = %v, want unknown field detail for pack.legacy_unknown", err)
 	}
 }
 

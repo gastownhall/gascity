@@ -417,7 +417,7 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		}
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
-	cfg, _ := loadCityConfig(current.cityPath)
+	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	var persistRestart func() error
 	if store != nil {
 		persistRestart = func() error {

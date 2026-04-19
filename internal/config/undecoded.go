@@ -39,16 +39,35 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 			warnings = append(warnings, special)
 			continue
 		}
-		// Skip deeply nested keys — we only warn on section-level and
-		// field-level keys, not on sub-sub-fields of tables.
-		suggestion := suggestKey(keyStr, known)
-		w := fmt.Sprintf("%s: unknown field %q", source, keyStr)
-		if suggestion != "" {
-			w += fmt.Sprintf(" (did you mean %q?)", suggestion)
-		}
-		warnings = append(warnings, w)
+		warnings = append(warnings, unknownFieldWarning(source, keyStr, known))
 	}
 	return warnings
+}
+
+func fatalUndecodedWarnings(md toml.MetaData, source string) []string {
+	undecoded := md.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	known := knownTOMLKeys()
+	var warnings []string
+	for _, key := range undecoded {
+		keyStr := key.String()
+		if _, ok := specializedUndecodedWarning(source, keyStr); ok {
+			continue
+		}
+		warnings = append(warnings, unknownFieldWarning(source, keyStr, known))
+	}
+	return warnings
+}
+
+func unknownFieldWarning(source, key string, known []string) string {
+	suggestion := suggestKey(key, known)
+	w := fmt.Sprintf("%s: unknown field %q", source, key)
+	if suggestion != "" {
+		w += fmt.Sprintf(" (did you mean %q?)", suggestion)
+	}
+	return w
 }
 
 func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []string {
