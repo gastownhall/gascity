@@ -907,6 +907,9 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		cfg, _ = loadCityConfig(cityPath)
 		store, err = openCityStoreAt(cityPath)
 	}
+	// Narrower than isStorelessMailProvider: exec: providers can legitimately
+	// run without a city store, but fake/fail still require one for alias
+	// resolution in tests. Do not unify with isStorelessMailProvider.
 	if err != nil && !strings.HasPrefix(mailProviderName(), "exec:") {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
