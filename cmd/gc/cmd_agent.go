@@ -50,7 +50,50 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 // expansion. Use for commands that modify city.toml and write it back —
 // preserves include directives, pack references, and patches.
 func loadCityConfigForEditFS(fs fsys.FS, tomlPath string) (*config.City, error) {
-	return config.Load(fs, tomlPath)
+	cfg, err := config.Load(fs, tomlPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := config.ApplySiteBindingsForEdit(fs, filepath.Dir(tomlPath), cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// writeCityConfigForEditFS writes the checked-in city.toml form (without
+// rig.path entries) and then persists machine-local rig bindings to
+// .gc/site.toml. Ordering matters: the reverse order would leave
+// .gc/site.toml with the new binding while city.toml retained the stale
+// legacy path, and the loader's "site wins" overlay would silently mask
+// the inconsistency. Writing city.toml first means a crash between the
+// two writes leaves an orphan-legacy-path state (rig has no effective
+// binding) which the loader surfaces via warnings (see
+// ApplySiteBindings in internal/config/site_binding.go).
+//
+// Both writes are skipped when the on-disk content already matches the
+// desired content. This keeps operations like repeated `gc rig add
+// <same-rig>` idempotent on the checked-in city.toml instead of
+// producing spurious diffs on every invocation.
+func writeCityConfigForEditFS(fs fsys.FS, tomlPath string, cfg *config.City) error {
+	cityPath := filepath.Dir(tomlPath)
+	content, err := cfg.MarshalForWrite()
+	if err != nil {
+		return err
+	}
+	if err := fsys.WriteFileIfChangedAtomic(fs, tomlPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := config.PersistRigSiteBindings(fs, cityPath, cfg.Rigs); err != nil {
+		// Surface the half-migrated state explicitly: city.toml has
+		// been written but the site binding was not, so any rig paths
+		// that would have been persisted to .gc/site.toml are now
+		// absent — declared rigs will load as unbound until recovered.
+		// Applies to every edit caller (rig add/remove/suspend/resume,
+		// agent suspend/resume, configedit via this shared helper),
+		// not just `gc doctor --fix`.
+		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs may be unbound; re-run the command or `gc doctor --fix` to retry: %w", err)
+	}
+	return nil
 }
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
@@ -404,12 +447,7 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 				break
 			}
 		}
-		content, err := cfg.Marshal()
-		if err != nil {
-			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -505,12 +543,7 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 				break
 			}
 		}
-		content, err := cfg.Marshal()
-		if err != nil {
-			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

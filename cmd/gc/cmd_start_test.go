@@ -253,48 +253,6 @@ func TestPassthroughEnvClearsClaudeNestingUnconditionally(t *testing.T) {
 	}
 }
 
-func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
-	cityDir := filepath.Join(t.TempDir(), "city")
-	workDir := filepath.Join(cityDir, "worker")
-	hookRels := []string{
-		path.Join(".codex", "hooks.json"),
-		path.Join(".github", "hooks", "gascity.json"),
-		path.Join(".github", "copilot-instructions.md"),
-	}
-	for _, rel := range hookRels {
-		p := filepath.Join(workDir, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%q): %v", p, err)
-		}
-		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
-			t.Fatalf("WriteFile(%q): %v", p, err)
-		}
-	}
-
-	got := stageHookFiles(nil, cityDir, workDir)
-	rels := make(map[string]bool, len(got))
-	for _, entry := range got {
-		rels[entry.RelDst] = true
-	}
-	// RelDst must include the relative workDir prefix so K8s staging
-	// places files under the agent's container WorkingDir, not at /workspace/.
-	for _, rel := range hookRels {
-		want := path.Join("worker", rel)
-		if !rels[want] {
-			t.Errorf("stageHookFiles() missing %q (got %v)", want, rels)
-		}
-	}
-	// All filesystem-probed entries must be marked Probed with a ContentHash.
-	for _, entry := range got {
-		if !entry.Probed {
-			t.Errorf("stageHookFiles() entry %q not marked Probed", entry.RelDst)
-		}
-		if entry.ContentHash == "" {
-			t.Errorf("stageHookFiles() entry %q has empty ContentHash", entry.RelDst)
-		}
-	}
-}
-
 func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")
@@ -377,5 +335,50 @@ func TestConfiguredRigNameUnmatchedPathReturnsEmpty(t *testing.T) {
 
 	if got := configuredRigName(cityPath, agent, rigs); got != "" {
 		t.Fatalf("configuredRigName() = %q, want empty", got)
+	}
+}
+
+// TestBuildFingerprintExtra_StableAcrossBaseAndInstance is a regression test
+// for the config-drift oscillation that was reaping live pool and named
+// sessions "minutes into work". Different code paths in buildDesiredState
+// resolve the same session bead with either the BASE agent
+// (cfgAgent, QualifiedName = "rig/pool") or a deepCopied INSTANCE agent
+// (QualifiedName = "rig/pool-1"). Those two shapes must produce the same
+// FingerprintExtra or the reconciler's CoreFingerprint flips every tick
+// and drains every live pool session with close_reason=stale-session.
+//
+// The fix drops pool.check from FingerprintExtra — it's a runtime probe for
+// demand, not a behavioral-identity field, and it was the only piece that
+// carried the agent's QualifiedName into the fingerprint. pool.min,
+// pool.max, depends_on, wake_mode remain.
+func TestBuildFingerprintExtra_StableAcrossBaseAndInstance(t *testing.T) {
+	baseAgent := &config.Agent{
+		Name:              "opus",
+		Dir:               "gascity",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: nil, // unlimited
+	}
+	instanceAgent := deepCopyAgent(baseAgent, "opus-1", "gascity")
+
+	baseExtra := buildFingerprintExtra(baseAgent)
+	instExtra := buildFingerprintExtra(&instanceAgent)
+
+	if len(baseExtra) != len(instExtra) {
+		t.Fatalf("buildFingerprintExtra size differs base=%d instance=%d (base=%v instance=%v)",
+			len(baseExtra), len(instExtra), baseExtra, instExtra)
+	}
+	for k, bv := range baseExtra {
+		iv, ok := instExtra[k]
+		if !ok {
+			t.Fatalf("instance fpExtra missing key %q (base=%q)", k, bv)
+		}
+		if bv != iv {
+			t.Fatalf("fpExtra[%q] differs: base=%q instance=%q — this drives the reconciler's CoreFingerprint to oscillate between ticks and drains every live pool/named session", k, bv, iv)
+		}
+	}
+	// pool.check must NOT be present — it bakes QualifiedName which differs
+	// between base and instance agents and is the drift source.
+	if _, has := baseExtra["pool.check"]; has {
+		t.Fatalf("buildFingerprintExtra must not include pool.check (it bakes QualifiedName and differs across base/instance forms): %v", baseExtra)
 	}
 }

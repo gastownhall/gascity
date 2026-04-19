@@ -178,11 +178,7 @@ func cmdMailCheck(args []string, inject bool, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = args[0]
-	}
-	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail check")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail check")
 	if !ok {
 		if inject {
 			return 0
@@ -247,16 +243,39 @@ func formatInjectOutput(messages []mail.Message) string {
 }
 
 func defaultMailIdentity() string {
-	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
-		return alias
+	return defaultMailIdentityCandidates()[0]
+}
+
+// defaultMailIdentityCandidates returns ordered non-empty identity candidates
+// (GC_ALIAS, GC_SESSION_ID, GC_AGENT), falling back to ["human"] when all are
+// unset. Multiple candidates matter for pool workers where GC_ALIAS may be a
+// pool-instance qualified name absent from the session bead's metadata while
+// GC_SESSION_ID still matches via session_name.
+func defaultMailIdentityCandidates() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
 	}
-	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
-		return sessionID
+	add(os.Getenv("GC_ALIAS"))
+	add(os.Getenv("GC_SESSION_ID"))
+	add(os.Getenv("GC_AGENT"))
+	if len(out) == 0 {
+		out = append(out, "human")
 	}
-	if agent := strings.TrimSpace(os.Getenv("GC_AGENT")); agent != "" {
-		return agent
-	}
-	return "human"
+	return out
+}
+
+// isStorelessMailProvider reports whether the configured mail provider
+// bypasses the city bead store (exec scripts and test doubles).
+func isStorelessMailProvider() bool {
+	v := mailProviderName()
+	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
 func sessionMailboxAddress(b beads.Bead) string {
@@ -543,9 +562,59 @@ func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName s
 	return target, true
 }
 
+// resolveDefaultMailTargetsForCommand tries each default identity candidate
+// against the city's bead store and returns the first that resolves. A
+// stale GC_ALIAS on a pool worker would otherwise block inbox access when
+// GC_SESSION_ID still matches the bead via session_name.
+func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	candidates := defaultMailIdentityCandidates()
+	if len(candidates) == 1 || isStorelessMailProvider() {
+		return resolveMailTargetsForCommand(candidates[0], stderr, cmdName)
+	}
+	store, code := openCityStore(stderr, cmdName)
+	if store == nil {
+		_ = code
+		return resolvedMailTarget{}, false
+	}
+	for _, c := range candidates {
+		target, err := resolveMailTargets(store, c)
+		if err == nil {
+			return target, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return resolvedMailTarget{}, false
+		}
+	}
+	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
+	return resolvedMailTarget{}, false
+}
+
+func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer, cmdName string) (string, bool) {
+	candidates := defaultMailIdentityCandidates()
+	for _, c := range candidates {
+		sender, err := resolveMailIdentityWithConfig(cityPath, cfg, store, c)
+		if err == nil {
+			return sender, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "%s: invalid sender %q: %v\n", cmdName, c, err) //nolint:errcheck // best-effort stderr
+			return "", false
+		}
+	}
+	fmt.Fprintf(stderr, "%s: no sender identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
+	return "", false
+}
+
+func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	if len(args) > 0 {
+		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
+	}
+	return resolveDefaultMailTargetsForCommand(stderr, cmdName)
+}
+
 func resolveRawMailTargetForStorelessProvider(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
-	v := mailProviderName()
-	if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+	if !isStorelessMailProvider() {
 		return resolvedMailTarget{}, false
 	}
 	store, err := openMailTargetStore()
@@ -854,6 +923,9 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		cfg, _ = loadCityConfig(cityPath)
 		store, err = openCityStoreAt(cityPath)
 	}
+	// Narrower than isStorelessMailProvider: exec: providers can legitimately
+	// run without a city store, but fake/fail still require one for alias
+	// resolution in tests. Do not unify with isStorelessMailProvider.
 	if err != nil && !strings.HasPrefix(mailProviderName(), "exec:") {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1032,11 +1104,7 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = args[0]
-	}
-	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail inbox")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
 	if !ok {
 		return 1
 	}
@@ -1150,8 +1218,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	sender := defaultMailIdentity()
 	var hasStore bool
 	if sender != "human" {
-		v := mailProviderName()
-		if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+		if !isStorelessMailProvider() {
 			hasStore = true
 			store, storeCode := openCityStore(stderr, "gc mail reply")
 			if store == nil {
@@ -1163,9 +1230,8 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 				return 1
 			}
 			cfg, _ := loadCityConfig(cityPath)
-			resolved, err := resolveMailIdentityWithConfig(cityPath, cfg, store, sender)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+			resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+			if !ok {
 				return 1
 			}
 			sender = resolved
@@ -1363,11 +1429,7 @@ func cmdMailCount(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = args[0]
-	}
-	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail count")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail count")
 	if !ok {
 		return 1
 	}

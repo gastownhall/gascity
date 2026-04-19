@@ -1,4 +1,4 @@
 scope = "rig"
-start_command = "{{.ConfigDir}}/scripts/mock-refinery.sh"
+start_command = "{{.ConfigDir}}/assets/scripts/mock-refinery.sh"
 nudge = "Check for merge-ready beads and merge them to main."
 idle_timeout = "10m"

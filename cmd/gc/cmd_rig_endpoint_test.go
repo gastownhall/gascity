@@ -466,7 +466,7 @@ func TestDoRigSetEndpointSupportsExecGcBeadsBdProvider(t *testing.T) {
 	writeRigEndpointCityConfig(t, cityDir, rigDir)
 	writeRigEndpointMetadata(t, cityDir, "hq")
 	writeRigEndpointMetadata(t, rigDir, "fe")
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
 
 	var stdout, stderr bytes.Buffer
 	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{External: true, Host: "rig-db.example.com", Port: "4406", AdoptUnverified: true}, &stdout, &stderr)
@@ -1040,6 +1040,7 @@ func TestCanonicalValidationPasswordUsesCredentialsFileOverride(t *testing.T) {
 }
 
 func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run without -short or via integration packages")
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")
@@ -1053,10 +1054,10 @@ func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityDir)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityDir)
 
 	homeDir := filepath.Join(t.TempDir(), "home")
 	if err := os.MkdirAll(homeDir, 0o755); err != nil {
@@ -1130,6 +1131,7 @@ func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T
 }
 
 func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run without -short or via integration packages")
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")
@@ -1145,8 +1147,8 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 
 	homeDir := filepath.Join(t.TempDir(), "home")
@@ -1233,6 +1235,7 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 }
 
 func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run without -short or via integration packages")
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt not installed")
@@ -1248,8 +1251,8 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 
 	homeDir := filepath.Join(t.TempDir(), "home")

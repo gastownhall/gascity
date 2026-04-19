@@ -15,9 +15,9 @@ is a thin composition layer proving the primitives are sufficient.
 
 ## Key Concepts
 
-- **Mail**: A message bead — a bead with `Type="message"` and the
-  `gc:message` label. `From` is the sender, `Assignee` is the recipient,
-  `Title` holds the subject line, and `Description` holds the message body.
+- **Mail**: A message bead — a bead with `Type="message"`. `From` is the
+  sender, `Assignee` is the recipient, `Title` holds the subject line, and
+  `Description` holds the message body.
   Open beads without a "read" label are unread; beads with the "read"
   label are read but still accessible; closed beads are archived.
 
@@ -71,7 +71,7 @@ is a thin composition layer proving the primitives are sufficient.
 **Sending a message (beadmail path):**
 
 1. `gc mail send agent-1 -s "Hello" -m "body text"` invokes `Provider.Send("sender", "agent-1", "Hello", "body text")`
-2. beadmail calls `store.Create(Bead{Title:"Hello", Description:"body text", Type:"message", Assignee:"agent-1", From:"sender", Labels:["gc:message", "thread:<id>"]})`
+2. beadmail calls `store.Create(Bead{Title:"Hello", Description:"body text", Type:"message", Assignee:"agent-1", From:"sender", Labels:["thread:<id>"]})`
 3. Store assigns ID, sets Status="open", returns the bead
 4. beadmail converts to `mail.Message` and returns
 
@@ -112,8 +112,9 @@ is a thin composition layer proving the primitives are sufficient.
 ## Invariants
 
 1. **Messages are beads.** Every message has a corresponding bead with
-   `Type="message"` and the `gc:message` label. No separate message
-   storage exists.
+   `Type="message"`. No separate message storage exists. `Type="message"`
+   is the authoritative discriminator — the legacy `gc:message` label is
+   neither written nor read.
 2. **Inbox returns only open, unread messages.** Read messages (with
    "read" label) and closed (archived) beads are excluded from inbox.
 3. **Read does not close.** `Read(id)` adds the "read" label but keeps

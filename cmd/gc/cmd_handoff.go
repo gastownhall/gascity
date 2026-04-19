@@ -111,7 +111,7 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps,
 		Type:        "message",
 		Assignee:    sessionAddress,
 		From:        sessionAddress,
-		Labels:      []string{"gc:message", "thread:" + handoffThreadID()},
+		Labels:      []string{"thread:" + handoffThreadID()},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -163,7 +163,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		Type:        "message",
 		Assignee:    targetAddress,
 		From:        sender,
-		Labels:      []string{"gc:message", "thread:" + handoffThreadID()},
+		Labels:      []string{"thread:" + handoffThreadID()},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr

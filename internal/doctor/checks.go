@@ -162,33 +162,27 @@ func (c *ConfigRefsCheck) Name() string { return "config-refs" }
 func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	var issues []string
-	resolvePath := func(value string) string {
-		if filepath.IsAbs(value) {
-			return value
-		}
-		return filepath.Join(c.cityPath, value)
-	}
 
 	for _, a := range c.cfg.Agents {
 		qn := a.QualifiedName()
 		if a.PromptTemplate != "" {
-			path := resolvePath(a.PromptTemplate)
+			path := resolveConfigRefPath(c.cityPath, a.PromptTemplate)
 			if _, err := os.Stat(path); err != nil {
-				issues = append(issues, fmt.Sprintf("agent %q: prompt_template %q not found", qn, a.PromptTemplate))
+				issues = append(issues, fmt.Sprintf("agent %q: prompt_template %q not found", qn, path))
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := resolvePath(a.SessionSetupScript)
+			path := resolveConfigRefPath(c.cityPath, a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
-				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, a.SessionSetupScript))
+				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, path))
 			}
 		}
 		if a.OverlayDir != "" {
-			path := resolvePath(a.OverlayDir)
+			path := resolveConfigRefPath(c.cityPath, a.OverlayDir)
 			if fi, err := os.Stat(path); err != nil {
-				issues = append(issues, fmt.Sprintf("agent %q: overlay_dir %q not found", qn, a.OverlayDir))
+				issues = append(issues, fmt.Sprintf("agent %q: overlay_dir %q not found", qn, path))
 			} else if !fi.IsDir() {
-				issues = append(issues, fmt.Sprintf("agent %q: overlay_dir %q is not a directory", qn, a.OverlayDir))
+				issues = append(issues, fmt.Sprintf("agent %q: overlay_dir %q is not a directory", qn, path))
 			}
 		}
 		if a.Provider != "" && len(c.cfg.Providers) > 0 {
@@ -214,6 +208,16 @@ func (c *ConfigRefsCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *ConfigRefsCheck) Fix(_ *CheckContext) error { return nil }
+
+// resolveConfigRefPath resolves an agent config path reference against the
+// city root. Schema=2 packs emit absolute paths; legacy [[agent]] tables
+// use city-relative paths, so guard against double-rooting before joining.
+func resolveConfigRefPath(cityPath, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(cityPath, p)
+}
 
 // BuiltinPackFamilyCheck fails when a city overrides only one member of the
 // builtin bd/dolt pack family. Mixed system/user families are unsupported.
@@ -1223,84 +1227,6 @@ func isWorktreeValid(wtPath string) bool {
 	target := strings.TrimPrefix(content, "gitdir: ")
 	_, err = os.Stat(target)
 	return err == nil
-}
-
-// --- System formulas check ---
-
-// SystemFormulasCheck verifies formulas/ and orders/ contain all expected
-// system files with correct content.
-type SystemFormulasCheck struct {
-	CityPath string
-	// Expected is the list of relative paths from ListEmbeddedSystemFormulas.
-	// Order files (orders/*) are checked under orders/; formula files under formulas/.
-	Expected []string
-	// ExpectedContent maps relative path → file content for staleness detection.
-	// If nil, only presence is checked (not content).
-	ExpectedContent map[string][]byte
-	// FixFn re-materializes system formulas. Called by Fix().
-	FixFn func() error
-}
-
-// Name returns the check identifier.
-func (c *SystemFormulasCheck) Name() string { return "system-formulas" }
-
-// systemFileAbsPath returns the absolute path for a system formula/order
-// file. Orders (orders/*) resolve under the city orders/ directory;
-// formulas resolve under formulas/.
-func (c *SystemFormulasCheck) systemFileAbsPath(rel string) string {
-	if strings.HasPrefix(rel, "orders/") {
-		return filepath.Join(c.CityPath, citylayout.OrdersRoot, strings.TrimPrefix(rel, "orders/"))
-	}
-	return filepath.Join(c.CityPath, citylayout.FormulasRoot, rel)
-}
-
-// Run checks that the formulas/ and orders/ directories have all expected system files.
-func (c *SystemFormulasCheck) Run(_ *CheckContext) *CheckResult {
-	r := &CheckResult{Name: c.Name()}
-
-	if len(c.Expected) == 0 {
-		r.Status = StatusOK
-		r.Message = "no system formulas expected"
-		return r
-	}
-
-	var stale []string
-	for _, rel := range c.Expected {
-		path := c.systemFileAbsPath(rel)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			stale = append(stale, rel+" (missing)")
-			continue
-		}
-		if c.ExpectedContent != nil {
-			if expected, ok := c.ExpectedContent[rel]; ok && string(data) != string(expected) {
-				stale = append(stale, rel+" (stale)")
-			}
-		}
-	}
-
-	if len(stale) == 0 {
-		r.Status = StatusOK
-		r.Message = fmt.Sprintf("all %d system formula(s) present", len(c.Expected))
-		return r
-	}
-
-	r.Status = StatusError
-	r.Message = fmt.Sprintf("%d system formula(s) missing or stale", len(stale))
-	r.Details = stale
-	r.FixHint = "run gc doctor --fix to re-materialize"
-	return r
-}
-
-// CanFix returns true — system formulas can be re-materialized.
-func (c *SystemFormulasCheck) CanFix() bool { return c.FixFn != nil }
-
-// Fix re-materializes system formulas from the embedded FS.
-func (c *SystemFormulasCheck) Fix(_ *CheckContext) error {
-	if c.FixFn == nil {
-		return fmt.Errorf("no fix function provided")
-	}
-	return c.FixFn()
 }
 
 // IsControllerRunning probes the controller lock file to determine if a

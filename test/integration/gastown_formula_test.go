@@ -43,10 +43,8 @@ needs = ["check"]
 	if err != nil {
 		t.Fatalf("gc formula list failed: %v\noutput: %s", err, out)
 	}
-	for _, want := range []string{"test-patrol", "pancakes"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in formula list:\n%s", want, out)
-		}
+	if !strings.Contains(out, "test-patrol") {
+		t.Errorf("expected %q in formula list:\n%s", "test-patrol", out)
 	}
 }
 
@@ -57,7 +55,9 @@ func TestGastown_FormulaShow(t *testing.T) {
 	}
 	cityDir := setupGasTownCityNoGuard(t, agents)
 
-	formulaDir := filepath.Join(cityDir, ".gc", "formulas")
+	// formulas/ is the city-local compose layer; .gc/formulas/ is a
+	// runtime state dir not on the formula search path.
+	formulaDir := filepath.Join(cityDir, "formulas")
 	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
 		t.Fatalf("creating formulas dir: %v", err)
 	}

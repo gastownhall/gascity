@@ -285,12 +285,16 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			cfg.RigOverlayDirs[rig.Name] = rigOverlayDirs
 		}
 
-		// Collect scripts/ dirs from rig pack dirs.
+		// Collect scripts dirs from rig pack dirs. V2 packs ship scripts
+		// under assets/scripts/; legacy packs may still use scripts/ at
+		// the pack root.
 		var rigScriptDirs []string
 		for _, dir := range rigTopoDirs {
-			sd := filepath.Join(dir, "scripts")
-			if info, sErr := fs.Stat(sd); sErr == nil && info.IsDir() {
-				rigScriptDirs = appendUnique(rigScriptDirs, sd)
+			for _, rel := range []string{"scripts", filepath.Join("assets", "scripts")} {
+				sd := filepath.Join(dir, rel)
+				if info, sErr := fs.Stat(sd); sErr == nil && info.IsDir() {
+					rigScriptDirs = appendUnique(rigScriptDirs, sd)
+				}
 			}
 		}
 		if len(rigScriptDirs) > 0 {
@@ -587,11 +591,16 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 		}
 	}
 
-	// Collect scripts/ dirs from pack dirs.
+	// Collect scripts dirs from pack dirs. V2 packs ship scripts under
+	// assets/scripts/; legacy packs may still use scripts/ at the pack
+	// root. Scan both so `gc` continues to symlink scripts into
+	// <city>/scripts/ regardless of where the source pack put them.
 	for _, dir := range allPackDirs {
-		sd := filepath.Join(dir, "scripts")
-		if info, err := fs.Stat(sd); err == nil && info.IsDir() {
-			cfg.PackScriptDirs = appendUnique(cfg.PackScriptDirs, sd)
+		for _, rel := range []string{"scripts", filepath.Join("assets", "scripts")} {
+			sd := filepath.Join(dir, rel)
+			if info, err := fs.Stat(sd); err == nil && info.IsDir() {
+				cfg.PackScriptDirs = appendUnique(cfg.PackScriptDirs, sd)
+			}
 		}
 	}
 

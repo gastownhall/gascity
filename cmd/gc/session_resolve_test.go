@@ -68,6 +68,25 @@ func TestResolveSessionID_QualifiedAlias(t *testing.T) {
 	}
 }
 
+func TestResolveSessionID_QualifiedAliasBasename(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "myrig/witness",
+		},
+	})
+
+	id, err := resolveSessionIDWithConfig(t.TempDir(), nil, store, "witness")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Errorf("got %q, want %q", id, b.ID)
+	}
+}
+
 func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{

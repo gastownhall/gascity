@@ -18,11 +18,11 @@ func TestHandleAgentPatchList(t *testing.T) {
 	fs.cfg.Patches.Agents = []config.AgentPatch{
 		{Dir: "rig1", Name: "worker", Suspended: &suspended},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/patches/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/patches/agents"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -37,11 +37,11 @@ func TestHandleAgentPatchList(t *testing.T) {
 
 func TestHandleAgentPatchList_Empty(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/patches/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/patches/agents"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -60,11 +60,11 @@ func TestHandleAgentPatchGet(t *testing.T) {
 	fs.cfg.Patches.Agents = []config.AgentPatch{
 		{Dir: "rig1", Name: "worker", Suspended: &suspended},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/patches/agent/rig1/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/patches/agent/rig1/worker"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -73,11 +73,11 @@ func TestHandleAgentPatchGet(t *testing.T) {
 
 func TestHandleAgentPatchGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/patches/agent/rig1/nonexistent", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/patches/agent/rig1/nonexistent"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -86,13 +86,13 @@ func TestHandleAgentPatchGet_NotFound(t *testing.T) {
 
 func TestHandleAgentPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"dir":"rig1","name":"worker","suspended":true}`
-	req := httptest.NewRequest("PUT", "/v0/patches/agents", strings.NewReader(body))
+	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/agents"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -108,13 +108,13 @@ func TestHandleAgentPatchSet(t *testing.T) {
 
 func TestHandleAgentPatchSet_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"dir":"rig1","suspended":true}`
-	req := httptest.NewRequest("PUT", "/v0/patches/agents", strings.NewReader(body))
+	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/agents"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -127,12 +127,12 @@ func TestHandleAgentPatchDelete(t *testing.T) {
 	fs.cfg.Patches.Agents = []config.AgentPatch{
 		{Dir: "rig1", Name: "worker", Suspended: &suspended},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/patches/agent/rig1/worker", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/patches/agent/rig1/worker"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -145,12 +145,12 @@ func TestHandleAgentPatchDelete(t *testing.T) {
 
 func TestHandleAgentPatchDelete_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/patches/agent/nonexistent", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/patches/agent/nonexistent"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -165,11 +165,11 @@ func TestHandleRigPatchList(t *testing.T) {
 	fs.cfg.Patches.Rigs = []config.RigPatch{
 		{Name: "myrig", Suspended: &suspended},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/patches/rigs", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/patches/rigs"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -184,13 +184,13 @@ func TestHandleRigPatchList(t *testing.T) {
 
 func TestHandleRigPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"myrig","suspended":true}`
-	req := httptest.NewRequest("PUT", "/v0/patches/rigs", strings.NewReader(body))
+	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/rigs"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -207,12 +207,12 @@ func TestHandleRigPatchDelete(t *testing.T) {
 	fs.cfg.Patches.Rigs = []config.RigPatch{
 		{Name: "myrig", Suspended: &suspended},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/patches/rig/myrig", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/patches/rig/myrig"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -231,11 +231,11 @@ func TestHandleProviderPatchList(t *testing.T) {
 	fs.cfg.Patches.Providers = []config.ProviderPatch{
 		{Name: "claude", Command: &cmd},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/patches/providers", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/patches/providers"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -250,13 +250,13 @@ func TestHandleProviderPatchList(t *testing.T) {
 
 func TestHandleProviderPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"claude","command":"my-claude"}`
-	req := httptest.NewRequest("PUT", "/v0/patches/providers", strings.NewReader(body))
+	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/providers"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -273,12 +273,12 @@ func TestHandleProviderPatchDelete(t *testing.T) {
 	fs.cfg.Patches.Providers = []config.ProviderPatch{
 		{Name: "claude", Command: &cmd},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/patches/provider/claude", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/patches/provider/claude"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -291,12 +291,12 @@ func TestHandleProviderPatchDelete(t *testing.T) {
 
 func TestHandleProviderPatchDelete_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/patches/provider/nonexistent", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/patches/provider/nonexistent"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)

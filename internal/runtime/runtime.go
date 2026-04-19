@@ -36,6 +36,32 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 
+// ErrSessionNotFound reports that an operation targeted a session the
+// runtime does not know about. Benign for Stop() — the session was
+// already gone — but fatal for Attach/Send. Providers wrap their own
+// internal "not found" conditions with this sentinel so callers can
+// dispatch with errors.Is.
+var ErrSessionNotFound = errors.New("session not found")
+
+// IsSessionGone reports whether err represents a "the session is not
+// there" condition — either ErrSessionNotFound or the legacy provider
+// phrasings that predate the sentinel (tmux/subprocess providers may
+// still return raw strings). Callers that treat a missing session as
+// benign (e.g. bulk Stop) use this helper so the semantics live in one
+// place.
+func IsSessionGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "session not found") ||
+		strings.Contains(msg, "not running") ||
+		strings.Contains(msg, "not found")
+}
+
 // ContentBlock represents a content element in a message.
 // Type is "text" or "file_path".
 type ContentBlock struct {
@@ -338,10 +364,17 @@ type Config struct {
 	SessionLive []string
 
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
-	// Used for per-provider overlay filtering: only files from
-	// overlays/per-provider/<ProviderName>/ are copied. Empty means
-	// provider-specific filtering is skipped (all files copied).
+	// Used for per-provider overlay filtering: files from
+	// overlays/per-provider/<ProviderName>/ are copied alongside any extras
+	// listed in InstallAgentHooks.
 	ProviderName string
+
+	// InstallAgentHooks lists additional provider hook slots whose
+	// overlays/per-provider/<name>/ content should be staged alongside
+	// ProviderName's. Populated from the agent's install_agent_hooks
+	// config, so an agent running Claude can still get a materialized
+	// .gemini/settings.json for parallel tooling.
+	InstallAgentHooks []string
 
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,

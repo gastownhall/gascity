@@ -60,8 +60,15 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [packs/gastown]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.Includes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to [imports.gastown])", cfg.Workspace.Includes)
+	}
+	gastownImp, ok := cfg.Imports["gastown"]
+	if !ok {
+		t.Fatalf("cfg.Imports = %v, want entry for \"gastown\"", cfg.Imports)
+	}
+	if gastownImp.Source != "packs/gastown" {
+		t.Errorf("cfg.Imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
 }
 
@@ -138,7 +145,7 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -236,7 +243,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -270,7 +277,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -319,7 +326,7 @@ func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -366,7 +373,7 @@ func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -389,7 +396,7 @@ func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -416,7 +423,7 @@ func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
 	repo := filepath.Join(tmp, "repo")
 	cityA := filepath.Join(tmp, "city-a")
 	cityB := filepath.Join(tmp, "city-b")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -450,7 +457,7 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -512,9 +519,9 @@ func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-idea-to-plan"`,
 		`gc sling "$REVIEW_TARGET" "$LEG_BEAD" --on {{review_formula}}`,
-		`bd create`,
+		`gc bd create`,
 		`gc mail send`,
-		`bd dep add`,
+		`gc bd dep add`,
 		`Do NOT use unsupported upstream shortcuts`,
 		`This is the only required human gate.`,
 	} {
@@ -535,9 +542,9 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-review-leg"`,
 		`coordinator`,
-		`bd update {{issue}} --notes`,
+		`gc bd update {{issue}} --notes`,
 		`gc mail send "$COORD"`,
-		`bd update {{issue}} --status=closed`,
+		`gc bd update {{issue}} --status=closed`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review-leg formula missing %q", want)
@@ -739,8 +746,15 @@ func TestCombinedPackParses(t *testing.T) {
 	if tc.Pack.Schema != 2 {
 		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
-	if len(tc.Pack.Includes) != 1 || tc.Pack.Includes[0] != "../maintenance" {
-		t.Fatalf("pack includes = %v, want [../maintenance]", tc.Pack.Includes)
+	if len(tc.Pack.Includes) != 0 {
+		t.Fatalf("pack includes = %v, want empty (migrated to [imports.maintenance])", tc.Pack.Includes)
+	}
+	maintImp, ok := tc.Imports["maintenance"]
+	if !ok {
+		t.Fatalf("pack imports = %v, want entry for \"maintenance\"", tc.Imports)
+	}
+	if maintImp.Source != "../maintenance" {
+		t.Errorf("pack imports[\"maintenance\"].Source = %q, want %q", maintImp.Source, "../maintenance")
 	}
 
 	// Expect 6 locally-discovered agents. Dog comes from the maintenance import
@@ -844,11 +858,13 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
 		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)
 	}
-	if dog.PromptTemplate != filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md") {
-		t.Errorf("dog prompt_template = %q, want gastown dog prompt", dog.PromptTemplate)
+	wantPromptSuffix := filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md")
+	if !strings.HasSuffix(dog.PromptTemplate, wantPromptSuffix) {
+		t.Errorf("dog prompt_template = %q, want suffix %q", dog.PromptTemplate, wantPromptSuffix)
 	}
-	if dog.OverlayDir != filepath.Join("packs", "maintenance", "agents", "dog", "overlay") {
-		t.Errorf("dog overlay_dir = %q, want gastown dog overlay", dog.OverlayDir)
+	wantOverlaySuffix := filepath.Join("packs", "maintenance", "agents", "dog", "overlay")
+	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
+		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
 	}
 	if len(dog.SessionLive) != 2 {
 		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))

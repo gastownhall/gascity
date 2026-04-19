@@ -22,15 +22,15 @@ func TestClientSuspendCity(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendCity(); err != nil {
 		t.Fatalf("SuspendCity: %v", err)
 	}
 	if gotMethod != "PATCH" {
 		t.Errorf("method = %q, want PATCH", gotMethod)
 	}
-	if gotPath != "/v0/city" {
-		t.Errorf("path = %q, want /v0/city", gotPath)
+	if gotPath != "/v0/city/alpha" {
+		t.Errorf("path = %q, want /v0/city/alpha", gotPath)
 	}
 	if gotBody["suspended"] != true {
 		t.Errorf("body suspended = %v, want true", gotBody["suspended"])
@@ -46,7 +46,7 @@ func TestClientResumeCity(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.ResumeCity(); err != nil {
 		t.Fatalf("ResumeCity: %v", err)
 	}
@@ -65,15 +65,16 @@ func TestClientSuspendAgent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendAgent("worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
 	}
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
-	if gotPath != "/v0/agent/worker/suspend" {
-		t.Errorf("path = %q, want /v0/agent/worker/suspend", gotPath)
+	// Generated client targets the scoped path natively.
+	if gotPath != "/v0/city/alpha/agent/worker/suspend" {
+		t.Errorf("path = %q, want /v0/city/alpha/agent/worker/suspend", gotPath)
 	}
 }
 
@@ -86,12 +87,12 @@ func TestClientResumeAgent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.ResumeAgent("worker"); err != nil {
 		t.Fatalf("ResumeAgent: %v", err)
 	}
-	if gotPath != "/v0/agent/worker/resume" {
-		t.Errorf("path = %q, want /v0/agent/worker/resume", gotPath)
+	if gotPath != "/v0/city/alpha/agent/worker/resume" {
+		t.Errorf("path = %q, want /v0/city/alpha/agent/worker/resume", gotPath)
 	}
 }
 
@@ -104,12 +105,12 @@ func TestClientSuspendRig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendRig("myrig"); err != nil {
 		t.Fatalf("SuspendRig: %v", err)
 	}
-	if gotPath != "/v0/rig/myrig/suspend" {
-		t.Errorf("path = %q, want /v0/rig/myrig/suspend", gotPath)
+	if gotPath != "/v0/city/alpha/rig/myrig/suspend" {
+		t.Errorf("path = %q, want /v0/city/alpha/rig/myrig/suspend", gotPath)
 	}
 }
 
@@ -122,32 +123,37 @@ func TestClientResumeRig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.ResumeRig("myrig"); err != nil {
 		t.Fatalf("ResumeRig: %v", err)
 	}
-	if gotPath != "/v0/rig/myrig/resume" {
-		t.Errorf("path = %q, want /v0/rig/myrig/resume", gotPath)
+	if gotPath != "/v0/city/alpha/rig/myrig/resume" {
+		t.Errorf("path = %q, want /v0/city/alpha/rig/myrig/resume", gotPath)
 	}
 }
 
 func TestClientErrorResponse(t *testing.T) {
+	// The server speaks RFC 9457 Problem Details on every error. The
+	// generated client decodes the body into a typed ErrorModel and the
+	// adapter reads the Detail field directly — there's no hand-written
+	// JSON parsing or legacy format fallback anywhere in the path.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "not_found",
-			"message": "agent 'nope' not found",
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Not Found",
+			"status": http.StatusNotFound,
+			"detail": "not_found: agent 'nope' not found",
 		})
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	err := c.SuspendAgent("nope")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if got := err.Error(); got != "API error: agent 'nope' not found" {
+	if got := err.Error(); got != "API error: not_found: agent 'nope' not found" {
 		t.Errorf("error = %q", got)
 	}
 }
@@ -161,19 +167,21 @@ func TestClientQualifiedAgentName(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendAgent("myrig/worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
 	}
-	// The server uses {name...} wildcard, so the raw slash must arrive unescaped.
-	if gotPath != "/v0/agent/myrig/worker/suspend" {
-		t.Errorf("path = %q, want /v0/agent/myrig/worker/suspend", gotPath)
+	// Qualified agent names now map to explicit {dir}/{base}/{action}
+	// route segments — the slash between dir and base must arrive
+	// unescaped so the server's ServeMux routes to the qualified variant.
+	if gotPath != "/v0/city/alpha/agent/myrig/worker/suspend" {
+		t.Errorf("path = %q, want /v0/city/alpha/agent/myrig/worker/suspend", gotPath)
 	}
 }
 
 func TestClientConnError(t *testing.T) {
 	// Client targeting a port with nothing listening → connection refused.
-	c := NewClient("http://127.0.0.1:1") // port 1 is never listening
+	c := NewCityScopedClient("http://127.0.0.1:1", "alpha") // port 1 is never listening
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -185,13 +193,17 @@ func TestClientConnError(t *testing.T) {
 
 func TestClientAPIErrorNotConnError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Bad Request",
+			"status": http.StatusBadRequest,
+			"detail": "bad_request: malformed payload",
+		})
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -202,18 +214,20 @@ func TestClientAPIErrorNotConnError(t *testing.T) {
 }
 
 func TestClientReadOnlyFallback(t *testing.T) {
-	// Server returns 403 with read_only error code — should trigger ShouldFallback.
+	// Server returns 403 Problem Details with a `read_only:` prefix in
+	// detail — should trigger ShouldFallback.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "read_only",
-			"message": "mutations disabled: server bound to non-localhost address",
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Forbidden",
+			"status": http.StatusForbidden,
+			"detail": "read_only: mutations disabled: server bound to non-localhost address",
 		})
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -227,7 +241,7 @@ func TestClientReadOnlyFallback(t *testing.T) {
 }
 
 func TestClientConnErrorShouldFallback(t *testing.T) {
-	c := NewClient("http://127.0.0.1:1")
+	c := NewCityScopedClient("http://127.0.0.1:1", "alpha")
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -240,11 +254,12 @@ func TestClientConnErrorShouldFallback(t *testing.T) {
 func TestClientBusinessErrorNoFallback(t *testing.T) {
 	// A 404 not_found is a business error — should NOT trigger fallback.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "not_found",
-			"message": "agent 'nope' not found",
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Not Found",
+			"status": http.StatusNotFound,
+			"detail": "not_found: agent 'nope' not found",
 		})
 	}))
 	defer ts.Close()
@@ -269,22 +284,22 @@ func TestClientRestartRig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.RestartRig("myrig"); err != nil {
 		t.Fatalf("RestartRig: %v", err)
 	}
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
-	if gotPath != "/v0/rig/myrig/restart" {
-		t.Errorf("path = %q, want /v0/rig/myrig/restart", gotPath)
+	if gotPath != "/v0/city/alpha/rig/myrig/restart" {
+		t.Errorf("path = %q, want /v0/city/alpha/rig/myrig/restart", gotPath)
 	}
 }
 
 func TestClientListServices(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/services" {
-			t.Fatalf("path = %q, want /v0/services", r.URL.Path)
+		if r.URL.Path != "/v0/city/alpha/services" {
+			t.Fatalf("path = %q, want /v0/city/alpha/services", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -302,7 +317,7 @@ func TestClientListServices(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	items, err := c.ListServices()
 	if err != nil {
 		t.Fatalf("ListServices: %v", err)
@@ -314,8 +329,8 @@ func TestClientListServices(t *testing.T) {
 
 func TestClientGetService(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/service/healthz" {
-			t.Fatalf("path = %q, want /v0/service/healthz", r.URL.Path)
+		if r.URL.Path != "/v0/city/alpha/service/healthz" {
+			t.Fatalf("path = %q, want /v0/city/alpha/service/healthz", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(workspacesvc.Status{ //nolint:errcheck
@@ -330,7 +345,7 @@ func TestClientGetService(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	status, err := c.GetService("healthz")
 	if err != nil {
 		t.Fatalf("GetService: %v", err)
@@ -397,12 +412,12 @@ func TestClientKillSession(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.KillSession("sess-123"); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
-	if gotPath != "/v0/session/sess-123/kill" {
-		t.Errorf("path = %q, want /v0/session/sess-123/kill", gotPath)
+	if gotPath != "/v0/city/alpha/session/sess-123/kill" {
+		t.Errorf("path = %q, want /v0/city/alpha/session/sess-123/kill", gotPath)
 	}
 }
 
@@ -415,7 +430,7 @@ func TestClientCSRFHeader(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	c.SuspendAgent("worker") //nolint:errcheck
 	if gotHeader != "true" {
 		t.Errorf("X-GC-Request = %q, want %q", gotHeader, "true")

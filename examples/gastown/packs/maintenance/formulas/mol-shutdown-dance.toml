@@ -4,7 +4,7 @@ Shutdown dance — due process for stuck agents.
 Dispatched by filing a warrant bead with `--label=pool:dog`:
 
 ```bash
-bd create --type=warrant \
+gc bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"<who>"}' \
   --label=pool:dog
@@ -73,13 +73,13 @@ Entry point. Read the warrant metadata from your wisp.
 
 **1. Read warrant details:**
 ```bash
-bd show <wisp-id> --json | jq '.metadata'
+gc bd show <wisp-id> --json | jq '.metadata'
 ```
 Extract: `target`, `reason`, `requester`, `warrant_id`.
 
 **2. Verify the warrant bead exists and is open:**
 ```bash
-bd show {{warrant_id}} --json | jq '.status'
+gc bd show {{warrant_id}} --json | jq '.status'
 ```
 If warrant is already closed (another dog handled it, or requester
 cancelled): close this step, burn the wisp, exit.
@@ -89,7 +89,7 @@ cancelled): close this step, burn the wisp, exit.
 gc session peek {{target}} 1
 ```
 If target session doesn't exist (already dead):
-- Close warrant: `bd close {{warrant_id}} --reason "Target already dead"`
+- Close warrant: `gc bd close {{warrant_id}} --reason "Target already dead"`
 - Send DOG_DONE mail to requester
 - Burn this wisp, exit
 
@@ -127,7 +127,7 @@ generated). Use judgment — explicit "ALIVE" is definitive, but active
 output also indicates the agent is functioning.
 
 **4. If ALIVE or active:**
-- Close warrant: `bd close {{warrant_id}} --reason "Session responded at attempt 1"`
+- Close warrant: `gc bd close {{warrant_id}} --reason "Session responded at attempt 1"`
 - Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 1"`
 - Burn wisp, exit
 
@@ -163,7 +163,7 @@ gc session peek {{target}} 50
 Same evaluation as attempt 1: ALIVE keyword or active output.
 
 **4. If ALIVE or active:**
-- Close warrant: `bd close {{warrant_id}} --reason "Session responded at attempt 2"`
+- Close warrant: `gc bd close {{warrant_id}} --reason "Session responded at attempt 2"`
 - Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 2"`
 - Burn wisp, exit
 
@@ -197,7 +197,7 @@ gc session peek {{target}} 50
 ```
 
 **4. If ALIVE or active:**
-- Close warrant: `bd close {{warrant_id}} --reason "Session responded at attempt 3"`
+- Close warrant: `gc bd close {{warrant_id}} --reason "Session responded at attempt 3"`
 - Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 3 (close call)"`
 - Burn wisp, exit
 
@@ -232,7 +232,7 @@ gc mail send {{requester}}/ -s "EXECUTE_FAILED: {{target}}" \
 
 **3. Record execution on the warrant:**
 ```bash
-bd close {{warrant_id}} --reason "Executed after 3 failed attempts (420s total)"
+gc bd close {{warrant_id}} --reason "Executed after 3 failed attempts (420s total)"
 ```
 
 Close this step, proceed to epitaph."""
@@ -257,7 +257,7 @@ Action: session killed, reconciler will restart"
 **2. Close work bead (if separate from warrant):**
 If your assigned work bead is different from the warrant bead, close it:
 ```bash
-bd close <work-bead> --reason "Shutdown dance complete: {{target}} executed"
+gc bd close <work-bead> --reason "Shutdown dance complete: {{target}} executed"
 ```
 
 **3. Exit:**

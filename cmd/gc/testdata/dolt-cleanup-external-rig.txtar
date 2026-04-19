@@ -1,0 +1,654 @@
+# dolt cleanup + sync: external-rig discovery and allowlist guard (#706, #711)
+#
+# Covers six scenarios:
+#   1. External rig database is NOT listed as orphan (registry via gc rig list --json)
+#   2. --force removes genuine orphan at default data-dir (HQ-rooted; guard must not fire)
+#   3. Local rig database discovered via gc rig list --json (complements scenario 1)
+#   4. Allowlist refusal: orphan whose path overlaps a registered rig path is refused
+#   5. Path-prefix boundary: rig at /a/b does NOT protect a database at /a/bc
+#   6. sync.sh external-rig route discovery (parallel registry path to cleanup.sh)
+#
+# Each scenario uses a separate city initialized from a pre-written TOML template.
+# The pack's cleanup.sh and sync.sh are staged once under $WORK/shared/ and each
+# city copies them in before exercising the command — so all scenarios validate
+# the same script content (no drift between inline per-city copies).
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+# ==========================================================================
+# Scenario 1: External rig database discovery
+# ==========================================================================
+# city1 has three databases under .beads/dolt/:
+#   city_db   — referenced by HQ .beads/metadata.json     → NOT orphan
+#   ext_db    — referenced by external-rig metadata.json  → NOT orphan
+#   orphan_db — not referenced anywhere                   → ORPHAN
+#
+# The external rig lives at $WORK/external-rig (outside city1/).
+# After registering it, gc rig list --json returns both HQ and external-rig,
+# so cleanup.sh finds ext_db referenced and lists only orphan_db.
+
+exec gc init --file $WORK/city1-cfg.toml $WORK/city1
+stdout 'Welcome to Gas City'
+
+cd $WORK/city1
+
+exec gc rig add $WORK/external-rig --adopt --name external-rig --prefix ext
+stdout 'Rig added'
+
+# --- Scenario 1: dry-run lists orphan_db only ---
+cp $WORK/shared/cleanup.sh $WORK/city1/packs/dolt/commands/cleanup.sh
+chmod 755 $WORK/city1/packs/dolt/commands/cleanup.sh
+exec gc dolt cleanup
+stdout 'orphan_db'
+! stdout 'ext_db'
+! stdout 'city_db'
+
+# --- Scenario 2: --force removes genuine orphan at default data-dir (HQ-rooted) ---
+# Tests that --force removes genuine orphan at default data-dir (HQ-rooted).
+# The allowlist guard must not fire for HQ-managed storage: select(.hq != true)
+# excludes HQ from the rig-path overlap check, so orphan_db is correctly removed.
+exec gc dolt cleanup --force
+stdout 'Removed orphan_db'
+! exists $WORK/city1/.beads/dolt/orphan_db
+exists $WORK/city1/.beads/dolt/ext_db
+exists $WORK/city1/.beads/dolt/city_db
+
+# ==========================================================================
+# Scenario 3: Local rig database discovered via gc rig list --json registry
+# (city2 uses city1's fresh state — city1 now has orphan_db removed by Scenario 2)
+# ==========================================================================
+# city2 has a local rig (city2/rigs/local-rig) declared in city.toml.
+# gc rig list --json returns HQ + local-rig, so local_db is NOT orphaned.
+# fallback_orphan has no metadata reference and IS orphaned.
+# This confirms the registry path (not just the filesystem fallback) works
+# for local rigs too.
+
+exec gc init --file $WORK/city2-cfg.toml $WORK/city2
+stdout 'Welcome to Gas City'
+
+cd $WORK/city2
+
+cp $WORK/shared/cleanup.sh $WORK/city2/packs/dolt/commands/cleanup.sh
+chmod 755 $WORK/city2/packs/dolt/commands/cleanup.sh
+exec gc dolt cleanup
+stdout 'fallback_orphan'
+! stdout 'local_db'
+! stdout 'city2_db'
+
+# ==========================================================================
+# Scenario 4: Allowlist refusal — orphan path overlaps a registered rig
+# ==========================================================================
+# city3-rig is registered as an external rig. The pack's runtime.sh is
+# overridden (via CITY3_RIG_PATH env) to set DOLT_DATA_DIR inside city3-rig,
+# so the database path sits under the rig directory. The allowlist check
+# fires and refuses deletion; all orphans refused → exit non-zero.
+# Note: Placing DOLT_DATA_DIR inside a rig worktree is a misconfiguration;
+# the guard intentionally refuses it. city3-rig is non-HQ so
+# select(.hq != true) correctly includes it in the overlap check.
+
+exec gc init --file $WORK/city3-cfg.toml $WORK/city3
+stdout 'Welcome to Gas City'
+
+cd $WORK/city3
+
+exec gc rig add $WORK/city3-rig --adopt --name city3-rig --prefix c3r
+stdout 'Rig added'
+
+env CITY3_RIG_PATH=$WORK/city3-rig
+
+cp $WORK/shared/cleanup.sh $WORK/city3/packs/dolt/commands/cleanup.sh
+chmod 755 $WORK/city3/packs/dolt/commands/cleanup.sh
+! exec gc dolt cleanup --force
+stderr 'refusing to remove'
+
+# ==========================================================================
+# Scenario 5: Path-prefix boundary — rig /a/b does NOT protect /a/bc
+# ==========================================================================
+# city4 has rig-ab registered. Its database rigab_db is referenced.
+# boundary_db is NOT referenced — it is an orphan. boundary_db starts with
+# the same characters as rigab_db in its NAME, but the allowlist check
+# operates on filesystem PATHS, not names. Both rigab_db and boundary_db
+# live under DOLT_DATA_DIR ($WORK/city4/.beads/dolt/), which is separate
+# from the rig directory ($WORK/city4/rigs/rig-ab). No path overlap fires.
+# Expected: boundary_db listed as orphan; rigab_db not listed.
+
+exec gc init --file $WORK/city4-cfg.toml $WORK/city4
+stdout 'Welcome to Gas City'
+
+cd $WORK/city4
+
+cp $WORK/shared/cleanup.sh $WORK/city4/packs/dolt/commands/cleanup.sh
+chmod 755 $WORK/city4/packs/dolt/commands/cleanup.sh
+exec gc dolt cleanup
+stdout 'boundary_db'
+! stdout 'rigab_db'
+! stdout 'city4_db'
+
+# ==========================================================================
+# Scenario 6: sync.sh external-rig route discovery
+# ==========================================================================
+# city5 has one database (city5_db) under .beads/dolt/ and an external-rig
+# registered. sync.sh's routes_files() uses `gc rig list --json` (same
+# registry primitive as cleanup.sh) to enumerate per-rig routes.jsonl files.
+# Without GC_DOLT_PORT bound to a running server, is_running returns false;
+# each DB falls through to the "skipped (no remote)" branch.
+# The test asserts sync.sh exercises both its main loop and --gc branch
+# (which calls routes_files) without crashing on external rigs.
+
+exec gc init --file $WORK/city5-cfg.toml $WORK/city5
+stdout 'Welcome to Gas City'
+
+cd $WORK/city5
+
+exec gc rig add $WORK/external-rig-5 --adopt --name external-rig-5 --prefix e5
+stdout 'Rig added'
+
+cp $WORK/shared/sync.sh $WORK/city5/packs/dolt/commands/sync.sh
+chmod 755 $WORK/city5/packs/dolt/commands/sync.sh
+
+# --- Scenario 6a: --dry-run succeeds, processes both DBs ---
+exec gc dolt sync --dry-run
+stdout 'city5_db: skipped'
+
+# --- Scenario 6b: --gc --dry-run exercises routes_files; external-rig discovered ---
+exec gc dolt sync --gc --dry-run
+stdout 'city5/\.beads/routes\.jsonl'
+stdout 'external-rig-5/\.beads/routes\.jsonl'
+stdout 'city5_db: skipped'
+
+# ===========================================================================
+# Shared fixture: external-rig (used by city1 and city3)
+# ===========================================================================
+
+-- external-rig/.beads/metadata.json --
+{"dolt_database": "ext_db", "issue_prefix": "ext"}
+
+-- external-rig/.beads/config.yaml --
+issue_prefix: ext
+
+# ===========================================================================
+# city1 fixtures (Scenario 1)
+# ===========================================================================
+
+-- city1-cfg.toml --
+[workspace]
+name = "city1"
+includes = ["packs/dolt"]
+
+-- city1/.beads/metadata.json --
+{"dolt_database": "city_db", "issue_prefix": "gc"}
+
+-- city1/.beads/dolt/city_db/.dolt/.keep --
+-- city1/.beads/dolt/orphan_db/.dolt/.keep --
+-- city1/.beads/dolt/ext_db/.dolt/.keep --
+
+-- city1/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+-- city1/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
+if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+  DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
+else
+  DOLT_DATA_DIR="$PACK_STATE_DIR/dolt-data"
+fi
+
+-- city1/packs/dolt/commands/.keep --
+-- city2-cfg.toml --
+[workspace]
+name = "city2"
+includes = ["packs/dolt"]
+
+[[rigs]]
+name = "local-rig"
+path = "rigs/local-rig"
+
+-- city2/.beads/metadata.json --
+{"dolt_database": "city2_db", "issue_prefix": "c2"}
+
+-- city2/.beads/dolt/city2_db/.dolt/.keep --
+-- city2/.beads/dolt/local_db/.dolt/.keep --
+-- city2/.beads/dolt/fallback_orphan/.dolt/.keep --
+
+-- city2/rigs/local-rig/.beads/metadata.json --
+{"dolt_database": "local_db", "issue_prefix": "lr"}
+
+-- city2/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+-- city2/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
+if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+  DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
+else
+  DOLT_DATA_DIR="$PACK_STATE_DIR/dolt-data"
+fi
+
+-- city2/packs/dolt/commands/.keep --
+-- city3-cfg.toml --
+[workspace]
+name = "city3"
+includes = ["packs/dolt"]
+
+-- city3/.beads/metadata.json --
+{"dolt_database": "city3_db", "issue_prefix": "c3"}
+
+-- city3-rig/.beads/metadata.json --
+{"dolt_database": "city3_rig_db", "issue_prefix": "c3r"}
+
+-- city3-rig/.beads/config.yaml --
+issue_prefix: c3r
+
+-- city3-rig/dolt-data/overlap_orphan/.dolt/.keep --
+
+-- city3/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+-- city3/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+# Override: DOLT_DATA_DIR points inside city3-rig to trigger allowlist check.
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+: "${CITY3_RIG_PATH:?CITY3_RIG_PATH must be set (exported by testscript env)}"
+DOLT_DATA_DIR="$CITY3_RIG_PATH/dolt-data"
+
+-- city3/packs/dolt/commands/.keep --
+-- city4-cfg.toml --
+[workspace]
+name = "city4"
+includes = ["packs/dolt"]
+
+[[rigs]]
+name = "rig-ab"
+path = "rigs/rig-ab"
+
+-- city4/.beads/metadata.json --
+{"dolt_database": "city4_db", "issue_prefix": "c4"}
+
+-- city4/.beads/dolt/city4_db/.dolt/.keep --
+-- city4/.beads/dolt/rigab_db/.dolt/.keep --
+-- city4/.beads/dolt/boundary_db/.dolt/.keep --
+
+-- city4/rigs/rig-ab/.beads/metadata.json --
+{"dolt_database": "rigab_db", "issue_prefix": "rab"}
+
+-- city4/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+-- city4/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
+if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+  DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
+else
+  DOLT_DATA_DIR="$PACK_STATE_DIR/dolt-data"
+fi
+
+-- city4/packs/dolt/commands/.keep --
+
+# ===========================================================================
+# city5 fixtures (Scenario 6: sync.sh external-rig route discovery)
+# ===========================================================================
+
+-- city5-cfg.toml --
+[workspace]
+name = "city5"
+includes = ["packs/dolt"]
+
+-- city5/.beads/metadata.json --
+{"dolt_database": "city5_db", "issue_prefix": "c5"}
+
+-- city5/.beads/routes.jsonl --
+{"database": "city5_db"}
+
+-- city5/.beads/dolt/city5_db/.dolt/.keep --
+
+-- external-rig-5/.beads/metadata.json --
+{"dolt_database": "ext5_db", "issue_prefix": "e5"}
+
+-- external-rig-5/.beads/config.yaml --
+issue_prefix: e5
+
+-- external-rig-5/.beads/routes.jsonl --
+{"database": "ext5_db"}
+
+-- city5/packs/dolt/pack.toml --
+[pack]
+name = "dolt"
+schema = 1
+
+[[commands]]
+name = "cleanup"
+description = "Find and remove orphaned Dolt databases"
+script = "commands/cleanup.sh"
+
+[[commands]]
+name = "sync"
+description = "Push Dolt databases to their configured remotes"
+script = "commands/sync.sh"
+
+-- city5/packs/dolt/scripts/runtime.sh --
+#!/bin/sh
+: "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
+DOLT_BEADS_DATA_DIR="$GC_CITY_PATH/.beads/dolt"
+if [ -d "$DOLT_BEADS_DATA_DIR" ]; then
+  DOLT_DATA_DIR="$DOLT_BEADS_DATA_DIR"
+else
+  DOLT_DATA_DIR="$PACK_STATE_DIR/dolt-data"
+fi
+GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-/bin/true}"
+
+-- city5/packs/dolt/commands/.keep --
+
+# ===========================================================================
+# Shared cleanup.sh fixture — staged into each city's packs/dolt/commands/
+# by the exec cp calls above. Mirrors the logic of
+# examples/dolt/commands/cleanup/run.sh; the only adaptation is sourcing
+# runtime.sh from the test-pack's scripts/ layout (vs assets/scripts/).
+# ===========================================================================
+
+-- shared/cleanup.sh --
+#!/bin/sh
+# gc dolt cleanup — test fixture mirroring examples/dolt/commands/cleanup/run.sh (#706, #711).
+set -e
+
+force=false
+max_orphans=50
+PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+. "$PACK_DIR/scripts/runtime.sh"
+data_dir="$DOLT_DATA_DIR"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) force=true; shift ;;
+    --max)   max_orphans="$2"; shift 2 ;;
+    -h|--help) echo "Usage: gc dolt cleanup [--force] [--max N]"; exit 0 ;;
+    *) echo "gc dolt cleanup: unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [ ! -d "$data_dir" ]; then
+  echo "No orphaned databases found."
+  exit 0
+fi
+
+metadata_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
+  if command -v gc >/dev/null 2>&1; then
+    rig_paths=$(gc rig list --json 2>/dev/null \
+      | if command -v jq >/dev/null 2>&1; then
+          jq -r '.rigs[].path' 2>/dev/null
+        else
+          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
+        fi) || true
+    if [ -n "$rig_paths" ]; then
+      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+      done
+      return
+    fi
+  fi
+  find "$GC_CITY_PATH/rigs" -path '*/.beads/metadata.json' 2>/dev/null || true
+}
+
+referenced=""
+while IFS= read -r meta; do
+  [ -z "$meta" ] && continue
+  [ -f "$meta" ] || continue
+  db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null \
+    | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true)
+  [ -n "$db" ] && referenced="$referenced $db "
+done <<EOF
+$(metadata_files)
+EOF
+
+orphans=""
+orphan_count=0
+for d in "$data_dir"/*/; do
+  [ ! -d "$d/.dolt" ] && continue
+  name="$(basename "$d")"
+  case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+  case "$referenced" in *" $name "*) continue ;; esac
+  size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
+  size="${size_bytes} B"
+  orphans="$orphans$name|$size|$d
+"
+  orphan_count=$((orphan_count + 1))
+done
+
+if [ "$orphan_count" -eq 0 ]; then
+  echo "No orphaned databases found."
+  exit 0
+fi
+
+compute_allowlist_file() {
+  _out=$1
+  if ! command -v gc >/dev/null 2>&1; then
+    echo "gc dolt cleanup: gc not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "gc dolt cleanup: jq not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    return 1
+  fi
+  _list=$(gc rig list --json 2>/dev/null) || {
+    echo "gc dolt cleanup: gc rig list --json failed; refusing to run overlap allowlist unverified" >&2
+    return 1
+  }
+  if ! printf '%s\n' "$_list" | jq -e '.rigs' >/dev/null 2>&1; then
+    echo "gc dolt cleanup: gc rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
+    return 1
+  fi
+  printf '%s\n' "$_list" | jq -r '.rigs[] | select(.hq != true) | .path' > "$_out" || return 1
+}
+
+overlapping_rig_path() {
+  _db_path=${1%/}
+  while IFS= read -r rig_path; do
+    [ -z "$rig_path" ] && continue
+    rig_path=${rig_path%/}
+    if [ "$_db_path" = "$rig_path" ] \
+      || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
+      || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
+    then
+      printf '%s\n' "$rig_path"
+      return
+    fi
+  done < "$allowlist_file"
+}
+
+allowlist_file=$(mktemp)
+trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}"' EXIT
+allowlist_ready=true
+if ! compute_allowlist_file "$allowlist_file"; then
+  allowlist_ready=false
+  if [ "$force" = true ]; then
+    exit 1
+  fi
+  : > "$allowlist_file"
+fi
+
+printf "%-30s  %-12s  %s\n" "NAME" "SIZE" "STATUS"
+echo "$orphans" | while IFS='|' read -r name size path; do
+  [ -z "$name" ] && continue
+  status=""
+  if [ "$force" != true ] && [ "$allowlist_ready" = true ]; then
+    overlap=$(overlapping_rig_path "$path")
+    [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
+  fi
+  printf "%-30s  %-12s  %s\n" "$name" "$size" "$status"
+done
+
+if [ "$orphan_count" -gt "$max_orphans" ]; then
+  echo "" >&2
+  echo "gc dolt cleanup: $orphan_count orphans exceeds --max $max_orphans; remove manually or increase --max" >&2
+  exit 1
+fi
+
+if [ "$force" != true ]; then
+  echo ""
+  echo "$orphan_count orphaned database(s). Use --force to remove."
+  exit 0
+fi
+
+refused_tmp=$(mktemp)
+removed_tmp=$(mktemp)
+echo "$orphans" | while IFS='|' read -r db_name size path; do
+  [ -z "$db_name" ] && continue
+  overlap=$(overlapping_rig_path "$path")
+  if [ -n "$overlap" ]; then
+    echo "refusing to remove '$db_name': path overlaps registered rig at '$overlap'" >&2
+    echo "refused" >> "$refused_tmp"
+    continue
+  fi
+  if rm -rf "$path"; then
+    echo "removed" >> "$removed_tmp"
+    echo "  Removed $db_name"
+  else
+    echo "  Failed to remove $db_name" >&2
+  fi
+done
+
+removed=$(wc -l < "$removed_tmp" | tr -d ' ')
+refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
+echo ""
+echo "Removed $removed of $orphan_count orphaned database(s)."
+
+if [ "$removed" -lt "$((orphan_count - refused_count))" ] \
+  || { [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; }; then
+  exit 1
+fi
+
+-- shared/sync.sh --
+#!/bin/sh
+# gc dolt sync — test fixture mirroring examples/dolt/commands/sync/run.sh.
+# Exercises routes_files() external-rig discovery (#711).
+set -e
+
+: "${GC_DOLT_USER:=root}"
+PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+. "$PACK_DIR/scripts/runtime.sh"
+
+dry_run=false
+force=false
+do_gc=false
+db_filter=""
+beads_bd="$GC_BEADS_BD_SCRIPT"
+data_dir="$DOLT_DATA_DIR"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=true; shift ;;
+    --force)   force=true; shift ;;
+    --gc)      do_gc=true; shift ;;
+    --db)      db_filter="$2"; shift 2 ;;
+    -h|--help) echo "Usage: gc dolt sync [--dry-run] [--force] [--gc] [--db NAME]"; exit 0 ;;
+    *) echo "gc dolt sync: unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+is_running() {
+  [ -n "${GC_DOLT_PORT:-}" ] || return 1
+  lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+routes_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/routes.jsonl"
+  if command -v gc >/dev/null 2>&1; then
+    rig_paths=$(gc rig list --json 2>/dev/null \
+      | if command -v jq >/dev/null 2>&1; then
+          jq -r '.rigs[].path' 2>/dev/null
+        else
+          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
+        fi) || true
+    if [ -n "$rig_paths" ]; then
+      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\n' "$p/.beads/routes.jsonl"
+      done
+      return
+    fi
+  fi
+  find "$GC_CITY_PATH/rigs" -path '*/.beads/routes.jsonl' 2>/dev/null || true
+}
+
+if [ "$do_gc" = true ]; then
+  # Probe: print every route file routes_files() discovers, so the testscript
+  # can assert external-rig coverage without a running Dolt or bd.
+  routes_files | while IFS= read -r rf; do
+    [ -n "$rf" ] && echo "  route: $rf"
+  done
+fi
+
+was_running=false
+if is_running; then
+  was_running=true
+fi
+
+exit_code=0
+if [ -d "$data_dir" ]; then
+  for d in "$data_dir"/*/; do
+    [ ! -d "$d/.dolt" ] && continue
+    name="$(basename "$d")"
+    case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+    [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
+
+    remote=""
+    if [ -f "$d/.dolt/remotes.json" ]; then
+      remote=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
+    fi
+
+    if [ -z "$remote" ]; then
+      echo "  $name: skipped (no remote)"
+      continue
+    fi
+
+    if [ "$dry_run" = true ]; then
+      echo "  $name: would push to $remote"
+      continue
+    fi
+  done
+fi
+
+exit $exit_code

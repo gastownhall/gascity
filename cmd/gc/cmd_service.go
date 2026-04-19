@@ -148,7 +148,7 @@ func serviceRestartClient(cityPath string, cfg *config.City) *api.Client {
 			bind = "::1"
 		}
 		baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
-		return api.NewClient(baseURL)
+		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
 	}
 	if client := supervisorCityAPIClient(cityPath); client != nil {
 		return client
@@ -284,7 +284,7 @@ func serviceReadClient(cityPath string, cfg *config.City) serviceStatusReader {
 			bind = "::1"
 		}
 		baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
-		return api.NewClient(baseURL)
+		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
 	}
 	if client := supervisorCityAPIClient(cityPath); client != nil {
 		return client

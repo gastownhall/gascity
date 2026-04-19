@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,6 +158,18 @@ func TestDoEventEmitPayloadInvalidJSON(t *testing.T) {
 	}
 }
 
+// TestEventEmitViaCLI exercises the full `gc event emit` CLI path: flag
+// parsing, city discovery, event-provider open, and local events.jsonl
+// write. The matching read path (`gc events`) now goes through the
+// supervisor/controller API and is covered by TestDoEvents* against a
+// mock API server, so this test focuses on the emit CLI's end-to-end
+// behavior without needing a live controller.
+//
+// Pre-migration this test did an emit-then-read roundtrip via `gc events`,
+// but that readback is incompatible with the API-first contract — `gc
+// events` no longer reads local files. Splitting emit and read into
+// their own tests keeps each side focused without needing a fake
+// controller harness in the cmd/gc test tree.
 func TestEventEmitViaCLI(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -168,30 +183,58 @@ func TestEventEmitViaCLI(t *testing.T) {
 		t.Fatalf("gc init = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Use --city flag in args (run() creates fresh cobra root, resetting cityFlag).
+	// Emit two events via the CLI. `gc event emit` is best-effort and
+	// always returns 0, but it should still write the events locally.
 	stdout.Reset()
 	stderr.Reset()
 	code = run([]string{"--city", dir, "event", "emit", "bead.created", "--subject", "gc-1", "--message", "Build Hanoi"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("gc event emit = %d; stderr: %s", code, stderr.String())
+		t.Fatalf("gc event emit bead.created = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Verify via gc events.
-	stdout.Reset()
-	stderr.Reset()
-	code = run([]string{"--city", dir, "events"}, &stdout, &stderr)
+	code = run([]string{"--city", dir, "event", "emit", "bead.closed", "--subject", "gc-1", "--message", "Done"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("gc events = %d; stderr: %s", code, stderr.String())
+		t.Fatalf("gc event emit bead.closed = %d; stderr: %s", code, stderr.String())
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "bead.created") {
-		t.Errorf("gc events output missing 'bead.created': %q", out)
+
+	// Verify events landed in the local JSONL file. Parse line-by-line
+	// because the file is append-only JSONL, not a JSON array.
+	eventsPath := filepath.Join(dir, ".gc", "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("reading events.jsonl: %v", err)
 	}
-	if !strings.Contains(out, "gc-1") {
-		t.Errorf("gc events output missing 'gc-1': %q", out)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("events.jsonl has %d lines, want 2; content:\n%s", len(lines), string(data))
 	}
-	if !strings.Contains(out, "Build Hanoi") {
-		t.Errorf("gc events output missing 'Build Hanoi': %q", out)
+
+	var created, closed events.Event
+	if err := json.Unmarshal([]byte(lines[0]), &created); err != nil {
+		t.Fatalf("unmarshal line 0: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &closed); err != nil {
+		t.Fatalf("unmarshal line 1: %v", err)
+	}
+
+	if created.Type != "bead.created" {
+		t.Errorf("line 0 type = %q, want bead.created", created.Type)
+	}
+	if created.Subject != "gc-1" {
+		t.Errorf("line 0 subject = %q, want gc-1", created.Subject)
+	}
+	if created.Message != "Build Hanoi" {
+		t.Errorf("line 0 message = %q, want Build Hanoi", created.Message)
+	}
+	if created.Seq != 1 {
+		t.Errorf("line 0 seq = %d, want 1", created.Seq)
+	}
+
+	if closed.Type != "bead.closed" {
+		t.Errorf("line 1 type = %q, want bead.closed", closed.Type)
+	}
+	if closed.Seq != 2 {
+		t.Errorf("line 1 seq = %d, want 2", closed.Seq)
 	}
 }
 

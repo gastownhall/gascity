@@ -398,6 +398,19 @@ func TestDefaultBranchFor_NonGitDir(t *testing.T) {
 	}
 }
 
+func TestDefaultBranchFor_PreservesSlashesInBranchName(t *testing.T) {
+	// Regression test for #719: defaultBranchFor must preserve slashes in
+	// the default branch name. Previously strings.LastIndex(ref, "/") in
+	// DefaultBranch() truncated "refs/remotes/origin/team/feature/x" to "x",
+	// leaking the wrong branch name into PromptContext.DefaultBranch and
+	// the direct cmd_sling / cmd_prime consumers.
+	repoDir := newRepoWithOriginHead(t, "team/feature/x")
+	got := defaultBranchFor(repoDir)
+	if got != "team/feature/x" {
+		t.Errorf("defaultBranchFor(repo with slashy default) = %q, want %q", got, "team/feature/x")
+	}
+}
+
 func TestBuildTemplateDataDefaultBranchOverridesEnv(t *testing.T) {
 	ctx := PromptContext{
 		DefaultBranch: "develop",

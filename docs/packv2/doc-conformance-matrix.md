@@ -102,7 +102,7 @@ unsettled to be reliable release gates.
 | `patches/` directory convention for imported prompt replacements | documented in v.next docs, not implemented | Current implementation still relies on explicit patch fields rather than full loader-discovered patch files |
 | Pack `skills/` discovery | documented, not implemented | First slice is current-city-pack only with list-only visibility; imported-pack catalogs are later |
 | `mcp/` TOML abstraction | documented, not implemented | Same first-slice scope as skills: current-city-pack only, list-only visibility first, provider projection later |
-| `.gc/site.toml` rig-path split (`#588`) | future work | Important, but it is a separate migration and should not muddy the current pack/city suite |
+| `.gc/site.toml` rig-path split (`#588`) | implemented for `rig.path` | Loader overlays `.gc/site.toml`, commands write site bindings, and `gc doctor --fix` migrates legacy `rig.path`; `rig.prefix` / `rig.suspended` remain in `city.toml` in Phase A |
 | Final doctor manifest symmetry/shape | still under-specified | Discovery is testable now, but the final manifest shape should not be frozen by the first-pass suite |
 | Command collision rules and final command/doctor manifest shape | still under-specified | The docs still use "current preferred direction" language rather than frozen contract language |
 | Legacy cleanup surfaces | e.g. stale `.order.` / `.formula.` references in old docs/examples or dismantling `[workspace]` | Keep as handoff cleanup, but do not treat it as a current-wave ship gate |

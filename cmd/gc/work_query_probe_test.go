@@ -87,7 +87,7 @@ func TestControllerQueryRuntimeEnvExplicitRigUsesRigStorePassword(t *testing.T) 
 
 func TestControllerQueryRuntimeEnvSupportsExecGcBeadsBd(t *testing.T) {
 	cityPath, rigDir, cfg := newControllerProbeFixture(t)
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
 	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
 		IssuePrefix:    "de",
 		EndpointOrigin: contract.EndpointOriginExplicit,

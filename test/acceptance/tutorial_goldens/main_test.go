@@ -426,7 +426,7 @@ func stopTutorialSupervisor(env *tutorialEnv) {
 		return
 	}
 	if env.Env != nil && env.Home != "" {
-		_, _ = runEnvCommandWithTimeout(env, env.Home, 5*time.Second, "gc", "supervisor", "stop")
+		_, _ = runEnvCommandWithTimeout(env, env.Home, 15*time.Second, "gc", "supervisor", "stop", "--wait")
 	}
 	if env.supervisorDone != nil {
 		select {

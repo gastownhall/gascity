@@ -18,7 +18,7 @@ or `/gc-city` to load command reference for any topic.
 
 ## Working with rig beads
 
-Use `gc bd` to run bd commands against any rig from the city root:
+Use `gc bd` to run bead commands against any rig from the city root:
 
     gc bd --rig <rig-name> list
     gc bd --rig <rig-name> create "<title>"
@@ -28,7 +28,7 @@ The rig is auto-detected from the bead prefix when possible:
 
     gc bd show my-project-abc    # auto-routes to the correct rig
 
-For city-level beads (no rig), `gc bd` works the same as plain `bd`.
+For city-level beads (no rig), `gc bd` works the same way without `--rig`.
 
 ## Handoff
 

@@ -13,10 +13,10 @@ import (
 
 func TestRigList(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rigs", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rigs"), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -33,10 +33,10 @@ func TestRigList(t *testing.T) {
 
 func TestRigGet(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -53,10 +53,10 @@ func TestRigGet(t *testing.T) {
 
 func TestRigGetNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/nonexistent", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/nonexistent"), nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
@@ -70,10 +70,10 @@ func TestRigEnrichment(t *testing.T) {
 		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	}
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -91,11 +91,11 @@ func TestRigEnrichment(t *testing.T) {
 
 func TestRigSuspendResume(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Suspend rig.
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/myrig/suspend", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/rig/myrig/suspend"), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("suspend: status = %d, want 200", rec.Code)
@@ -103,7 +103,7 @@ func TestRigSuspendResume(t *testing.T) {
 
 	// Read-after-write: rig should show as suspended.
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
 
 	var rig rigResponse
 	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
@@ -115,7 +115,7 @@ func TestRigSuspendResume(t *testing.T) {
 
 	// Resume rig.
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/myrig/resume", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/rig/myrig/resume"), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resume: status = %d, want 200", rec.Code)
@@ -123,7 +123,7 @@ func TestRigSuspendResume(t *testing.T) {
 
 	// Read-after-write: rig should show as not suspended.
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
 
 	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -135,10 +135,10 @@ func TestRigSuspendResume(t *testing.T) {
 
 func TestRigActionNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/nonexistent/suspend", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/rig/nonexistent/suspend"), nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
@@ -147,10 +147,10 @@ func TestRigActionNotFound(t *testing.T) {
 
 func TestRigActionUnknown(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/myrig/reboot", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/rig/myrig/reboot"), nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)

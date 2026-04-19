@@ -1,156 +1,256 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
-	"net/http"
+	"fmt"
+	"log"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
 type workflowEventProjection struct {
-	Type            string               `json:"type"`
-	WorkflowID      string               `json:"workflow_id"`
-	RootBeadID      string               `json:"root_bead_id"`
-	RootStoreRef    string               `json:"root_store_ref"`
-	ScopeKind       string               `json:"scope_kind"`
-	ScopeRef        string               `json:"scope_ref"`
-	WatchGeneration string               `json:"watch_generation"`
-	EventSeq        uint64               `json:"event_seq"`
-	WorkflowSeq     uint64               `json:"workflow_seq"`
-	EventTS         string               `json:"event_ts"`
-	EventType       string               `json:"event_type"`
-	Bead            workflowBeadResponse `json:"bead"`
-	ChangedFields   []string             `json:"changed_fields"`
-	LogicalNodeID   string               `json:"logical_node_id"`
-	AttemptSummary  map[string]any       `json:"attempt_summary,omitempty"`
-	RequiresResync  bool                 `json:"requires_resync,omitempty"`
+	Type            string                  `json:"type"`
+	WorkflowID      string                  `json:"workflow_id"`
+	RootBeadID      string                  `json:"root_bead_id"`
+	RootStoreRef    string                  `json:"root_store_ref"`
+	ScopeKind       string                  `json:"scope_kind"`
+	ScopeRef        string                  `json:"scope_ref"`
+	WatchGeneration string                  `json:"watch_generation"`
+	EventSeq        uint64                  `json:"event_seq"`
+	WorkflowSeq     uint64                  `json:"workflow_seq"`
+	EventTS         string                  `json:"event_ts"`
+	EventType       string                  `json:"event_type"`
+	Bead            workflowBeadResponse    `json:"bead"`
+	ChangedFields   []string                `json:"changed_fields"`
+	LogicalNodeID   string                  `json:"logical_node_id"`
+	AttemptSummary  *WorkflowAttemptSummary `json:"attempt_summary,omitempty"`
+	RequiresResync  bool                    `json:"requires_resync,omitempty"`
 }
 
+// WorkflowAttemptSummary describes retry accounting for a workflow bead.
+// Emitted on workflow projections whenever a bead has a non-zero attempt
+// count. MaxAttempts is omitted when no ceiling is configured.
+type WorkflowAttemptSummary struct {
+	AttemptCount  int `json:"attempt_count"`
+	ActiveAttempt int `json:"active_attempt"`
+	MaxAttempts   int `json:"max_attempts,omitempty"`
+}
+
+// WireEvent is the list-endpoint wire shape for a single event,
+// emitted by GET /v0/city/{cityName}/events. Same envelope fields as
+// eventStreamEnvelope minus the SSE-specific Workflow projection.
+// Payload is decoded via the events registry into a typed variant so
+// the list endpoint's wire schema matches the stream endpoint's
+// instead of falling back to opaque bytes.
+type WireEvent struct {
+	Seq     uint64            `json:"seq"`
+	Type    string            `json:"type"`
+	Ts      time.Time         `json:"ts"`
+	Actor   string            `json:"actor"`
+	Subject string            `json:"subject,omitempty"`
+	Message string            `json:"message,omitempty"`
+	Payload EventPayloadUnion `json:"payload,omitempty"`
+}
+
+// WireTaggedEvent is the supervisor-scope list wire shape for
+// GET /v0/events, carrying the City the event originated from.
+type WireTaggedEvent struct {
+	WireEvent
+	City string `json:"city"`
+}
+
+// toWireEvent decodes the bus's opaque Payload into the registered
+// typed variant and returns the list-endpoint wire shape.
+//
+// Policy:
+//   - Registered event types: emit with the typed payload variant.
+//   - Unregistered event types (e.g. ad-hoc `gc event emit custom.foo`
+//     from a user hook): emit the envelope with a null payload so the
+//     CLI user's custom events remain visible in the list. The type
+//     string, actor, subject, message, seq, and ts are preserved — only
+//     structured payload data is dropped (there is no registered schema
+//     to interpret it against). The registry-coverage test
+//     (TestEveryKnownEventTypeHasRegisteredPayload) still guarantees
+//     every KnownEventTypes constant has a registered payload; this
+//     passthrough covers only types the SDK does not know about.
+//   - Decode error on registered types: skip + log. Emitting a typed
+//     event with bus corruption would violate Principle 7.
+func toWireEvent(e events.Event) (WireEvent, bool) {
+	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
+	if err != nil {
+		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
+		return WireEvent{}, false
+	}
+	var payload events.Payload
+	if registered {
+		payload, _ = decoded.(events.Payload)
+	}
+	return WireEvent{
+		Seq:     e.Seq,
+		Type:    e.Type,
+		Ts:      e.Ts,
+		Actor:   e.Actor,
+		Subject: e.Subject,
+		Message: e.Message,
+		Payload: EventPayloadUnion{Value: payload},
+	}, true
+}
+
+// toWireTaggedEvent is the supervisor-scope analog of toWireEvent,
+// preserving the City tag the multiplexer attached to the event.
+// Same skip-not-degrade contract: returns ok=false on decode failure.
+func toWireTaggedEvent(te events.TaggedEvent) (WireTaggedEvent, bool) {
+	wire, ok := toWireEvent(te.Event)
+	if !ok {
+		return WireTaggedEvent{}, false
+	}
+	return WireTaggedEvent{WireEvent: wire, City: te.City}, true
+}
+
+// eventStreamEnvelope is the wire shape emitted on
+// /v0/city/{cityName}/events/stream. The envelope is a single named
+// schema so generated Go and TS clients have a concrete type to work
+// with; the Payload field is the discriminated union, schema-typed as
+// oneOf over every registered events.Payload variant. Consumers read
+// `type` to know which variant `payload` holds.
 type eventStreamEnvelope struct {
-	events.Event
+	Seq      uint64                   `json:"seq"`
+	Type     string                   `json:"type"`
+	Ts       time.Time                `json:"ts"`
+	Actor    string                   `json:"actor"`
+	Subject  string                   `json:"subject,omitempty"`
+	Message  string                   `json:"message,omitempty"`
+	Payload  EventPayloadUnion        `json:"payload,omitempty"`
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
 }
 
+// taggedEventStreamEnvelope is the supervisor-scope wire shape for
+// /v0/events/stream. Structurally identical to eventStreamEnvelope
+// plus a City field identifying which city emitted the event.
 type taggedEventStreamEnvelope struct {
-	events.TaggedEvent
+	Seq      uint64                   `json:"seq"`
+	Type     string                   `json:"type"`
+	Ts       time.Time                `json:"ts"`
+	Actor    string                   `json:"actor"`
+	Subject  string                   `json:"subject,omitempty"`
+	Message  string                   `json:"message,omitempty"`
+	Payload  EventPayloadUnion        `json:"payload,omitempty"`
+	City     string                   `json:"city"`
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
 }
 
-func streamProjectedEventsWithWatcher(
-	ctx context.Context,
-	w http.ResponseWriter,
-	watcher events.Watcher,
-	state State,
-) {
-	defer watcher.Close() //nolint:errcheck
-
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	type result struct {
-		event events.Event
-		err   error
-	}
-	ch := make(chan result, 1)
-
-	readNext := func() {
-		go func() {
-			e, err := watcher.Next()
-			select {
-			case ch <- result{event: e, err: err}:
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	readNext()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case r := <-ch:
-			if r.err != nil {
-				return
-			}
-			data, err := json.Marshal(eventStreamEnvelope{
-				Event:    r.event,
-				Workflow: projectWorkflowEvent(state, r.event),
-			})
-			if err == nil {
-				writeSSE(w, r.event.Type, r.event.Seq, data)
-			}
-			readNext()
-		case <-keepalive.C:
-			writeSSEComment(w)
-		}
-	}
+// EventPayloadUnion wraps any registered events.Payload for wire
+// emission. Its MarshalJSON emits the concrete variant's shape
+// directly (no wrapper object); its Schema registers a named
+// EventPayload oneOf component in the OpenAPI spec so generated
+// clients receive a discriminated union over every registered payload
+// type (Principle 7). MarshalJSON is schema-intentional per Principle
+// 4's edge-case list: it enables the oneOf wire shape, not opaque
+// pass-through. No UnmarshalJSON is defined — the server is
+// marshal-only on this type, and absence of a custom unmarshaler
+// makes accidental in-process round-trips fail loudly at the
+// interface field rather than silently dropping bytes.
+type EventPayloadUnion struct {
+	Value events.Payload
 }
 
-func streamProjectedGlobalEvents(
-	ctx context.Context,
-	w http.ResponseWriter,
-	mw *events.MuxWatcher,
-	cursors map[string]uint64,
-	resolver CityResolver,
-) {
-	defer mw.Close() //nolint:errcheck
-
-	if cursors == nil {
-		cursors = make(map[string]uint64)
+// MarshalJSON emits the concrete payload's JSON directly so the wire
+// sees {"rig":...} (for mail) rather than {"Value": {...}}.
+func (p EventPayloadUnion) MarshalJSON() ([]byte, error) {
+	if p.Value == nil {
+		return []byte("null"), nil
 	}
+	return json.Marshal(p.Value)
+}
 
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	type result struct {
-		event events.TaggedEvent
-		err   error
-	}
-	ch := make(chan result, 1)
-
-	readNext := func() {
-		go func() {
-			te, err := mw.Next()
-			select {
-			case ch <- result{event: te, err: err}:
-			case <-ctx.Done():
+// Schema registers an "EventPayload" named component whose schema is
+// a oneOf of every registered payload type, then returns a $ref.
+// Named registration keeps the generated clients compact — one
+// EventPayload union type — rather than inlining the oneOf in every
+// envelope field reference.
+func (EventPayloadUnion) Schema(r huma.Registry) *huma.Schema {
+	const name = "EventPayload"
+	if _, ok := r.Map()[name]; !ok {
+		payloads := events.RegisteredPayloadTypes()
+		// Deduplicate by Go type — several event-type constants share
+		// the same payload shape (e.g. all mail.* events use
+		// MailEventPayload).
+		seen := map[reflect.Type]bool{}
+		types := make([]reflect.Type, 0)
+		for _, sample := range payloads {
+			t := reflect.TypeOf(sample)
+			if seen[t] {
+				continue
 			}
-		}()
-	}
-
-	readNext()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case r := <-ch:
-			if r.err != nil {
-				return
-			}
-			cursors[r.event.City] = r.event.Seq
-			var wfp *workflowEventProjection
-			if cs := resolver.CityState(r.event.City); cs != nil {
-				wfp = projectWorkflowEvent(cs, r.event.Event)
-			}
-			data, err := json.Marshal(taggedEventStreamEnvelope{
-				TaggedEvent: r.event,
-				Workflow:    wfp,
-			})
-			if err == nil {
-				cursorID := events.FormatCursor(cursors)
-				writeSSEWithStringID(w, r.event.Type, cursorID, data)
-			}
-			readNext()
-		case <-keepalive.C:
-			writeSSEComment(w)
+			seen[t] = true
+			types = append(types, t)
 		}
+		// Sort by type name for a stable spec.
+		sort.Slice(types, func(i, j int) bool {
+			return types[i].Name() < types[j].Name()
+		})
+		oneOf := make([]*huma.Schema, 0, len(types))
+		for _, t := range types {
+			oneOf = append(oneOf, r.Schema(t, true, t.Name()))
+		}
+		r.Map()[name] = &huma.Schema{OneOf: oneOf}
 	}
+	return &huma.Schema{Ref: schemaRefPrefix + name}
+}
+
+// wireEventFrom decodes the bus's opaque Payload into the registered
+// typed variant and returns a wire envelope ready for SSE emission on
+// the per-city stream. Unregistered event types cause an error —
+// Principle 7's strict policy enforced at emission time
+// (the registry-coverage test catches this at CI).
+func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStreamEnvelope, error) {
+	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
+	if err != nil {
+		return eventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", e.Type, err)
+	}
+	if !registered {
+		return eventStreamEnvelope{}, fmt.Errorf("event type %q has no registered payload (see internal/api/event_payloads.go)", e.Type)
+	}
+	payload, _ := decoded.(events.Payload)
+	return eventStreamEnvelope{
+		Seq:      e.Seq,
+		Type:     e.Type,
+		Ts:       e.Ts,
+		Actor:    e.Actor,
+		Subject:  e.Subject,
+		Message:  e.Message,
+		Payload:  EventPayloadUnion{Value: payload},
+		Workflow: workflow,
+	}, nil
+}
+
+// wireTaggedEventFrom is the supervisor-scope analog of wireEventFrom.
+func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjection) (taggedEventStreamEnvelope, error) {
+	decoded, registered, err := events.DecodePayload(te.Type, te.Payload)
+	if err != nil {
+		return taggedEventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", te.Type, err)
+	}
+	if !registered {
+		return taggedEventStreamEnvelope{}, fmt.Errorf("event type %q has no registered payload (see internal/api/event_payloads.go)", te.Type)
+	}
+	payload, _ := decoded.(events.Payload)
+	return taggedEventStreamEnvelope{
+		Seq:      te.Seq,
+		Type:     te.Type,
+		Ts:       te.Ts,
+		Actor:    te.Actor,
+		Subject:  te.Subject,
+		Message:  te.Message,
+		Payload:  EventPayloadUnion{Value: payload},
+		City:     te.City,
+		Workflow: workflow,
+	}, nil
 }
 
 func projectWorkflowEvent(state State, event events.Event) *workflowEventProjection {
@@ -224,7 +324,7 @@ func projectWorkflowEvent(state State, event events.Event) *workflowEventProject
 		projection.RequiresResync = true
 	}
 
-	if summary := workflowAttemptSummary(bead); len(summary) > 0 {
+	if summary := workflowAttemptSummary(bead); summary != nil {
 		projection.AttemptSummary = summary
 	}
 
@@ -343,17 +443,17 @@ func workflowChangedFields(eventType string) []string {
 	}
 }
 
-func workflowAttemptSummary(bead beads.Bead) map[string]any {
+func workflowAttemptSummary(bead beads.Bead) *WorkflowAttemptSummary {
 	attempt := workflowAttemptValue(bead)
 	if attempt <= 0 {
 		return nil
 	}
-	summary := map[string]any{
-		"attempt_count":  attempt,
-		"active_attempt": attempt,
+	summary := &WorkflowAttemptSummary{
+		AttemptCount:  attempt,
+		ActiveAttempt: attempt,
 	}
 	if maxAttempts := metadataInt(bead.Metadata, "gc.max_attempts"); maxAttempts > 0 {
-		summary["max_attempts"] = maxAttempts
+		summary.MaxAttempts = maxAttempts
 	}
 	return summary
 }

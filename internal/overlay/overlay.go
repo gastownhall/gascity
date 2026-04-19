@@ -193,6 +193,53 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 	return nil
 }
 
+// CopyDirForProviders copies overlay files for multiple provider slots.
+// Universal (non per-provider/) files are copied once, then per-provider/<p>/
+// content is copied for each name in providers. Used when an agent has
+// install_agent_hooks declaring additional provider hook slots beyond its
+// resolved provider — e.g. an agent running Claude that wants the Gemini
+// hook staged too.
+//
+// Duplicate provider names in the list are de-duped; empty strings are
+// skipped. The order in providers determines which per-provider copy
+// wins when two providers ship the same rel path (last-writer-wins via
+// overwrite or JSON merge).
+func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Writer) error {
+	info, err := os.Stat(srcDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("overlay: stat %q: %w", srcDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("overlay: %q is not a directory", srcDir)
+	}
+
+	// Step 1: copy universal files (skip per-provider/).
+	skip := func(relPath string, _ bool) bool {
+		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
+			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
+	}
+	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+		return err
+	}
+
+	// Step 2: copy per-provider slots in order, deduped.
+	seen := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		providerDir := filepath.Join(srcDir, PerProviderDir, p)
+		if err := CopyDir(providerDir, dstDir, stderr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
 // and dst already exists. Falls back to plain copy on any merge error.
 func copyOrMergeFile(src, dst string, merge bool) error {

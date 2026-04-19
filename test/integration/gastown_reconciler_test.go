@@ -118,8 +118,14 @@ func setupReconcilerCity(t *testing.T, agentBlocks string) string {
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
+		}
+		// --wait so the supervisor and its controller subprocesses are
+		// confirmed exited before t.TempDir() / fixRootOwnedFiles run.
+		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+		}
 		fixRootOwnedFiles(cityDir)
 	})
 

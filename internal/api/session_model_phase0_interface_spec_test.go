@@ -20,36 +20,36 @@ import (
 func TestPhase0APISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testing.T) {
 	tests := []struct {
 		name string
-		req  func() *http.Request
+		req  func(*fakeState) *http.Request
 	}{
 		{
 			name: "POST /close",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/template:worker/close", nil)
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/template:worker/close"), nil)
 			},
 		},
 		{
 			name: "POST /wake",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/template:worker/wake", nil)
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/template:worker/wake"), nil)
 			},
 		},
 		{
 			name: "POST /suspend",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/template:worker/suspend", nil)
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/template:worker/suspend"), nil)
 			},
 		},
 		{
 			name: "POST /messages",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/template:worker/messages", strings.NewReader(`{"message":"hello"}`))
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/template:worker/messages"), strings.NewReader(`{"message":"hello"}`))
 			},
 		},
 		{
 			name: "POST /submit",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/template:worker/submit", strings.NewReader(`{"message":"hello"}`))
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/template:worker/submit"), strings.NewReader(`{"message":"hello"}`))
 			},
 		},
 	}
@@ -58,9 +58,10 @@ func TestPhase0APISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			fs := newPhase0APIOrdinaryWorkerState(t)
 			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
 
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, tt.req())
+			h.ServeHTTP(rec, tt.req(fs))
 
 			if rec.Code < 400 {
 				t.Fatalf("%s accepted template:worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
@@ -75,36 +76,36 @@ func TestPhase0APISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 func TestPhase0APISessionTargetingSurfaces_BareConfigNameDoesNotCreateOrdinarySession(t *testing.T) {
 	tests := []struct {
 		name string
-		req  func() *http.Request
+		req  func(*fakeState) *http.Request
 	}{
 		{
 			name: "POST /close",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/worker/close", nil)
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/worker/close"), nil)
 			},
 		},
 		{
 			name: "POST /wake",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/worker/wake", nil)
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/worker/wake"), nil)
 			},
 		},
 		{
 			name: "POST /suspend",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/worker/suspend", nil)
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/worker/suspend"), nil)
 			},
 		},
 		{
 			name: "POST /messages",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"hello"}`))
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"hello"}`))
 			},
 		},
 		{
 			name: "POST /submit",
-			req: func() *http.Request {
-				return newPostRequest("/v0/session/worker/submit", strings.NewReader(`{"message":"hello"}`))
+			req: func(fs *fakeState) *http.Request {
+				return newPostRequest(cityURL(fs, "/session/worker/submit"), strings.NewReader(`{"message":"hello"}`))
 			},
 		},
 	}
@@ -113,9 +114,10 @@ func TestPhase0APISessionTargetingSurfaces_BareConfigNameDoesNotCreateOrdinarySe
 		t.Run(tt.name, func(t *testing.T) {
 			fs := newPhase0APIOrdinaryWorkerState(t)
 			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
 
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, tt.req())
+			h.ServeHTTP(rec, tt.req(fs))
 
 			if rec.Code < 400 {
 				t.Fatalf("%s accepted ordinary config name worker with status %d; body=%s", tt.name, rec.Code, rec.Body.String())
@@ -130,10 +132,11 @@ func TestPhase0APISessionTargetingSurfaces_BareConfigNameDoesNotCreateOrdinarySe
 func TestPhase0APIMailSend_RejectsTemplateFactoryTarget(t *testing.T) {
 	fs := newPhase0APIOrdinaryWorkerState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	body := `{"from":"human","to":"template:worker","subject":"hello","body":"test"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/mail", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/mail"), strings.NewReader(body)))
 
 	if rec.Code == http.StatusCreated {
 		t.Fatalf("POST /v0/mail accepted template:worker as recipient; body=%s", rec.Body.String())
@@ -150,10 +153,11 @@ func TestPhase0APIMailSend_RejectsTemplateFactoryTarget(t *testing.T) {
 func TestPhase0APIMailSend_BareConfigNameDoesNotResolveAsRecipient(t *testing.T) {
 	fs := newPhase0APIOrdinaryWorkerState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	body := `{"from":"human","to":"worker","subject":"hello","body":"test"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/mail", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/mail"), strings.NewReader(body)))
 
 	if rec.Code == http.StatusCreated {
 		t.Fatalf("POST /v0/mail accepted ordinary config name as recipient; body=%s", rec.Body.String())

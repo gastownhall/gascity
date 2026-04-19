@@ -44,9 +44,8 @@ func TestGCSweepSessionBeads_ClosesOrphans(t *testing.T) {
 	_ = workBead
 
 	sessionBeads := []beads.Bead{orphan, active}
-	allWork := []beads.Bead{workBead}
 
-	closed := GCSweepSessionBeads(store, sessionBeads, allWork)
+	closed := GCSweepSessionBeads(store, nil, sessionBeads)
 
 	if len(closed) != 1 {
 		t.Fatalf("closed %d beads, want 1", len(closed))
@@ -89,9 +88,8 @@ func TestGCSweepSessionBeads_KeepsBlockedAssigned(t *testing.T) {
 	_ = blocked
 
 	sessionBeads := []beads.Bead{sess}
-	allWork := []beads.Bead{blocked}
 
-	closed := GCSweepSessionBeads(store, sessionBeads, allWork)
+	closed := GCSweepSessionBeads(store, nil, sessionBeads)
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (blocked work keeps session alive)", len(closed))
@@ -119,9 +117,8 @@ func TestGCSweepSessionBeads_ClosesWhenAllWorkClosed(t *testing.T) {
 	done, _ = store.Get(done.ID)
 
 	sessionBeads := []beads.Bead{sess}
-	allWork := []beads.Bead{done}
 
-	closed := GCSweepSessionBeads(store, sessionBeads, allWork)
+	closed := GCSweepSessionBeads(store, nil, sessionBeads)
 
 	if len(closed) != 1 {
 		t.Errorf("closed %d beads, want 1 (all work done)", len(closed))
@@ -137,7 +134,7 @@ func TestGCSweepSessionBeads_SkipsAlreadyClosed(t *testing.T) {
 
 	sessionBeads := []beads.Bead{sess}
 
-	closed := GCSweepSessionBeads(store, sessionBeads, nil)
+	closed := GCSweepSessionBeads(store, nil, sessionBeads)
 
 	if len(closed) != 0 {
 		t.Errorf("closed %d beads, want 0 (already closed)", len(closed))

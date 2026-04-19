@@ -1053,6 +1053,11 @@
           "type": "integer",
           "description": "ProbeConcurrency bounds the number of concurrent bd subprocess probes\nissued by the pool scale_check and work_query paths. bd serializes on\na shared dolt sql-server, so unbounded parallelism causes contention.\nNil (unset) defaults to 8. Set higher for workspaces with a fast\ndedicated dolt server, or lower to reduce contention on slow storage.",
           "default": 8
+        },
+        "max_wakes_per_tick": {
+          "type": "integer",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Raise this on cities with slow cold-starts (e.g. opus\ncold-start ~60s) where the default of 5 starves the rest of the\ncandidate queue for minutes. Nil (unset) defaults to 5. Values \u003c= 0\nare treated as the default — set a positive integer to override.\n\nTradeoff: the default of 5 also bounds the process-spawn burst after a\ncontroller restart (thundering-herd protection). Raising it trades\nrestart burst for steady-state throughput; keep within what the host\ncan absorb.",
+          "default": 5
         }
       },
       "additionalProperties": false,
@@ -1638,7 +1643,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Path is the absolute filesystem path to the rig's repository."
+          "description": "Path is the effective filesystem path to the rig's repository. New\nwrites persist it to .gc/site.toml; legacy city.toml paths are accepted\nonly so edit/migration flows can move them into site binding state."
         },
         "prefix": {
           "type": "string",
@@ -1704,8 +1709,7 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "name",
-        "path"
+        "name"
       ],
       "description": "Rig defines an external project registered in the city."
     },
@@ -1983,5 +1987,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the top-level configuration file for a Gas City instance."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility."
 }

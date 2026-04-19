@@ -31,6 +31,48 @@ func main() {
 // non-zero exit. The command has already written its own error to stderr.
 var errExit = errors.New("exit")
 
+type commandExitError struct {
+	code int
+}
+
+func (e *commandExitError) Error() string {
+	if e == nil {
+		return "exit"
+	}
+	return fmt.Sprintf("exit %d", e.code)
+}
+
+func (e *commandExitError) ExitCode() int {
+	if e == nil || e.code == 0 {
+		return 1
+	}
+	return e.code
+}
+
+func exitForCode(code int) error {
+	if code == 0 {
+		return nil
+	}
+	if code == 1 {
+		return errExit
+	}
+	return &commandExitError{code: code}
+}
+
+func commandExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr interface{ ExitCode() int }
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	if errors.Is(err, errExit) {
+		return 1
+	}
+	return 1
+}
+
 // cityFlag holds the value of the --city persistent flag.
 // Empty means "discover from cwd."
 var cityFlag string
@@ -64,7 +106,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	if err := root.Execute(); err != nil {
-		return 1
+		return commandExitCode(err)
 	}
 	return 0
 }
@@ -665,6 +707,13 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	}
 }
 
+// resolveStoreScopeRoot resolves a store's scope root under cityPath.
+// An empty storePath falls back to cityPath — this is the "city scope"
+// default used by callers that don't have a specific rig context. Callers
+// that need to distinguish an unbound rig from the city scope must check
+// rig.Path themselves before calling (see rig_scope_resolution.go and
+// beads_provider_lifecycle.go for the `if rig.Path == "" { continue }`
+// pattern).
 func resolveStoreScopeRoot(cityPath, storePath string) string {
 	scopeRoot := strings.TrimSpace(storePath)
 	if scopeRoot == "" {

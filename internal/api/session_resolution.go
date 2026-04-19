@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 const (
@@ -57,7 +58,38 @@ func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (ap
 		return apiNamedSessionSpec{}, false, nil
 	}
 	cityName := apiCityName(cfg, s.state.CityPath())
-	return session.FindNamedSessionSpecForTarget(cfg, cityName, target, "")
+	spec, ok, err := session.FindNamedSessionSpecForTarget(cfg, cityName, target, "")
+	if err != nil || ok || strings.Contains(target, "/") {
+		return spec, ok, err
+	}
+
+	rigMatches := map[string]bool{}
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns == nil {
+			continue
+		}
+		name := strings.TrimSpace(ns.Name)
+		if name == "" {
+			name = strings.TrimSpace(ns.Template)
+		}
+		if name != target {
+			continue
+		}
+		rigMatches[strings.TrimSpace(ns.Dir)] = true
+	}
+	switch len(rigMatches) {
+	case 0:
+		return apiNamedSessionSpec{}, false, nil
+	case 1:
+		var rigContext string
+		for rig := range rigMatches {
+			rigContext = rig
+		}
+		return session.FindNamedSessionSpecForTarget(cfg, cityName, target, rigContext)
+	default:
+		return apiNamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
+	}
 }
 
 func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessionSpec) (beads.Bead, bool, error) {
@@ -201,7 +233,13 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		return "", err
 	}
 
-	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
+	resolved, _, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
+	if err != nil {
+		return "", err
+	}
+	var workDir string
+	workDirQualifiedName := workdirutil.SessionQualifiedName(s.state.CityPath(), *spec.Agent, s.state.Config().Rigs, spec.Identity, "")
+	workDir, err = s.resolveSessionWorkDir(*spec.Agent, workDirQualifiedName)
 	if err != nil {
 		return "", err
 	}
@@ -283,6 +321,14 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return "", err
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+		if cfg := s.state.Config(); cfg != nil {
+			if bead, getErr := store.Get(id); getErr == nil && apiIsNamedSessionBead(bead) {
+				identity := apiNamedSessionIdentity(bead)
+				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
+					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+				}
+			}
+		}
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
@@ -298,9 +344,6 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
-	}
-	if !opts.materialize {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }

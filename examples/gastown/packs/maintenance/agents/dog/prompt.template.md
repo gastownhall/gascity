@@ -62,7 +62,7 @@ ample opportunity to respond even if they're in long-running operations.
 **CRITICAL**: When you finish, you MUST close your work and exit:
 
 ```bash
-bd close <work-bead>    # Close your assigned work
+gc bd close <work-bead>    # Close your assigned work
 gc runtime drain-ack    # Signal reconciler you're done
 exit                     # Return to pool (controller recycles you)
 ```
@@ -108,11 +108,11 @@ gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Read formula steps | `bd show <wisp-id>` (shows formula ref) |
+| Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
 | Find pool work | `{{ .WorkQuery }}` |
-| Claim pool work | `bd update <id> --claim` |
-| View work details | `bd show <id> --json` |
-| Close completed work | `bd close <id> --reason "..."` |
+| Claim pool work | `gc bd update <id> --claim` |
+| View work details | `gc bd show <id> --json` |
+| Close completed work | `gc bd close <id> --reason "..."` |
 | Request target restart | `gc session kill <target>` |
 | List orphan databases | `gc dolt cleanup` |
 | Remove orphan databases | `gc dolt cleanup --force` |

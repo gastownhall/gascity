@@ -80,6 +80,51 @@ func TestDefaultBranch_NoRemote(t *testing.T) {
 	}
 }
 
+// TestDefaultBranch_FromOriginHEAD exercises the symref parsing path and
+// verifies that branch names containing slashes round-trip correctly.
+// Regression test for the bug where strings.LastIndex(ref, "/") truncated
+// "refs/remotes/origin/user/feature" to "feature".
+func TestDefaultBranch_FromOriginHEAD(t *testing.T) {
+	tests := []struct {
+		name   string
+		branch string
+	}{
+		{"plain branch", "main"},
+		{"single slash", "boylec/develop"},
+		{"nested slashes", "team/feature/x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set up a bare remote and a clone that tracks it, so
+			// refs/remotes/origin/HEAD can be wired to the target ref.
+			bare := t.TempDir()
+			runGit(t, bare, "init", "--bare")
+
+			clone := t.TempDir()
+			runGit(t, clone, "clone", bare, ".")
+			runGit(t, clone, "config", "user.email", "test@test.com")
+			runGit(t, clone, "config", "user.name", "Test")
+			runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+
+			// Create the target ref under refs/remotes/origin/ and point
+			// origin/HEAD at it. symbolic-ref is permissive about its
+			// target so we don't need to push the branch first.
+			target := "refs/remotes/origin/" + tt.branch
+			runGit(t, clone, "update-ref", target, "HEAD")
+			runGit(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", target)
+
+			g := New(clone)
+			got, err := g.DefaultBranch()
+			if err != nil {
+				t.Fatalf("DefaultBranch: %v", err)
+			}
+			if got != tt.branch {
+				t.Errorf("DefaultBranch() = %q, want %q", got, tt.branch)
+			}
+		})
+	}
+}
+
 func TestWorktreeRemove(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)

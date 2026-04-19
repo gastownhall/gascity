@@ -9,11 +9,11 @@ import (
 
 func TestRouting404(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", "/nonexistent", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -22,12 +22,12 @@ func TestRouting404(t *testing.T) {
 
 func TestCORSHeaders(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("OPTIONS", "/v0/status", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("OPTIONS status = %d, want %d", rec.Code, http.StatusNoContent)
@@ -39,12 +39,12 @@ func TestCORSHeaders(t *testing.T) {
 
 func TestCORSOnRegularRequest(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", "/v0/status", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:8080")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:8080" {
 		t.Errorf("CORS origin = %q, want %q", got, "http://127.0.0.1:8080")
@@ -56,11 +56,11 @@ func TestCORSOnRegularRequest(t *testing.T) {
 
 func TestRequestIDHeader(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", "/v0/status", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	rid := rec.Header().Get("X-GC-Request-Id")
 	if rid == "" {
@@ -72,7 +72,7 @@ func TestRequestIDHeader(t *testing.T) {
 
 	// Each request gets a unique ID.
 	rec2 := httptest.NewRecorder()
-	srv.ServeHTTP(rec2, httptest.NewRequest("GET", "/v0/status", nil))
+	h.ServeHTTP(rec2, httptest.NewRequest("GET", "/v0/status", nil))
 	if rec2.Header().Get("X-GC-Request-Id") == rid {
 		t.Error("two requests should have different request IDs")
 	}
@@ -80,13 +80,13 @@ func TestRequestIDHeader(t *testing.T) {
 
 func TestCORSRejectsNonLocalhost(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Reject obvious non-localhost.
 	req := httptest.NewRequest("GET", "/v0/status", nil)
 	req.Header.Set("Origin", "http://evil.com")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("CORS origin = %q for non-localhost, want empty", got)
@@ -101,7 +101,7 @@ func TestCORSRejectsNonLocalhost(t *testing.T) {
 		req = httptest.NewRequest("GET", "/v0/status", nil)
 		req.Header.Set("Origin", spoof)
 		rec = httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("CORS origin = %q for spoof %q, want empty", got, spoof)
 		}
@@ -110,12 +110,13 @@ func TestCORSRejectsNonLocalhost(t *testing.T) {
 
 func TestMethodNotAllowed(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	// POST to a GET-only endpoint
-	req := newPostRequest("/v0/status", nil)
+	// POST to a GET-only endpoint. Go 1.22+ mux returns 405 when a
+	// path has handlers for other methods but not the requested one.
+	req := newPostRequest(cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
@@ -138,11 +139,19 @@ func TestPanicRecovery(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 
-	var apiErr Error
-	if err := json.NewDecoder(rec.Body).Decode(&apiErr); err != nil {
+	// Phase 3 Fix 3d: withRecovery emits RFC 9457 Problem Details.
+	var problem struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
 		t.Fatalf("decode error: %v", err)
 	}
-	if apiErr.Code != "internal" {
-		t.Errorf("error code = %q, want %q", apiErr.Code, "internal")
+	if problem.Status != http.StatusInternalServerError {
+		t.Errorf("problem.status = %d, want %d", problem.Status, http.StatusInternalServerError)
+	}
+	if problem.Title == "" {
+		t.Error("problem.title should be non-empty")
 	}
 }

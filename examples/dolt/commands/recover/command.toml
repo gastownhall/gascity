@@ -1,2 +1,1 @@
 description = "Recover Dolt from read-only state"
-run = "../recover.sh"

@@ -823,7 +823,7 @@ func TestManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T
 func TestManagedExecBdRigStoreConsistentAcrossRawBdAndProviderStore(t *testing.T) {
 	cityPath, rigPath := setupManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
 	rawDir := filepath.Join(rigPath, "nested-exec")
 	if err := os.MkdirAll(rawDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rawDir): %v", err)
@@ -1048,7 +1048,7 @@ func TestInheritedExternalExecBdRigStoreConsistentAcrossRawBdAndProviderStore(t 
 	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
 		t.Fatalf("WriteFile(rig config): %v", err)
 	}
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
 	t.Setenv("GC_DOLT_HOST", "bad.example.invalid")
 	t.Setenv("GC_DOLT_PORT", "9999")
 	rawDir := filepath.Join(rigPath, "nested-exec-external")

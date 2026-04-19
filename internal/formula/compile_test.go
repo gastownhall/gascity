@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows"
 )
 
 func TestCompileSimpleFormula(t *testing.T) {
@@ -266,8 +268,9 @@ title = "Scan"
 }
 
 func TestCompileRalphMarksWorkflowRootAndBlocksOnTopLevelSteps(t *testing.T) {
-	FormulaV2Enabled = true
-	t.Cleanup(func() { FormulaV2Enabled = false })
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaContent := `
@@ -336,8 +339,9 @@ timeout = "30s"
 }
 
 func TestCompileVersion2UsesGraphWorkflowRootAndNoParentChild(t *testing.T) {
-	FormulaV2Enabled = true
-	t.Cleanup(func() { FormulaV2Enabled = false })
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaContent := `
@@ -408,15 +412,16 @@ needs = ["setup"]
 }
 
 func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
-	FormulaV2Enabled = true
-	t.Cleanup(func() { FormulaV2Enabled = false })
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
 	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
-	searchDir := filepath.Join(repoRoot, "cmd", "gc", "formulas")
+	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
 
 	recipe, err := Compile(context.Background(), "mol-scoped-work", []string{searchDir}, nil)
 	if err != nil {
@@ -514,8 +519,9 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 }
 
 func TestCompileGraphWorkflowRejectsCycles(t *testing.T) {
-	FormulaV2Enabled = true
-	t.Cleanup(func() { FormulaV2Enabled = false })
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaText := `
@@ -541,6 +547,178 @@ needs = ["a"]
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
 		t.Fatalf("Compile(graph-cycle) error = %v, want dependency cycle", err)
 	}
+}
+
+func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
+		"issue":       "GC-1",
+		"pr_ref":      "refs/heads/test",
+		"skip_gemini": "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if strings.Contains(step.ID, "review-gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini lane with skip_gemini=true: %s", step.ID)
+		}
+	}
+	for _, dep := range recipe.Deps {
+		if strings.Contains(dep.StepID, "review-gemini") || strings.Contains(dep.DependsOnID, "review-gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini dependency with skip_gemini=true: %+v", dep)
+		}
+	}
+
+	for _, want := range []string{
+		"mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-claude",
+		"mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-codex",
+		"mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.synthesize",
+		"mol-adopt-pr-v2.review-loop.iteration.1.apply-fixes",
+	} {
+		if recipe.StepByID(want) == nil {
+			t.Fatalf("compiled recipe missing expected step %q", want)
+		}
+	}
+}
+
+func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
+		"issue":       "GC-1",
+		"pr_ref":      "refs/heads/test",
+		"skip_gemini": "false",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	assertRetryStep := func(stepID, onExhausted string) {
+		t.Helper()
+		step := recipe.StepByID(stepID)
+		if step == nil {
+			t.Fatalf("missing retry control step %q", stepID)
+		}
+		if got := step.Metadata["gc.kind"]; got != "retry" {
+			t.Fatalf("%s gc.kind = %q, want retry", stepID, got)
+		}
+		if got := step.Metadata["gc.on_exhausted"]; got != onExhausted {
+			t.Fatalf("%s gc.on_exhausted = %q, want %q", stepID, got, onExhausted)
+		}
+		if got := step.Metadata["gc.max_attempts"]; got != "3" {
+			t.Fatalf("%s gc.max_attempts = %q, want 3", stepID, got)
+		}
+
+		attempt := recipe.StepByID(stepID + ".attempt.1")
+		if attempt == nil {
+			t.Fatalf("missing first retry attempt for %q", stepID)
+		}
+		if got := attempt.Metadata["gc.attempt"]; got != "1" {
+			t.Fatalf("%s gc.attempt = %q, want 1", attempt.ID, got)
+		}
+		if got := attempt.Metadata["gc.step_id"]; got == "" {
+			t.Fatalf("%s gc.step_id should be populated for retry attempts", attempt.ID)
+		}
+	}
+
+	assertRetryStep("mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-codex", "hard_fail")
+	assertRetryStep("mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-gemini", "soft_fail")
+}
+
+func writeReviewWorkflowFixtures(t *testing.T, dir string) {
+	t.Helper()
+	for name, content := range map[string]string{
+		"expansion-review-pr.toml": reviewworkflows.ExpansionReviewPR,
+		"mol-adopt-pr-v2.toml":     reviewworkflows.AdoptPR,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+func TestCompileV2FormulaFailsWhenFormulaV2Disabled(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+
+	t.Run("version 2 formula errors", func(t *testing.T) {
+		formulaContent := `
+formula = "needs-v2"
+version = 2
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+		if err := os.WriteFile(filepath.Join(dir, "needs-v2.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := Compile(context.Background(), "needs-v2", []string{dir}, nil)
+		if err == nil {
+			t.Fatal("Compile(needs-v2) succeeded, want error for v2 formula with FormulaV2Enabled=false")
+		}
+		if !strings.Contains(err.Error(), "formula_v2") {
+			t.Fatalf("error = %v, want message mentioning formula_v2", err)
+		}
+	})
+
+	t.Run("version 8 formula errors", func(t *testing.T) {
+		formulaContent := `
+formula = "needs-v8"
+version = 8
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+		if err := os.WriteFile(filepath.Join(dir, "needs-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := Compile(context.Background(), "needs-v8", []string{dir}, nil)
+		if err == nil {
+			t.Fatal("Compile(needs-v8) succeeded, want error for v8 formula with FormulaV2Enabled=false")
+		}
+		if !strings.Contains(err.Error(), "formula_v2") {
+			t.Fatalf("error = %v, want message mentioning formula_v2", err)
+		}
+	})
+
+	t.Run("version 1 formula still compiles", func(t *testing.T) {
+		formulaContent := `
+formula = "still-v1"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+		if err := os.WriteFile(filepath.Join(dir, "still-v1.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := Compile(context.Background(), "still-v1", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("Compile(still-v1) = %v, want nil for v1 formula", err)
+		}
+	})
 }
 
 func TestCompileValidatesRequiredVars(t *testing.T) {

@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print(
+            "usage: merge-coverprofiles <output> <input1> [<input2> ...]",
+            file=sys.stderr,
+        )
+        return 1
+
+    output = Path(sys.argv[1])
+    inputs = [Path(path) for path in sys.argv[2:]]
+
+    mode = None
+    merged = {}
+
+    for path in inputs:
+        lines = path.read_text().splitlines()
+        if not lines:
+            continue
+        header = lines[0].strip()
+        if not header.startswith("mode: "):
+            raise SystemExit(f"{path}: missing coverage mode header")
+        current_mode = header.split(": ", 1)[1]
+        if mode is None:
+            mode = current_mode
+        elif current_mode != mode:
+            raise SystemExit(f"{path}: mode {current_mode} != expected {mode}")
+
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            key, count_text = line.rsplit(" ", 1)
+            count = int(count_text)
+            if key not in merged:
+                merged[key] = count
+                continue
+            if mode == "set":
+                merged[key] = max(merged[key], count)
+            else:
+                merged[key] += count
+
+    if mode is None:
+        raise SystemExit("no coverage profiles supplied")
+
+    output.write_text(
+        "mode: "
+        + mode
+        + "\n"
+        + "\n".join(f"{key} {count}" for key, count in merged.items())
+        + "\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

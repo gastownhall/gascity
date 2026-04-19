@@ -121,12 +121,7 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, stdout, stderr io.
 
 	cfg.Workspace.Suspended = suspend
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

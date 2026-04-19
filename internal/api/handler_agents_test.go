@@ -20,10 +20,11 @@ func TestAgentList(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -48,10 +49,11 @@ func TestAgentListPoolExpansion(t *testing.T) {
 		},
 	}
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -94,10 +96,11 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--polecat-1", runtime.Config{}) //nolint:errcheck
 	state.sp.Start(context.Background(), "myrig--polecat-2", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -139,10 +142,11 @@ func TestAgentListUnlimitedImportedPoolDiscovery(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--gs__polecat-1", runtime.Config{}) //nolint:errcheck
 	state.sp.Start(context.Background(), "myrig--gs__polecat-2", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -210,10 +214,11 @@ func TestAgentListFilterByRig(t *testing.T) {
 		{Name: "rig2", Path: filepath.Join(state.cityPath, "repos", "rig2")},
 	}
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents?rig=rig1", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents?rig=rig1"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -236,10 +241,11 @@ func TestAgentListFilterByRunning(t *testing.T) {
 	}
 	state.sp.Start(context.Background(), "running-agent", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents?running=true", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents?running=true"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -257,10 +263,11 @@ func TestAgentListFilterByRunning(t *testing.T) {
 func TestAgentGet(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -296,9 +303,10 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	}
 
 	srv := New(state)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -315,10 +323,11 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 func TestAgentGetNotFound(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -330,10 +339,11 @@ func TestAgentOutputPeekFallback(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sp.SetPeekOutput("myrig--worker", "Hello from agent")
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -382,10 +392,11 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 func TestAgentOutputNotRunning(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -395,11 +406,12 @@ func TestAgentOutputNotRunning(t *testing.T) {
 func TestAgentSuspendResume(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// Suspend.
-	req := newPostRequest("/v0/agent/myrig/worker/suspend", nil)
+	req := newPostRequest(cityURL(state, "/agent/myrig/worker/suspend"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("suspend: status = %d, want %d", rec.Code, http.StatusOK)
@@ -409,9 +421,9 @@ func TestAgentSuspendResume(t *testing.T) {
 	}
 
 	// Resume.
-	req = newPostRequest("/v0/agent/myrig/worker/resume", nil)
+	req = newPostRequest(cityURL(state, "/agent/myrig/worker/resume"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resume: status = %d, want %d", rec.Code, http.StatusOK)
@@ -424,14 +436,19 @@ func TestAgentSuspendResume(t *testing.T) {
 func TestAgentRuntimeActionsRemoved(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
+	// Unknown actions (kill/drain/undrain/nudge/restart) are rejected
+	// by the spec's action enum at the Huma validation layer, before
+	// the handler runs. A 422 with a Problem Details body is the
+	// contract for "your request violated the input schema."
 	for _, action := range []string{"kill", "drain", "undrain", "nudge", "restart"} {
-		req := newPostRequest("/v0/agent/myrig/worker/"+action, nil)
+		req := newPostRequest(cityURL(state, "/agent/myrig/worker/")+action, nil)
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s: status = %d, want %d", action, rec.Code, http.StatusNotFound)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status = %d, want %d", action, rec.Code, http.StatusUnprocessableEntity)
 		}
 	}
 }
@@ -439,10 +456,11 @@ func TestAgentRuntimeActionsRemoved(t *testing.T) {
 func TestAgentActionNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := newPostRequest("/v0/agent/nonexistent/suspend", nil)
+	req := newPostRequest(cityURL(state, "/agent/nonexistent/suspend"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -453,10 +471,11 @@ func TestAgentActionNotMutator(t *testing.T) {
 	// fakeState (not fakeMutatorState) doesn't implement StateMutator.
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := newPostRequest("/v0/agent/myrig/worker/suspend", nil)
+	req := newPostRequest(cityURL(state, "/agent/myrig/worker/suspend"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotImplemented)
@@ -471,10 +490,11 @@ func TestAgentProviderAndDisplayName(t *testing.T) {
 		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	}
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -533,10 +553,11 @@ func TestAgentStateEnum(t *testing.T) {
 			state := newFakeState(t)
 			tt.setup(state)
 			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
 
-			req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+			req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
+			h.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -556,11 +577,12 @@ func TestAgentPeekViaQueryParam(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sp.SetPeekOutput("myrig--worker", "line1\nline2\nline3")
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// Without ?peek=true — no last_output.
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -571,9 +593,9 @@ func TestAgentPeekViaQueryParam(t *testing.T) {
 	}
 
 	// With ?peek=true — includes last_output.
-	req = httptest.NewRequest("GET", "/v0/agents?peek=true", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/agents?peek=true"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp.Items[0].LastOutput == "" {
@@ -607,10 +629,11 @@ func TestAgentModelAndContext(t *testing.T) {
 
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{searchDir}
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -658,10 +681,11 @@ func TestAgentActivityFromSessionLog(t *testing.T) {
 
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{searchDir}
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)

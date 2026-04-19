@@ -18,6 +18,24 @@ contributors. Before making changes, read:
 4. Set up tooling and hooks: `make setup`
 5. Build and run the fast quality gates: `make build && make check`
 
+`make setup` installs a pre-commit hook at `.githooks/pre-commit` that
+auto-formats staged Go files and, when any Go file is staged,
+regenerates `internal/api/openapi.json` and `docs/schema/openapi.json`
+from the live supervisor. The hook stages both spec copies so the
+committed spec never drifts from what the server actually serves.
+
+**Dashboard SPA.** The dashboard at `cmd/gc/dashboard/web/` is a
+TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
+endpoints. When `internal/api/openapi.json` or files under
+`cmd/gc/dashboard/web/src/` change, the hook regenerates
+`cmd/gc/dashboard/web/src/generated/schema.d.ts` (TS types from the
+spec) and rebuilds `cmd/gc/dashboard/web/dist/` (the compiled bundle
+that the Go static server embeds via `go:embed`). The hook needs
+Node / npm on your PATH; if npm is missing, the hook warns and
+skips the rebuild (CI enforces it). Run `make dashboard-dev` to
+iterate with Vite HMR, `make dashboard-build` to produce a fresh
+bundle, `make dashboard-check` for typecheck + build + test.
+
 ## Development Workflow
 
 We use a direct-to-main workflow for trusted contributors. External
@@ -74,7 +92,7 @@ For the capability boundary, use the
 The docs tree is now Mintlify-based.
 
 - Config lives in `docs/docs.json`
-- Preview locally with `cd docs && npx --yes mint@latest dev`
+- Preview locally with `cd docs && ./mint.sh dev`
 - Run docs checks with `make check-docs`
 
 When updating docs:
@@ -97,6 +115,10 @@ Run `make help` for the full list. The most useful targets are:
 | `make check-all` | Extended quality gates including integration tests |
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |
+| `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
+| `make dashboard-build` | Regenerate SPA types + compile the dashboard bundle |
+| `make dashboard-dev` | Vite dev server for SPA iteration |
+| `make dashboard-check` | Typecheck + build + test the dashboard |
 | `make cover` | Coverage run |
 
 ## macOS Release Verification

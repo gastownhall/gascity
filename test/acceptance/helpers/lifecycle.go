@@ -1,6 +1,7 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,9 +15,11 @@ import (
 // previous test first (tests share XDG_RUNTIME_DIR within a suite).
 func (c *City) StartWithSupervisor() {
 	c.t.Helper()
-	// Stop stale supervisor/controller from a previous test.
-	RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
-	RunGC(c.Env, c.Dir, "stop", c.Dir)     //nolint:errcheck
+	// Stop stale supervisor/controller from a previous test. --wait blocks
+	// until the supervisor has finished shutting down its managed cities
+	// so the start below doesn't race the prior shutdown.
+	RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck
+	RunGC(c.Env, c.Dir, "stop", c.Dir)               //nolint:errcheck
 	time.Sleep(2 * time.Second)
 
 	out, err := RunGC(c.Env, c.Dir, "start", c.Dir)
@@ -27,7 +30,7 @@ func (c *City) StartWithSupervisor() {
 	c.usedSupervisor = true
 	c.t.Cleanup(func() {
 		c.Stop()
-		RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
+		RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	})
 }
 
@@ -132,12 +135,83 @@ func (c *City) WaitForReport(name string, timeout time.Duration) map[string]stri
 	// One more try with diagnostics.
 	data, err := os.ReadFile(reportFile)
 	if err != nil {
+		c.dumpDiagnostics(name)
 		c.t.Fatalf("report for %q not found after %s: %v", name, timeout, err)
 	}
 	if !strings.Contains(string(data), "REPORT_DONE=true") {
+		c.dumpDiagnostics(name)
 		c.t.Fatalf("report for %q incomplete after %s:\n%s", name, timeout, string(data))
 	}
 	return parseEnvReport(string(data))
+}
+
+// dumpDiagnostics prints useful debugging info when a report wait fails.
+// Each external command is bounded by diagTimeout so a wedged diagnostic
+// (e.g. an unresponsive supervisor under gc status) cannot convert a
+// ~60s report-wait failure into an indefinite CI stall.
+func (c *City) dumpDiagnostics(name string) {
+	c.t.Helper()
+	c.t.Logf("=== DIAGNOSTICS for %q in %s ===", name, c.Dir)
+
+	const diagTimeout = 10 * time.Second
+
+	// List .gc dir contents. Direct exec (no shell), so paths with spaces
+	// or glob metacharacters in TMPDIR don't break the diagnostic itself.
+	ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+	if out, err := exec.CommandContext(ctx, "find", filepath.Join(c.Dir, ".gc"), "-maxdepth", "4", "-type", "f").CombinedOutput(); err == nil {
+		lines := strings.SplitN(string(out), "\n", 41)
+		if len(lines) > 40 {
+			lines = lines[:40]
+		}
+		c.t.Logf(".gc files:\n%s", strings.Join(lines, "\n"))
+	}
+	cancel()
+
+	// gc status. RunGC takes no context, so bound it via a goroutine timer.
+	statusCh := make(chan string, 1)
+	go func() {
+		out, err := c.GC("status", "--city", c.Dir)
+		if err != nil {
+			statusCh <- ""
+			return
+		}
+		statusCh <- out
+	}()
+	select {
+	case out := <-statusCh:
+		if out != "" {
+			c.t.Logf("gc status:\n%s", out)
+		}
+	case <-time.After(diagTimeout):
+		c.t.Logf("gc status: timed out after %s", diagTimeout)
+	}
+
+	// Supervisor log tail.
+	if gcHome := c.Env.vars["GC_HOME"]; gcHome != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+		if out, err := exec.CommandContext(ctx, "tail", "-n", "200", filepath.Join(gcHome, "supervisor.log")).CombinedOutput(); err == nil {
+			c.t.Logf("supervisor.log tail:\n%s", out)
+		}
+		cancel()
+	}
+
+	// City logs: glob in Go + direct exec, to avoid shell interpolation
+	// and so each tail is individually time-bounded.
+	var logs []string
+	for _, pat := range []string{
+		filepath.Join(c.Dir, ".gc", "*.log"),
+		filepath.Join(c.Dir, ".gc", "runtime", "*.log"),
+	} {
+		matches, _ := filepath.Glob(pat)
+		logs = append(logs, matches...)
+	}
+	for _, f := range logs {
+		ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+		if out, err := exec.CommandContext(ctx, "tail", "-n", "100", f).CombinedOutput(); err == nil {
+			c.t.Logf("--- %s ---\n%s", f, out)
+		}
+		cancel()
+	}
 }
 
 func parseEnvReport(s string) map[string]string {
@@ -185,6 +259,19 @@ func (c *City) WriteE2EConfig(agents []E2EAgent) {
 			fmt.Fprintf(&b, "\n[agent.pool]\nmin = %d\nmax = %d\n", a.Pool.Min, a.Pool.Max)
 			if a.Pool.ScaleCheck != "" {
 				fmt.Fprintf(&b, "check = %q\n", a.Pool.ScaleCheck)
+			}
+		}
+		// Reserve a canonical named session so the lifecycle reconciler
+		// materializes and starts the agent. Without this, post-PR-666 the
+		// template is just config and never runs until work arrives. Drain-ack
+		// still transitions the session to the sticky "drained" state, so
+		// mode=always does not prevent the drain-ack tests from observing a
+		// stopped session. Mirror a.Dir so rig-scoped agents resolve to the
+		// correct TemplateQualifiedName.
+		if !a.Suspended && a.Pool == nil {
+			fmt.Fprintf(&b, "\n[[named_session]]\ntemplate = %q\nmode = \"always\"\n", a.Name)
+			if a.Dir != "" {
+				fmt.Fprintf(&b, "dir = %q\n", a.Dir)
 			}
 		}
 	}

@@ -1,0 +1,9 @@
+node_modules/
+src/generated/
+*.log
+.vite/
+
+# dist/ IS committed. The Go static server embeds it at compile time
+# via go:embed, so fresh checkouts must be able to `go build` without
+# running `npm install` first. CI rebuilds dist/ from source and the
+# pre-commit hook keeps it in lockstep with src/.

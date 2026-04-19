@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -47,12 +48,148 @@ func TestCustomTypesCheck_RequiredTypesIncludeSpec(t *testing.T) {
 	}
 }
 
+// TestCustomTypesCheck_RequiredTypesIncludeConvergence verifies that
+// "convergence" is in the required list. gc's convergence handler
+// (internal/convergence/create.go) creates beads with Type="convergence"
+// on every `gc converge create` call; if the type isn't registered in
+// bd's types.custom, every convergence loop fails at creation with
+// "invalid issue type: convergence".
+func TestCustomTypesCheck_RequiredTypesIncludeConvergence(t *testing.T) {
+	found := false
+	for _, typ := range RequiredCustomTypes {
+		if typ == "convergence" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("RequiredCustomTypes must include 'convergence' — gc's convergence handler requires this type")
+	}
+}
+
+// TestMergeCustomTypes exercises the merge/dedup/preservation logic that
+// backs CustomTypesCheck.Fix(). The regression it guards against is
+// `--fix` overwriting user-defined types (which was the pre-PR behavior
+// and still the failure mode if the merge is ever reverted).
+func TestMergeCustomTypes(t *testing.T) {
+	cases := []struct {
+		name     string
+		current  []string
+		required []string
+		want     []string
+	}{
+		{
+			name:     "empty current gets required only",
+			current:  nil,
+			required: []string{"a", "b"},
+			want:     []string{"a", "b"},
+		},
+		{
+			name:     "preserves extra user types and appends missing required",
+			current:  []string{"custom-foo", "molecule"},
+			required: []string{"molecule", "spec", "convergence"},
+			want:     []string{"custom-foo", "molecule", "spec", "convergence"},
+		},
+		{
+			name:     "dedupes duplicates in current",
+			current:  []string{"a", "a", "b", "a"},
+			required: []string{"c"},
+			want:     []string{"a", "b", "c"},
+		},
+		{
+			name:     "drops empty and whitespace-only entries",
+			current:  []string{"a", "", "  ", "b"},
+			required: []string{"c"},
+			want:     []string{"a", "b", "c"},
+		},
+		{
+			name:     "trims whitespace around entries",
+			current:  []string{" a ", "b\t"},
+			required: []string{"a", "c"},
+			want:     []string{"a", "b", "c"},
+		},
+		{
+			name:     "dedupes when required entry already in current",
+			current:  []string{"a", "b", "c"},
+			required: []string{"b", "c", "d"},
+			want:     []string{"a", "b", "c", "d"},
+		},
+		{
+			name:     "preserves order of current entries",
+			current:  []string{"z", "y", "x"},
+			required: []string{"a"},
+			want:     []string{"z", "y", "x", "a"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mergeCustomTypes(tc.current, tc.required)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("mergeCustomTypes(%v, %v) = %v, want %v",
+					tc.current, tc.required, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseCustomTypesJSON guards against the regression where
+// `bd config get types.custom` on a store with an unset key returns
+// "types.custom (not set)" and the old parser would persist that
+// string as a fake custom type when Fix() merges. Switching to
+// --json (+ this parser) eliminates the sentinel.
+func TestParseCustomTypesJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:  "unset key returns nil",
+			input: `{"key":"types.custom","value":""}`,
+			want:  nil,
+		},
+		{
+			name:  "whitespace-only value returns nil",
+			input: `{"key":"types.custom","value":"   "}`,
+			want:  nil,
+		},
+		{
+			name:  "populated value splits on comma",
+			input: `{"key":"types.custom","value":"molecule,spec,convergence"}`,
+			want:  []string{"molecule", "spec", "convergence"},
+		},
+		{
+			name:    "malformed JSON errors",
+			input:   `not json`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseCustomTypesJSON([]byte(tc.input))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got nil (result=%v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("parseCustomTypesJSON(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 	expected := map[string]bool{
 		"molecule": true, "convoy": true, "message": true,
 		"event": true, "gate": true, "merge-request": true,
 		"agent": true, "role": true, "rig": true,
-		"session": true, "spec": true,
+		"session": true, "spec": true, "convergence": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {

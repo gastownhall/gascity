@@ -1,5 +1,5 @@
 scope = "rig"
-start_command = "{{.ConfigDir}}/scripts/mock-polecat.sh"
+start_command = "{{.ConfigDir}}/assets/scripts/mock-polecat.sh"
 nudge = "Find work, create a branch, implement, push, hand off to refinery."
 idle_timeout = "5m"
 min_active_sessions = 0

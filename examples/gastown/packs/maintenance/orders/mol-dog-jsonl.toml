@@ -3,6 +3,6 @@
 # No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Export Dolt databases to JSONL git archive"
-exec = "$PACK_DIR/scripts/jsonl-export.sh"
+exec = "$PACK_DIR/assets/scripts/jsonl-export.sh"
 gate = "cooldown"
 interval = "15m"

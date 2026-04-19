@@ -1,11 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
-[ -z "$staged_go_files" ] && exit 0
+staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
+staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
 
-golangci-lint fmt ./... 2>/dev/null
-echo "$staged_go_files" | xargs git add
+if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ]; then
+  exit 0
+fi
 
-golangci-lint run --new-from-rev=HEAD --fix || exit 1
-echo "$staged_go_files" | xargs git add
+if [ -n "$staged_go_files" ]; then
+  golangci-lint fmt ./... 2>/dev/null
+  echo "$staged_go_files" | xargs git add
+
+  golangci-lint run --new-from-rev=HEAD --fix || exit 1
+  echo "$staged_go_files" | xargs git add
+
+  # Regenerate the OpenAPI spec from the live Huma API and stage both
+  # canonical copies. Keeps the committed spec and the published
+  # Mintlify schema in lockstep with whatever the server actually
+  # serves.
+  go run ./cmd/genspec
+  git add internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt
+
+  # Regenerate the config/schema docs derived from Go structs and
+  # stage every generated artifact so commits do not leave the
+  # worktree dirty.
+  go run ./cmd/genschema
+  git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
+fi
+
+# Dashboard SPA rebuild: whenever the spec changes OR the SPA source
+# changes, regenerate the TS types, typecheck, and rebuild the compiled
+# bundle. Guarded on `npm` availability so contributors without Node
+# tooling aren't blocked; CI enforces the full regeneration.
+if command -v npm >/dev/null 2>&1; then
+  spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+  if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
+    (
+      cd cmd/gc/dashboard/web
+      if [ ! -d node_modules ]; then
+        npm install --silent
+      fi
+      npm run gen --silent
+      # Typecheck BEFORE build: vite's build transpiles TS to JS and
+      # silently ignores type errors. Without this step, SPA type
+      # regressions against the regenerated spec (e.g. a query param
+      # tightening from string to boolean) ship unnoticed. `tsc
+      # --noEmit` fails fast and stops the commit.
+      npm run typecheck --silent
+      npm run build --silent
+    )
+    git add cmd/gc/dashboard/web/dist
+  fi
+else
+  echo "warning: npm not on PATH — skipped dashboard SPA typecheck + rebuild. CI will enforce this." >&2
+fi

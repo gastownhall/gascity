@@ -179,8 +179,11 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// Best-effort: stop any isolated supervisor that survived test cleanup.
+	// Use --wait so the sweep blocks until the supervisor and its managed
+	// cities have actually shut down, avoiding a race with process-table
+	// cleanup below.
 	if gcBinary != "" {
-		stopCmd := exec.Command(gcBinary, "supervisor", "stop")
+		stopCmd := exec.Command(gcBinary, "supervisor", "stop", "--wait")
 		stopCmd.Env = integrationEnv()
 		_ = stopCmd.Run()
 	}
@@ -408,12 +411,21 @@ func bdDolt(dir string, args ...string) (string, error) {
 			"GC_CITY_PATH="+dir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)
-		if port, ok := currentManagedDoltPortForTest(dir); ok {
+		if port, ok := ensureManagedDoltPortForTest(dir); ok {
 			env = filterEnv(env, "GC_DOLT_PORT")
 			env = append(env, "GC_DOLT_PORT="+port)
 		}
 	}
-	return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	if err == nil || dir == "" || !managedDoltTransportRetryable(out) {
+		return out, err
+	}
+	if port, ok := ensureManagedDoltPortForTest(dir); ok {
+		env = filterEnv(env, "GC_DOLT_PORT")
+		env = append(env, "GC_DOLT_PORT="+port)
+		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+	}
+	return out, err
 }
 
 func runGCWithEnv(env []string, dir string, args ...string) (string, error) {
@@ -849,6 +861,44 @@ func currentManagedDoltPortForTest(cityDir string) (string, bool) {
 	return port, true
 }
 
+func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
+	if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+		return port, true
+	}
+	if cityDir == "" {
+		return "", false
+	}
+	startOut, startErr := runGCDoltWithEnv(commandEnvForDir(cityDir, true), "", "start", cityDir)
+	if startErr != nil && !isGCStartAlreadyRunning(startOut) {
+		return "", false
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			return port, true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return "", false
+}
+
+func managedDoltTransportRetryable(out string) bool {
+	msg := strings.ToLower(out)
+	for _, marker := range []string{
+		"dolt server unreachable",
+		"dial tcp",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"bad connection",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func testPortReachable(port string) bool {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
 	if err != nil {
@@ -898,7 +948,9 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status")
 		if err == nil && strings.Contains(out, "Supervisor is running") {
 			t.Cleanup(func() {
-				_, _ = runCommand("", env, 5*time.Second, gcBinary, "supervisor", "stop")
+				// --wait so runCommand blocks until the supervisor fully
+				// shut down, aligning with the cmd.Wait() synchronization below.
+				_, _ = runCommand("", env, 15*time.Second, gcBinary, "supervisor", "stop", "--wait")
 				select {
 				case <-done:
 				case <-time.After(10 * time.Second):

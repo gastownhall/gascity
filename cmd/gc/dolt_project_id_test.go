@@ -14,6 +14,7 @@ import (
 )
 
 func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabaseMissing(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run without -short or via integration packages")
 	doltPath := os.Getenv("GC_DOLT_REAL_BINARY")
 	var err error
 	if doltPath == "" {
@@ -30,8 +31,8 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 
 	homeDir := filepath.Join(t.TempDir(), "home")
@@ -257,6 +258,7 @@ func TestManagedDoltWaitReadyWithPasswordUsesDirectQueryProbe(t *testing.T) {
 }
 
 func TestRecoverManagedDoltProcessWithPasswordUsesDirectHelpersAgainstRealServer(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run without -short or via integration packages")
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -303,6 +305,7 @@ func TestRecoverManagedDoltProcessWithPasswordUsesDirectHelpersAgainstRealServer
 }
 
 func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run without -short or via integration packages")
 	cityDir := t.TempDir()
 	metadataPath := filepath.Join(cityDir, ".beads", "metadata.json")
 	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {

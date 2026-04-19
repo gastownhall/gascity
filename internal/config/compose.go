@@ -398,6 +398,12 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// materializer.
 	WarnDeprecatedAttachmentFields(root)
 
+	siteBindingWarnings, err := ApplySiteBindings(fs, cityRoot, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
+
 	// v0.15.1: enrich every agent with its convention-discovered
 	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
 	// DiscoverPackAgents only does this for agents it creates — it skips
@@ -493,7 +499,7 @@ func collidesWithImplicitImports(userImports map[string]Import, implicitNames []
 // User-added implicit imports (e.g. custom entries that a user wrote
 // into ~/.gc/implicit-import.toml by hand) retain the pre-v0.15.1
 // "explicit wins over implicit" contract and are shadowed silently.
-var bootstrapManagedImportNames = []string{"import", "registry", "core"}
+var bootstrapManagedImportNames = []string{"registry", "core"}
 
 // BootstrapManagedImportNames returns a copy of the bootstrap-managed
 // implicit-import binding names recognized by the composer's collision

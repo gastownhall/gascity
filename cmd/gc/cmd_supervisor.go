@@ -77,18 +77,29 @@ This forks "gc supervisor run", verifies it became ready, and returns.`,
 }
 
 func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
+	var wait bool
+	var waitTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the machine-wide supervisor",
-		Long:  `Stop the running machine-wide supervisor and all its cities.`,
-		Args:  cobra.NoArgs,
+		Long: `Stop the running machine-wide supervisor and all its cities.
+
+By default, returns as soon as the supervisor acknowledges the stop
+request — shutdown continues asynchronously. Pass --wait to block
+until the supervisor socket is no longer answering, which is what
+most callers that need deterministic cleanup want (e.g., integration
+tests that then expect to remove temp directories without racing
+against lingering supervisor / controller subprocesses).`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if stopSupervisor(stdout, stderr) != 0 {
+			if stopSupervisorWithWait(stdout, stderr, wait, waitTimeout) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set")
 	return cmd
 }
 
@@ -174,7 +185,30 @@ var (
 	supervisorReloadWaitTimeout  = 5 * time.Minute
 )
 
-func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest) (net.Listener, error) {
+// shutdownState tracks the supervisor's shutdown progress so socket
+// handlers can report the final result to --wait clients. done is closed
+// when shutdown has finished (successful or not). err is populated (may
+// be nil on clean shutdown) before done is closed.
+type shutdownState struct {
+	done chan struct{}
+	err  atomic.Pointer[shutdownResult]
+}
+
+type shutdownResult struct {
+	err error
+}
+
+func newShutdownState() *shutdownState {
+	return &shutdownState{done: make(chan struct{})}
+}
+
+// finish records the shutdown result and closes done. Safe to call once.
+func (s *shutdownState) finish(err error) {
+	s.err.Store(&shutdownResult{err: err})
+	close(s.done)
+}
+
+func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
 	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -192,7 +226,7 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 				fmt.Fprintf(os.Stderr, "gc supervisor: socket accept: %v\n", err) //nolint:errcheck
 				continue
 			}
-			go handleSupervisorConn(conn, cancelFn, reconcileCh)
+			go handleSupervisorConn(conn, cancelFn, reconcileCh, shut)
 		}
 	}()
 	return lis, nil
@@ -201,7 +235,12 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 // handleSupervisorConn reads from a connection and dispatches commands.
 // Supported: "stop" (shutdown), "ping" (liveness check, returns PID),
 // "reload" (trigger immediate reconciliation of all cities).
-func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest) {
+//
+// For "stop", the handler first sends "ok\n" (backward compatible ACK),
+// then — if the client keeps the connection open — blocks until shutdown
+// completes and sends a second line "done:ok\n" or "done:err:<detail>\n"
+// so --wait clients can distinguish clean shutdown from partial failure.
+func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest, shut *shutdownState) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -209,7 +248,32 @@ func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileC
 		switch scanner.Text() {
 		case "stop":
 			cancelFn()
-			conn.Write([]byte("ok\n")) //nolint:errcheck
+			if _, err := conn.Write([]byte("ok\n")); err != nil {
+				return
+			}
+			if shut == nil {
+				return
+			}
+			// Wait for shutdown to complete (or client to disconnect)
+			// so we can report the final result.
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Minute)) //nolint:errcheck
+			select {
+			case <-shut.done:
+			case <-time.After(5 * time.Minute):
+				return
+			}
+			res := shut.err.Load()
+			if res == nil || res.err == nil {
+				conn.Write([]byte("done:ok\n")) //nolint:errcheck
+			} else {
+				// Collapse newlines in the error so the protocol stays line-oriented.
+				msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
+				fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
+			}
+			// One command per connection — return explicitly instead of
+			// falling through to scanner.Scan() again. The read deadline
+			// would close us anyway, but this makes the contract explicit.
+			return
 		case "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck
 		case "reload":
@@ -247,13 +311,33 @@ func runningSupervisorSocket() (string, int) {
 }
 
 func supervisorAliveAtPath(sockPath string) int {
-	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	return supervisorAliveAtPathUntil(sockPath, time.Now().Add(3*time.Second))
+}
+
+// supervisorAliveAtPathUntil is supervisorAliveAtPath with a total budget.
+// Dial and read timeouts are each capped to the remaining time before
+// deadline so a wedged socket cannot stretch the probe beyond the caller's
+// wait budget.
+func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	dialTimeout := 500 * time.Millisecond
+	if dialTimeout > remaining {
+		dialTimeout = remaining
+	}
+	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()                                    //nolint:errcheck
-	conn.Write([]byte("ping\n"))                          //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	defer conn.Close()           //nolint:errcheck
+	conn.Write([]byte("ping\n")) //nolint:errcheck
+	readDeadline := time.Now().Add(2 * time.Second)
+	if readDeadline.After(deadline) {
+		readDeadline = deadline
+	}
+	conn.SetReadDeadline(readDeadline) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
 	if err != nil || n == 0 {
@@ -266,10 +350,26 @@ func supervisorAliveAtPath(sockPath string) int {
 	return pid
 }
 
-// stopSupervisor sends a stop command to the running supervisor.
-// It also unloads the platform service (without removing the unit file)
-// so launchd/systemd doesn't immediately restart the supervisor.
+// stopSupervisor sends a stop command to the running supervisor and returns
+// as soon as the supervisor acknowledges. Shutdown continues asynchronously.
+// Callers that need to block until the supervisor process has actually
+// exited should use stopSupervisorWithWait(stdout, stderr, true, timeout).
 func stopSupervisor(stdout, stderr io.Writer) int {
+	return stopSupervisorWithWait(stdout, stderr, false, 0)
+}
+
+// stopSupervisorWithWait is stopSupervisor with an optional wait-for-exit
+// phase. When wait is true, after the supervisor ACKs the stop command the
+// function keeps the control connection open and reads the post-shutdown
+// status line (done:ok or done:err:<detail>) that runSupervisor emits once
+// every managed city has quiesced. If the supervisor predates that protocol
+// or drops the connection early, we fall back to polling the socket until
+// it stops answering. This is the shape tests and shell scripts want: on
+// return, the supervisor has fully shut down and any failure is visible.
+//
+// It also unloads the platform service (without removing the unit file) so
+// launchd/systemd doesn't immediately restart the supervisor.
+func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
 	// Unload the platform service first so the service manager doesn't
 	// restart the supervisor after we send the stop command.
 	unloadSupervisorService()
@@ -287,14 +387,93 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.Write([]byte("stop\n"))                           //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	buf := make([]byte, 64)
-	n, _ := conn.Read(buf)
-	if n > 0 && string(buf[:n]) == "ok\n" {
-		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	reader := bufio.NewReader(conn)
+	ackLine, err := reader.ReadString('\n')
+	if err != nil || strings.TrimSpace(ackLine) != "ok" {
+		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	if !wait {
 		return 0
 	}
-	fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
-	return 1
+	if waitTimeout <= 0 {
+		waitTimeout = 30 * time.Second
+	}
+
+	// Wait for the supervisor's post-shutdown status line. An older
+	// supervisor binary won't send one; the connection will just close.
+	// Treat EOF / timeout / unexpected input as "fall back to polling".
+	deadline := time.Now().Add(waitTimeout)
+	conn.SetReadDeadline(deadline) //nolint:errcheck
+	statusLine, statusErr := reader.ReadString('\n')
+	switch {
+	case statusErr == nil:
+		line := strings.TrimSpace(statusLine)
+		switch {
+		case line == "done:ok":
+			// Confirm the socket actually goes away, but with a small
+			// budget — the server already told us shutdown finished.
+			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
+			return 0
+		case strings.HasPrefix(line, "done:err:"):
+			fmt.Fprintf(stderr, "gc supervisor stop: %s\n", strings.TrimPrefix(line, "done:err:")) //nolint:errcheck
+			return 1
+		default:
+			fmt.Fprintf(stderr, "gc supervisor stop: unexpected status %q\n", line) //nolint:errcheck
+			// Still make sure the process actually goes away.
+			if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			return 1
+		}
+	case errors.Is(statusErr, io.EOF):
+		// Older supervisor — no done:* line. Fall through to polling.
+	default:
+		// Likely i/o deadline hit on ReadString. The absolute deadline is
+		// already consumed, so the fall-through waitForSupervisorExitUntil
+		// will surface the timeout error directly — there is no additional
+		// budget to retry the probe.
+	}
+
+	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
+	return 0
+}
+
+// waitForSupervisorExitUntil polls the supervisor socket until it stops
+// answering (i.e., supervisorAliveAtPathUntil returns 0), or until the
+// absolute deadline elapses. Each probe is capped to the remaining budget
+// so a half-open socket cannot stretch the total wait past the deadline.
+// The original total budget is reconstructed for the timeout error so
+// operators can see which budget was exhausted in CI logs.
+func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
+	startBudget := time.Until(deadline)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for supervisor at %s to exit", startBudget, sockPath)
+		}
+		if supervisorAliveAtPathUntil(sockPath, deadline) == 0 {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		sleep := 100 * time.Millisecond
+		if sleep > remaining {
+			sleep = remaining
+		}
+		if sleep <= 0 {
+			continue
+		}
+		time.Sleep(sleep)
+	}
 }
 
 // supervisorStatus checks and reports whether the supervisor is running.
@@ -383,12 +562,19 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
-func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
+// stopManagedCity cancels a city's context, waits up to its configured
+// grace period for it to exit, forces shutdown if it doesn't, and then
+// closes the bead provider and file recorder. It returns a non-nil error
+// when the city did not exit cleanly within the budget. Stderr still
+// receives a trace line for operability; the returned error is for
+// callers (runSupervisor) that need to aggregate shutdown status.
+func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if mc == nil {
-		return
+		return nil
 	}
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
+	var stopErr error
 	if timeout > 0 {
 		select {
 		case <-mc.done:
@@ -398,9 +584,10 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 			if mc.closer != nil {
 				mc.closer.Close() //nolint:errcheck
 			}
-			return
+			return nil
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}
 	if mc.cr != nil {
@@ -412,8 +599,12 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 	if timeout > 0 {
 		select {
 		case <-mc.done:
+			// Forced shutdown completed before the second timeout — the
+			// city is out. Clear the pending error so we report success.
+			stopErr = nil
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, timeout)
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
@@ -422,6 +613,7 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 	if mc.closer != nil {
 		mc.closer.Close() //nolint:errcheck
 	}
+	return stopErr
 }
 
 // runSupervisor is the main supervisor loop. It acquires the lock,
@@ -495,6 +687,19 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: binding to %s — mutation endpoints disabled (non-localhost)\n", bind) //nolint:errcheck
 	}
 	apiMux := api.NewSupervisorMux(registry, readOnly, version, startedAt)
+
+	pprofSrv, pprofErr := api.StartPprof("")
+	if pprofErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: pprof: %v\n", pprofErr) //nolint:errcheck
+	}
+	if pprofSrv != nil {
+		defer func() {
+			shutCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
+			defer c()
+			pprofSrv.Shutdown(shutCtx) //nolint:errcheck
+		}()
+	}
+
 	addr := net.JoinHostPort(bind, strconv.Itoa(port))
 	apiLis, apiErr := net.Listen("tcp", addr)
 	if apiErr != nil {
@@ -519,13 +724,36 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: creating socket dir: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	lis, err := startSupervisorSocket(sockPath, cancel, reconcileCh)
+	shut := newShutdownState()
+	lis, err := startSupervisorSocket(sockPath, cancel, reconcileCh, shut)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	defer lis.Close()         //nolint:errcheck
-	defer os.Remove(sockPath) //nolint:errcheck
+	// Socket teardown order matters. Defers run in LIFO, so listed last =
+	// executes first. We want:
+	//   1. Signal shutdown completion (shut.finish) so blocked "stop"
+	//      handlers can write their done:* line.
+	//   2. Brief pause (0.5s) so those writes reach the client before the
+	//      socket closes.
+	//   3. Close listener + remove socket path.
+	// The ctx.Done() branch below calls shut.finish directly before it
+	// returns; this defer is the safety net for any other return path
+	// (early errors, panics) so socket handlers never block forever.
+	defer func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	}()
+	defer func() {
+		select {
+		case <-shut.done:
+		default:
+			shut.finish(fmt.Errorf("supervisor exited before shutdown aggregation"))
+		}
+		// Give in-flight "stop" handlers a short window to emit their
+		// done:* line before the listener closes.
+		time.Sleep(500 * time.Millisecond)
+	}()
 
 	fmt.Fprintln(stdout, "Supervisor started.") //nolint:errcheck
 
@@ -582,11 +810,22 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					delete(cities, k)
 				}
 			})
+			var stopFailures []string
 			for name, mc := range toStop {
 				fmt.Fprintf(stdout, "Stopping city '%s'...\n", name) //nolint:errcheck
-				stopManagedCity(mc, name, stderr)
-				fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+				if err := stopManagedCity(mc, name, stderr); err != nil {
+					stopFailures = append(stopFailures, fmt.Sprintf("%s: %s", name, err.Error()))
+					fmt.Fprintf(stdout, "City '%s' stop reported error (see stderr).\n", name) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+				}
 			}
+			var shutErr error
+			if len(stopFailures) > 0 {
+				shutErr = fmt.Errorf("%d cities did not shut down cleanly: %s", len(stopFailures), strings.Join(stopFailures, "; "))
+				fmt.Fprintf(stderr, "gc supervisor: %v\n", shutErr) //nolint:errcheck
+			}
+			shut.finish(shutErr)
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 			return 0
 		}
@@ -653,7 +892,11 @@ func reconcileCities(
 	for i, mc := range toStop {
 		name := filepath.Base(toStopPaths[i])
 		fmt.Fprintf(stdout, "Unregistered city '%s', stopping...\n", name) //nolint:errcheck
-		stopManagedCity(mc, toStopPaths[i], stderr)
+		// Reconcile path: stop error is already logged inside stopManagedCity
+		// and propagating it would require bubbling through the whole
+		// reconcile loop. The supervisor-shutdown aggregator is the path
+		// that cares about these errors.
+		_ = stopManagedCity(mc, toStopPaths[i], stderr)
 		// Clear backoff so re-registering starts immediately.
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -712,7 +955,7 @@ func reconcileCities(
 	})
 	for i, mc := range nameDriftCities {
 		fmt.Fprintf(stdout, "City name changed at '%s', restarting...\n", nameDriftPaths[i]) //nolint:errcheck
-		stopManagedCity(mc, nameDriftPaths[i], stderr)
+		_ = stopManagedCity(mc, nameDriftPaths[i], stderr)
 	}
 
 	// Start new cities (and name-drifted restarts). Build list under lock,
@@ -1286,6 +1529,11 @@ func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
 			break
 		}
 		for _, rig := range cfg.Rigs {
+			// Skip unbound rigs; their empty path would map to the
+			// city root and shadow real rigs in the supervisor index.
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			rigPath := rig.Path
 			if !filepath.IsAbs(rigPath) {
 				rigPath = filepath.Join(c.Path, rigPath)
@@ -1360,25 +1608,15 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return fmt.Errorf("validate services: %w", err)
 	}
 
-	// Materialize the gc-beads-bd script.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gc-beads-bd: %v\n", cityName, err) //nolint:errcheck
-		// Non-fatal.
-	}
-
 	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
+	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
+	// materialized alongside the rest of the pack content.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
 
-	// Materialize builtin prompts and formulas.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin prompts: %v\n", cityName, err) //nolint:errcheck
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin formulas: %v\n", cityName, err) //nolint:errcheck
-	}
+	// Built-in prompts and formulas now arrive via the core bootstrap pack.
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.
@@ -1397,15 +1635,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if err := runStep("materializing_system_formulas", func() error {
-		_, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-		return sysErr
-	}); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, err) //nolint:errcheck
-	}
-
 	// Resolve formula symlinks.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if progress != nil {
 		progress("resolving_formulas")
 	}

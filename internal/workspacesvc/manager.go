@@ -3,6 +3,7 @@ package workspacesvc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -20,6 +21,11 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
+
+// ErrServiceNotFound is returned when a workspace service lookup by name
+// finds no matching entry. Callers dispatch with errors.Is rather than
+// substring-matching error messages.
+var ErrServiceNotFound = errors.New("workspace service not found")
 
 // Manager owns the lifecycle and status projection for workspace services.
 type Manager struct {
@@ -351,7 +357,7 @@ func (m *Manager) Restart(name string) error {
 	e, ok := m.entries[name]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("service %q not found", name)
+		return fmt.Errorf("%w: %q", ErrServiceNotFound, name)
 	}
 	if m.closed {
 		m.mu.Unlock()

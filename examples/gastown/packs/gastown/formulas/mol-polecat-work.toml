@@ -60,7 +60,7 @@ git fetch --prune origin
 
 Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(gc bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -78,7 +78,7 @@ cd "$WORKTREE_PATH"
 ```
 Record immediately so restarts and witness recovery can find it:
 ```bash
-bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+gc bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
 ```
 
 Worktrees are scoped to the work bead (not the agent name) so that:
@@ -90,7 +90,7 @@ Worktrees are scoped to the work bead (not the agent name) so that:
 
 Check if `metadata.branch` already records a branch:
 ```bash
-BRANCH=$(bd show {{issue}} --json | jq -r '.metadata.branch // empty')
+BRANCH=$(gc bd show {{issue}} --json | jq -r '.metadata.branch // empty')
 ```
 
 **If branch exists in metadata** — check it out:
@@ -99,12 +99,12 @@ git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/"$BRANCH"
 ```
 If resuming a rejected branch, rebase onto latest base:
 ```bash
-REJECTION=$(bd show {{issue}} --json | jq -r '.metadata.rejection_reason // empty')
+REJECTION=$(gc bd show {{issue}} --json | jq -r '.metadata.rejection_reason // empty')
 if [ -n "$REJECTION" ]; then
     git rebase origin/{{base_branch}}
     # If conflicts: resolve them (this is likely the rejection reason)
     # After resolving: git rebase --continue
-    bd update {{issue}} --unset-metadata rejection_reason
+    gc bd update {{issue}} --unset-metadata rejection_reason
 fi
 ```
 
@@ -112,7 +112,7 @@ fi
 ```bash
 BRANCH="polecat/{{issue}}"
 git checkout -b "$BRANCH" origin/{{base_branch}}
-bd update {{issue}} --set-metadata branch="$BRANCH"
+gc bd update {{issue}} --set-metadata branch="$BRANCH"
 ```
 
 Recording the branch early means:
@@ -167,7 +167,7 @@ git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
 
 **4. Update metadata on the work bead:**
 ```bash
-bd update {{issue}} \
+gc bd update {{issue}} \
   --set-metadata target={{base_branch}} \
   --notes "Implemented: <brief summary>"
 ```
@@ -176,7 +176,7 @@ This adds the target for the refinery.
 
 **5. Reassign to refinery:**
 ```bash
-bd update {{issue}} --status=open --assignee=<rig>/refinery --set-metadata gc.routed_to=<rig>/refinery
+gc bd update {{issue}} --status=open --assignee=<rig>/refinery --set-metadata gc.routed_to=<rig>/refinery
 ```
 
 Update both `assignee` AND `gc.routed_to` so the reconciler stops

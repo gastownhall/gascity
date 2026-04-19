@@ -2,4 +2,4 @@
 description = "Clean stale gc/* branches from all rigs"
 gate = "cooldown"
 interval = "6h"
-exec = "$PACK_DIR/scripts/prune-branches.sh"
+exec = "$PACK_DIR/assets/scripts/prune-branches.sh"

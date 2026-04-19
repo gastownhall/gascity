@@ -7,7 +7,12 @@ import (
 )
 
 // FindNamedSession returns the configured named session for the provided
-// qualified identity, or nil when the identity is not reserved.
+// identity, or nil when the identity is not reserved. Matches by fully
+// qualified name first. When no exact match is found and the identity has
+// no binding prefix, falls back to matching the bare template/name against
+// V2 bindings so callers can say "mayor" instead of "gastown.mayor".
+// Returns nil when multiple bindings would match — the caller must
+// disambiguate with the fully qualified form.
 func FindNamedSession(cfg *City, identity string) *NamedSession {
 	if cfg == nil || identity == "" {
 		return nil
@@ -17,7 +22,25 @@ func FindNamedSession(cfg *City, identity string) *NamedSession {
 			return &cfg.NamedSessions[i]
 		}
 	}
-	return nil
+	// V2 bare-name fallback: only when identity has no binding prefix.
+	if strings.Contains(identity, ".") {
+		return nil
+	}
+	var match *NamedSession
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns.BindingName == "" {
+			continue
+		}
+		if ns.IdentityName() == ns.BindingName+"."+identity {
+			if match != nil {
+				// Ambiguous — user must spell out the qualified name.
+				return nil
+			}
+			match = ns
+		}
+	}
+	return match
 }
 
 // FindAgent returns the configured agent template for the provided qualified

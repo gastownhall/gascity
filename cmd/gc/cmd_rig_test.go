@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -363,12 +364,6 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Save original config content.
-	origData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
 
@@ -386,13 +381,22 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 		t.Errorf("output should say re-initialized: %s", output)
 	}
 
-	// city.toml must be unchanged (no duplicate rig or polecat added).
+	// Re-add should migrate the machine-local path out of city.toml while
+	// preserving the effective rig binding.
 	newData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(newData) != string(origData) {
-		t.Errorf("city.toml should be unchanged on re-add.\nBefore:\n%s\nAfter:\n%s", origData, newData)
+	wantCityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\n"
+	if string(newData) != wantCityToml {
+		t.Errorf("city.toml should be rewritten without rig.path on re-add.\nWant:\n%s\nGot:\n%s", wantCityToml, newData)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "my-frontend" || binding.Rigs[0].Path != rigPath {
+		t.Fatalf("site binding = %+v, want my-frontend=%s", binding.Rigs, rigPath)
 	}
 }
 
@@ -896,6 +900,116 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "my-frontend (suspended)") {
 		t.Errorf("output = %q, want suspended annotation", stdout.String())
+	}
+}
+
+// TestDoRigList_JSON_RelativeRigPath verifies that doRigList emits absolute
+// paths in JSON output when the rig path in city.toml is relative.
+func TestDoRigList_JSON_RelativeRigPath(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the rig directory at the resolved absolute location.
+	relRigPath := "rigs/local-rig"
+	absRigPath := filepath.Join(cityPath, relRigPath)
+	if err := os.MkdirAll(absRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .beads/metadata.json in the rig so its beads status reads "initialized".
+	beadsDir := filepath.Join(absRigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write city.toml with a relative path for the rig.
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-rig\"\npath = \"" + relRigPath + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var result RigListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\noutput: %s", err, stdout.String())
+	}
+
+	// Find the non-HQ rig entry.
+	var rigItem *RigListItem
+	for i := range result.Rigs {
+		if !result.Rigs[i].HQ {
+			rigItem = &result.Rigs[i]
+			break
+		}
+	}
+	if rigItem == nil {
+		t.Fatal("no non-HQ rig found in JSON output")
+	}
+
+	if !filepath.IsAbs(rigItem.Path) {
+		t.Errorf("rig path %q is not absolute", rigItem.Path)
+	}
+	if rigItem.Path != absRigPath {
+		t.Errorf("rig path = %q, want %q", rigItem.Path, absRigPath)
+	}
+	if rigItem.Beads != "initialized" {
+		t.Errorf("rig beads = %q, want \"initialized\"", rigItem.Beads)
+	}
+}
+
+// TestDoRigList_JSON_AbsolutePathPreserved verifies that doRigList does not
+// mangle rig paths that are already absolute in city.toml (idempotency guard).
+func TestDoRigList_JSON_AbsolutePathPreserved(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	absRigPath := filepath.Join(t.TempDir(), "external-rig")
+	if err := os.MkdirAll(absRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"external-rig\"\npath = \"" + absRigPath + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var result RigListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\noutput: %s", err, stdout.String())
+	}
+
+	var rigItem *RigListItem
+	for i := range result.Rigs {
+		if !result.Rigs[i].HQ {
+			rigItem = &result.Rigs[i]
+			break
+		}
+	}
+	if rigItem == nil {
+		t.Fatal("no non-HQ rig found in JSON output")
+	}
+
+	// The path must be byte-identical to the original absolute path (no double-prefix).
+	if rigItem.Path != absRigPath {
+		t.Errorf("rig path = %q, want byte-identical %q", rigItem.Path, absRigPath)
 	}
 }
 
@@ -1758,6 +1872,14 @@ func (f *failCityTomlWriteFS) WriteFile(name string, data []byte, perm os.FileMo
 	return f.OSFS.WriteFile(name, data, perm)
 }
 
+func (f *failCityTomlWriteFS) Rename(oldpath, newpath string) error {
+	if !f.failed && filepath.Clean(newpath) == filepath.Clean(f.target) {
+		f.failed = true
+		return errors.New("injected write failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
+
 func TestDoRigAdd_RollsBackCanonicalFilesWhenConfigWriteFails(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1825,6 +1947,9 @@ func TestDoRigAdd_RollsBackCanonicalFilesWhenConfigWriteFails(t *testing.T) {
 	}
 	if string(gotCityToml) != cityToml {
 		t.Fatalf("city.toml changed after rollback:\nwant: %s\n got: %s", cityToml, gotCityToml)
+	}
+	if _, err := os.Stat(config.SiteBindingPath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf(".gc/site.toml should be absent after rollback, stat err = %v", err)
 	}
 	for _, tc := range []struct {
 		path string
@@ -2003,7 +2128,7 @@ func TestResolveRigAddPath(t *testing.T) {
 	}
 }
 
-func TestCmdRigAddUsesCityRelativePathWhenOutsideCity(t *testing.T) {
+func TestCmdRigAddStoresMachinePathInSiteBindingWhenOutsideCity(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {
@@ -2041,7 +2166,21 @@ func TestCmdRigAddUsesCityRelativePathWhenOutsideCity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "path = \""+wantRigPath+"\"") {
-		t.Fatalf("city.toml should contain city-relative absolute path %q:\n%s", wantRigPath, data)
+	parsed, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parse city.toml: %v\ncontents:\n%s", err, data)
+	}
+	if len(parsed.Rigs) != 1 {
+		t.Fatalf("parsed rigs = %d, want 1\ncontents:\n%s", len(parsed.Rigs), data)
+	}
+	if got := parsed.Rigs[0].Path; got != "" {
+		t.Fatalf("city.toml rig.path = %q, want empty (moved to site binding)\ncontents:\n%s", got, data)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != wantRigPath {
+		t.Fatalf("site binding = %+v, want frontend=%s", binding.Rigs, wantRigPath)
 	}
 }

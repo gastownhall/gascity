@@ -155,6 +155,11 @@ func resolveSessionIDWithOptions(
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
+	if id, err := resolveOpenQualifiedAliasBasename(store, identifier); err == nil {
+		return id, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
+	}
 	if opts.allowClosed {
 		if cfg != nil {
 			cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
@@ -171,4 +176,39 @@ func resolveSessionIDWithOptions(
 		}
 	}
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+}
+
+func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if store == nil || identifier == "" || strings.Contains(identifier, "/") {
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	if err != nil {
+		return "", fmt.Errorf("listing sessions: %w", err)
+	}
+	matches := make([]beads.Bead, 0, 1)
+	for _, b := range all {
+		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+			continue
+		}
+		session.RepairEmptyType(store, &b)
+		alias := strings.TrimSpace(b.Metadata["alias"])
+		if alias == "" || !strings.Contains(alias, "/") || session.TargetBasename(alias) != identifier {
+			continue
+		}
+		matches = append(matches, b)
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		labels := make([]string, 0, len(matches))
+		for _, match := range matches {
+			labels = append(labels, fmt.Sprintf("%s (%s)", match.ID, strings.TrimSpace(match.Metadata["alias"])))
+		}
+		return "", fmt.Errorf("%w: %q matches %d sessions: %s", session.ErrAmbiguous, identifier, len(matches), strings.Join(labels, ", "))
+	}
 }

@@ -299,6 +299,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		}
 		if explicitName != "" {
 			meta["session_name"] = explicitName
+			meta["session_name_explicit"] = "true"
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
@@ -332,6 +333,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			b.Metadata = make(map[string]string)
 		}
 		b.Metadata["session_name"] = sessName
+		if explicitName != "" {
+			b.Metadata["session_name_explicit"] = "true"
+		}
 
 		unroute := m.routeACPIfNeeded(provider, transport, sessName)
 		rollbackFailedCreate := func() error {
@@ -342,7 +346,11 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 				if err := m.store.SetMetadata(b.ID, "session_name", ""); err != nil {
 					return fmt.Errorf("clearing session name during rollback: %w", err)
 				}
+				if err := m.store.SetMetadata(b.ID, "session_name_explicit", ""); err != nil {
+					return fmt.Errorf("clearing explicit session name flag during rollback: %w", err)
+				}
 				b.Metadata["session_name"] = ""
+				b.Metadata["session_name_explicit"] = ""
 			}
 			if err := m.store.Close(b.ID); err != nil {
 				return fmt.Errorf("closing rolled-back session bead: %w", err)
@@ -360,10 +368,14 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
+		runtimeAlias := alias
+		if runtimeAlias == "" {
+			runtimeAlias = strings.TrimSpace(extraMeta["agent_name"])
+		}
 		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
 			b.ID,
 			sessName,
-			alias,
+			runtimeAlias,
 			template,
 			meta["session_origin"],
 			DefaultGeneration,
@@ -596,8 +608,28 @@ func (m *Manager) Suspend(id string) error {
 		if err != nil {
 			return err
 		}
-		if State(b.Metadata["state"]) == StateSuspended {
-			return nil // already suspended
+		// Closed beads are terminal; mutating lifecycle metadata after
+		// close produces impossible status=closed + live-state rows.
+		if b.Status == "closed" {
+			return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+		}
+		current := State(b.Metadata["state"])
+		if current == StateSuspended {
+			return nil // idempotent: already suspended
+		}
+		// Legacy bead normalization: pre-metadata cities may have empty
+		// state fields. Treat empty as StateActive so the state-machine
+		// transition works during upgrade. Matches what Close and
+		// checkTransition already do for the other lifecycle methods.
+		if current == StateNone {
+			current = StateActive
+		}
+		// StateAwake is the reconciler's alias for StateActive.
+		if current == StateAwake {
+			current = StateActive
+		}
+		if _, err := Transition(current, CmdSuspend); err != nil {
+			return err
 		}
 
 		// Kill the runtime session (skip if already dead).
@@ -627,7 +659,22 @@ func (m *Manager) Close(id string) error {
 			return err
 		}
 		if b.Status == "closed" {
-			return nil // already closed
+			return nil // idempotent: already closed
+		}
+		// CmdClose is legal from any non-none state; this is effectively a
+		// documentation check that will catch future table changes. Treat
+		// empty metadata state as StateActive for bootstrap beads, and
+		// treat the reconciler's StateAwake alias as StateActive so
+		// already-awake beads can close cleanly.
+		current := State(b.Metadata["state"])
+		if current == StateNone {
+			current = StateActive
+		}
+		if current == StateAwake {
+			current = StateActive
+		}
+		if _, err := Transition(current, CmdClose); err != nil {
+			return err
 		}
 
 		// Best-effort stop cleans up any live runtime and allows auto.Provider
@@ -698,42 +745,136 @@ func (m *Manager) Kill(id string) error {
 
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
+// Idempotent: returns nil if the session is already draining.
 func (m *Manager) BeginDrain(id, reason string) error {
-	return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
+	return withSessionMutationLock(id, func() error {
+		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
+		if err != nil {
+			return err
+		}
+		if !cmdLegal {
+			return nil // idempotent: already draining
+		}
+		return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
+	})
 }
 
-// Archive transitions a session from draining to archived. The runtime
-// process should already be stopped.
+// Archive transitions a session from draining to archived. Idempotent:
+// returns nil if the session is already archived.
 func (m *Manager) Archive(id, reason string) error {
-	return m.store.SetMetadataBatch(id, ArchivePatch(time.Now().UTC(), reason, false))
+	return withSessionMutationLock(id, func() error {
+		cmdLegal, err := m.checkTransition(id, CmdArchive, StateArchived)
+		if err != nil {
+			return err
+		}
+		if !cmdLegal {
+			return nil // idempotent: already archived
+		}
+		return m.store.SetMetadataBatch(id, ArchivePatch(time.Now().UTC(), reason, false))
+	})
 }
 
 // Quarantine marks a session as crash-quarantined until the given time.
+// Idempotent: returns nil if the session is already quarantined.
 func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
-	return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
+	return withSessionMutationLock(id, func() error {
+		cmdLegal, err := m.checkTransition(id, CmdQuarantine, StateQuarantined)
+		if err != nil {
+			return err
+		}
+		if !cmdLegal {
+			return nil // idempotent: already quarantined
+		}
+		return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
+	})
 }
 
 // Reactivate clears archive/quarantine blockers and returns a session to
-// asleep so normal wake machinery owns the next runtime start.
+// asleep so normal wake machinery owns the next runtime start. Idempotent:
+// returns nil if the session is already in an awake-eligible state.
 func (m *Manager) Reactivate(id string) error {
-	b, err := m.store.Get(id)
-	if err != nil {
-		return err
-	}
-	view := ProjectLifecycle(LifecycleInput{
-		Status:   b.Status,
-		Metadata: b.Metadata,
+	return withSessionMutationLock(id, func() error {
+		cmdLegal, err := m.checkTransition(id, CmdWake, StateAsleep)
+		if err != nil {
+			return err
+		}
+		if !cmdLegal {
+			return nil // idempotent: already in target state
+		}
+		b, err := m.store.Get(id)
+		if err != nil {
+			return err
+		}
+		view := ProjectLifecycle(LifecycleInput{
+			Status:   b.Status,
+			Metadata: b.Metadata,
+		})
+		// Note: quarantine_cycle is intentionally preserved across reactivations.
+		// It tracks how many quarantine rounds the session has been through,
+		// enabling eviction after quarantine_max_attempts.
+		return m.store.SetMetadataBatch(id, ReactivatePatch(view.ContinuityEligible))
 	})
-	// Note: quarantine_cycle is intentionally preserved across reactivations.
-	// It tracks how many quarantine rounds the session has been through,
-	// enabling eviction after quarantine_max_attempts.
-	return m.store.SetMetadataBatch(id, ReactivatePatch(view.ContinuityEligible))
 }
 
 // ConfirmCreation transitions a session from creating to active after the
-// runtime process has been confirmed alive.
+// runtime process has been confirmed alive. Idempotent: returns nil if the
+// session is already active.
 func (m *Manager) ConfirmCreation(id string) error {
-	return m.store.SetMetadataBatch(id, ConfirmStartedPatch())
+	return withSessionMutationLock(id, func() error {
+		cmdLegal, err := m.checkTransition(id, CmdReady, StateActive)
+		if err != nil {
+			return err
+		}
+		if !cmdLegal {
+			return nil // idempotent: already active
+		}
+		return m.store.SetMetadataBatch(id, ConfirmStartedPatch(time.Now()))
+	})
+}
+
+// checkTransition reads the current state of session id and reports whether
+// cmd is legal. Empty state metadata is treated as StateActive for legacy
+// bootstrap beads (pre-metadata upgrades). Closed beads are terminal and
+// reject any lifecycle mutation (callers should use the dedicated Close
+// idempotency branch, not a lifecycle transition). Returns:
+//   - cmdLegal: true if the command produces a real transition, false if
+//     the session is already in targetState (idempotent no-op)
+//   - err: *IllegalTransitionError wrapping ErrIllegalTransition when the
+//     command is neither legal nor a no-op
+//
+// MUST be called while holding withSessionMutationLock(id).
+func (m *Manager) checkTransition(id string, cmd TransitionCommand, targetState State) (bool, error) {
+	b, _, err := m.sessionBead(id)
+	if err != nil {
+		return false, err
+	}
+	// Closed beads are terminal. Mutating lifecycle metadata after close
+	// would produce impossible status=closed + live-state combinations
+	// that the reconciler misreads. Surface a clear illegal-transition
+	// error instead of silently mutating.
+	if b.Status == "closed" {
+		return false, &IllegalTransitionError{From: StateClosed, Command: cmd}
+	}
+	current := State(b.Metadata["state"])
+	if current == StateNone {
+		// Legacy bead: pre-metadata cities may have empty state fields.
+		// Treat as active so transitions work during upgrade.
+		current = StateActive
+	}
+	// StateAwake is the reconciler's alias for StateActive. The state
+	// machine table only knows StateActive, so normalize before calling
+	// Transition to keep already-awake beads accepting Suspend/Drain/
+	// Archive/Quarantine.
+	if current == StateAwake {
+		current = StateActive
+	}
+	if current == targetState {
+		return false, nil
+	}
+	if _, err := Transition(current, cmd); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Rename updates the title of a chat session.

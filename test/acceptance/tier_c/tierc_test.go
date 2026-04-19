@@ -164,7 +164,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	helpers.RunGC(testEnvC, "", "supervisor", "stop") //nolint:errcheck
+	helpers.RunGC(testEnvC, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	os.Exit(code)
 }
 

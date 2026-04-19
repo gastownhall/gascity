@@ -19,17 +19,19 @@ func PoolSessionName(template, beadID string) string {
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining
-// assigned work beads (all assigned beads are closed). Returns the IDs
-// of session beads that were closed.
-func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBeads []beads.Bead) []string {
-	assigneeHasWork := buildAssignedWorkIndex(allWorkBeads)
-
+// open/in-progress work beads anywhere — primary store OR any attached
+// rig store. Work-bead assignment is verified by a live cross-store
+// query inside closeSessionBeadIfUnassigned, so the caller does not
+// pass a work snapshot — that pattern was retired to prevent pre-close
+// tick snapshots from poisoning close decisions. Returns the IDs of
+// session beads that were closed.
+func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, sessionBeads []beads.Bead) []string {
 	var closed []string
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		if !closeSessionBeadIfUnassigned(store, sb, assigneeHasWork, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionBeadIfUnassigned(store, rigStores, sb, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, sb.ID)
@@ -115,22 +117,6 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee str
 		return false
 	}
 	return namedSessionBackingTemplate(spec) == template
-}
-
-// sessionHasAssignedWork checks whether any work bead is assigned to this
-// session bead via any of its identifiers: bead ID, session name, or
-// named identity (alias).
-func sessionHasAssignedWork(sb beads.Bead, assigneeHasWork map[string]bool) bool {
-	if assigneeHasWork[sb.ID] {
-		return true
-	}
-	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" && assigneeHasWork[sn] {
-		return true
-	}
-	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" && assigneeHasWork[ni] {
-		return true
-	}
-	return false
 }
 
 func stringPtr(s string) *string { return &s }

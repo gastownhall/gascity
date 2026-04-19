@@ -75,6 +75,14 @@ type BeadRouter interface {
 	Route(ctx context.Context, req RouteRequest) error
 }
 
+// SourceWorkflowStore is one entry from the list of bead stores the sling
+// layer should consult when enforcing source-workflow singleton invariants.
+// StoreRef identifies the store scope (e.g. "city:foo" / "rig:alpha").
+type SourceWorkflowStore struct {
+	Store    beads.Store
+	StoreRef string
+}
+
 // RouteRequest describes a bead routing operation in typed terms.
 type RouteRequest struct {
 	BeadID   string
@@ -93,6 +101,9 @@ type SlingDeps struct {
 	Runner   SlingRunner
 	Store    beads.Store
 	StoreRef string
+	// SourceWorkflowStores lists every bead store that may contain workflow
+	// roots for source-workflow singleton checks and recovery.
+	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution
@@ -145,6 +156,7 @@ type SlingChildResult struct {
 	Skipped     bool // idempotent or non-open
 	Failed      bool
 	FailReason  string
+	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
 }

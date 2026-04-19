@@ -27,8 +27,8 @@ func TestDefaultCity(t *testing.T) {
 	if c.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", c.Agents[0].Name, "mayor")
 	}
-	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
+	if c.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
 	}
 }
 
@@ -83,7 +83,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"agents/mayor/prompt.template.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -680,8 +680,8 @@ func TestWizardCity(t *testing.T) {
 	if c.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", c.Agents[0].Name, "mayor")
 	}
-	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
+	if c.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
 	}
 }
 
@@ -2262,6 +2262,59 @@ name = "mayor"
 	}
 }
 
+// --- MaxWakesPerTick tests ---
+
+func TestDaemonConfig_MaxWakesPerTickOrDefault(t *testing.T) {
+	zero := 0
+	neg := -3
+	pos := 20
+	cases := []struct {
+		name  string
+		field *int
+		want  int
+	}{
+		{"nil returns default", nil, DefaultMaxWakesPerTick},
+		{"zero returns default", &zero, DefaultMaxWakesPerTick},
+		{"negative returns default", &neg, DefaultMaxWakesPerTick},
+		{"positive returns value", &pos, 20},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DaemonConfig{MaxWakesPerTick: tc.field}
+			got := d.MaxWakesPerTickOrDefault()
+			if got != tc.want {
+				t.Errorf("MaxWakesPerTickOrDefault() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseMaxWakesPerTick(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+max_wakes_per_tick = 15
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.MaxWakesPerTick == nil {
+		t.Fatal("Daemon.MaxWakesPerTick is nil, want 15")
+	}
+	if *cfg.Daemon.MaxWakesPerTick != 15 {
+		t.Errorf("Daemon.MaxWakesPerTick = %d, want 15", *cfg.Daemon.MaxWakesPerTick)
+	}
+	if got := cfg.Daemon.MaxWakesPerTickOrDefault(); got != 15 {
+		t.Errorf("MaxWakesPerTickOrDefault() = %d, want 15", got)
+	}
+}
+
 // --- DrainTimeout tests ---
 
 func TestDrainTimeoutDefault(t *testing.T) {
@@ -2524,14 +2577,11 @@ func TestValidateRigs_MissingName(t *testing.T) {
 	}
 }
 
-func TestValidateRigs_MissingPath(t *testing.T) {
+func TestValidateRigs_MissingPathAllowed(t *testing.T) {
 	rigs := []Rig{{Name: "frontend"}}
 	err := ValidateRigs(rigs, "ci")
-	if err == nil {
-		t.Fatal("expected error for missing path")
-	}
-	if !strings.Contains(err.Error(), "path is required") {
-		t.Errorf("error = %q, want 'path is required'", err)
+	if err != nil {
+		t.Fatalf("ValidateRigs: unexpected error: %v", err)
 	}
 }
 

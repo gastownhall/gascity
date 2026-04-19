@@ -393,16 +393,28 @@ func buildPreparedStart(
 		}
 		session.Metadata["instance_token"] = instanceToken
 	}
-	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithSessionContext(
+	beadAlias := strings.TrimSpace(session.Metadata["alias"])
+	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
 		session.ID,
 		candidate.name(),
-		strings.TrimSpace(session.Metadata["alias"]),
+		beadAlias,
 		strings.TrimSpace(session.Metadata["template"]),
 		strings.TrimSpace(session.Metadata["session_origin"]),
 		generation,
 		continuationEpoch,
 		instanceToken,
-	))
+	)
+	// When the bead has no alias but the template was identity-stamped
+	// (pool workers and dependency floors via setTemplateEnvIdentity),
+	// don't let mergeEnv's override-wins semantics clobber the stamped
+	// GC_ALIAS with the runtime's empty value. For ordinary sessions the
+	// resolver-stamped GC_ALIAS is left to be overwritten by the empty
+	// runtime value so the tmux runtime emits `env -u GC_ALIAS` and scrubs
+	// any inherited GC_ALIAS from the tmux server.
+	if beadAlias == "" && tp.EnvIdentityStamped {
+		delete(runtimeEnv, "GC_ALIAS")
+	}
+	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
 	if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
@@ -596,23 +608,25 @@ func commitStartResultTraced(
 		Actor:   "gc",
 		Subject: tp.DisplayName(),
 	})
-	if err := clearPendingCreateClaim(session, store); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
-	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
 	}
 	// Transition creating/asleep/drained beads to active once the runtime
 	// spawn has confirmed. Folded into this metadata batch so the state
-	// write is atomic with the hash writes and avoids a second round-trip
-	// per spawn. See confirmPendingStart for the state gate.
+	// write is atomic with the hash writes, the pending_create_claim
+	// clear, and the creation_complete_at marker. This prevents the sweep
+	// from observing a transient state where the claim is gone but the
+	// post-create marker hasn't landed yet. See confirmPendingStart for
+	// the state gate.
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:         result.prepared.coreHash,
-		LiveHash:         result.prepared.liveHash,
-		CoreBreakdown:    coreBreakdown,
-		ConfirmState:     confirmPendingStart(session.Metadata["state"]),
-		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		CoreHash:                result.prepared.coreHash,
+		LiveHash:                result.prepared.liveHash,
+		CoreBreakdown:           coreBreakdown,
+		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
+		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
+		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
+		Now:                     clk.Now(),
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -644,25 +658,12 @@ func commitStartResultTraced(
 	return true
 }
 
-func clearPendingCreateClaim(session *beads.Bead, store beads.Store) error {
-	if !shouldRollbackPendingCreate(session) || store == nil {
-		return nil
-	}
-	if err := store.SetMetadata(session.ID, "pending_create_claim", ""); err != nil {
-		return err
-	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
-	session.Metadata["pending_create_claim"] = ""
-	return nil
-}
-
 func recoverRunningPendingCreate(
 	session *beads.Bead,
 	tp TemplateParams,
 	cfg *config.City,
 	store beads.Store,
+	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
 ) bool {
 	if session == nil || store == nil {
@@ -677,12 +678,18 @@ func recoverRunningPendingCreate(
 		}
 		return false
 	}
-	if err := clearPendingCreateClaim(session, store); err != nil {
-		return false
-	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
+	}
+	// Fall back to wall clock if the caller didn't inject one — the marker
+	// is load-bearing for the post-create sweep guard, so leaving it unset
+	// would re-open the crash/recovery spin-loop window.
+	var now time.Time
+	if clk != nil {
+		now = clk.Now()
+	} else {
+		now = time.Now()
 	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:      prepared.coreHash,
@@ -691,6 +698,12 @@ func recoverRunningPendingCreate(
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
 		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		// recoverRunningPendingCreate's caller (session_reconciler.go)
+		// already gates entry on shouldRollbackPendingCreate(session), so
+		// at this point the claim is guaranteed to be set — hard-code the
+		// clear rather than re-evaluating the same predicate.
+		ClearPendingCreateClaim: true,
+		Now:                     now,
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		if trace != nil {
@@ -788,6 +801,7 @@ func executePlannedStartsTraced(
 	if len(candidates) == 0 {
 		return 0
 	}
+	maxWakes := cfg.Daemon.MaxWakesPerTickOrDefault()
 	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store)
 	if !ok {
 		fmt.Fprintln(stderr, "session reconciler: dependency graph fallback to serial start order") //nolint:errcheck
@@ -810,7 +824,7 @@ func executePlannedStartsTraced(
 		if len(waveCandidates) == 0 {
 			continue
 		}
-		if wakeCount >= defaultMaxWakesPerTick {
+		if wakeCount >= maxWakes {
 			for _, candidate := range waveCandidates {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
 			}
@@ -825,13 +839,13 @@ func executePlannedStartsTraced(
 			ready = append(ready, candidate)
 		}
 		for offset := 0; offset < len(ready); {
-			if wakeCount >= defaultMaxWakesPerTick {
+			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
 				}
 				break
 			}
-			batchSize := min(defaultMaxParallelStartsPerWave, defaultMaxWakesPerTick-wakeCount)
+			batchSize := min(defaultMaxParallelStartsPerWave, maxWakes-wakeCount)
 			end := min(offset+batchSize, len(ready))
 			var prepared []preparedStart
 			for _, candidate := range ready[offset:end] {

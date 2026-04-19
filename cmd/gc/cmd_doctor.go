@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -128,26 +128,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 	}
 
-	// System formulas check.
-	expected := ListEmbeddedSystemFormulas(systemFormulasFS, "system_formulas")
-	if len(expected) > 0 {
-		expectedContent := make(map[string][]byte)
-		for _, rel := range expected {
-			data, err := fs.ReadFile(systemFormulasFS, "system_formulas/"+rel)
-			if err == nil {
-				expectedContent[rel] = data
-			}
-		}
-		d.Register(&doctor.SystemFormulasCheck{
-			CityPath:        cityPath,
-			Expected:        expected,
-			ExpectedContent: expectedContent,
-			FixFn: func() error {
-				_, err := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-				return err
-			},
-		})
-	}
+	// System formulas/orders now ship via the core bootstrap pack; pack
+	// materialization and the bootstrap collision checks cover what the
+	// legacy SystemFormulasCheck used to verify.
 
 	// Pack cache check (if config has remote packs).
 	if cfgErr == nil && len(cfg.Packs) > 0 {
@@ -200,6 +183,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	if cfgErr == nil {
 		for _, rig := range cfg.Rigs {
 			if rig.Suspended {
+				continue
+			}
+			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
 			d.Register(doctor.NewRigPathCheck(rig))
@@ -276,6 +262,12 @@ func backfillRigIndex(cityPath string) error {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	for _, rig := range cfg.Rigs {
 		rigPath := rig.Path
+		// Unbound rigs (no .gc/site.toml binding) have an empty path;
+		// registering that would pollute the supervisor registry with
+		// an entry pointing at the city root.
+		if strings.TrimSpace(rigPath) == "" {
+			continue
+		}
 
 		if err := reg.RegisterRig(rigPath, rig.Name, cityPath); err != nil {
 			// Non-fatal — may be a name conflict with another city's rig.

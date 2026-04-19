@@ -61,7 +61,7 @@ sees the existing branch and reason, and resumes instead of redoing everything.
 
 Read metadata:
 ```bash
-bd show <issue> --json | jq '.metadata'
+gc bd show <issue> --json | jq '.metadata'
 ```
 
 ## Work Protocol
@@ -84,9 +84,9 @@ Your formula: `mol-polecat-work`
 
 ```bash
 # Step 1: Check for assigned work
-bd list --assignee="$GC_SESSION_NAME" --status=in_progress
+gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
 {{ .WorkQuery }}                                             # Find pool work
-bd update <id> --claim                                       # Atomic grab
+gc bd update <id> --claim                                       # Atomic grab
 
 # Step 2: Work found? -> Follow formula steps. Nothing? -> Check mail
 gc mail inbox
@@ -129,8 +129,8 @@ conflict, test failure, etc.), and resubmit. Don't redo all the work.
 
 ```bash
 # Check for rejection
-bd show <issue> --json | jq -r '.metadata.rejection_reason // empty'
-bd show <issue> --json | jq -r '.metadata.branch // empty'
+gc bd show <issue> --json | jq -r '.metadata.rejection_reason // empty'
+gc bd show <issue> --json | jq -r '.metadata.branch // empty'
 
 # If both exist: resume the branch, fix the issue, resubmit
 ```
@@ -156,7 +156,7 @@ gc mail send {{ .RigName }}/witness -s "ESCALATION: Brief description [HIGH]" -m
 gc mail send mayor/ -s "BLOCKED: <topic>" -m "Context"
 ```
 
-After escalating: continue if possible, otherwise `bd update <bead> --status=escalated && gc runtime drain-ack && exit`.
+After escalating: continue if possible, otherwise `gc bd update <bead> --status=escalated && gc runtime drain-ack && exit`.
 
 ---
 
@@ -192,11 +192,11 @@ Nudges from other agents may arrive via your hook. When working:
 
 ```bash
 git push origin HEAD
-bd update <work-bead> \
+gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
 gc runtime drain-ack
 exit
 ```
@@ -215,7 +215,7 @@ is the "Idle Polecat heresy."
 | Want to... | Correct command |
 |------------|----------------|
 | Signal work complete | Done sequence (push, set metadata, reassign, `gc runtime drain-ack`, exit) |
-| Read formula steps | `bd show <wisp-id>` (shows formula ref) |
+| Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
 | Escalate blocker | `gc mail send {{ .RigName }}/witness -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
 | Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |

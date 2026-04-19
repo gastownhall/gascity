@@ -59,7 +59,7 @@ func newTutorialWorkspace(t *testing.T) *tutorialWorkspace {
 		for _, cityDir := range cityDirs {
 			_, _ = runEnvCommandWithTimeout(env, cityDir, 20*time.Second, "gc", "stop")
 		}
-		_, _ = runEnvCommandWithTimeout(env, env.Home, 20*time.Second, "gc", "supervisor", "stop")
+		_, _ = runEnvCommandWithTimeout(env, env.Home, 30*time.Second, "gc", "supervisor", "stop", "--wait")
 	})
 	return w
 }

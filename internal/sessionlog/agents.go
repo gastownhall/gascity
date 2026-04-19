@@ -36,6 +36,42 @@ type AgentSession struct {
 	Status   AgentStatus `json:"status"`
 }
 
+// RawPayloads decodes each non-empty Entry.Raw into a generic JSON value
+// and returns the slice. Same semantics as Session.RawPayloads — see
+// that method for the precision-loss caveat.
+func (s *AgentSession) RawPayloads() []any {
+	out := make([]any, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(entry.Raw, &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// RawPayloadBytes returns a defensive copy of each non-empty
+// Entry.Raw. Same semantics as Session.RawPayloadBytes — preserves
+// byte-identity and int64 precision, and should be preferred when the
+// result will be re-marshaled onto the wire.
+func (s *AgentSession) RawPayloadBytes() []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		if !json.Valid(entry.Raw) {
+			continue
+		}
+		out = append(out, append(json.RawMessage(nil), entry.Raw...))
+	}
+	return out
+}
+
 // agentDir returns the subagents directory for a session log path.
 // Claude Code stores subagent files in {slug}/{session-uuid}/subagents/.
 func agentDir(parentLogPath string) string {

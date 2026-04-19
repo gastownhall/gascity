@@ -1,306 +1,249 @@
 ---
 title: "Shareable Packs"
+description: Create, import, and customize PackV2 Gas City packs.
 ---
 
-A practical guide for creating and consuming shareable packs as
-pluggable features in Gas City.
+A pack is a portable definition of behavior: agents, prompt templates,
+providers, formulas, orders, commands, doctor checks, overlays, skills, and
+other reusable assets. A city is the root pack plus a `city.toml` deployment
+file and machine-local `.gc/` bindings.
 
-## What is a shareable pack?
+PackV2 separates three concerns:
 
-A pack is a directory containing a `pack.toml` file and any
-supporting assets (prompt templates, scripts, formulas). It defines a
-reusable set of agents that can be composed into any city.
+- `pack.toml` and pack directories define what the system is.
+- `city.toml` defines how this deployment runs.
+- `.gc/` stores local site bindings and runtime state managed by `gc`.
 
+Legacy `includes`, `[packs.*]`, and `[[agent]]` examples may still load for
+migration compatibility, but new docs and new packs should use PackV2 imports
+and `agents/<name>/` directories.
+
+## Pack Layout
+
+Pack structure is convention-based. Standard directories are loaded by name;
+opaque helper files belong under `assets/`.
+
+```text
+code-review-pack/
+├── pack.toml
+├── agents/
+│   └── reviewer/
+│       ├── agent.toml
+│       └── prompt.template.md
+├── formulas/
+│   └── review-change.toml
+├── orders/
+│   └── nightly-review.toml
+├── commands/
+│   └── status/
+│       ├── help.md
+│       └── run.sh
+├── doctor/
+│   └── check-review-tools/
+│       └── run.sh
+├── overlays/
+├── skills/
+├── mcp/
+├── template-fragments/
+└── assets/
+    └── scripts/
+        └── setup-reviewer.sh
 ```
-my-pack/
-├── pack.toml        # agent definitions + metadata
-├── prompts/
-│   └── worker.md        # prompt templates (auto-resolved)
-├── scripts/
-│   └── setup.sh         # session setup scripts
-└── formulas/            # optional formula directory
-    └── code-review.formula.toml
-```
 
-Packs are self-contained: they carry everything their agents need.
-Paths in `pack.toml` (prompt_template, session_setup_script,
-overlay_dir) resolve relative to the pack directory, so the
-pack works regardless of where it's referenced from.
+## Minimal `pack.toml`
 
-Packs can be:
-- **Local directories** — referenced by relative or absolute path
-- **Remote git repos** — fetched and cached via `[[packs]]` source
-
-## Creating a shareable pack
-
-### pack.toml format
+Pack metadata and imports live in `pack.toml`. Agent definitions live in
+`agents/<name>/`, not in `[[agent]]` tables.
 
 ```toml
 [pack]
 name = "code-review"
+schema = 2
 version = "1.0.0"
-schema = 1
 
-[[agent]]
-name = "reviewer"
-prompt_template = "prompts/reviewer.md"
+[agent_defaults]
 provider = "claude"
-
-[agent.pool]
-min = 0
-max = 3
-
-[[agent]]
-name = "summarizer"
-prompt_template = "prompts/summarizer.md"
-provider = "claude"
+scope = "rig"
 ```
 
-Required metadata fields:
-- **name** — identifier for the pack
-- **schema** — format version (currently `1`)
+`schema = 2` is the current PackV2 format. `[agent_defaults]` applies to
+agents discovered from `agents/` unless an agent's own `agent.toml` overrides a
+field.
 
-Optional metadata:
-- **version** — semver string for tracking
-- **requires_gc** — minimum gc version
-- **city_agents** — agent names that should be city-scoped (see below)
+## Agent Directories
 
-### Prompt templates and scripts
+A minimal agent is just a directory with a prompt:
 
-Reference prompts and scripts using paths relative to the pack
-directory:
-
-```toml
-[[agent]]
-name = "reviewer"
-prompt_template = "prompts/reviewer.md"
-session_setup_script = "scripts/setup.sh"
-overlay_dir = "overlays/reviewer"
+```text
+agents/reviewer/
+└── prompt.template.md
 ```
 
-During expansion, Gas City rewrites these paths to absolute paths so
-they work regardless of which city references the pack.
-
-### Including formulas
-
-Add a `[formulas]` section to include a formula directory:
+Use `agent.toml` for fields that differ from pack defaults:
 
 ```toml
-[formulas]
-dir = "formulas"
-```
-
-Formula directories participate in the layered formula resolution
-system. Pack formulas are lower priority than city-local or
-rig-local formulas, so consumers can override specific formulas.
-
-### Including providers
-
-Packs can define provider presets that their agents depend on:
-
-```toml
-[providers.claude]
-start_command = "claude --dangerously-skip-permissions"
-```
-
-Provider definitions merge additively — existing city providers are
-not overwritten. This means the consumer's provider config takes
-precedence.
-
-### Dual-scope packs (city_agents)
-
-Some packs define agents that should run at city scope (not per-rig)
-alongside agents that run per-rig. Use `city_agents` to declare which
-agents are city-scoped:
-
-```toml
-[pack]
-name = "gastown"
-schema = 1
-city_agents = ["mayor", "deacon"]
-
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
-
-[[agent]]
-name = "deacon"
-prompt_template = "prompts/deacon.md"
-
-[[agent]]
-name = "polecat"
-prompt_template = "prompts/polecat.md"
-
-[agent.pool]
-min = 0
-max = 5
-```
-
-When this pack is referenced from both `workspace.includes` and a
-rig's `includes`:
-- City expansion keeps only `mayor` and `deacon` (dir="")
-- Rig expansion keeps only `polecat` (dir=rig name)
-
-## Consuming a shareable pack
-
-### Local reference
-
-Reference a pack directory by path in your `city.toml`:
-
-```toml
-# City-level (agents get dir="")
-[workspace]
-includes = ["packs/base"]
-
-# Or multiple city packs
-[workspace]
-includes = ["packs/base", "packs/monitoring"]
-
-# Rig-level (agents get dir=rig name)
-[[rigs]]
-name = "my-project"
-path = "/home/user/my-project"
-includes = ["packs/gastown"]
-
-# Or multiple rig packs
-[[rigs]]
-name = "my-project"
-path = "/home/user/my-project"
-includes = ["packs/base", "packs/review"]
-```
-
-Relative paths resolve against the city directory (where `city.toml`
-lives).
-
-### Remote reference
-
-Define named pack sources and reference them by name:
-
-```toml
-[packs.gastown]
-source = "https://github.com/example/gastown-pack.git"
-ref = "v1.0.0"
-path = "pack"  # subdirectory within the repo
-
-[[rigs]]
-name = "my-project"
-path = "/home/user/my-project"
-includes = ["gastown"]
-```
-
-Remote packs are fetched once and cached in `.gc/pack-cache/`.
-The cache key includes the source URL, ref, and path.
-
-### Customizing pack agents
-
-Use per-rig overrides to customize agents from a pack without
-modifying the pack itself:
-
-```toml
-[[rigs]]
-name = "my-project"
-path = "/home/user/my-project"
-includes = ["packs/gastown"]
-
-[[rigs.overrides]]
-agent = "polecat"
-provider = "gemini"
+# agents/reviewer/agent.toml
+scope = "rig"
+nudge = "Check your hook, review the assigned change, and leave findings."
 idle_timeout = "30m"
-
-[rigs.overrides.env]
-CUSTOM_VAR = "value"
-
-[rigs.overrides.pool]
-max = 10
+min_active_sessions = 0
+max_active_sessions = 3
+pre_start = ["{{.ConfigDir}}/assets/scripts/setup-reviewer.sh {{.RigRoot}}"]
 ```
 
-Override fields (all optional):
-- **provider** — change the agent's provider
-- **suspended** — suspend/unsuspend the agent
-- **idle_timeout** — change idle timeout
-- **prompt_template** — replace the prompt template
-- **start_command** — change the start command
-- **nudge** — change the nudge text
-- **env** / **env_remove** — add/remove environment variables
-- **pool** — override pool settings (min, max, check, drain_timeout)
-- **pre_start** — replace pre-start commands
-- **session_setup** / **session_setup_script** — replace session setup
-- **overlay_dir** — replace overlay directory
-- **install_agent_hooks** — replace agent hook installation list
+Prompt file discovery prefers `prompt.template.md`. `prompt.md` and
+`prompt.md.tmpl` are accepted for compatibility.
 
-For city-level customization, use patches:
+## Imports
+
+Packs compose other packs with named imports. Imports preserve provenance, so
+consumers can distinguish `gastown.polecat` from `review.polecat`.
+
+```toml
+[imports.maintenance]
+source = "../maintenance"
+export = true
+```
+
+Local imports use a path relative to the importing pack. Remote imports use a
+source plus a version constraint:
+
+```toml
+[imports.gastown]
+source = "github.com/gastownhall/gastown"
+version = "^1.2"
+```
+
+Imports are transitive by default. Set `transitive = false` only when the
+import is internal to the pack and should not be visible to consumers.
+
+## City Usage
+
+A city imports packs at the root pack level and declares deployment details in
+`city.toml`.
+
+```toml
+# pack.toml
+[pack]
+name = "bright-lights"
+schema = 2
+
+[imports.gastown]
+source = "./assets/gastown"
+
+[imports.review]
+source = "./assets/code-review"
+```
+
+```toml
+# city.toml
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "backend"
+max_active_sessions = 4
+default_sling_target = "backend/gastown.polecat"
+```
+
+Machine-local rig paths are site bindings managed by `gc`:
+
+```bash
+gc rig add ~/src/backend --name backend
+```
+
+## Rig-Level Imports
+
+Use rig-level imports when only one rig should receive a pack's agents or
+formulas.
+
+```toml
+[[rigs]]
+name = "backend"
+
+[rigs.imports.gastown]
+source = "./assets/gastown"
+
+[rigs.imports.review]
+source = "./assets/code-review"
+```
+
+Rig-level imports create rig-scoped identities such as
+`backend/gastown.polecat` and `backend/review.reviewer`.
+
+## Named Sessions
+
+Packs can declare sessions that should exist independent of current work.
+
+```toml
+[[named_session]]
+template = "mayor"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "polecat"
+scope = "rig"
+mode = "on_demand"
+```
+
+The `template` is an agent name from the same pack or an imported qualified
+name when needed.
+
+## Customizing Imported Agents
+
+Use patches to modify imported agents without redefining them.
 
 ```toml
 [[patches.agent]]
-name = "mayor"
-provider = "gemini"
+name = "gastown.mayor"
+provider = "codex"
+idle_timeout = "2h"
+
+[patches.agent.env]
+GC_MODE = "coordination"
 ```
 
-## Handling name collisions
-
-When two packs define an agent with the same name and both apply to
-the same scope (same rig, or both city-level), Gas City reports an error
-with provenance:
-
-```
-rig "myrig": packs define duplicate agent "worker":
-  - packs/base
-  - packs/extras
-rename one agent in its pack.toml, or use separate rigs
-```
-
-### Resolution strategies
-
-1. **Rename in pack.toml** — if you control the pack, change one
-   agent's name to be unique.
-
-2. **Use separate rigs** — apply each pack to a different rig. Since
-   agent uniqueness is scoped to `(dir, name)`, the same agent name in
-   different rigs is valid.
-
-3. **Split the pack** — extract the conflicting agent into its own
-   pack so you can choose which version to include.
-
-## Example: composing three packs
+For rig-specific customization, patch under the rig:
 
 ```toml
-[workspace]
-name = "full-stack-city"
-provider = "claude"
-includes = ["packs/orchestration"]
-
-# Remote pack source
-[packs.code-review]
-source = "https://github.com/example/review-pack.git"
-ref = "main"
-
-# Provider presets
-[providers.claude]
-start_command = "claude --dangerously-skip-permissions"
-
-[providers.gemini]
-start_command = "gemini-cli"
-
-# Rig with two composed packs
 [[rigs]]
 name = "backend"
-path = "/home/user/backend"
-includes = ["packs/base-agents", "code-review"]
 
-# Override the reviewer to use gemini
-[[rigs.overrides]]
-agent = "reviewer"
+[[rigs.patches]]
+agent = "gastown.polecat"
 provider = "gemini"
 
-# Second rig with just the base pack
-[[rigs]]
-name = "frontend"
-path = "/home/user/frontend"
-includes = ["packs/base-agents"]
+[rigs.patches.pool]
+max = 8
 ```
 
-This city composes:
-- **orchestration** pack at city scope (dir="")
-- **base-agents** pack on both rigs
-- **code-review** pack only on the backend rig
-- Per-rig overrides to customize the reviewer agent
+## Formula and Order Files
+
+Formula files go in `formulas/` and order files go in `orders/`. No
+`[formulas].dir` declaration is needed for PackV2 packs.
+
+```text
+formulas/
+└── review-change.toml
+
+orders/
+└── nightly-review.toml
+```
+
+When multiple packs provide the same formula name, the importing pack wins over
+its imports. Rig-level imports can override city-level formulas for that rig.
+
+## Compatibility Notes
+
+The loader still exposes some V1 fields for migration and old city support:
+
+- `workspace.includes`
+- `[[rigs]].includes`
+- `[packs.*]`
+- `[[agent]]`
+- `[formulas].dir`
+
+Treat those as migration surfaces. New shareable packs should use PackV2:
+`schema = 2`, `[imports.*]`, `agents/<name>/`, conventional `formulas/`, and
+patches for customization.

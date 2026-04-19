@@ -21,7 +21,7 @@ func TestGastownPackMaterialization(t *testing.T) {
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("GastownScriptsExecutable", func(t *testing.T) {
-		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "scripts")
+		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "assets", "scripts")
 		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
 			t.Fatalf("reading gastown scripts dir: %v", err)
@@ -38,11 +38,11 @@ func TestGastownPackMaterialization(t *testing.T) {
 				continue
 			}
 			if info.Mode()&0o111 == 0 {
-				t.Errorf("packs/gastown/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+				t.Errorf("packs/gastown/assets/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
 			}
 		}
 		if count == 0 {
-			t.Fatal("no .sh scripts found in packs/gastown/scripts/")
+			t.Fatal("no .sh scripts found in packs/gastown/assets/scripts/")
 		}
 	})
 
@@ -52,7 +52,7 @@ func TestGastownPackMaterialization(t *testing.T) {
 			"packs/gastown/agents",
 			"packs/gastown/template-fragments",
 			"packs/gastown/formulas",
-			"packs/gastown/scripts",
+			"packs/gastown/assets/scripts",
 			"packs/gastown/commands",
 			"packs/maintenance/pack.toml",
 			"packs/maintenance/agents",

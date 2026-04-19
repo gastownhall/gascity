@@ -1,0 +1,55 @@
+coverage:
+  status:
+    default_rules:
+      flag_coverage_not_uploaded_behavior: include
+    project:
+      default:
+        target: auto
+        flags:
+          - unit
+          - integration-packages
+          - integration-review-formulas
+          - integration-bdstore
+          - integration-rest-smoke
+          - integration-rest-full
+
+flags:
+  unit:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  # These integration shards exercise the repo as a whole under different
+  # test partitions, so they intentionally share the same source paths and
+  # rely on flag names to distinguish the uploads.
+  integration-packages:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  integration-review-formulas:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  integration-bdstore:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  integration-rest-smoke:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  integration-rest-full:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true

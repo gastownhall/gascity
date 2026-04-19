@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,12 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
+// write fails. Sized to match terminateProcess's SIGTERM grace period so a
+// Nudge racing with Stop still converges to the best-effort nil contract
+// rather than surfacing a spurious error before SIGKILL lands.
+const nudgePostWriteDrainTimeout = 5 * time.Second
 
 // Config holds ACP provider settings.
 type Config struct {
@@ -446,8 +453,8 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 }
 
 // Nudge sends a session/prompt to the named session. Waits for the agent to
-// become idle before sending. Returns nil if the session doesn't exist
-// (best-effort).
+// become idle before sending. Returns nil if the session doesn't exist or
+// the agent process exits during the send (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
@@ -463,6 +470,13 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// sendRequest is atomic with respect to other concurrent Nudge calls.
 	sc.nudgeMu.Lock()
 	defer sc.nudgeMu.Unlock()
+
+	// Re-check liveness under the lock. If an earlier Nudge observed the
+	// process exit and returned nil while we were queued on nudgeMu, skip
+	// the marshal+write work instead of tripping through the recovery path.
+	if !sc.alive() {
+		return nil
+	}
 
 	// Wait for agent to become idle.
 	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
@@ -491,7 +505,30 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 			sc.activePromptID = 0
 		}
 		sc.mu.Unlock()
-		return fmt.Errorf("sending prompt to %q: %w", name, err)
+		// Non-pipe failures (e.g., marshal errors) have nothing to do with
+		// the agent lifecycle, so surface them immediately rather than
+		// stalling the caller on sc.done.
+		if !isPipeWriteError(err) {
+			return fmt.Errorf("sending prompt to %q: %w", name, err)
+		}
+		// Pipe write failed — the agent process is exiting (e.g., a prior
+		// Interrupt delivered SIGINT and the agent died, or Stop closed
+		// our stdin end between the alive() check and the write).
+		// Sync on the existing lifecycle event: cmd.Wait() → drainPending →
+		// close(sc.done). Once that fires, this is identical to the
+		// !sc.alive() case above, so honor the best-effort contract by
+		// returning nil. The bound matches terminateProcess's SIGTERM grace
+		// period; the common path returns in microseconds.
+		select {
+		case <-sc.done:
+			// A chronically flapping agent would otherwise be silent here;
+			// a single stderr line lets ops distinguish "nothing happened"
+			// from "agent died mid-write."
+			fmt.Fprintf(os.Stderr, "acp: nudge to %q skipped (agent exiting): %v\n", name, err)
+			return nil
+		case <-time.After(nudgePostWriteDrainTimeout):
+			return fmt.Errorf("sending prompt to %q: %w", name, err)
+		}
 	}
 
 	// Drain the response channel in the background. If the agent
@@ -821,6 +858,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 // SleepCapability reports that ACP sessions support timed-only idle sleep.
 func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityTimedOnly
+}
+
+// isPipeWriteError reports whether err originated from writing to a closed
+// stdin pipe — the signal that the agent process exited between our alive()
+// check and the write. Other sendRequest failures (marshal errors, etc.) are
+// unrelated to lifecycle and should surface immediately.
+func isPipeWriteError(err error) bool {
+	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE)
 }
 
 // terminateProcess sends SIGTERM then SIGKILL to a tracked process group.

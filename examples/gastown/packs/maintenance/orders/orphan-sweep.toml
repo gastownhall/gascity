@@ -8,4 +8,4 @@
 description = "Reset beads assigned to dead agents back to the work pool"
 gate = "cooldown"
 interval = "5m"
-exec = "$PACK_DIR/scripts/orphan-sweep.sh"
+exec = "$PACK_DIR/assets/scripts/orphan-sweep.sh"

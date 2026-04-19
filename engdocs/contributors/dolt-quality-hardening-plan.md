@@ -16,7 +16,7 @@ This plan is grounded in:
 - the live regression inventory in
   [`engdocs/contributors/dolt-regression-audit.md`](./dolt-regression-audit.md)
 - the current branch hotspots, especially
-  [`cmd/gc/gc-beads-bd`](../../cmd/gc/gc-beads-bd),
+  [`examples/bd/assets/scripts/gc-beads-bd.sh`](../../examples/bd/assets/scripts/gc-beads-bd.sh),
   [`cmd/gc/beads_provider_lifecycle.go`](../../cmd/gc/beads_provider_lifecycle.go),
   [`cmd/gc/bd_env.go`](../../cmd/gc/bd_env.go), and
   [`internal/beads/contract/connection.go`](../../internal/beads/contract/connection.go).
@@ -111,12 +111,12 @@ files.
 
 **Verification:**
 - [ ] `go test ./cmd/gc -run 'Test(NormalizeCanonicalBdScopeFiles|GcBeadsBdInit|FinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock)' -count=1`
-- [ ] `rg -n 'ensure_config_yaml|ensure_metadata|metadata_patch_json' cmd/gc/gc-beads-bd`
+- [ ] `rg -n 'ensure_config_yaml|ensure_metadata|metadata_patch_json' examples/bd/assets/scripts/gc-beads-bd.sh`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
-- `cmd/gc/gc-beads-bd`
+- `examples/bd/assets/scripts/gc-beads-bd.sh`
 - `cmd/gc/beads_provider_lifecycle.go`
 - `cmd/gc/init_provider_readiness.go`
 - `internal/beads/contract/files.go`
@@ -280,7 +280,7 @@ server actions and SQL/database work only.
 **Dependencies:** Task 6
 
 **Files likely touched:**
-- `cmd/gc/gc-beads-bd`
+- `examples/bd/assets/scripts/gc-beads-bd.sh`
 - `cmd/gc/beads_provider_lifecycle.go`
 - `internal/beads/contract/*`
 - related tests

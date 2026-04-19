@@ -128,7 +128,7 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "mayor"}},
-		Rigs:      []config.Rig{{Name: "rig1"}}, // missing path
+		Rigs:      []config.Rig{{}}, // missing name
 	}
 	c := NewConfigValidCheck(cfg)
 	r := c.Run(&CheckContext{})
@@ -269,6 +269,71 @@ func TestConfigRefsCheck_MultipleIssues(t *testing.T) {
 	}
 	if len(r.Details) != 2 {
 		t.Errorf("expected 2 issues, got %d: %v", len(r.Details), r.Details)
+	}
+}
+
+// Regression for schema=2 packs: convention-discovered agents store
+// prompt_template / session_setup_script / overlay_dir as absolute paths.
+// The check must stat them directly instead of joining against cityPath,
+// which doubles the root prefix and makes every file "not found".
+func TestConfigRefsCheck_AbsolutePaths(t *testing.T) {
+	cases := []struct {
+		name         string
+		createFiles  bool
+		overlayIsDir bool // only applies when createFiles=true
+		wantStatus   CheckStatus
+		wantIssues   int
+	}{
+		{"existing_files", true, true, StatusOK, 0},
+		{"missing_files", false, false, StatusWarning, 3},
+		{"overlay_is_file_not_dir", true, false, StatusWarning, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			packDir := t.TempDir()
+			absPrompt := filepath.Join(packDir, "agents", "mayor", "prompt.template.md")
+			absScript := filepath.Join(packDir, "agents", "mayor", "setup.sh")
+			absOverlay := filepath.Join(packDir, "agents", "mayor", "overlay")
+			if tc.createFiles {
+				if err := os.MkdirAll(filepath.Dir(absPrompt), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(absPrompt, []byte("hi"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(absScript, []byte("#!/bin/sh"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if tc.overlayIsDir {
+					if err := os.MkdirAll(absOverlay, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.WriteFile(absOverlay, []byte("file-not-dir"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			cfg := &config.City{
+				Agents: []config.Agent{{
+					Name:               "mayor",
+					PromptTemplate:     absPrompt,
+					SessionSetupScript: absScript,
+					OverlayDir:         absOverlay,
+				}},
+			}
+			c := NewConfigRefsCheck(cfg, cityDir)
+			r := c.Run(&CheckContext{})
+			if r.Status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; msg = %s; details = %v",
+					r.Status, tc.wantStatus, r.Message, r.Details)
+			}
+			if len(r.Details) != tc.wantIssues {
+				t.Errorf("got %d issues, want %d: %v", len(r.Details), tc.wantIssues, r.Details)
+			}
+		})
 	}
 }
 
@@ -1624,142 +1689,6 @@ func TestPackCacheCheck_WithPath(t *testing.T) {
 	r := c.Run(ctx)
 	if r.Status != StatusOK {
 		t.Errorf("status = %v, want OK: %s", r.Status, r.Message)
-	}
-}
-
-// --- SystemFormulasCheck ---
-
-func TestSystemFormulasCheckOK(t *testing.T) {
-	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	formulasDir := filepath.Join(dir, "formulas")
-	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("hello"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &SystemFormulasCheck{
-		CityPath:        dir,
-		Expected:        []string{"hello.toml"},
-		ExpectedContent: map[string][]byte{"hello.toml": []byte("hello")},
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusOK {
-		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
-	}
-}
-
-func TestSystemFormulasCheckOrdersOK(t *testing.T) {
-	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	ordersDir := filepath.Join(dir, "orders", "health")
-	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(ordersDir, "order.toml"), []byte("health"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &SystemFormulasCheck{
-		CityPath:        dir,
-		Expected:        []string{"orders/health/order.toml"},
-		ExpectedContent: map[string][]byte{"orders/health/order.toml": []byte("health")},
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusOK {
-		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
-	}
-}
-
-func TestSystemFormulasCheckMissing(t *testing.T) {
-	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	// No formulas/ directory, no files.
-
-	c := &SystemFormulasCheck{
-		CityPath: dir,
-		Expected: []string{"hello.toml"},
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error; msg = %s", r.Status, r.Message)
-	}
-}
-
-func TestSystemFormulasCheckStale(t *testing.T) {
-	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	formulasDir := filepath.Join(dir, "formulas")
-	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("old"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &SystemFormulasCheck{
-		CityPath:        dir,
-		Expected:        []string{"hello.toml"},
-		ExpectedContent: map[string][]byte{"hello.toml": []byte("new")},
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error; msg = %s", r.Status, r.Message)
-	}
-}
-
-func TestSystemFormulasCheckFix(t *testing.T) {
-	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-
-	fixed := false
-	c := &SystemFormulasCheck{
-		CityPath: dir,
-		Expected: []string{"hello.toml"},
-		FixFn: func() error {
-			formulasDir := filepath.Join(dir, "formulas")
-			if err := os.MkdirAll(formulasDir, 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("hello"), 0o644); err != nil {
-				return err
-			}
-			fixed = true
-			return nil
-		},
-		ExpectedContent: map[string][]byte{"hello.toml": []byte("hello")},
-	}
-
-	// Verify it fails first.
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Fatalf("status = %d, want Error before fix", r.Status)
-	}
-
-	// Fix should succeed.
-	if !c.CanFix() {
-		t.Fatal("CanFix() = false, want true")
-	}
-	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
-		t.Fatalf("Fix() error: %v", err)
-	}
-	if !fixed {
-		t.Error("FixFn was not called")
-	}
-
-	// Re-run should be OK.
-	r = c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusOK {
-		t.Errorf("status = %d, want OK after fix; msg = %s", r.Status, r.Message)
-	}
-}
-
-func TestSystemFormulasCheckNoExpected(t *testing.T) {
-	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	c := &SystemFormulasCheck{
-		CityPath: dir,
-		Expected: nil,
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusOK {
-		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
 }
 

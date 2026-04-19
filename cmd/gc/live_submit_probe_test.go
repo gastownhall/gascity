@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 
 func preferRealBDOnPath(t *testing.T) {
 	t.Helper()
+	skipSlowCmdGCTest(t, "requires a live bd-managed session probe; run without -short")
 
 	currentPath := os.Getenv("PATH")
 	pathEntries := filepath.SplitList(currentPath)
@@ -96,7 +98,7 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name
@@ -172,7 +174,7 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name

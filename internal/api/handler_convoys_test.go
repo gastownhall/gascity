@@ -12,7 +12,7 @@ import (
 
 func TestConvoyCreateAndGet(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Create a bead to link as convoy item.
 	store := state.stores["myrig"]
@@ -24,7 +24,7 @@ func TestConvoyCreateAndGet(t *testing.T) {
 	// Create convoy with the item.
 	body := `{"rig":"myrig","title":"test convoy","items":["` + item.ID + `"]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoys", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoys"), strings.NewReader(body)))
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: status = %d, want 201; body = %s", rec.Code, rec.Body.String())
@@ -40,7 +40,7 @@ func TestConvoyCreateAndGet(t *testing.T) {
 
 	// Get convoy.
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/"+convoy.ID, nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get: status = %d, want 200", rec.Code)
 	}
@@ -48,11 +48,11 @@ func TestConvoyCreateAndGet(t *testing.T) {
 
 func TestConvoyCreateInvalidItem(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"rig":"myrig","title":"test","items":["nonexistent"]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoys", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoys"), strings.NewReader(body)))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
@@ -61,7 +61,7 @@ func TestConvoyCreateInvalidItem(t *testing.T) {
 
 func TestConvoyAddItems(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
@@ -69,7 +69,7 @@ func TestConvoyAddItems(t *testing.T) {
 
 	body := `{"items":["` + item.ID + `"]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/add", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoy/")+convoy.ID+"/add", strings.NewReader(body)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("add: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -78,13 +78,13 @@ func TestConvoyAddItems(t *testing.T) {
 
 func TestConvoyClose(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/close", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoy/")+convoy.ID+"/close", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("close: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -93,10 +93,10 @@ func TestConvoyClose(t *testing.T) {
 
 func TestConvoyNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/nonexistent", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/nonexistent"), nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
@@ -105,7 +105,7 @@ func TestConvoyNotFound(t *testing.T) {
 
 func TestConvoyRemoveItems(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
@@ -118,7 +118,7 @@ func TestConvoyRemoveItems(t *testing.T) {
 	// Remove item from convoy.
 	body := `{"items":["` + item.ID + `"]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/remove", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoy/")+convoy.ID+"/remove", strings.NewReader(body)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("remove: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -133,7 +133,7 @@ func TestConvoyRemoveItems(t *testing.T) {
 
 func TestConvoyRemoveNonMember(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
@@ -142,7 +142,7 @@ func TestConvoyRemoveNonMember(t *testing.T) {
 	// Item is not linked to this convoy — remove should fail.
 	body := `{"items":["` + item.ID + `"]}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/remove", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoy/")+convoy.ID+"/remove", strings.NewReader(body)))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("remove non-member: status = %d, want 400; body = %s", rec.Code, rec.Body.String())
@@ -151,7 +151,7 @@ func TestConvoyRemoveNonMember(t *testing.T) {
 
 func TestConvoyCheck(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
@@ -164,7 +164,7 @@ func TestConvoyCheck(t *testing.T) {
 	store.Close(item1.ID)                                    //nolint:errcheck
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/"+convoy.ID+"/check", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID+"/check", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("check: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -185,7 +185,7 @@ func TestConvoyCheck(t *testing.T) {
 
 func TestConvoyCheckComplete(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
@@ -196,7 +196,7 @@ func TestConvoyCheckComplete(t *testing.T) {
 	store.Close(item.ID)                                    //nolint:errcheck
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/"+convoy.ID+"/check", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID+"/check", nil))
 
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
@@ -207,15 +207,15 @@ func TestConvoyCheckComplete(t *testing.T) {
 
 func TestConvoyDelete(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 
-	req := httptest.NewRequest("DELETE", "/v0/convoy/"+convoy.ID, nil)
+	req := httptest.NewRequest("DELETE", cityURL(state, "/convoy/")+convoy.ID, nil)
 	req.Header.Set("X-GC-Request", "true")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -230,15 +230,15 @@ func TestConvoyDelete(t *testing.T) {
 
 func TestConvoyDeleteNotConvoy(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	task, _ := store.Create(beads.Bead{Title: "task", Type: "task"})
 
-	req := httptest.NewRequest("DELETE", "/v0/convoy/"+task.ID, nil)
+	req := httptest.NewRequest("DELETE", cityURL(state, "/convoy/")+task.ID, nil)
 	req.Header.Set("X-GC-Request", "true")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -247,7 +247,7 @@ func TestConvoyDeleteNotConvoy(t *testing.T) {
 
 func TestConvoyList(t *testing.T) {
 	state := newFakeMutatorState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	store := state.stores["myrig"]
 	if _, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"}); err != nil {
@@ -258,7 +258,7 @@ func TestConvoyList(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoys", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoys"), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)

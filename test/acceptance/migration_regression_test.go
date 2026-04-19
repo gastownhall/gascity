@@ -149,15 +149,23 @@ func TestRegression_GastownConfig(t *testing.T) {
 			t.Error("maintenance pack agent 'dog' not found; system pack auto-inclusion failed (PR #213 regression)")
 		}
 
-		hasGastownInclude := false
+		// V2: gastown arrives via [imports.gastown] rather than
+		// workspace.includes. Accept either form so this regression test
+		// covers both the legacy-includes and the V2-imports layouts.
+		hasGastownReference := false
 		for _, inc := range cfg.Workspace.Includes {
 			if strings.Contains(inc, "gastown") {
-				hasGastownInclude = true
+				hasGastownReference = true
 				break
 			}
 		}
-		if !hasGastownInclude {
-			t.Error("workspace.includes does not reference gastown pack")
+		if !hasGastownReference {
+			if _, ok := cfg.Imports["gastown"]; ok {
+				hasGastownReference = true
+			}
+		}
+		if !hasGastownReference {
+			t.Error("gastown pack not referenced via workspace.includes or [imports.gastown]")
 		}
 
 		if len(cfg.PackDirs) == 0 {
@@ -300,7 +308,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 			}
 		}
 
-		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "scripts")
+		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "assets", "scripts")
 		if entries, err := os.ReadDir(scriptsDir); err == nil {
 			for _, e := range entries {
 				if strings.HasSuffix(e.Name(), ".sh") {

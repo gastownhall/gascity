@@ -352,8 +352,10 @@ type ScriptLayers struct {
 type Rig struct {
 	// Name is the unique identifier for this rig.
 	Name string `toml:"name" jsonschema:"required"`
-	// Path is the absolute filesystem path to the rig's repository.
-	Path string `toml:"path" jsonschema:"required"`
+	// Path is the effective filesystem path to the rig's repository. New
+	// writes persist it to .gc/site.toml; legacy city.toml paths are accepted
+	// only so edit/migration flows can move them into site binding state.
+	Path string `toml:"path,omitempty"`
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
@@ -1191,6 +1193,17 @@ type DaemonConfig struct {
 	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
+	// MaxWakesPerTick caps how many sessions the reconciler may start in a
+	// single tick. Raise this on cities with slow cold-starts (e.g. opus
+	// cold-start ~60s) where the default of 5 starves the rest of the
+	// candidate queue for minutes. Nil (unset) defaults to 5. Values <= 0
+	// are treated as the default — set a positive integer to override.
+	//
+	// Tradeoff: the default of 5 also bounds the process-spawn burst after a
+	// controller restart (thundering-herd protection). Raising it trades
+	// restart burst for steady-state throughput; keep within what the host
+	// can absorb.
+	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1257,6 +1270,21 @@ func (d *DaemonConfig) ProbeConcurrencyOrDefault() int {
 		return 1
 	}
 	return *d.ProbeConcurrency
+}
+
+// DefaultMaxWakesPerTick is the per-tick wake budget the reconciler uses
+// when [daemon].max_wakes_per_tick is unset. See issue #772 for why 5 is
+// often wrong on slow-cold-start workloads.
+const DefaultMaxWakesPerTick = 5
+
+// MaxWakesPerTickOrDefault returns the per-tick wake budget. Nil (unset)
+// and non-positive values fall back to DefaultMaxWakesPerTick so a bad
+// config can't deadlock the reconciler on a zero budget.
+func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
+	if d.MaxWakesPerTick == nil || *d.MaxWakesPerTick <= 0 {
+		return DefaultMaxWakesPerTick
+	}
+	return *d.MaxWakesPerTick
 }
 
 // DriftDrainTimeoutDuration returns the drift drain timeout as a time.Duration.
@@ -1815,6 +1843,22 @@ func (a *Agent) SupportsGenericEphemeralSessions() bool {
 	return true
 }
 
+// SupportsMultipleSessions reports whether the template may materialize more
+// than one distinct concrete session identity. Unlike
+// SupportsGenericEphemeralSessions, max_active_sessions = 0 still represents a
+// multi-session template shape even though generic ephemeral session creation
+// is disabled.
+func (a *Agent) SupportsMultipleSessions() bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
+	}
+	maxSessions := a.EffectiveMaxActiveSessions()
+	return maxSessions == nil || *maxSessions != 1
+}
+
 // SupportsInstanceExpansion reports whether the template may have multiple
 // simultaneously addressable concrete instances and therefore needs instance
 // discovery / synthetic member naming.
@@ -1923,7 +1967,9 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.PromptsRoot + "/pool-worker.md"
+	// Implicit agents reference the pool-worker prompt shipped by the
+	// core bootstrap pack, materialized under .gc/system/packs/core/.
+	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
@@ -2424,9 +2470,6 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		if r.Name == "" {
 			return fmt.Errorf("rig[%d]: name is required", i)
 		}
-		if r.Path == "" {
-			return fmt.Errorf("rig %q: path is required", r.Name)
-		}
 		if seenNames[r.Name] {
 			return fmt.Errorf("rig %q: duplicate name", r.Name)
 		}
@@ -2446,7 +2489,7 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
-		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
+		Agents:        []Agent{{Name: "mayor", PromptTemplate: "agents/mayor/prompt.template.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 }
@@ -2475,7 +2518,7 @@ func WizardCity(name, provider, startCommand string) City {
 	return City{
 		Workspace: ws,
 		Agents: []Agent{
-			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
+			{Name: "mayor", PromptTemplate: "agents/mayor/prompt.template.md"},
 		},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
@@ -2519,6 +2562,22 @@ func (c *City) Marshal() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling config: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// MarshalForWrite emits the checked-in city.toml form by stripping
+// machine-local rig path bindings before encoding.
+func (c *City) MarshalForWrite() ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("marshaling config: nil city")
+	}
+	clone := *c
+	if len(c.Rigs) > 0 {
+		clone.Rigs = append([]Rig(nil), c.Rigs...)
+		for i := range clone.Rigs {
+			clone.Rigs[i].Path = ""
+		}
+	}
+	return clone.Marshal()
 }
 
 // Load reads and parses a city.toml file at the given path using the

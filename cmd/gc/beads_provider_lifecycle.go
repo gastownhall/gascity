@@ -110,6 +110,9 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) erro
 		return fmt.Errorf("init city beads: %w", err)
 	}
 	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			continue
+		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
 		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
@@ -329,10 +332,16 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 }
 
 // resolveRigPaths resolves relative rig paths to absolute (relative to
-// cityPath). Mutates cfg.Rigs in place. Called before any function that
-// uses rig paths.
+// cityPath). Mutates rigs in place. Must be called after loading city config
+// and before any access to rigs[i].Path for filesystem operations. Required
+// call sites include: doRigList, doRigAdd, doRigRemove, doRigDefault,
+// cmd_start, cmd_hook, cmd_sling, dispatch_runtime, city_runtime,
+// cmd_supervisor, cmd_convoy_dispatch.
 func resolveRigPaths(cityPath string, rigs []config.Rig) {
 	for i := range rigs {
+		if strings.TrimSpace(rigs[i].Path) == "" {
+			continue
+		}
 		if !filepath.IsAbs(rigs[i].Path) {
 			rigs[i].Path = filepath.Join(cityPath, rigs[i].Path)
 		}
@@ -573,12 +582,19 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 	if err := waitForBeadsScopeReadyAfterRecovery(cityPath, cityPath, deadline); err != nil {
 		return err
 	}
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	// Use the full config load (site-binding overlay applied) so
+	// migrated rigs (rig.path only in .gc/site.toml) are still waited
+	// for. A raw config.Load here would silently skip every migrated
+	// rig — the site binding wouldn't populate rig.Path.
+	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		return nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
 		if err := waitForBeadsScopeReadyAfterRecovery(resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {
 			return fmt.Errorf("rig %q store not ready: %w", rig.Name, err)
 		}
@@ -905,6 +921,9 @@ func syncConfiguredDoltPortFiles(cityPath, provider string, cityDolt config.Dolt
 
 	for i := range rigs {
 		rig := normalizedRigConfig(cityPath, rigs[i])
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
 		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)
 		if err != nil {
 			return err

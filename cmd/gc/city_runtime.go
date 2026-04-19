@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -133,9 +134,11 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).
+	// Retry with backoff as defense-in-depth against transient store
+	// errors immediately after ensureBeadsProvider returns (#753).
 	if sweepStore, err := openStoreAtForCity(p.CityPath, p.CityPath); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-	} else if n, err := sweepOrphanedOrderTracking(sweepStore); err != nil {
+	} else if n, err := sweepOrphanedOrderTrackingRetry(sweepStore, 3, time.Second); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
 	} else if n > 0 {
 		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
@@ -555,11 +558,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		}
 	}
 
-	// Re-materialize system formulas into the city formulas/ directory.
-	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot) //nolint:errcheck // best-effort
-	if _, err := MaterializeBeadsBdScript(cityRoot); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: config reload: materializing gc-beads-bd: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-	}
+	// System formulas/orders now arrive via the core bootstrap pack.
+	// gc-beads-bd ships inside the bd pack's assets/scripts/ and is
+	// materialized alongside the rest of the pack content.
 	if err := MaterializeBuiltinPacks(cityRoot); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: materializing builtin packs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -759,9 +760,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	if sweepUndesiredPoolSessionBeads(
 		store,
+		cr.rigBeadStores(),
 		sessionBeads,
 		desiredState,
-		result.OwnershipWorkBeads,
 		cr.cfg,
 		cr.sp,
 		result.StoreQueryPartial,
@@ -865,7 +866,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	reconcileSessionBeadsTraced(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
-		assignedWorkBeads, result.OwnershipWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
+		assignedWorkBeads, cr.rigBeadStores(), readyWaitSet, cr.sessionDrains, poolDesired,
 		result.StoreQueryPartial,
 		workSet, cityName,
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
@@ -907,9 +908,9 @@ func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
 
 func sweepUndesiredPoolSessionBeads(
 	store beads.Store,
+	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	desiredState map[string]TemplateParams,
-	assignedWorkBeads []beads.Bead,
 	cfg *config.City,
 	sp runtime.Provider,
 	storeQueryPartial bool,
@@ -931,6 +932,76 @@ func sweepUndesiredPoolSessionBeads(
 		if sp != nil && sp.IsRunning(bead.Metadata["session_name"]) {
 			continue
 		}
+		// Don't sweep beads that the reconciler still considers "start
+		// requested" — their work assignment window hasn't opened. Mirrors
+		// sessionStartRequested (session_reconcile.go) exactly so the two
+		// loops agree about ownership:
+		//   - pending_create_claim=true: in-flight create claim, protected
+		//     regardless of age until the lifecycle clears it.
+		//   - state=creating: protected until staleCreatingState would
+		//     return true (i.e., until staleCreatingStateTimeout has
+		//     elapsed; zero CreatedAt is treated as stale, matching
+		//     staleCreatingState in session_reconcile.go).
+		// Without this, a pool's freshly-created session bead gets swept
+		// on the same tick it's created (no work assigned →
+		// GCSweepSessionBeads closes it), spinning the pool in a rapid
+		// create→sweep→recreate loop.
+		if strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+			continue
+		}
+		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead.CreatedAt) {
+			continue
+		}
+		// Age grace period for the post-creating, pre-wake window. After
+		// session_lifecycle_parallel flips state from "creating" to
+		// "active" + state_reason=creation_complete, there's still a gap
+		// before the wake pipeline records last_woke_at. Sweeping that
+		// window produces the same spin as sweeping during creation —
+		// we observed pool sessions with state=active, last_woke=empty
+		// getting closed before wake ever landed.
+		//
+		// The guard matches both "active" and "awake" because the
+		// reconciler's healStatePatch (session_reconcile.go) rewrites a
+		// live bead from "active" to "awake" whenever the runtime is
+		// alive, and the reconciler treats both values as equivalent
+		// live states. Limiting the guard to "active" alone would leave
+		// the same spin-loop open on the "awake" alias path.
+		//
+		// The guard must only match the post-create window, not crash/
+		// churn/start-failure paths that ALSO clear last_woke_at
+		// (checkStability, checkChurn, and the start-failure branch in
+		// session_lifecycle_parallel.go all clear last_woke_at on beads
+		// that may already be state=active). We distinguish by the
+		// per-start marker creation_complete_at, written atomically with
+		// the state transition by CommitStartedPatch / ConfirmStartedPatch
+		// and restamped by recoverRunningPendingCreate on heal. A bead
+		// is protected while creation_complete_at is recent (within
+		// staleCreatingStateTimeout) AND last_woke_at is still empty —
+		// crash/churn paths do not touch creation_complete_at, so a
+		// post-crash bead whose last successful start was longer than
+		// the timeout ago is sweepable even when wake_attempts or
+		// churn_count are non-zero. The age bound mirrors
+		// staleCreatingState: a missing or zero creation_complete_at is
+		// treated as stale (sweepable) so beads without the per-start
+		// marker (older builds, manually repaired) stay recoverable.
+		//
+		// Upgrade contract: older binaries did not write
+		// creation_complete_at, so any bead persisted before upgrade
+		// fails the age check and becomes sweepable. That matches the
+		// semantics a crashed bead would get under the current binary
+		// and is the intended behavior — a bead that survived a binary
+		// restart without completing its wake is not in the protected
+		// "mid-start" window. The atomicity requirement therefore only
+		// binds within a single binary (writers and sweep are the same
+		// process); the rollout needs no cross-version coordination.
+		if state := strings.TrimSpace(bead.Metadata["state"]); (state == "active" || state == "awake") &&
+			strings.TrimSpace(bead.Metadata["last_woke_at"]) == "" &&
+			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" {
+			if creationCompleteAt, ok := parseRFC3339Metadata(bead.Metadata["creation_complete_at"]); ok &&
+				time.Since(creationCompleteAt) < staleCreatingStateTimeout {
+				continue
+			}
+		}
 		template := normalizedSessionTemplate(bead, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil || !isEphemeralSessionBead(bead) {
@@ -938,7 +1009,36 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		candidates = append(candidates, bead)
 	}
-	return len(GCSweepSessionBeads(store, candidates, assignedWorkBeads))
+	return len(GCSweepSessionBeads(store, rigStores, candidates))
+}
+
+// isStaleCreating mirrors staleCreatingState in session_reconcile.go without
+// requiring a clock.Clock dependency: a zero CreatedAt is treated as stale,
+// and otherwise the bead is stale once staleCreatingStateTimeout has elapsed.
+// Keeping this shape identical to the reconciler's predicate means the sweep
+// and the reconciler agree about which in-flight create beads are still alive.
+func isStaleCreating(createdAt time.Time) bool {
+	if createdAt.IsZero() {
+		return true
+	}
+	return time.Since(createdAt) >= staleCreatingStateTimeout
+}
+
+// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing
+// or unparseable value returns ok=false; the caller treats that as "no per-
+// start marker present" so older beads (pre-creation_complete_at rollout)
+// fall through to the default sweepable path rather than being protected
+// indefinitely.
+func parseRFC3339Metadata(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
@@ -997,7 +1097,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		store,
 		cr.dops,
 		nil,
-		wfcResult.OwnershipWorkBeads,
+		cr.rigBeadStores(),
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		poolDesired,
@@ -1084,6 +1184,14 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 	}
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
+		// Unbound rigs (declared in city.toml but missing a
+		// .gc/site.toml binding) have an empty rig.Path;
+		// openStoreAtForCity would silently fall back to the city
+		// scope, aliasing the rig store to the city store. Skip them
+		// so supervisor-mode store maps match api_state.buildStores.
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
 		store, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", rig.Name, err) //nolint:errcheck // best-effort stderr

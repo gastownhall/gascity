@@ -1,0 +1,191 @@
+name: CI
+# Keep the historical check name `CI / Integration / review-formulas` even
+# though the shard now lives in a dedicated workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - labeled
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-formulas-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOLT_VERSION: "1.86.1"
+  BD_VERSION: "v1.0.0"
+
+jobs:
+  gate:
+    name: review-formulas routing
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'needs-review-formulas'
+    runs-on: ubuntu-latest
+    outputs:
+      run_shard: ${{ steps.gate.outputs.run_shard }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+        id: filter
+        with:
+          filters: |
+            review_formulas:
+              - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/workflows/nightly.yml'
+              - '.github/workflows/review-formulas.yml'
+              - 'Makefile'
+              - 'go.mod'
+              - 'go.sum'
+              - 'cmd/gc/**'
+              - 'examples/bd/**'
+              - 'examples/dolt/**'
+              - 'examples/gastown/packs/**'
+              - 'scripts/test-integration-shard'
+              - 'test/agents/**'
+              - 'test/integration/**'
+              - 'test/tmuxtest/**'
+              - 'internal/**'
+      - name: Decide whether shard should run
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          LABELED_NAME: ${{ github.event.label.name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PATH_HIT: ${{ steps.filter.outputs.review_formulas }}
+          NEEDS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-review-formulas') }}
+        run: |
+          run_shard=false
+          reason="skipped"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            run_shard=true
+            reason="manual dispatch"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            run_shard=true
+            reason="push to main safety net"
+          elif [[ "$PR_DRAFT" != "true" ]]; then
+            if [[ "$EVENT_ACTION" == "labeled" && "$LABELED_NAME" != "needs-review-formulas" ]]; then
+              reason="ignored unrelated label event"
+            elif [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
+              run_shard=true
+              reason="pull request path/label match"
+            else
+              reason="pull request path/label miss"
+            fi
+          else
+            reason="draft pull request"
+          fi
+
+          {
+            echo "run_shard=$run_shard"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+      - name: Report routing decision
+        run: |
+          echo "review-formulas shard: ${{ steps.gate.outputs.reason }}"
+
+  review-formulas-shard:
+    name: Integration / review-formulas (${{ matrix.label }})
+    needs: gate
+    if: needs.gate.outputs.run_shard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: review-formulas-basic
+            label: basic
+            coverprofile: coverage.integration-review-formulas-basic.txt
+          - shard: review-formulas-retries
+            label: retries
+            coverprofile: coverage.integration-review-formulas-retries.txt
+          - shard: review-formulas-recovery
+            label: recovery
+            coverprofile: coverage.integration-review-formulas-recovery.txt
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run review-formulas shard
+        id: shard
+        run: GO_TEST_COVERPROFILE=${{ matrix.coverprofile }} ./scripts/test-integration-shard ${{ matrix.shard }}
+      - name: Inspect shard coverage profile
+        if: steps.shard.outcome == 'success'
+        run: |
+          if [[ -f "${{ matrix.coverprofile }}" ]]; then
+            ls -lh "${{ matrix.coverprofile }}"
+          else
+            echo "coverage file missing: ${{ matrix.coverprofile }}"
+          fi
+      - name: Upload shard coverage to Codecov
+        if: >-
+          steps.shard.outcome == 'success' &&
+          hashFiles(matrix.coverprofile) != '' &&
+          (
+            github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        with:
+          files: ${{ matrix.coverprofile }}
+          flags: integration-review-formulas
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
+  review-formulas:
+    # This synthesized result is the historical branch-protected gate.
+    # The old workflow carried `continue-on-error`, but PR checks still
+    # treated this name as a failing signal. Keep that effective behavior
+    # explicit while the shards run in parallel underneath it.
+    name: Integration / review-formulas
+    needs:
+      - gate
+      - review-formulas-shard
+    if: >-
+      always() &&
+      (
+        github.event_name != 'pull_request' ||
+        github.event.action != 'labeled' ||
+        github.event.label.name == 'needs-review-formulas'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finalize review-formulas result
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+          RUN_SHARD: ${{ needs.gate.outputs.run_shard }}
+          REASON: ${{ needs.gate.outputs.reason }}
+          SHARD_RESULT: ${{ needs.review-formulas-shard.result }}
+        run: |
+          echo "review-formulas shard: ${REASON}"
+          if [[ "${GATE_RESULT}" != "success" ]]; then
+            echo "review-formulas routing failed" >&2
+            exit 1
+          fi
+          if [[ "${RUN_SHARD}" != "true" ]]; then
+            exit 0
+          fi
+          if [[ "${SHARD_RESULT}" != "success" ]]; then
+            echo "review-formulas subshards failed" >&2
+            exit 1
+          fi

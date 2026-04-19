@@ -475,10 +475,12 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestControllerReloadsConventionDiscoveredAgentOnWatchEvent exercises
+// tryReloadConfig directly — a fast, deterministic unit test for the
+// reload logic. It does NOT cover the watcher/debounce wiring between
+// fsnotify and tryReloadConfig; see
+// TestControllerLoop_WatcherDrivesConventionAgentReload for that.
 func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
 	configureTestDoltIdentityEnv(t)
 
 	dir := shortSocketTempDir(t, "gc-reload-agents-")
@@ -489,56 +491,15 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents): %v", err)
+	}
 
 	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-
-	sp := runtime.NewFake()
-
-	var lastAgentNames atomic.Value
-	var reconcileCount atomic.Int32
-	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-		reconcileCount.Add(1)
-		var names []string
-		ds := make(map[string]TemplateParams)
-		for _, a := range c.Agents {
-			if a.Implicit {
-				continue
-			}
-			names = append(names, a.Name)
-			ds[a.Name] = TemplateParams{
-				SessionName:  a.Name,
-				TemplateName: a.Name,
-				Command:      "echo hello",
-			}
-		}
-		lastAgentNames.Store(names)
-		return DesiredStateResult{State: ds}
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
-
-	loopDone := make(chan struct{})
-	go func() {
-		controllerLoop(ctx, 30*time.Second, cfg, "test", tomlPath, config.WatchDirs(prov, cfg, dir),
-			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
-		close(loopDone)
-	}()
-
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-loopDone:
-		case <-time.After(5 * time.Second):
-		}
-	})
-
-	for reconcileCount.Load() < 1 {
-		time.Sleep(5 * time.Millisecond)
-	}
+	initialRev := config.Revision(osFS{}, prov, cfg, dir)
 
 	agentDir := filepath.Join(dir, "agents", "noreen")
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
@@ -548,30 +509,112 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 		t.Fatalf("WriteFile(prompt.template.md): %v", err)
 	}
 
-	deadline := time.After(5 * time.Second)
-	for !strings.Contains(stdout.String(), "Config reloaded") {
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for config reload; reconciles=%d stdout=%q stderr=%q",
-				reconcileCount.Load(), stdout.String(), stderr.String())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	var stderr bytes.Buffer
+	result, err := tryReloadConfig(tomlPath, "test", dir, &stderr)
+	if err != nil {
+		t.Fatalf("tryReloadConfig() error = %v, stderr = %s", err, stderr.String())
+	}
+	if result.Revision == initialRev {
+		t.Fatalf("revision did not change after convention-discovered agent was added: %s", result.Revision)
 	}
 
-	deadline = time.After(5 * time.Second)
-	for {
-		names, _ := lastAgentNames.Load().([]string)
-		if len(names) == 1 && names[0] == "noreen" {
-			break
+	var names []string
+	for _, a := range result.Cfg.Agents {
+		if a.Implicit {
+			continue
 		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for convention-discovered agent noreen; got %v stdout=%q stderr=%q",
-				names, stdout.String(), stderr.String())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+		names = append(names, a.Name)
+	}
+	if len(names) != 1 || names[0] != "noreen" {
+		t.Fatalf("reloaded agent names = %v, want [noreen]", names)
+	}
+}
+
+// TestWatchConfigDirs_DetectsFileChangeAndSetsDirty covers the
+// fsnotify → debounce → dirty flag wiring. This is the integration
+// complement to the reload-logic unit test above: if this test breaks
+// but the unit test passes, the watcher glue has regressed
+// independently. Focuses on the primitive (watchConfigDirs) rather
+// than a full controllerLoop to keep the test fast and free of
+// bead-store dependencies.
+func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigDirs([]string{dir}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	// Rewrite city.toml — fsnotify watches the dir, so the write fires
+	// a WRITE or CREATE event that flips dirty after the debounce.
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-v2\"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite city.toml: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after city.toml rewrite; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after file change; stderr=%q", stderr.String())
+	}
+
+	// New directory under a watched dir should be picked up and added to
+	// the watch list — verifies the subtree auto-add path (critical for
+	// convention-discovered agent dirs created after startup).
+	dirty.Store(false)
+	// Drain any pending poke so we can observe the next one.
+	select {
+	case <-pokeCh:
+	default:
+	}
+
+	agentsDir := filepath.Join(dir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents): %v", err)
+	}
+	// First poke is from the mkdir CREATE event on the watched city dir.
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for poke after agents/ mkdir; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after agents/ mkdir; stderr=%q", stderr.String())
+	}
+
+	// Now prove the subtree-add path actually registered agents/: create
+	// a file INSIDE agents/ and verify the watcher fires again. Without
+	// the watcher.Add(event.Name) in watchConfigDirs's event loop, this
+	// write would silently miss and a real-world regression (conv-agent
+	// file showing up after startup) would be invisible.
+	dirty.Store(false)
+	select {
+	case <-pokeCh:
+	default:
+	}
+
+	agentFile := filepath.Join(agentsDir, "noreen.template.md")
+	if err := os.WriteFile(agentFile, []byte("You are noreen.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agentFile): %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for poke after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -93,7 +92,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	// Use the full config load path (includes pack expansion + site
+	// binding overlay) so migrated rigs (path only in .gc/site.toml)
+	// resolve to their bound path. A raw config.Load here would make
+	// every already-migrated rig look unbound and fail the new guard
+	// in resolveBdScopeTarget / bdRigScopeTarget.
+	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -194,17 +198,24 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		if !ok {
 			return execStoreTarget{}, fmt.Errorf("rig %q not found", rigName)
 		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return execStoreTarget{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before scoping bd commands", rig.Name, rig.Name)
+		}
 		return bdRigScopeTarget(cityPath, rig), nil
 	}
 
 	// Auto-detect from bead IDs in args, but only accept candidates that
 	// actually exist in the resolved rig store. This keeps hyphenated flag
 	// values and other non-ID args from silently retargeting the command.
+	// Unbound rigs are skipped so we don't alias them to the city store.
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
 		if rig, ok := bdRigForArg(cfg, arg); ok {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			target := bdRigScopeTarget(cityPath, rig)
 			if bdBeadExists(cityPath, target, arg) {
 				return target, nil
@@ -215,6 +226,8 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
 		return execStoreTarget{}, err
 	} else if ok {
+		// resolveRigForDir already skips unbound rigs, so rig.Path is
+		// guaranteed non-empty here.
 		return bdRigScopeTarget(cityPath, rig), nil
 	}
 

@@ -48,10 +48,10 @@ func TestWorkflowGetSelectsScopedRootMatch(t *testing.T) {
 		t.Fatalf("Create(rigRoot): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_shared?scope_kind=rig&scope_ref=alpha", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_shared?scope_kind=rig&scope_ref=alpha"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -96,10 +96,10 @@ func TestWorkflowGetPreservesRequestedScopeForUniqueCrossStoreWorkflow(t *testin
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_city_scope?scope_kind=city&scope_ref=gascity", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_city_scope?scope_kind=city&scope_ref=gascity"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -140,10 +140,10 @@ func TestWorkflowGetRejectsMismatchedCityScopeForUniqueCrossStoreWorkflow(t *tes
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_wrong_city_scope?scope_kind=city&scope_ref=other-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_wrong_city_scope?scope_kind=city&scope_ref=other-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
@@ -167,10 +167,10 @@ func TestWorkflowGetRejectsInvalidScopeKind(t *testing.T) {
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_invalid_scope?scope_kind=workspace&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_invalid_scope?scope_kind=workspace&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
@@ -196,10 +196,10 @@ func TestWorkflowGetRejectsMismatchedRigScopeForUniqueCrossStoreWorkflow(t *test
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_rig_only?scope_kind=rig&scope_ref=beta", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_rig_only?scope_kind=rig&scope_ref=beta"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
@@ -235,10 +235,10 @@ func TestWorkflowGetMarksSnapshotPartialWhenDepListFails(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_partial?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_partial?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -285,10 +285,10 @@ func TestWorkflowGetHistoricalSnapshotIncludesClosedFallbackChildren(t *testing.
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_closed_history?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_closed_history?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -345,10 +345,10 @@ func TestWorkflowGetOpenSnapshotIncludesClosedFallbackChildren(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_open_history?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_open_history?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -406,11 +406,11 @@ func TestWorkflowDeleteIncludesClosedDescendantsAndDeletesBeads(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodDelete, "/v0/workflow/"+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
 	req.Header.Set("X-GC-Request", "test")
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -465,11 +465,11 @@ func TestWorkflowDeleteResolvesLogicalWorkflowID(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodDelete, "/v0/workflow/wf_delete_logical?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/wf_delete_logical?scope_kind=city&scope_ref=test-city&delete=true"), nil)
 	req.Header.Set("X-GC-Request", "test")
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -502,10 +502,10 @@ func TestWorkflowGetAllowsMissingScopeFields(t *testing.T) {
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_missing_scope", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_missing_scope"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -541,10 +541,10 @@ func TestWorkflowGetScopedRequestSurvivesUnrelatedStoreListFailure(t *testing.T)
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_city_partial?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_city_partial?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -580,10 +580,10 @@ func TestWorkflowGetUsesSingleSnapshotIndexForHeaderAndBody(t *testing.T) {
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_index?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/wf_index?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -837,10 +837,10 @@ func TestWorkflowGetNormalizesShortScopeRefs(t *testing.T) {
 		t.Fatalf("Create(member): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/"+root.ID+"?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/")+root.ID+"?scope_kind=city&scope_ref=test-city", nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -937,10 +937,10 @@ func TestWorkflowGetRejectsNonWorkflowRoot(t *testing.T) {
 		t.Fatalf("Create(bead): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/"+bead.ID+"?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/")+bead.ID+"?scope_kind=city&scope_ref=test-city", nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())

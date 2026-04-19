@@ -32,10 +32,26 @@ type Entry struct {
 }
 
 // BootstrapPacks is the hardcoded set of implicit packs bootstrapped by gc init.
+// Built-in gc import is authoritative and is not bootstrapped as a pack.
 var BootstrapPacks = []Entry{
-	{Name: "import", Source: "github.com/gastownhall/gc-import", Version: "0.2.0", AssetDir: "packs/import"},
 	{Name: "registry", Source: "github.com/gastownhall/gc-registry", Version: "0.1.0", AssetDir: "packs/registry"},
 	{Name: "core", Source: "github.com/gastownhall/gc-core", Version: "0.1.0", AssetDir: "packs/core"},
+}
+
+// RetiredBootstrapPacks is the set of packs that previous gc releases
+// bootstrapped but the current release no longer does. On reconciliation,
+// any pre-existing [imports.<name>] entry whose (name, source) matches a
+// retired pack is pruned so the loader stops splicing the legacy pack into
+// every city. This is the upgrade path: without pruning, implicit-import.toml
+// entries written by older releases would live forever, and cache eviction
+// (fresh container, new machine) would surface undiagnosable missing-pack
+// errors.
+//
+// Matching is intentionally conservative: the user must have both the name
+// AND the exact historical source. Hand-edited entries with a different
+// source under the same name are left alone.
+var RetiredBootstrapPacks = []Entry{
+	{Name: "import", Source: "github.com/gastownhall/gc-import"},
 }
 
 type implicitImport struct {
@@ -87,6 +103,21 @@ func EnsureBootstrapForCity(gcHome string, userImports map[string]config.Import)
 		return err
 	}
 	updated := false
+
+	// Prune retired bootstrap-owned entries before collision detection so
+	// an upgraded install does not trip on a stale [imports.<name>] the
+	// user never authored.
+	for _, retired := range RetiredBootstrapPacks {
+		existing, ok := imports[retired.Name]
+		if !ok {
+			continue
+		}
+		if config.NormalizeRemoteSource(existing.Source) != config.NormalizeRemoteSource(retired.Source) {
+			continue
+		}
+		delete(imports, retired.Name)
+		updated = true
+	}
 
 	// Collision check across ALL bootstrap entries so the user sees every
 	// conflict in one error rather than fixing them one at a time. The
@@ -245,11 +276,25 @@ func copyEmbeddedTree(root, dst string) error {
 			return err
 		}
 		perm := os.FileMode(0o644)
-		if strings.HasSuffix(assetPath, ".sh") {
+		if isExecutableScriptAsset(assetPath) {
 			perm = 0o755
 		}
 		return os.WriteFile(target, data, perm)
 	})
+}
+
+// isExecutableScriptAsset reports whether a materialized asset should be
+// marked executable. Shell, Python, and other script interpreters all rely
+// on shebang-based direct execution, so the file needs +x regardless of the
+// extension (gc discovers commands/doctor checks by convention and invokes
+// the resolved path directly — it does not run `bash <script>`).
+func isExecutableScriptAsset(assetPath string) bool {
+	for _, suffix := range []string{".sh", ".py", ".bash"} {
+		if strings.HasSuffix(assetPath, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func assetRel(root, assetPath string) string {

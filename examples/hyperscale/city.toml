@@ -13,8 +13,10 @@
 [workspace]
 name = "hyperscale"
 provider = "claude"
-includes = ["packs/hyperscale"]
 isolation = "none"
+
+[imports.hyperscale]
+source = "packs/hyperscale"
 
 [session]
 provider = "k8s"

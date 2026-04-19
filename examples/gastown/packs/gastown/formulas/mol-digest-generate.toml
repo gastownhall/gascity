@@ -85,8 +85,8 @@ gc rig list
 
 a) **Issues filed and closed:**
 ```bash
-bd list --created-after=$SINCE --json --limit=0
-bd list --status=closed --closed-after=$SINCE --json --limit=0
+gc bd list --created-after=$SINCE --json --limit=0
+gc bd list --status=closed --closed-after=$SINCE --json --limit=0
 ```
 
 b) **Merge activity:**
@@ -96,7 +96,7 @@ git -C <rig-path> log --merges --since=$SINCE --oneline main
 
 c) **Incidents:**
 ```bash
-bd list --label=incident --created-after=$SINCE --json
+gc bd list --label=incident --created-after=$SINCE --json
 ```
 
 **3. Collect town-level data:**
@@ -108,12 +108,12 @@ gc events --since=$SINCE --type=agent.started,agent.stopped,agent.crashed --json
 
 b) **Escalations:**
 ```bash
-bd list --label=escalation --created-after=$SINCE --json
+gc bd list --label=escalation --created-after=$SINCE --json
 ```
 
 c) **Warrants filed:**
 ```bash
-bd list --type=warrant --created-after=$SINCE --json
+gc bd list --type=warrant --created-after=$SINCE --json
 ```
 
 Close this step when all data is collected."""
@@ -160,14 +160,14 @@ gc mail send mayor/ -s "Gas Town Digest: $DATE" -m "$DIGEST"
 
 **3. Archive as bead:**
 ```bash
-bd create --type=digest \
+gc bd create --type=digest \
   --title="Digest: $DATE" \
   --label=digest,{{period}}
 ```
 
 **4. Close work bead, signal reconciler, and exit:**
 ```bash
-bd close <work-bead> --reason "Digest generated and sent"
+gc bd close <work-bead> --reason "Digest generated and sent"
 gc runtime drain-ack
 exit
 ```

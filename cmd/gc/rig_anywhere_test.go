@@ -26,10 +26,26 @@ func setupCity(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	toml := "[workspace]\nname = \"" + name + "\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+	writeRigAnywhereCityToml(t, dir, toml)
+	return canonicalTestPath(dir)
+}
+
+func writeRigAnywhereCityToml(t *testing.T, cityPath, toml string) {
+	t.Helper()
+	cfg, err := config.Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse(city.toml fixture): %v", err)
+	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, cfg.Rigs); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+	data, err := cfg.MarshalForWrite()
+	if err != nil {
+		t.Fatalf("MarshalForWrite: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return canonicalTestPath(dir)
 }
 
 // resetFlags saves and restores cityFlag and rigFlag globals.
@@ -100,9 +116,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 			t.Fatal(err)
 		}
 		toml := "[workspace]\nname = \"beta\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		cityFlag = cityPath
 		setCwd(t, rigDir)
@@ -303,9 +317,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		}
 		// Register rig in city.toml so rigFromCwdDir can match.
 		toml := "[workspace]\nname = \"kappa\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		// cwd inside the city tree; walk-up finds city, then rigFromCwdDir matches.
 		subInCity := filepath.Join(cityPath, "rigs", "workspace")
@@ -359,9 +371,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			toml := fmt.Sprintf("[workspace]\nname = %q\n\n[[agent]]\nname = \"a\"\n\n[[rigs]]\nname = \"shared-rig\"\npath = %q\n", filepath.Base(cp), rigDir)
-			if err := os.WriteFile(filepath.Join(cp, "city.toml"), []byte(toml), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeRigAnywhereCityToml(t, cp, toml)
 		}
 
 		reg := registryAt(t, gcHome)
@@ -451,9 +461,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 			t.Fatal(err)
 		}
 		toml := "[workspace]\nname = \"mu\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"envrig-dir\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		t.Setenv("GC_CITY", cityPath)
 		setCwd(t, rigDir)
@@ -653,9 +661,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 
 		// Add the rig to city.toml first so re-add triggers.
 		toml := "[workspace]\nname = \"idem-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"idem-rig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		var stdout1, stderr1 bytes.Buffer
 		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout1, &stderr1)
@@ -751,9 +757,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 
 		// Re-add to city2 (rig already exists from a different city perspective).
 		toml2 := "[workspace]\nname = \"city-two\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"shared\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(city2, "city.toml"), []byte(toml2), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, city2, toml2)
 
 		var stdout2, stderr2 bytes.Buffer
 		code = doRigAdd(fsys.OSFS{}, city2, rigDir, "", "", "", false, false, &stdout2, &stderr2)
@@ -788,9 +792,7 @@ func TestRigAnywhere_RigDefault(t *testing.T) {
 
 		// Add rig to city.toml.
 		toml := "[workspace]\nname = \"default-test\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"defrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		// Register city and rig in global index.
 		reg := registryAt(t, gcHome)
@@ -831,9 +833,7 @@ func TestRigAnywhere_RigDefault(t *testing.T) {
 		}
 
 		toml := "[workspace]\nname = \"env-upd\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"envrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		reg := registryAt(t, gcHome)
 		if err := reg.Register(cityPath, "env-upd"); err != nil {
@@ -895,9 +895,7 @@ func TestRigAnywhere_RigDefault(t *testing.T) {
 
 		// Rig is in city-a's config, but NOT in city-b's.
 		tomlA := "[workspace]\nname = \"city-a\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"orphan-rig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityA, "city.toml"), []byte(tomlA), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityA, tomlA)
 
 		reg := registryAt(t, gcHome)
 		if err := reg.Register(cityA, "city-a"); err != nil {
@@ -938,9 +936,7 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		}
 
 		toml := "[workspace]\nname = \"rm-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"rm-rig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		reg := registryAt(t, gcHome)
 		if err := reg.Register(cityPath, "rm-city"); err != nil {
@@ -981,9 +977,7 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		}
 
 		toml := "[workspace]\nname = \"solo-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"solo-rig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		reg := registryAt(t, gcHome)
 		if err := reg.Register(cityPath, "solo-city"); err != nil {
@@ -1022,9 +1016,7 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		// Rig is in both cities, default is city-a.
 		for _, cp := range []string{cityA, cityB} {
 			toml := "[workspace]\nname = \"" + filepath.Base(cp) + "\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"shared-rig\"\npath = \"" + rigDir + "\"\n"
-			if err := os.WriteFile(filepath.Join(cp, "city.toml"), []byte(toml), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeRigAnywhereCityToml(t, cp, toml)
 		}
 
 		reg := registryAt(t, gcHome)
@@ -1072,9 +1064,7 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		for _, cp := range []string{cityA, cityB, cityC} {
 			name := filepath.Base(cp)
 			toml := "[workspace]\nname = \"" + name + "\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"multi-rig\"\npath = \"" + rigDir + "\"\n"
-			if err := os.WriteFile(filepath.Join(cp, "city.toml"), []byte(toml), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeRigAnywhereCityToml(t, cp, toml)
 		}
 
 		reg := registryAt(t, gcHome)
@@ -1372,9 +1362,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			toml := fmt.Sprintf("[workspace]\nname = %q\n\n[[agent]]\nname = \"a\"\n\n[[rigs]]\nname = \"ambig-rig\"\npath = %q\n", filepath.Base(cp), rigDir)
-			if err := os.WriteFile(filepath.Join(cp, "city.toml"), []byte(toml), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeRigAnywhereCityToml(t, cp, toml)
 		}
 
 		reg := registryAt(t, gcHome)
@@ -1502,9 +1490,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 			t.Fatal(err)
 		}
 		toml := "[workspace]\nname = \"cwd-match\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"matchrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		got := rigFromCwdDir(cityPath, rigDir)
 		if got != "matchrig" {
@@ -1520,9 +1506,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 			t.Fatal(err)
 		}
 		toml := "[workspace]\nname = \"cwd-sub\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"subrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		got := rigFromCwdDir(cityPath, subDir)
 		if got != "subrig" {
@@ -1547,9 +1531,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		}
 		// Use relative path in config.
 		toml := "[workspace]\nname = \"cwd-rel\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"relrig\"\npath = \"rigs/relrig\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		got := rigFromCwdDir(cityPath, rigDir)
 		if got != "relrig" {
@@ -1561,9 +1543,7 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		cityPath := setupCity(t, "cwd-symlink")
 		rigDir, aliasRigDir := makeRigSymlinkAliasFixture(t)
 		toml := "[workspace]\nname = \"cwd-symlink\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"aliasrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRigAnywhereCityToml(t, cityPath, toml)
 
 		got := rigFromCwdDir(cityPath, filepath.Join(aliasRigDir, "src"))
 		if got != "aliasrig" {

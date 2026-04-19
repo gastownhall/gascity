@@ -114,7 +114,7 @@ name = "frontend"
 max_active_sessions = 2
 ```
 
-Site binding (rig paths, suspended flags, prefixes) is managed by `gc` commands and stored in `.gc/`:
+Site binding (today: rig paths) is managed by `gc` commands and stored in `.gc/`:
 
 ```
 gc rig add ~/src/api-server --name api-server
@@ -139,7 +139,7 @@ Everything else — agents, named sessions, providers, formulas, prompts, script
 
 `gc register` accepts `--name` to set the city's registration name explicitly. In the current rollout, that name is persisted into `workspace.name` before registration so the runtime and registry stay aligned. When `--name` is omitted, `gc register` uses `workspace.name` if present; otherwise it falls back to `pack.name`, writes that into `city.toml`, and registers the city under that name. `gc register` does not rewrite `pack.toml`. ([#602](https://github.com/gastownhall/gascity/issues/602))
 
-Names and prefixes are both managed by `gc`. The authoritative copy lives in `.gc/`. Names are human-facing labels; prefixes are derived from names and baked into bead IDs. Neither should be casually changed after creation.
+Names and prefixes are both managed by `gc`, but the current Phase A rollout only moves the machine-local rig path into `.gc/`. Rig names, prefixes, and suspended flags still live in `city.toml` for now. Names are human-facing labels; prefixes are derived from names and baked into bead IDs. Neither should be casually changed after creation.
 
 #### Renaming
 
@@ -230,11 +230,11 @@ version = "^1.2"
 
 Local path imports have no version constraint.
 
-Resolved versions for remote imports are recorded in the lock file (`pack.lock`; format owned by [doc-packman.md](doc-packman.md)). The loader reads the lock file to find which commit each import resolves to and which directory under `~/.gc/cache/repos/` holds it. The loader itself does not clone git — that responsibility belongs to `gc import install`. A missing lock entry is a load-time error telling the user to run `gc import install`.
+Resolved versions for remote imports are recorded in the lock file (`packs.lock`; format owned by [doc-packman.md](doc-packman.md)). The loader reads the lock file to find which commit each import resolves to and which directory under `~/.gc/cache/repos/` holds it. The loader itself does not clone git — that responsibility belongs to the built-in `gc import install`. A missing lock entry is a load-time error telling the user to run `gc import install`.
 
 #### Implicit imports
 
-Some packs are spliced into every city without the city declaring them. The set lives in `~/.gc/implicit-import.toml`, managed by `gc import`. At load time the loader reads that file and treats each entry as if the root pack had declared it, recording `parent = "(implicit)"` in provenance. This is how `import` and `registry` themselves load for every city — they ship as packs but don't have to be declared.
+Some packs are spliced into every city without the city declaring them. The set lives in `~/.gc/implicit-import.toml`, managed by the bootstrap/init flow and consumed by the loader. At load time the loader reads that file and treats each entry as if the root pack had declared it, recording `parent = "(implicit)"` in provenance. This is how bootstrap-managed packs such as `registry` can load for every city without being authored in every city. `gc import` itself is a built-in command surface, not an implicit pack.
 
 #### Transitive import and export
 
@@ -264,7 +264,7 @@ With `export = true`, maintenance's agents appear flattened into gastown's names
 
 #### Lock file model
 
-The root city's lock file records every pack in the entire transitive import graph. Imported packs do **not** carry their own lock files. `gc import install` walks the full DAG from the root and writes one flat lock at the root. This is the npm/Cargo model: one source of truth, one place for version-conflict resolution, one file read for the loader. See [doc-packman.md](doc-packman.md) for the lock file format.
+The root city's lock file records every pack in the entire transitive import graph. Imported packs do **not** carry their own lock files. `gc import install` walks the full DAG from the root and writes one flat `packs.lock` at the root. This is the npm/Cargo model: one source of truth, one place for version-conflict resolution, one file read for the loader. See [doc-packman.md](doc-packman.md) for the lock file format.
 
 #### Lifecycle verbs
 
@@ -396,14 +396,14 @@ Per-machine state lives in `.gc/` and is managed by `gc` commands:
 | Category | Examples | Set by |
 |---|---|---|
 | **Identity bindings** | Workspace name, workspace prefix | `gc init`, `gc config set` |
-| **Rig bindings** | Rig paths, rig prefixes | `gc rig add` |
-| **Operational toggles** | Rig suspended flag | `gc rig suspend/resume` |
+| **Rig bindings** | Rig paths | `gc rig add` |
+| **Operational toggles** | Runtime-only local flags and state | `gc` runtime |
 | **Machine-local config** | api.bind, session.socket, dolt.host | `gc config set` |
 | **Runtime state** | Sessions, beads, caches, logs, sockets | `gc` runtime |
 
 The rule: **if it's in a checked-in TOML file, it's definition or deployment. If it's in `.gc/`, it's site binding.** No gray area.
 
-> **Target design ([#588](https://github.com/gastownhall/gascity/issues/588)):** Rig paths and other machine-local rig bindings move from `city.toml` to `.gc/site.toml`. The loader overlays site.toml onto city.toml at load time. Legacy rig paths in city.toml load with a deprecation warning for one release. This may ship in a later Pack/City v2 wave.
+> **Current rollout ([#588](https://github.com/gastownhall/gascity/issues/588)):** `rig.path` now lives in `.gc/site.toml`. The loader overlays site binding onto `city.toml` at load time, ignores legacy `rig.path` entries for runtime use, and `gc doctor --fix` migrates the legacy path into `.gc/site.toml`. Phase A only moves `rig.path`: `rig.prefix` and `rig.suspended` remain in `city.toml` for now.
 
 See also [doc-rig-binding-phases.md](doc-rig-binding-phases.md) for the current
 Phase A / Phase B split between path extraction and post-15.0 multi-city rig
@@ -512,8 +512,8 @@ backlog.
 |---|---|---|---|---|
 | `[[rigs]].name` | | **yes** | | Structural deployment config |
 | `[[rigs]].path` | | | **yes** | Machine-local binding |
-| `[[rigs]].prefix` | | | **yes** | Derived, baked into bead IDs |
-| `[[rigs]].suspended` | | | **yes** | Operational toggle |
+| `[[rigs]].prefix` | | **yes** | | Derived, baked into bead IDs |
+| `[[rigs]].suspended` | | **yes** | | Operational toggle |
 | `[[rigs]].imports` | | **yes** | | Team-shared rig composition |
 | `[[rigs]].patches` | | **yes** | | Deployment-specific customization |
 | `[[rigs]].max_active_sessions` | | **yes** | | Deployment capacity |

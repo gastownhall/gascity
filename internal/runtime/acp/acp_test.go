@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -764,5 +766,105 @@ func TestStderrCaptured_InHandshakeError(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "fatal: bad config") {
 		t.Errorf("error should contain stderr output, got: %v", err)
+	}
+}
+
+// closedPipeStdin models a stdin pipe whose agent end has exited: the first
+// Write signals that the recovery path is about to run, then returns
+// io.ErrClosedPipe. Subsequent writes are idempotent.
+type closedPipeStdin struct {
+	writeCalled chan struct{}
+	once        sync.Once
+}
+
+func (c *closedPipeStdin) Write(_ []byte) (int, error) {
+	c.once.Do(func() { close(c.writeCalled) })
+	return 0, io.ErrClosedPipe
+}
+
+func (*closedPipeStdin) Close() error { return nil }
+
+// erroringStdin returns a fixed error on every Write — used to model a
+// non-lifecycle failure (e.g. the equivalent of a marshal error) that must
+// bypass the sc.done drain path.
+type erroringStdin struct{ err error }
+
+func (e *erroringStdin) Write(_ []byte) (int, error) { return 0, e.err }
+func (*erroringStdin) Close() error                  { return nil }
+
+// TestNudge_ReturnsNilWhenAgentExitsDuringSend pins the recovery branch in
+// Provider.Nudge: when sendRequest fails with a pipe-write error and the
+// monitor goroutine closes sc.done shortly after, Nudge honors its
+// best-effort nil contract instead of surfacing a spurious error. This is
+// independent of fakeacp's SIGINT handling, so a future refactor of either
+// cannot silently undo the fix.
+func TestNudge_ReturnsNilWhenAgentExitsDuringSend(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{NudgeBusyTimeout: 2 * time.Second})
+	name := testName()
+
+	stdin := &closedPipeStdin{writeCalled: make(chan struct{})}
+	sc := newSessionConn(nil, stdin, nil, 100)
+	sc.sessionID = "session-1"
+
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+
+	// Mimic the monitor goroutine converging lifecycle state after the
+	// child exits: close sc.done as soon as the failing write is observed.
+	go func() {
+		<-stdin.writeCalled
+		close(sc.done)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected nil error when agent exits during send, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Nudge did not return within 3s — recovery select likely timed out")
+	}
+}
+
+// TestNudge_NonPipeErrorSurfacesImmediately verifies that sendRequest
+// failures unrelated to the agent lifecycle (modeled here by a writer
+// returning a non-pipe error) do NOT stall on sc.done and instead surface
+// immediately — the pipe-origin gate is doing its job.
+func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{NudgeBusyTimeout: 2 * time.Second})
+	name := testName()
+
+	stubErr := errors.New("disk quota exceeded")
+	sc := newSessionConn(nil, &erroringStdin{err: stubErr}, nil, 100)
+	sc.sessionID = "session-1"
+
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+
+	// sc.done is intentionally left open: if the new branch mis-routes
+	// non-pipe errors through the select, the call will hang until
+	// nudgePostWriteDrainTimeout and the test will fail.
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected non-pipe error to surface, got nil")
+		}
+		if !errors.Is(err, stubErr) {
+			t.Fatalf("expected wrapped %v, got %v", stubErr, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
 	}
 }

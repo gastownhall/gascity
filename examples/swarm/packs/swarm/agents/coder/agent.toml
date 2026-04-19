@@ -1,5 +1,5 @@
 scope = "rig"
-nudge = "Run bd ready --unassigned, check mail, then claim and work on a task."
+nudge = "Run gc bd ready --unassigned, check mail, then claim and work on a task."
 idle_timeout = "2h"
 min_active_sessions = 1
 max_active_sessions = 5

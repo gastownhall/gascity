@@ -91,16 +91,27 @@ close_with_result() {
     local failure_class="${3:-}"
     local failure_reason="${4:-}"
 
+    # Swallow any bd failure — the worker runs under `set -e`, so an
+    # error from a transient bd issue here (flaky socket, concurrent
+    # modification, etc.) would kill the whole worker mid-loop and take
+    # down the test session. Callers already tolerate unknown final
+    # outcomes (they read it back via show_outcome), so failing silently
+    # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
-        bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed
+        if ! bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
+            trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
+        fi
         return 0
     fi
 
-    bd update "$bead_id" \
+    if ! bd update "$bead_id" \
         --set-metadata "gc.outcome=fail" \
         --set-metadata "gc.failure_class=$failure_class" \
         --set-metadata "gc.failure_reason=$failure_reason" \
-        --status closed
+        --status closed 2>/dev/null; then
+        trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
+    fi
+    return 0
 }
 
 should_fail_transient_once() {
@@ -166,6 +177,10 @@ show_outcome() {
 
 show_assignee() {
     timeout 10 bd show --json "$1" | json_payload | jq_bead '.assignee'
+}
+
+refresh_bead_json() {
+    timeout 10 bd show --json "$1" 2>/dev/null
 }
 
 owned_status_ok() {
@@ -412,29 +427,20 @@ while true; do
             ;;
     esac
 
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
-    if [ "$outcome_before" = "skipped" ]; then
-        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+    if ! bead_json=$(refresh_bead_json "$bead_id"); then
+        trace "state-refresh-failed bead=$bead_id ref=$ref"
         sleep 0.2
         continue
     fi
-    if [ "$owns_bead" = "true" ]; then
-        if ! owned_status_ok "$status_before" "$assignee_before"; then
-            trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
-            sleep 0.2
-            continue
-        fi
-    elif [ "$status_before" != "open" ]; then
-        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+    bead_payload=$(printf '%s\n' "$bead_json" | json_payload)
+    if [ -z "$bead_payload" ] || ! printf '%s\n' "$bead_payload" | jq -e . >/dev/null 2>&1; then
+        trace "state-refresh-failed bead=$bead_id ref=$ref reason=invalid-json"
         sleep 0.2
         continue
     fi
-
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
+    status_before=$(printf '%s\n' "$bead_payload" | jq_bead '.status')
+    outcome_before=$(printf '%s\n' "$bead_payload" | jq_bead '.metadata["gc.outcome"]')
+    assignee_before=$(printf '%s\n' "$bead_payload" | jq_bead '.assignee')
     if [ "$outcome_before" = "skipped" ]; then
         trace "skip-before-action bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
         sleep 0.2
@@ -457,7 +463,12 @@ while true; do
         exit 1
     fi
 
-    printf '%s\n' "$ref" >> "$REPORT_FILE"
+    # Report emission is deferred until just before close_with_result so a
+    # step that gets skipped by the controller mid-processing (after we
+    # fetched it from the ready queue but before we committed to closing)
+    # does not appear in the report. Writing here would violate
+    # TestGraphWorkflowFailureRunsCleanup's "report should not include
+    # .implement after abort" invariant.
     trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
     trace_store
 
@@ -472,6 +483,7 @@ while true; do
             ;;
         *.preflight-tests*)
             if [ "$MODE" = "fail-preflight" ]; then
+                printf '%s\n' "$ref" >> "$REPORT_FILE"
                 trace "close-fail bead=$bead_id ref=$ref class=hard reason=preflight_failed"
                 close_with_result "$bead_id" "fail" "hard" "preflight_failed"
                 trace "close-returned bead=$bead_id"
@@ -507,6 +519,7 @@ while true; do
 
     if should_fail_transient_once "$ref"; then
         reason=$(transient_reason_for_ref "$ref")
+        printf '%s\n' "$ref" >> "$REPORT_FILE"
         trace "close-fail bead=$bead_id ref=$ref class=transient reason=$reason mode=once"
         close_with_result "$bead_id" "fail" "transient" "$reason"
         trace "close-returned bead=$bead_id"
@@ -517,6 +530,7 @@ while true; do
     fi
     if should_fail_transient_always "$ref"; then
         reason=$(transient_reason_for_ref "$ref")
+        printf '%s\n' "$ref" >> "$REPORT_FILE"
         trace "close-fail bead=$bead_id ref=$ref class=transient reason=$reason mode=always"
         close_with_result "$bead_id" "fail" "transient" "$reason"
         trace "close-returned bead=$bead_id"
@@ -546,6 +560,45 @@ while true; do
         continue
     fi
 
+    # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
+    # Without this, a worker that picked up .implement after preflight
+    # closed with fail — but before the controller's skipOpenScopeMembers
+    # pass ran — could race the controller in two ways:
+    #   1. Outcome race: worker closes .implement with pass before the
+    #      controller's skip lands. bd allows overwrites on closed beads,
+    #      so whoever writes last wins.
+    #   2. Report race: worker writes .implement to REPORT_FILE between
+    #      its own outcome check and the close.
+    # Defense: detect any sibling hard failure in the same workflow and
+    # close this bead as skipped ourselves instead of closing with pass.
+    # Scoped to gc.failure_class="hard" so retry-flavor transient
+    # failures (which the controller DOESN'T use to skip siblings) don't
+    # trigger false positives.
+    sibling_hard_fail="false"
+    if [ -n "$root_id" ]; then
+        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+            if printf '%s\n' "$sibling_json" | json_payload | jq -e \
+                --arg root "$root_id" --arg self "$bead_id" '
+                    if type == "array" then
+                        any(.[]?; (.metadata // {})["gc.root_bead_id"] == $root
+                                    and .id != $self
+                                    and .status == "closed"
+                                    and (.metadata // {})["gc.outcome"] == "fail"
+                                    and (.metadata // {})["gc.failure_class"] == "hard")
+                    else false
+                    end' >/dev/null 2>&1; then
+                sibling_hard_fail="true"
+            fi
+        fi
+    fi
+    if [ "$sibling_hard_fail" = "true" ]; then
+        trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
+        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
+            trace "skip-close-failed bead=$bead_id ref=$ref"
+        continue
+    fi
+
+    printf '%s\n' "$ref" >> "$REPORT_FILE"
     trace "close bead=$bead_id ref=$ref"
     trace_store
     close_with_result "$bead_id" "pass"

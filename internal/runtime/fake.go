@@ -182,7 +182,7 @@ func (f *Fake) Attach(name string) error {
 		return fmt.Errorf("session unavailable")
 	}
 	if _, exists := f.sessions[name]; !exists {
-		return fmt.Errorf("session %q not found", name)
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, name)
 	}
 	return nil
 }

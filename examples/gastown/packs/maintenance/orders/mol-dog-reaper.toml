@@ -3,6 +3,6 @@
 # No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Reap stale wisps and purge closed molecules"
-exec = "$PACK_DIR/scripts/reaper.sh"
+exec = "$PACK_DIR/assets/scripts/reaper.sh"
 gate = "cooldown"
 interval = "30m"

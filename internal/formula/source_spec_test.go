@@ -158,9 +158,9 @@ func TestNamespaceSourceSpecStepPreservesNestedRef(t *testing.T) {
 }
 
 func TestCompileControlSpecBeadsAreNotWorkflowSinks(t *testing.T) {
-	oldFormulaV2 := FormulaV2Enabled
-	FormulaV2Enabled = true
-	t.Cleanup(func() { FormulaV2Enabled = oldFormulaV2 })
+	oldFormulaV2 := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(oldFormulaV2) })
 
 	dir := t.TempDir()
 	formulaContent := `

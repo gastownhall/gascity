@@ -149,6 +149,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestTutorial01(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs the end-to-end tutorial script; run without -short for scenario coverage")
 	testscript.Run(t, newTestscriptParams(t))
 }
 
@@ -158,6 +159,10 @@ func TestImportMigrateScript(t *testing.T) {
 
 func TestPackV2ImportsScript(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "pack-v2-imports.txtar")))
+}
+
+func TestRootPackCommandsScript(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "root-pack-commands.txtar")))
 }
 
 func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
@@ -1507,8 +1512,8 @@ func TestDoInitAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("doInit = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("doInit = %d, want %d (initExitAlreadyInitialized)", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -1545,8 +1550,12 @@ func TestDoInitBootstrapsExistingCityToml(t *testing.T) {
 	if !f.Dirs[filepath.Join("/city", ".gc")] {
 		t.Error(".gc/ should be created during bootstrap")
 	}
-	if _, ok := f.Files[filepath.Join("/city", "hooks", "claude.json")]; !ok {
-		t.Error("hooks/claude.json should be created during bootstrap")
+	// Post stale-mirror fix (V1 adoption): hooks/claude.json is only
+	// written when the user explicitly selects it as the Claude settings
+	// source or when upgrading a known-stale gc-generated pattern. Fresh
+	// bootstraps produce only the gc-managed .gc/settings.json.
+	if _, ok := f.Files[filepath.Join("/city", ".gc", "settings.json")]; !ok {
+		t.Error(".gc/settings.json should be created during bootstrap")
 	}
 }
 
@@ -1609,16 +1618,17 @@ func TestDoInitCreatesSettings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	settingsPath := filepath.Join("/bright-lights", "hooks", "claude.json")
-	data, ok := f.Files[settingsPath]
+	// Post stale-mirror fix: the gc-managed .gc/settings.json is the
+	// Claude settings file `gc` passes via --settings. hooks/claude.json
+	// is only written for legacy-hook-source installs; fresh bootstraps
+	// (like this one) leave it untouched.
+	runtimePath := filepath.Join("/bright-lights", ".gc", "settings.json")
+	data, ok := f.Files[runtimePath]
 	if !ok {
-		t.Fatal("hooks/claude.json not created")
-	}
-	if _, ok := f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]; !ok {
 		t.Fatal(".gc/settings.json not created")
 	}
 	if len(data) == 0 {
-		t.Fatal("hooks/claude.json is empty")
+		t.Fatal(".gc/settings.json is empty")
 	}
 }
 
@@ -1629,10 +1639,12 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	settingsPath := filepath.Join("/bright-lights", "hooks", "claude.json")
-	data := f.Files[settingsPath]
-	if got := string(f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]); got != string(data) {
-		t.Fatalf(".gc/settings.json = %q, want mirror of hooks/claude.json", got)
+	// Post stale-mirror fix: validate the gc-managed runtime settings
+	// (the file Claude is actually invoked with) rather than the legacy
+	// hook mirror, which is no longer seeded on fresh installs.
+	data := f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]
+	if len(data) == 0 {
+		t.Fatal(".gc/settings.json not created or empty")
 	}
 
 	var parsed map[string]any
@@ -1658,9 +1670,11 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 
 func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	f := fsys.NewFake()
-	// Pre-populate .gc/ and settings.json with custom content.
-	// doInit will see .gc/ exists and return "already initialized".
-	// So test installClaudeHooks directly instead.
+	// Pre-populate hooks/claude.json with a user-authored custom key. The
+	// file was historically preserved verbatim, which meant new default
+	// hooks added to the embedded base in later releases never landed for
+	// legacy users. Current contract: the custom key is preserved via merge
+	// while embedded defaults are pulled in.
 	settingsPath := filepath.Join("/city", "hooks", "claude.json")
 	f.Dirs[filepath.Join("/city", "hooks")] = true
 	f.Files[settingsPath] = []byte(`{"custom": true}`)
@@ -1669,12 +1683,17 @@ func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("installClaudeHooks = %d, want 0", code)
 	}
-	got := string(f.Files[settingsPath])
-	if got != `{"custom": true}` {
-		t.Errorf("settings.json was overwritten: %q", got)
+
+	hookData := string(f.Files[settingsPath])
+	runtimeData := string(f.Files[filepath.Join("/city", ".gc", "settings.json")])
+	if !strings.Contains(hookData, `"custom": true`) {
+		t.Errorf("user-authored custom key not preserved in hook file:\n%s", hookData)
 	}
-	if runtime := string(f.Files[filepath.Join("/city", ".gc", "settings.json")]); runtime != `{"custom": true}` {
-		t.Errorf("runtime settings were not mirrored from existing hooks file: %q", runtime)
+	if !strings.Contains(hookData, "SessionStart") {
+		t.Errorf("embedded default hooks not merged into hook file:\n%s", hookData)
+	}
+	if hookData != runtimeData {
+		t.Error("runtime settings must mirror merged hook settings")
 	}
 }
 
@@ -1765,6 +1784,45 @@ func TestSettingsArgsMissingFile(t *testing.T) {
 	got := settingsArgs(dir, "claude")
 	if got != "" {
 		t.Errorf("settingsArgs(claude, no file) = %q, want empty", got)
+	}
+}
+
+// TestEnsureClaudeSettingsArgsPropagatesMalformedOverride verifies that a
+// malformed .claude/settings.json surfaces as an error from
+// ensureClaudeSettingsArgs rather than silently returning a --settings arg
+// that points at stale bytes from a prior tick. resolveTemplate relies on
+// this so a bad override fails agent creation loudly; a best-effort caller
+// like buildResumeCommand may choose to log-and-continue.
+func TestEnsureClaudeSettingsArgsPropagatesMalformedOverride(t *testing.T) {
+	dir := t.TempDir()
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ensureClaudeSettingsArgs(fsys.OSFS{}, dir, "claude", io.Discard)
+	if err == nil {
+		t.Fatalf("expected propagated error for malformed override; got arg=%q", got)
+	}
+	if got != "" {
+		t.Errorf("arg must be empty when projection fails; got %q", got)
+	}
+}
+
+// TestEnsureClaudeSettingsArgsNoOpForNonClaude verifies the helper is a
+// no-op for non-Claude providers — projection never runs and no error is
+// returned regardless of filesystem state.
+func TestEnsureClaudeSettingsArgsNoOpForNonClaude(t *testing.T) {
+	dir := t.TempDir()
+	got, err := ensureClaudeSettingsArgs(fsys.OSFS{}, dir, "codex", io.Discard)
+	if err != nil {
+		t.Fatalf("non-Claude provider must return nil error; got %v", err)
+	}
+	if got != "" {
+		t.Errorf("non-Claude provider must return empty arg; got %q", got)
 	}
 }
 
@@ -2351,8 +2409,8 @@ func TestCmdInitFromTOMLFileAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2371,8 +2429,8 @@ func TestCmdInitFromTOMLFileAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2751,8 +2809,8 @@ func TestDoInitFromDirAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2782,8 +2840,8 @@ func TestDoInitFromDirAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -3476,11 +3534,12 @@ max = 3
 }
 
 func TestDoPrimePoolAgentFallback(t *testing.T) {
-	// An explicit pool agent with no prompt_template reads the materialized
-	// pool-worker.md from prompts/ on disk.
+	// An explicit pool agent with no prompt_template reads the pool-worker
+	// prompt shipped by the core bootstrap pack, materialized under
+	// .gc/system/packs/core/assets/prompts/.
 	dir := t.TempDir()
-	if err := materializeBuiltinPrompts(dir); err != nil {
-		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 	tomlContent := `[workspace]
 name = "test-city"

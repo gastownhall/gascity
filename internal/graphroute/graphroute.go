@@ -414,6 +414,9 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			step.Metadata["gc.run_target"] = routedTo
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID
+				if rootStoreRef != "" {
+					step.Metadata["gc.source_store_ref"] = rootStoreRef
+				}
 			}
 			if scopeKind != "" {
 				step.Metadata["gc.scope_kind"] = scopeKind

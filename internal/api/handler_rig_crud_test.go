@@ -9,12 +9,12 @@ import (
 
 func TestHandleRigCreate(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"new-rig","path":"/tmp/new-rig"}`
-	req := newPostRequest("/v0/rigs", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/rigs"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
@@ -33,41 +33,41 @@ func TestHandleRigCreate(t *testing.T) {
 
 func TestHandleRigCreate_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"path":"/tmp/x"}`
-	req := newPostRequest("/v0/rigs", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/rigs"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleRigCreate_MissingPath(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"x"}`
-	req := newPostRequest("/v0/rigs", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/rigs"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleRigUpdate(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"path":"/tmp/updated"}`
-	req := httptest.NewRequest("PATCH", "/v0/rig/myrig", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/rig/myrig"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -86,13 +86,13 @@ func TestHandleRigUpdate(t *testing.T) {
 
 func TestHandleRigUpdate_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"path":"/tmp/x"}`
-	req := httptest.NewRequest("PATCH", "/v0/rig/nonexistent", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/rig/nonexistent"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -101,12 +101,12 @@ func TestHandleRigUpdate_NotFound(t *testing.T) {
 
 func TestHandleRigDelete(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/rig/myrig", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/rig/myrig"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -121,12 +121,12 @@ func TestHandleRigDelete(t *testing.T) {
 
 func TestHandleRigDelete_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/rig/nonexistent", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/rig/nonexistent"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)

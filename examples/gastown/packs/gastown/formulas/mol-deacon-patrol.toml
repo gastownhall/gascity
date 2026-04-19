@@ -1,8 +1,8 @@
 description = """
 Deacon patrol loop. Poured as a root-only wisp on startup:
 
-  bd mol wisp mol-deacon-patrol --root-only
-  bd update $WISP --assignee=$GC_AGENT
+  gc bd mol wisp mol-deacon-patrol --root-only
+  gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check inbox, run town-wide coordination
 tasks, pour the next iteration. On crash, re-read the formula steps
@@ -159,7 +159,7 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 
 **For stuck coordination agents, file a warrant:**
 ```bash
-bd create --type=warrant \
+gc bd create --type=warrant \
   --title="Stuck: <rig>/<role>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --set-metadata gc.routed_to=dog
@@ -186,7 +186,7 @@ wisp timestamps.
 
 **Step 1: Find active utility agent work:**
 ```bash
-bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
+gc bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
 ```
 
 **Step 2: For each, assess progress:**
@@ -199,7 +199,7 @@ No hardcoded thresholds. Use judgment.
 
 **Step 3: For stuck utility agents, file a warrant:**
 ```bash
-bd create --type=warrant \
+gc bd create --type=warrant \
   --title="Stuck dog: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --set-metadata gc.routed_to=dog
@@ -228,17 +228,22 @@ gc dolt health --json
 ```
 
 Parse the JSON output (HealthReport schema):
-- `server`: running, pid, port, latency_ms
+- `server`: running, reachable, pid, port, latency_ms
 - `databases[]`: name, commits, open_beads
 - `backups`: dolt_freshness, dolt_age_seconds, dolt_stale
 - `processes`: zombie_count, zombie_pids
 - `orphans[]`: name, size
 
+Note: `--json` always exits 0 when the payload is well-formed; health
+state is signalled in-band. Key decisions off `server.reachable`, not
+`server.running` — a process can hold the port while its goroutines
+are wedged (the latter is what first prompted this check to exist).
+
 **Step 2: Evaluate thresholds**
 
 | Signal | Threshold | Meaning |
 |--------|-----------|---------|
-| `server.running == false` | — | Dolt server is down (CRITICAL) |
+| `server.reachable == false` | — | Dolt server is down or unresponsive (CRITICAL) |
 | `server.latency_ms > 5000` | 5 s | Server may be overloaded |
 | `databases[].commits > 50000` | 50 k | Compactor dog may have stalled |
 | `backups.dolt_stale == true` | >30 min | Backup dog may have failed |
@@ -247,10 +252,12 @@ Parse the JSON output (HealthReport schema):
 
 **Step 3: React to alerts**
 
-**Server down (CRITICAL):**
+**Server down (CRITICAL):** `server.reachable == false` — either no
+process is listening on the port, or a process is listening but not
+answering SQL (wedged goroutines, migration lock, saturated pool).
 ```bash
 gc mail send mayor/ -s "ESCALATION: Dolt server unreachable [CRITICAL]" \\
-  -m "gc dolt health reports server not running"
+  -m "gc dolt health reports server.reachable=false"
 ```
 
 **Commit bloat (commits > 50k in any DB):**
@@ -333,8 +340,8 @@ Handle any urgent messages that arrived during patrol. Archive the rest.
 
 **3. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEXT" --assignee=$GC_AGENT
+NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
 **4. Wait for activity (exponential backoff):**
@@ -349,7 +356,7 @@ On timeout: double the timeout (cap 300s) and proceed anyway.
 
 **5. Burn this wisp:**
 ```bash
-bd mol burn <this-wisp-id> --force
+gc bd mol burn <this-wisp-id> --force
 ```
 
 The new wisp is ready. Re-read formula steps to start

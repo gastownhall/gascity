@@ -350,9 +350,14 @@ exit 1
 		t.Fatalf("read manifest: %v", readManifestErr)
 	}
 
+	// Strip tmpDir from the call log so substring assertions (e.g. searching
+	// for a port number) aren't corrupted by random digits Go inserts into
+	// t.TempDir() paths — those digits leak into the log via `kubectl cp`.
+	callLog := strings.ReplaceAll(string(callLogBytes), tmpDir, "<TMPDIR>")
+
 	return controllerScriptDeployResult{
 		manifestEnv: manifestEnv,
-		callLog:     string(callLogBytes),
+		callLog:     callLog,
 		output:      string(out),
 		err:         err,
 	}

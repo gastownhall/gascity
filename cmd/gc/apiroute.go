@@ -37,9 +37,24 @@ func apiClient(cityPath string) *api.Client {
 		}
 
 		baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
-		return api.NewClient(baseURL)
+		// Standalone controller serves /v0/city/{cityName}/... routes via
+		// api.NewSupervisorMux, so per-city method calls need a city-scoped
+		// client. Derive the city name from config; the controller only
+		// serves one city in standalone mode.
+		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
 	}
 	return supervisorCityAPIClient(cityPath)
+}
+
+// standaloneControllerCityName resolves the city name for a standalone
+// controller API client. In standalone mode the controller serves exactly
+// one city; we prefer cfg.Workspace.Name when set, falling back to the
+// resolved name from the city directory path.
+func standaloneControllerCityName(cfg *config.City, cityPath string) string {
+	if cfg != nil && cfg.Workspace.Name != "" {
+		return cfg.Workspace.Name
+	}
+	return resolveCityName("", cityPath)
 }
 
 // resolveAgentForAPI resolves a bare agent name (e.g., "worker") to its

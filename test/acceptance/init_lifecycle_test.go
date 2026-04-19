@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// Best-effort supervisor stop.
-	helpers.RunGC(testEnv, "", "supervisor", "stop") //nolint:errcheck
+	helpers.RunGC(testEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	os.Exit(code)
 }
 
@@ -57,9 +57,6 @@ func TestInitTutorial(t *testing.T) {
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created")
-	}
-	if !c.HasFile("prompts") {
-		t.Fatal("prompts/ not created")
 	}
 	if !c.HasFile("formulas") {
 		t.Fatal("formulas/ not created")
@@ -102,7 +99,7 @@ func TestInitGastown(t *testing.T) {
 	if !c.HasFile("packs/gastown/formulas") {
 		t.Fatal("gastown formulas not materialized")
 	}
-	if !c.HasFile("packs/gastown/scripts") {
+	if !c.HasFile("packs/gastown/assets/scripts") {
 		t.Fatal("gastown scripts not materialized")
 	}
 }

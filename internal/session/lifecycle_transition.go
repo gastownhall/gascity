@@ -87,11 +87,15 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	return patch
 }
 
-// ConfirmStartedPatch records a confirmed runtime start.
-func ConfirmStartedPatch() MetadataPatch {
+// ConfirmStartedPatch records a confirmed runtime start. The timestamp pins
+// the "creation_complete" transition so downstream readers (e.g. the pool
+// bead sweep) can distinguish a just-committed start from a long-stable
+// bead whose last_woke_at was later cleared by crash/churn recovery.
+func ConfirmStartedPatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
 		"state":                string(StateActive),
 		"state_reason":         "creation_complete",
+		"creation_complete_at": now.UTC().Format(time.RFC3339),
 		"pending_create_claim": "",
 		"sleep_reason":         "",
 	}
@@ -100,13 +104,21 @@ func ConfirmStartedPatch() MetadataPatch {
 // CommitStartedPatchInput describes metadata persisted after a runtime start
 // has completed. Hashes describe the runtime configuration that actually
 // launched; ConfirmState controls whether this start should stamp lifecycle
-// state active.
+// state active. Now is used to stamp creation_complete_at whenever it is
+// non-zero (independent of ConfirmState, so the recovery path that commits
+// a fresh start on an already-active bead still refreshes the sweep's
+// post-create marker). ClearPendingCreateClaim folds the
+// pending_create_claim clear into the same atomic batch so downstream
+// readers (e.g. the pool bead sweep) never observe a transient state
+// where the claim is gone but the post-create marker hasn't landed yet.
 type CommitStartedPatchInput struct {
-	CoreHash         string
-	LiveHash         string
-	CoreBreakdown    string
-	ConfirmState     bool
-	ClearSleepReason bool
+	CoreHash                string
+	LiveHash                string
+	CoreBreakdown           string
+	ConfirmState            bool
+	ClearSleepReason        bool
+	ClearPendingCreateClaim bool
+	Now                     time.Time
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -124,8 +136,20 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 		patch["state"] = string(StateActive)
 		patch["state_reason"] = "creation_complete"
 	}
+	// creation_complete_at tracks when the runtime was last confirmed started.
+	// Stamp it whenever Now is non-zero — the ConfirmState path marks the
+	// fresh transition from creating/asleep; the recovery path (already-
+	// active bead with pending_create_claim=true) re-confirms an existing
+	// start, so it needs the same marker so the post-create sweep guard
+	// doesn't treat the healed bead as stale on subsequent ticks.
+	if !input.Now.IsZero() {
+		patch["creation_complete_at"] = input.Now.UTC().Format(time.RFC3339)
+	}
 	if input.ClearSleepReason {
 		patch["sleep_reason"] = ""
+	}
+	if input.ClearPendingCreateClaim {
+		patch["pending_create_claim"] = ""
 	}
 	return patch
 }

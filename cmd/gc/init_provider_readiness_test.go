@@ -274,11 +274,11 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 		t.Fatalf("reading implicit-import.toml: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, `[imports."import"]`) {
-		t.Fatalf("implicit-import.toml missing import entry:\n%s", text)
+	if !strings.Contains(text, `[imports."registry"]`) {
+		t.Fatalf("implicit-import.toml missing registry entry:\n%s", text)
 	}
-	if !strings.Contains(text, `source = "github.com/gastownhall/gc-import"`) {
-		t.Fatalf("implicit-import.toml missing import source:\n%s", text)
+	if !strings.Contains(text, `source = "github.com/gastownhall/gc-registry"`) {
+		t.Fatalf("implicit-import.toml missing registry source:\n%s", text)
 	}
 }
 
@@ -290,9 +290,9 @@ func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
 
 	oldBootstrap := bootstrap.BootstrapPacks
 	bootstrap.BootstrapPacks = []bootstrap.Entry{{
-		Name:     "import",
-		Source:   "github.com/gastownhall/gc-import",
-		Version:  "0.2.0",
+		Name:     "registry",
+		Source:   "github.com/gastownhall/gc-registry",
+		Version:  "0.1.0",
 		AssetDir: "packs/missing",
 	}}
 	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })

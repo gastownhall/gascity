@@ -54,6 +54,24 @@ func readTOML(t *testing.T, path string) *config.City {
 	return cfg
 }
 
+func readEffectiveTOML(t *testing.T, path string) *config.City {
+	t.Helper()
+	cfg := readTOML(t, path)
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, filepath.Dir(path), cfg); err != nil {
+		t.Fatalf("ApplySiteBindings: %v", err)
+	}
+	return cfg
+}
+
+func readSiteBinding(t *testing.T, dir string) *config.SiteBinding {
+	t.Helper()
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	return binding
+}
+
 func TestEdit_SetsAgentSuspended(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())
@@ -551,9 +569,17 @@ func TestUpdateRig(t *testing.T) {
 		t.Fatalf("UpdateRig: %v", err)
 	}
 
-	cfg := readTOML(t, path)
+	raw := readTOML(t, path)
+	if raw.Rigs[0].Path != "" {
+		t.Errorf("raw path = %q, want empty city.toml binding", raw.Rigs[0].Path)
+	}
+	cfg := readEffectiveTOML(t, path)
 	if cfg.Rigs[0].Path != "/tmp/updated" {
-		t.Errorf("path = %q, want %q", cfg.Rigs[0].Path, "/tmp/updated")
+		t.Errorf("effective path = %q, want %q", cfg.Rigs[0].Path, "/tmp/updated")
+	}
+	binding := readSiteBinding(t, dir)
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Path != "/tmp/updated" {
+		t.Errorf("site binding = %+v, want updated path", binding.Rigs)
 	}
 }
 
@@ -576,9 +602,13 @@ suspended = true
 		t.Fatalf("UpdateRig: %v", err)
 	}
 
-	cfg := readTOML(t, path)
+	raw := readTOML(t, path)
+	if raw.Rigs[0].Path != "" {
+		t.Errorf("raw path = %q, want empty city.toml binding", raw.Rigs[0].Path)
+	}
+	cfg := readEffectiveTOML(t, path)
 	if cfg.Rigs[0].Path != "/tmp/updated" {
-		t.Errorf("path = %q, want %q", cfg.Rigs[0].Path, "/tmp/updated")
+		t.Errorf("effective path = %q, want %q", cfg.Rigs[0].Path, "/tmp/updated")
 	}
 	if !cfg.Rigs[0].Suspended {
 		t.Error("suspended was reset to false — zero-value bug")

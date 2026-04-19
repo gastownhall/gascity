@@ -17,9 +17,11 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -109,8 +111,9 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
-		Long: `Create a new persistent conversation from an agent template defined in
-city.toml. By default, attaches the terminal after creation.
+		Long: `Create a new persistent conversation from an agent template defined
+in the loaded city configuration. By default, attaches the terminal
+after creation.
 
 When --title-hint is provided without --title, the session title is
 auto-generated from the hint text: a short version is set immediately
@@ -168,7 +171,16 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	alias, err = session.ValidateAlias(alias)
+	requestedAlias, err := session.ValidateAlias(alias)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	alias = requestedAlias
+	if alias != "" && found.SupportsMultipleSessions() {
+		alias = workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, "")
+	}
+	explicitName, err := sessionExplicitNameForNewSession(&found, alias)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -184,7 +196,13 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	mgr := newSessionManager(store, sp)
 
 	// Build the work directory.
-	workDir, err := resolveWorkDir(cityPath, cfg, &found)
+	sessionQualifiedName := workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, explicitName)
+	workDir, err := resolveWorkDirForQualifiedName(
+		cityPath,
+		cfg,
+		&found,
+		sessionQualifiedName,
+	)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -194,6 +212,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	// via findAgentByTemplate (which compares against QualifiedName()).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
+	reservationIDs := []string{alias, explicitName}
+	reserveConcreteIdentity := found.SupportsMultipleSessions() && strings.TrimSpace(sessionQualifiedName) != ""
+	if reserveConcreteIdentity {
+		reservationIDs = append(reservationIDs, sessionQualifiedName)
+	}
 
 	// Resolve the workspace default provider for title generation. This
 	// mirrors api.Server.resolveTitleProvider: use an empty Agent so we
@@ -210,16 +233,27 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — create bead only, let reconciler start it.
 			var info session.Info
-			err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
+			err := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 					return err
 				}
+				if reserveConcreteIdentity && sessionQualifiedName != alias {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+						return err
+					}
+				}
+				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+					return err
+				}
 				var createErr error
-				kindMeta := map[string]string{"session_origin": "ephemeral"}
+				kindMeta := map[string]string{
+					"agent_name":     sessionQualifiedName,
+					"session_origin": "manual",
+				}
 				if resolved.Kind != "" && resolved.Kind != resolved.Name {
 					kindMeta["provider_kind"] = resolved.Kind
 				}
-				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
+				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, explicitName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
 					ResumeStyle:   resolved.ResumeStyle,
 					ResumeCommand: resolved.ResumeCommand,
@@ -276,17 +310,28 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
 
-	kindMeta := map[string]string{"session_origin": "ephemeral"}
+	kindMeta := map[string]string{
+		"agent_name":     sessionQualifiedName,
+		"session_origin": "manual",
+	}
 	if resolved.Kind != "" && resolved.Kind != resolved.Name {
 		kindMeta["provider_kind"] = resolved.Kind
 	}
 	var info session.Info
-	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
+	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 			return err
 		}
+		if reserveConcreteIdentity && sessionQualifiedName != alias {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+				return err
+			}
+		}
+		if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+			return err
+		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
+		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, explicitName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
 		return createErr
 	})
 	if err != nil {
@@ -757,7 +802,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Build the resume command from the template's provider.
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
+	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID), stderr)
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
 	if err := mgr.Attach(context.Background(), sessionID, resumeCmd, hints); err != nil {
@@ -774,12 +819,17 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 // cityPath is needed to resolve the --settings flag for Claude sessions.
 // Without it, SessionStart hooks defined in .gc/settings.json are not loaded
 // when gc session attach starts the process (as opposed to the reconciler).
+// For Claude providers, the managed settings file is projected here via
+// ensureClaudeSettingsArgs so `gc session attach` on a fresh city still
+// emits `--settings` even when the reconciler hasn't run yet.
+//
+// stderr receives projection errors (use io.Discard to ignore).
 //
 // sessionKind mirrors the mc_session_kind bead metadata: "provider" means
 // the session was created from a bare provider name (not an agent template),
 // so the agent-template lookup should be skipped. This matches the guard in
 // the API handler (handler_session_chat.go).
-func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string) (string, runtime.Config) {
+func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string, stderr io.Writer) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
 	if cfg == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
@@ -796,8 +846,25 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 			command = command + " " + shellquote.Join(defaultArgs)
 		}
-		if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
+		// buildResumeCommand is best-effort: log projection failures and
+		// continue so `gc session attach` still starts the agent. The strict
+		// path is resolveTemplate at reconciler time, which fails agent
+		// creation on projection errors.
+		sa, saErr := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, resolved.Name, stderr)
+		if saErr == nil && sa != "" {
 			command = command + " " + sa
+		} else if saErr != nil {
+			// Projection failed this tick. Fall back to the last-known-good
+			// projection on disk, but require the file to be actually
+			// readable — not just Stat-present. Pointing Claude at an
+			// unreadable --settings path would fail agent startup worse
+			// than launching without --settings at all. On a fresh city
+			// with a malformed override, attach therefore launches without
+			// --settings; on an older city with a readable prior projection,
+			// attach uses that projection.
+			if probe := settingsArgsIfReadable(cityPath, resolved.Name); probe != "" {
+				command = command + " " + probe
+			}
 		}
 		resolvedInfo.Command = command
 		resolvedInfo.Provider = resolved.Name
@@ -1327,7 +1394,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
+	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID), stderr)
 	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1366,6 +1433,10 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr i
 // resolveWorkDir determines the working directory for a session based on the
 // agent config. work_dir overrides dir, while dir still carries rig identity.
 func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (string, error) {
+	return resolveWorkDirForQualifiedName(cityPath, cfg, agent, "")
+}
+
+func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
 	cityName := filepath.Base(cityPath)
 	if cfg != nil && cfg.Workspace.Name != "" {
 		cityName = cfg.Workspace.Name
@@ -1374,7 +1445,14 @@ func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (str
 	if cfg != nil {
 		rigs = cfg.Rigs
 	}
-	return resolveConfiguredWorkDir(cityPath, cityName, agent, rigs)
+	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs)
+}
+
+func sessionExplicitNameForNewSession(agent *config.Agent, alias string) (string, error) {
+	if agent == nil || !agent.SupportsMultipleSessions() || strings.TrimSpace(alias) != "" {
+		return "", nil
+	}
+	return session.GenerateAdhocExplicitName(agent.Name)
 }
 
 func shouldAttachNewSession(noAttach bool, transport string) bool {

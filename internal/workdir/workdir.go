@@ -86,6 +86,39 @@ func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a con
 	}
 }
 
+// SessionQualifiedName returns the canonical work_dir identity for a concrete
+// session instance. Single-session agents keep their template identity; pooled
+// agents use the alias or generated explicit name.
+func SessionQualifiedName(cityPath string, a config.Agent, rigs []config.Rig, alias, explicitName string) string {
+	if !a.SupportsMultipleSessions() {
+		return a.QualifiedName()
+	}
+	identity := strings.TrimSpace(alias)
+	if identity == "" {
+		identity = strings.TrimSpace(explicitName)
+	}
+	if identity == "" {
+		return a.QualifiedName()
+	}
+
+	_, instanceName := config.ParseQualifiedName(identity)
+	if instanceName != "" {
+		identity = instanceName
+	}
+	if a.BindingName != "" {
+		prefix := a.BindingName + "."
+		identity = strings.TrimPrefix(identity, prefix)
+	}
+
+	qualified := a.QualifiedInstanceName(identity)
+	rigName := ConfiguredRigName(cityPath, a, rigs)
+	if rigName == "" {
+		return qualified
+	}
+	_, agentBase := config.ParseQualifiedName(qualified)
+	return rigName + "/" + agentBase
+}
+
 // ExpandTemplateStrict expands Go text/template placeholders in a work_dir
 // string and returns an error when parsing or execution fails.
 func ExpandTemplateStrict(spec string, ctx PathContext) (string, error) {

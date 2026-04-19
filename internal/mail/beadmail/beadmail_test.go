@@ -2,36 +2,15 @@ package beadmail
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
-type hiddenMessageStore struct {
-	*beads.MemStore
-}
-
-func (s hiddenMessageStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == "gc:message" {
-		return s.MemStore.List(query)
-	}
-	all, err := s.MemStore.List(beads.ListQuery{AllowScan: true})
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]beads.Bead, 0, len(all))
-	for _, b := range all {
-		if !isMessage(b) {
-			filtered = append(filtered, b)
-		}
-	}
-	return beads.ApplyListQuery(filtered, query), nil
-}
-
 // noListScanStore errors when List is called without a filter, proving that
-// Inbox/Count/All use targeted queries (assignee+type or label) instead
-// of broad scans.
+// Inbox/Count/All use targeted type queries instead of broad scans.
 type noListScanStore struct {
 	*beads.MemStore
 }
@@ -57,6 +36,28 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 	}
 	if len(msgs) != 1 {
 		t.Errorf("Inbox = %d messages, want 1", len(msgs))
+	}
+}
+
+func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		if strings.Contains(cmd, "--label=gc:message") {
+			t.Fatalf("mail check used gc:message label supplement: %s", cmd)
+		}
+		if strings.Contains(cmd, "--assignee=mayor") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("Check = %#v, want msg-1", msgs)
 	}
 }
 
@@ -179,8 +180,36 @@ func TestSend(t *testing.T) {
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "open")
 	}
-	if !hasLabel(b.Labels, "gc:message") {
-		t.Error("bead missing gc:message label")
+	if hasLabel(b.Labels, "gc:message") {
+		t.Error("bead should no longer carry the legacy gc:message label")
+	}
+}
+
+func TestSendRejectsEmptyRecipient(t *testing.T) {
+	p := New(beads.NewMemStore())
+	if _, err := p.Send("human", "", "subject", "body"); err == nil {
+		t.Fatal("Send with empty recipient should error")
+	}
+}
+
+func TestGetRejectsNonMessageType(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	b, err := store.Create(beads.Bead{Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(b.ID); err == nil {
+		t.Error("Get should reject non-message bead")
+	}
+
+	untyped, err := store.Create(beads.Bead{Title: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(untyped.ID); err == nil {
+		t.Error("Get should reject bead with empty type (Type=\"message\" is now required)")
 	}
 }
 
@@ -245,26 +274,6 @@ func TestInboxExcludesRead(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("Inbox = %d messages, want 0 (read messages excluded)", len(msgs))
-	}
-}
-
-func TestInboxUsesMessageLabelQueryWhenListOmitsMessages(t *testing.T) {
-	base := beads.NewMemStore()
-	p := New(hiddenMessageStore{MemStore: base})
-
-	if _, err := p.Send("human", "corp/lawrence", "", "for lawrence"); err != nil {
-		t.Fatal(err)
-	}
-
-	msgs, err := p.Inbox("corp/lawrence")
-	if err != nil {
-		t.Fatalf("Inbox: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("Inbox = %d messages, want 1", len(msgs))
-	}
-	if msgs[0].Body != "for lawrence" {
-		t.Errorf("Body = %q, want %q", msgs[0].Body, "for lawrence")
 	}
 }
 
@@ -427,27 +436,6 @@ func TestMarkReadMarkUnread(t *testing.T) {
 	}
 	if len(msgs) != 1 {
 		t.Errorf("Inbox after MarkUnread = %d, want 1", len(msgs))
-	}
-}
-
-func TestCountUsesMessageLabelQueryWhenListOmitsMessages(t *testing.T) {
-	base := beads.NewMemStore()
-	p := New(hiddenMessageStore{MemStore: base})
-
-	sent, err := p.Send("human", "corp/lawrence", "", "count me")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.MarkRead(sent.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	total, unread, err := p.Count("corp/lawrence")
-	if err != nil {
-		t.Fatalf("Count: %v", err)
-	}
-	if total != 1 || unread != 0 {
-		t.Fatalf("Count = (%d,%d), want (1,0)", total, unread)
 	}
 }
 

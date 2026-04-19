@@ -7,12 +7,36 @@
 package configedit
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
+)
+
+// Sentinel errors for typed error matching. API handlers use errors.Is() to
+// map these to appropriate HTTP status codes without string matching.
+var (
+	// ErrNotFound is returned when a named resource (agent, rig, provider,
+	// patch) doesn't exist in the config. Maps to HTTP 404.
+	ErrNotFound = errors.New("resource not found")
+
+	// ErrAlreadyExists is returned when creating a resource whose name
+	// collides with an existing one. Maps to HTTP 409.
+	ErrAlreadyExists = errors.New("resource already exists")
+
+	// ErrPackDerived is returned when attempting to mutate a resource that
+	// originates from an imported pack (must go through the patches API
+	// instead). Maps to HTTP 409.
+	ErrPackDerived = errors.New("resource is pack-derived")
+
+	// ErrValidation is returned when a mutation would produce an invalid
+	// config (duplicate names, missing required fields, etc.). Maps to
+	// HTTP 400.
+	ErrValidation = errors.New("validation failed")
 )
 
 // Origin describes where an agent or rig is defined in the config.
@@ -52,9 +76,9 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	cfg, err := config.Load(e.fs, e.tomlPath)
+	cfg, err := e.loadForEdit()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
 
 	if err := fn(cfg); err != nil {
@@ -62,27 +86,22 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	}
 
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
-		return fmt.Errorf("validating agents: %w", err)
+		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
 	if err := config.ValidateRigs(cfg.Rigs, cfg.Workspace.Name); err != nil {
-		return fmt.Errorf("validating rigs: %w", err)
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
-		return fmt.Errorf("validating services: %w", err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
-		return fmt.Errorf("validating services: %w", err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := validateProviders(cfg.Providers); err != nil {
-		return fmt.Errorf("validating providers: %w", err)
+		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshaling config: %w", err)
-	}
-
-	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
+	return e.write(cfg)
 }
 
 // EditExpanded loads both raw and expanded configs, calls fn with both,
@@ -97,7 +116,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	raw, err := config.Load(e.fs, e.tomlPath)
+	raw, err := e.loadForEdit()
 	if err != nil {
 		return fmt.Errorf("loading raw config: %w", err)
 	}
@@ -112,27 +131,62 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	}
 
 	if err := config.ValidateAgents(raw.Agents); err != nil {
-		return fmt.Errorf("validating agents: %w", err)
+		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
 	if err := config.ValidateRigs(raw.Rigs, raw.Workspace.Name); err != nil {
-		return fmt.Errorf("validating rigs: %w", err)
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	if err := config.ValidateServices(raw.Services); err != nil {
-		return fmt.Errorf("validating services: %w", err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(raw.Services); err != nil {
-		return fmt.Errorf("validating services: %w", err)
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}
 	if err := validateProviders(raw.Providers); err != nil {
-		return fmt.Errorf("validating providers: %w", err)
+		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
 	}
 
-	content, err := raw.Marshal()
+	return e.write(raw)
+}
+
+func (e *Editor) loadForEdit() (*config.City, error) {
+	cfg, err := config.Load(e.fs, e.tomlPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	if _, err := config.ApplySiteBindingsForEdit(e.fs, filepath.Dir(e.tomlPath), cfg); err != nil {
+		return nil, fmt.Errorf("loading site binding: %w", err)
+	}
+	return cfg, nil
+}
+
+// write persists city.toml first, then .gc/site.toml. A crash between the
+// two writes leaves city.toml with rig paths stripped while .gc/site.toml
+// retains its previous state — producing an orphan legacy/unbound rig
+// that the loader surfaces via warnings rather than the silent
+// site-wins-over-stale-city state the reverse order would create.
+//
+// The city.toml write is skipped when on-disk content already matches,
+// matching the idempotency guarantee documented on
+// writeCityConfigForEditFS so repeated no-op mutations don't churn
+// watcher mtime or break debounce.
+func (e *Editor) write(cfg *config.City) error {
+	cityPath := filepath.Dir(e.tomlPath)
+	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-
-	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
+	if err := fsys.WriteFileIfChangedAtomic(e.fs, e.tomlPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := config.PersistRigSiteBindings(e.fs, cityPath, cfg.Rigs); err != nil {
+		// Surface the half-migrated state: city.toml has been rewritten
+		// without rig paths, but the site binding wasn't persisted, so
+		// any previously-bound rigs whose path came only from city.toml
+		// are now unbound.
+		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs may be unbound; re-run the command or `gc doctor --fix` to retry: %w", err)
+	}
+	return nil
 }
 
 // AgentOrigin determines whether an agent is defined inline in the raw
@@ -174,7 +228,7 @@ func SetAgentSuspended(cfg *config.City, name string, suspended bool) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("agent %q not found in config", name)
+	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
 // SetRigSuspended sets the suspended field on an inline rig.
@@ -186,7 +240,7 @@ func SetRigSuspended(cfg *config.City, name string, suspended bool) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig %q not found in config", name)
+	return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 }
 
 // AddOrUpdateAgentPatch adds or updates an agent patch in the config's
@@ -238,7 +292,7 @@ func (e *Editor) SuspendAgent(name string) error {
 				p.Suspended = boolPtr(true)
 			})
 		default:
-			return fmt.Errorf("agent %q not found", name)
+			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 		}
 	})
 }
@@ -255,7 +309,7 @@ func (e *Editor) ResumeAgent(name string) error {
 				p.Suspended = boolPtr(false)
 			})
 		default:
-			return fmt.Errorf("agent %q not found", name)
+			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 		}
 	})
 }
@@ -297,7 +351,7 @@ func (e *Editor) CreateAgent(a config.Agent) error {
 		qn := a.QualifiedName()
 		for _, existing := range cfg.Agents {
 			if existing.QualifiedName() == qn {
-				return fmt.Errorf("agent %q already exists", qn)
+				return fmt.Errorf("%w: agent %q", ErrAlreadyExists, qn)
 			}
 		}
 		cfg.Agents = append(cfg.Agents, a)
@@ -319,9 +373,9 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 		origin := AgentOrigin(raw, expanded, name)
 		switch origin {
 		case OriginDerived:
-			return fmt.Errorf("agent %q is pack-derived; cannot update directly (use patches)", name)
+			return fmt.Errorf("%w: agent %q cannot be updated directly (use patches)", ErrPackDerived, name)
 		case OriginNotFound:
-			return fmt.Errorf("agent %q not found", name)
+			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 		}
 		for i := range raw.Agents {
 			if config.AgentMatchesIdentity(&raw.Agents[i], name) {
@@ -337,7 +391,7 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("agent %q not found", name)
+		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 	})
 }
 
@@ -348,9 +402,9 @@ func (e *Editor) DeleteAgent(name string) error {
 		origin := AgentOrigin(raw, expanded, name)
 		switch origin {
 		case OriginDerived:
-			return fmt.Errorf("agent %q is pack-derived; cannot delete (use patches to override)", name)
+			return fmt.Errorf("%w: agent %q cannot be deleted (use patches to override)", ErrPackDerived, name)
 		case OriginNotFound:
-			return fmt.Errorf("agent %q not found", name)
+			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 		}
 		for i := range raw.Agents {
 			if config.AgentMatchesIdentity(&raw.Agents[i], name) {
@@ -358,7 +412,7 @@ func (e *Editor) DeleteAgent(name string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("agent %q not found", name)
+		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 	})
 }
 
@@ -368,7 +422,7 @@ func (e *Editor) CreateRig(r config.Rig) error {
 	return e.Edit(func(cfg *config.City) error {
 		for _, existing := range cfg.Rigs {
 			if existing.Name == r.Name {
-				return fmt.Errorf("rig %q already exists", r.Name)
+				return fmt.Errorf("%w: rig %q", ErrAlreadyExists, r.Name)
 			}
 		}
 		cfg.Rigs = append(cfg.Rigs, r)
@@ -403,7 +457,7 @@ func (e *Editor) UpdateRig(name string, patch RigUpdate) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("rig %q not found", name)
+		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	})
 }
 
@@ -420,7 +474,7 @@ func (e *Editor) DeleteRig(name string) error {
 			}
 		}
 		if !found {
-			return fmt.Errorf("rig %q not found", name)
+			return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 		}
 		// Remove rig-scoped agents.
 		var kept []config.Agent
@@ -454,7 +508,7 @@ func (e *Editor) CreateProvider(name string, spec config.ProviderSpec) error {
 			cfg.Providers = make(map[string]config.ProviderSpec)
 		}
 		if _, exists := cfg.Providers[name]; exists {
-			return fmt.Errorf("provider %q already exists", name)
+			return fmt.Errorf("%w: provider %q", ErrAlreadyExists, name)
 		}
 		cfg.Providers[name] = spec
 		return nil
@@ -467,11 +521,11 @@ func (e *Editor) CreateProvider(name string, spec config.ProviderSpec) error {
 func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 	return e.Edit(func(cfg *config.City) error {
 		if cfg.Providers == nil {
-			return fmt.Errorf("provider %q not found", name)
+			return fmt.Errorf("%w: provider %q", ErrNotFound, name)
 		}
 		spec, ok := cfg.Providers[name]
 		if !ok {
-			return fmt.Errorf("provider %q not found", name)
+			return fmt.Errorf("%w: provider %q", ErrNotFound, name)
 		}
 		if patch.DisplayName != nil {
 			spec.DisplayName = *patch.DisplayName
@@ -510,10 +564,10 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 func (e *Editor) DeleteProvider(name string) error {
 	return e.Edit(func(cfg *config.City) error {
 		if cfg.Providers == nil {
-			return fmt.Errorf("provider %q not found", name)
+			return fmt.Errorf("%w: provider %q", ErrNotFound, name)
 		}
 		if _, ok := cfg.Providers[name]; !ok {
-			return fmt.Errorf("provider %q not found", name)
+			return fmt.Errorf("%w: provider %q", ErrNotFound, name)
 		}
 		delete(cfg.Providers, name)
 		return nil
@@ -549,7 +603,7 @@ func (e *Editor) DeleteAgentPatch(name string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("agent patch %q not found", name)
+		return fmt.Errorf("%w: agent patch %q", ErrNotFound, name)
 	})
 }
 
@@ -579,7 +633,7 @@ func (e *Editor) DeleteRigPatch(name string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("rig patch %q not found", name)
+		return fmt.Errorf("%w: rig patch %q", ErrNotFound, name)
 	})
 }
 
@@ -609,7 +663,7 @@ func (e *Editor) DeleteProviderPatch(name string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("provider patch %q not found", name)
+		return fmt.Errorf("%w: provider patch %q", ErrNotFound, name)
 	})
 }
 
@@ -640,7 +694,7 @@ func (e *Editor) DeleteOrderOverride(name, rig string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("order override %q not found", name)
+		return fmt.Errorf("%w: order override %q", ErrNotFound, name)
 	})
 }
 

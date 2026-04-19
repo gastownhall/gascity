@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -351,5 +353,59 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 	if strings.Contains(tp.Prompt, "Run `gc prime`") {
 		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateClaudeProjectsCityDotClaudeSettingsIntoRuntimeFile(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "mayor.md"), []byte("mayor prompt body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".claude", "settings.json"), []byte(`{"custom": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "claude"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "claude",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Command, `.gc/settings.json`) {
+		t.Fatalf("command missing Claude settings path: %q", tp.Command)
+	}
+	runtimePath := filepath.Join(cityPath, ".gc", "settings.json")
+	data, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatalf("resolveTemplate did not materialize %s: %v", runtimePath, err)
+	}
+	rendered := string(data)
+	if !strings.Contains(rendered, `"custom": true`) {
+		t.Fatalf("runtime settings missing city .claude override:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SessionStart") {
+		t.Fatalf("runtime settings lost default Claude hooks:\n%s", rendered)
 	}
 }
