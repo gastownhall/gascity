@@ -92,7 +92,7 @@ func runDashboardServe(commandName string, port int, apiURLOverride string, stde
 	return nil
 }
 
-func resolveDashboardContext(warningWriter io.Writer) (cityPath string, cfg *config.City, err error) {
+func resolveDashboardContext(warningWriter ...io.Writer) (cityPath string, cfg *config.City, err error) {
 	cityPath, err = resolveCity()
 	if err != nil {
 		if strings.TrimSpace(cityFlag) == "" && strings.Contains(err.Error(), "not in a city directory") {
@@ -100,7 +100,7 @@ func resolveDashboardContext(warningWriter io.Writer) (cityPath string, cfg *con
 		}
 		return "", nil, err
 	}
-	cfg, err = loadCityConfig(cityPath, warningWriter)
+	cfg, err = loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
 		return "", nil, err
 	}
