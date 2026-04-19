@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Revision computes a deterministic bundle hash from all resolved config
@@ -37,14 +36,11 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 	}
 
-	// Hash rig pack directory contents (v1 Includes-based refs).
+	// Hash rig pack directory contents (all pack sources).
 	rigs := cfg.Rigs
 	for _, r := range rigs {
 		for _, ref := range r.Includes {
-			topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
-			if !ok {
-				continue
-			}
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 			topoHash := PackContentHashRecursive(fs, topoDir)
 			h.Write([]byte("pack:" + r.Name + ":" + ref)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})                            //nolint:errcheck // hash.Write never errors
@@ -53,17 +49,27 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		}
 	}
 
-	// Hash city-level pack directory contents (v1 Includes-based refs).
+	// Hash city-level pack directory contents.
 	for _, ref := range cfg.Workspace.Includes {
-		topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
-		if !ok {
-			continue
-		}
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 		topoHash := PackContentHashRecursive(fs, topoDir)
 		h.Write([]byte("city-pack:" + ref)) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
 		h.Write([]byte(topoHash))           //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
+	}
+
+	// Remote PackV2 imports resolve through packs.lock, so lockfile changes
+	// can change the effective config even when city.toml/pack.toml stay
+	// untouched.
+	if tracksPackV2Imports(cfg) {
+		lockPath := filepath.Join(cityRoot, "packs.lock")
+		if data, err := fs.ReadFile(lockPath); err == nil {
+			h.Write([]byte(lockPath)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})        //nolint:errcheck // hash.Write never errors
+			h.Write(data)             //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})        //nolint:errcheck // hash.Write never errors
+		}
 	}
 
 	// Hash v2-resolved pack directories (populated by ExpandPacks from
@@ -97,9 +103,8 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 			h.Write([]byte{0})                                    //nolint:errcheck // hash.Write never errors
 		}
 	}
-
 	// Hash convention-discovered city-pack trees so adding or editing
-	// convention content changes the effective revision too.
+	// agents/commands/doctor content changes the effective revision too.
 	for _, dir := range existingConventionDiscoveryDirsFS(fs, cityRoot) {
 		topoHash := PackContentHashRecursive(fs, dir)
 		h.Write([]byte("city-discovery:" + dir)) //nolint:errcheck // hash.Write never errors
@@ -111,130 +116,86 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// WatchTarget describes a filesystem path that should be watched for config
-// changes and how much of its subtree participates in discovery.
-type WatchTarget struct {
-	Path                string
-	Recursive           bool
-	DiscoverConventions bool
-}
+// WatchDirs returns the set of directories that should be watched for
+// config changes. This includes the directory of each source file,
+// rig pack directories, and city-level pack directories.
+// Returns deduplicated, sorted paths.
+func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
+	seen := make(map[string]bool)
+	var dirs []string
 
-// WatchTargets returns the set of paths that should be watched for config
-// changes. Config source directories are shallow; city roots discover
-// convention subdirectories; pack roots and convention roots are recursive.
-// Returns deduplicated targets sorted by path.
-func WatchTargets(prov *Provenance, cfg *City, cityRoot string) []WatchTarget {
-	seen := make(map[string]int)
-	var targets []WatchTarget
-
-	addTarget := func(path string, recursive, discoverConventions bool) {
-		if path == "" {
-			return
+	addDir := func(dir string) {
+		if dir != "" && !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
 		}
-		if idx, ok := seen[path]; ok {
-			targets[idx].Recursive = targets[idx].Recursive || recursive
-			targets[idx].DiscoverConventions = targets[idx].DiscoverConventions || discoverConventions
-			return
-		}
-		seen[path] = len(targets)
-		targets = append(targets, WatchTarget{
-			Path:                path,
-			Recursive:           recursive,
-			DiscoverConventions: discoverConventions,
-		})
 	}
 
 	// Config source file directories.
 	if prov != nil {
 		for _, src := range prov.Sources {
-			dir := filepath.Dir(src)
-			addTarget(dir, false, pathutil.SamePath(dir, cityRoot))
+			addDir(filepath.Dir(src))
 		}
 	}
 
-	// Rig pack directories (v1 Includes-based refs).
+	// Rig pack directories (all pack sources).
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
-			topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
-			if !ok {
-				continue
-			}
-			addTarget(topoDir, true, false)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			addDir(topoDir)
 		}
 	}
 
-	// City-level pack directories (v1 Includes-based refs).
+	// City-level pack directories.
 	for _, ref := range cfg.Workspace.Includes {
-		topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
-		if !ok {
-			continue
-		}
-		addTarget(topoDir, true, false)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		addDir(topoDir)
 	}
 
-	// v2-resolved pack directories populated by ExpandPacks from [imports.X]
-	// and [rigs.imports.X]. Regression guard: gastownhall/gascity#779.
+	// PackV2 imports resolve into concrete pack directories during config
+	// expansion, so watch those directories too. Without this, `gc import
+	// install` and edits under imported packs change the revision hash but not
+	// the watch set that drives reloads.
 	for _, dir := range cfg.PackDirs {
-		if strings.TrimSpace(dir) == "" {
-			continue
-		}
-		addTarget(dir, true, false)
+		addDir(dir)
 	}
-	rigPackDirNames := make([]string, 0, len(cfg.RigPackDirs))
-	for name := range cfg.RigPackDirs {
-		rigPackDirNames = append(rigPackDirNames, name)
+	rigNames := make([]string, 0, len(cfg.RigPackDirs))
+	for rigName := range cfg.RigPackDirs {
+		rigNames = append(rigNames, rigName)
 	}
-	sort.Strings(rigPackDirNames)
-	for _, rigName := range rigPackDirNames {
+	sort.Strings(rigNames)
+	for _, rigName := range rigNames {
 		for _, dir := range cfg.RigPackDirs[rigName] {
-			if strings.TrimSpace(dir) == "" {
-				continue
-			}
-			addTarget(dir, true, false)
+			addDir(dir)
 		}
 	}
 
 	// Convention-discovered city-pack trees are loaded directly from the city
 	// root, so watch them too when they already exist.
 	for _, dir := range existingConventionDiscoveryDirsOS(cityRoot) {
-		addTarget(dir, true, false)
+		addDir(dir)
 	}
 
-	sort.Slice(targets, func(i, j int) bool {
-		return targets[i].Path < targets[j].Path
-	})
-	return targets
-}
-
-func revisionPackDir(ref, declDir, cityRoot string) (string, bool) {
-	if strings.TrimSpace(ref) == "" {
-		return "", false
-	}
-	dir, err := resolvePackRef(ref, declDir, cityRoot)
-	if err != nil || strings.TrimSpace(dir) == "" {
-		return "", false
-	}
-	return dir, true
-}
-
-// WatchDirs returns the deduplicated paths from WatchTargets. It is retained
-// for callers that only need the legacy path list.
-func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
-	targets := WatchTargets(prov, cfg, cityRoot)
-	dirs := make([]string, len(targets))
-	for i, target := range targets {
-		dirs[i] = target.Path
-	}
+	sort.Strings(dirs)
 	return dirs
 }
 
-var conventionDiscoveryDirNames = []string{"agents", "commands", "doctor", "formulas", "orders", "template-fragments", "skills", "mcp"}
-
-// ConventionDiscoveryDirNames returns the fixed top-level directory names
-// whose contents participate in convention-based pack discovery.
-func ConventionDiscoveryDirNames() []string {
-	return append([]string(nil), conventionDiscoveryDirNames...)
+func tracksPackV2Imports(cfg *City) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.Imports) > 0 || len(cfg.PackDirs) > 0 || len(cfg.RigPackDirs) > 0 {
+		return true
+	}
+	for _, rig := range cfg.Rigs {
+		if len(rig.Imports) > 0 {
+			return true
+		}
+	}
+	return false
 }
+
+var conventionDiscoveryDirNames = []string{"agents", "commands", "doctor"}
 
 func existingConventionDiscoveryDirsFS(fs fsys.FS, cityRoot string) []string {
 	var dirs []string

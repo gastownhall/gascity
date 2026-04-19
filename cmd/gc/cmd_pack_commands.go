@@ -5,12 +5,47 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
+
+func addPackCommandsToRoot(root *cobra.Command, entries []config.PackCommandInfo, cityPath, cityName string, stdout, stderr io.Writer) {
+	discovered := make([]config.DiscoveredCommand, 0, len(entries))
+	for _, entry := range entries {
+		discovered = append(discovered, discoveredCommandFromPackCommandInfo(entry))
+	}
+	addDiscoveredCommandsToRoot(root, discovered, cityPath, cityName, stdout, stderr, true)
+}
+
+func runPackCommand(info config.PackCommandInfo, cityPath, cityName string, args []string, stdinR io.Reader, stdout, stderr io.Writer) int {
+	return runDiscoveredCommand(discoveredCommandFromPackCommandInfo(info), cityPath, cityName, args, stdinR, stdout, stderr)
+}
+
+func readLongDescription(info config.PackCommandInfo) string {
+	return readDiscoveredHelp(discoveredCommandFromPackCommandInfo(info))
+}
+
+func discoveredCommandFromPackCommandInfo(info config.PackCommandInfo) config.DiscoveredCommand {
+	helpFile := strings.TrimSpace(info.Entry.LongDescription)
+	if helpFile != "" && !filepath.IsAbs(helpFile) {
+		helpFile = filepath.Join(info.PackDir, helpFile)
+	}
+	return config.DiscoveredCommand{
+		Name:        info.Entry.Name,
+		Command:     []string{info.Entry.Name},
+		Description: info.Entry.Description,
+		RunScript:   info.Entry.Script,
+		HelpFile:    helpFile,
+		SourceDir:   info.PackDir,
+		PackDir:     info.PackDir,
+		PackName:    info.PackName,
+		BindingName: info.PackName,
+	}
+}
 
 // quietLoadCityConfig loads city config with log output suppressed.
 // ExpandCityPacks logs "not found, skipping" for uncached remote packs
@@ -21,7 +56,7 @@ func quietLoadCityConfig(cityPath string) (*config.City, error) {
 	prev := log.Writer()
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(prev)
-	return loadCityConfig(cityPath, io.Discard)
+	return loadCityConfig(cityPath)
 }
 
 // registerPackCommands attempts to discover the city, load config, and
