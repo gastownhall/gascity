@@ -235,10 +235,9 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 // targeted queries instead of a broad store scan. This avoids timeouts
 // on stores with many beads.
 //
-// For per-recipient queries, two scoped queries are combined:
-//  1. List by assignee+type+status — targeted to the recipient's open messages
-//  2. List by gc:message label — catches messages that type queries may miss
-//     (some external stores omit messages from generic queries)
+// For per-recipient queries, list by assignee+type+status — targeted to the
+// recipient's open messages. Beadmail send paths write Type="message", so the
+// label is decoration, not the authoritative discriminator.
 //
 // For global queries (recipient==""), falls back to type-based listing since
 // no assignee filter can be applied.
@@ -276,17 +275,6 @@ func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
 		}
 		add(all)
 	}
-
-	// Supplement: label query catches messages that type/assignee queries
-	// may miss (some external stores omit messages from generic queries).
-	labeled, err := p.store.List(beads.ListQuery{
-		Label: "gc:message",
-		Sort:  beads.SortCreatedDesc,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing gc:message beads: %w", err)
-	}
-	add(labeled)
 
 	result := make([]beads.Bead, 0, len(order))
 	for _, id := range order {
