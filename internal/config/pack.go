@@ -216,6 +216,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					services = filterServicesBySourceDir(services, impDir)
 					commands = filterCommandsByPackDir(commands, impDir)
 					doctors = filterDoctorsByPackDir(doctors, impDir)
+					providers = cachedPackLocalProviders(cache, impDir)
+					topoDirs = cachedPackLocalTopoDirs(cache, impDir)
+					reqs = cachedPackLocalRequires(cache, impDir)
+					globals = cachedPackLocalGlobals(cache, impDir)
 					skills = filterSkillsByPackDir(skills, impDir)
 				}
 				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, warnings...)
@@ -602,8 +606,13 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				}
 				agents = direct
 				namedSessions = filterNamedSessionsBySourceDir(namedSessions, impDir)
+				services = filterServicesBySourceDir(services, impDir)
 				commands = filterCommandsByPackDir(commands, impDir)
 				doctors = filterDoctorsByPackDir(doctors, impDir)
+				providers = cachedPackLocalProviders(cache, impDir)
+				topoDirs = cachedPackLocalTopoDirs(cache, impDir)
+				reqs = cachedPackLocalRequires(cache, impDir)
+				globals = cachedPackLocalGlobals(cache, impDir)
 				skills = filterSkillsByPackDir(skills, impDir)
 				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
@@ -994,18 +1003,22 @@ type packLoadCache struct {
 }
 
 type packLoadResult struct {
-	agents        []Agent
-	namedSessions []NamedSession
-	providers     map[string]ProviderSpec
-	services      []Service
-	topoDirs      []string
-	requires      []PackRequirement
-	globals       []ResolvedPackGlobal
-	commands      []DiscoveredCommand
-	doctors       []DiscoveredDoctor
-	skills        []DiscoveredSkillCatalog
-	localWarnings []string
-	warnings      []string
+	agents         []Agent
+	namedSessions  []NamedSession
+	providers      map[string]ProviderSpec
+	localProviders map[string]ProviderSpec
+	services       []Service
+	topoDirs       []string
+	localTopoDirs  []string
+	requires       []PackRequirement
+	localRequires  []PackRequirement
+	globals        []ResolvedPackGlobal
+	localGlobals   []ResolvedPackGlobal
+	commands       []DiscoveredCommand
+	doctors        []DiscoveredDoctor
+	skills         []DiscoveredSkillCatalog
+	localWarnings  []string
+	warnings       []string
 }
 
 func parsePackConfigWithMeta(data []byte, source string) (packConfig, []string, error) {
@@ -1193,8 +1206,13 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 			}
 			impAgents = direct
 			impNamedSessions = filterNamedSessionsBySourceDir(impNamedSessions, impDir)
+			impServices = filterServicesBySourceDir(impServices, impDir)
 			impCommands = filterCommandsByPackDir(impCommands, impDir)
 			impDoctors = filterDoctorsByPackDir(impDoctors, impDir)
+			impProviders = cachedPackLocalProviders(cache, impDir)
+			impTopoDirs = cachedPackLocalTopoDirs(cache, impDir)
+			impReqs = cachedPackLocalRequires(cache, impDir)
+			impGlobals = cachedPackLocalGlobals(cache, impDir)
 			impSkills = filterSkillsByPackDir(impSkills, impDir)
 		}
 
@@ -1417,29 +1435,35 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 	topoDirs = append(topoDirs, topoDir)
 
 	// Collect globals: included globals first, then this pack's own.
-	var allGlobals []ResolvedPackGlobal
-	allGlobals = append(allGlobals, includedGlobals...)
+	var localGlobals []ResolvedPackGlobal
 	if len(tc.Global.SessionLive) > 0 {
-		allGlobals = append(allGlobals, ResolvedPackGlobal{
+		localGlobals = append(localGlobals, ResolvedPackGlobal{
 			SessionLive: resolveConfigDirInCommands(tc.Global.SessionLive, topoDir),
 			PackName:    tc.Pack.Name,
 		})
 	}
+	var allGlobals []ResolvedPackGlobal
+	allGlobals = append(allGlobals, includedGlobals...)
+	allGlobals = append(allGlobals, localGlobals...)
 
 	// Cache result for diamond-DAG dedup.
 	cache.results[absTopoDir] = clonePackLoadResult(&packLoadResult{
-		agents:        includedAgents,
-		namedSessions: includedNamedSessions,
-		providers:     mergedProviders,
-		services:      includedServices,
-		topoDirs:      topoDirs,
-		requires:      allRequires,
-		globals:       allGlobals,
-		commands:      includedCommands,
-		doctors:       includedDoctors,
-		skills:        includedSkills,
-		localWarnings: append([]string(nil), packWarnings...),
-		warnings:      appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
+		agents:         includedAgents,
+		namedSessions:  includedNamedSessions,
+		providers:      mergedProviders,
+		localProviders: tc.Providers,
+		services:       includedServices,
+		topoDirs:       topoDirs,
+		localTopoDirs:  []string{topoDir},
+		requires:       allRequires,
+		localRequires:  append([]PackRequirement(nil), tc.Pack.Requires...),
+		globals:        allGlobals,
+		localGlobals:   localGlobals,
+		commands:       includedCommands,
+		doctors:        includedDoctors,
+		skills:         includedSkills,
+		localWarnings:  append([]string(nil), packWarnings...),
+		warnings:       appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
 	})
 
 	return includedAgents, includedNamedSessions, mergedProviders, includedServices, topoDirs, allRequires, allGlobals, nil
@@ -1450,18 +1474,22 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		return nil
 	}
 	return &packLoadResult{
-		agents:        deepCopyAgents(in.agents),
-		namedSessions: deepCopyNamedSessions(in.namedSessions),
-		providers:     deepCopyProviderSpecs(in.providers),
-		services:      deepCopyServices(in.services),
-		topoDirs:      append([]string(nil), in.topoDirs...),
-		requires:      append([]PackRequirement(nil), in.requires...),
-		globals:       deepCopyResolvedPackGlobals(in.globals),
-		commands:      deepCopyCommands(in.commands),
-		doctors:       deepCopyDoctors(in.doctors),
-		skills:        deepCopySkills(in.skills),
-		localWarnings: append([]string(nil), in.localWarnings...),
-		warnings:      append([]string(nil), in.warnings...),
+		agents:         deepCopyAgents(in.agents),
+		namedSessions:  deepCopyNamedSessions(in.namedSessions),
+		providers:      deepCopyProviderSpecs(in.providers),
+		localProviders: deepCopyProviderSpecs(in.localProviders),
+		services:       deepCopyServices(in.services),
+		topoDirs:       append([]string(nil), in.topoDirs...),
+		localTopoDirs:  append([]string(nil), in.localTopoDirs...),
+		requires:       append([]PackRequirement(nil), in.requires...),
+		localRequires:  append([]PackRequirement(nil), in.localRequires...),
+		globals:        deepCopyResolvedPackGlobals(in.globals),
+		localGlobals:   deepCopyResolvedPackGlobals(in.localGlobals),
+		commands:       deepCopyCommands(in.commands),
+		doctors:        deepCopyDoctors(in.doctors),
+		skills:         deepCopySkills(in.skills),
+		localWarnings:  append([]string(nil), in.localWarnings...),
+		warnings:       append([]string(nil), in.warnings...),
 	}
 }
 
@@ -1654,6 +1682,66 @@ func cachedPackLocalWarnings(cache *packLoadCache, topoDir string) []string {
 		return nil
 	}
 	return append([]string(nil), result.localWarnings...)
+}
+
+func cachedPackLocalProviders(cache *packLoadCache, topoDir string) map[string]ProviderSpec {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return deepCopyProviderSpecs(result.localProviders)
+}
+
+func cachedPackLocalTopoDirs(cache *packLoadCache, topoDir string) []string {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), result.localTopoDirs...)
+}
+
+func cachedPackLocalRequires(cache *packLoadCache, topoDir string) []PackRequirement {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return append([]PackRequirement(nil), result.localRequires...)
+}
+
+func cachedPackLocalGlobals(cache *packLoadCache, topoDir string) []ResolvedPackGlobal {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return deepCopyResolvedPackGlobals(result.localGlobals)
 }
 
 func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir string) []NamedSession {

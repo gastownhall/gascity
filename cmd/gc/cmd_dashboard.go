@@ -74,10 +74,6 @@ func runDashboardServe(commandName string, port int, apiURLOverride string, stde
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return err
-	}
 
 	apiURL, err := resolveDashboardAPI(cityPath, cfg, apiURLOverride)
 	if err != nil {
