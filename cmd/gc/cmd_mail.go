@@ -138,8 +138,8 @@ func newMailCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a <system-reminder> block suitable for
-hook injection (always exits 0). The recipient defaults to $GC_ALIAS,
-$GC_SESSION_ID, or "human".`,
+hook injection (always exits 0). The recipient defaults to $GC_SESSION_ID,
+$GC_ALIAS, or "human".`,
 		Example: `  gc mail check
   gc mail check --inject
   gc mail check mayor`,
@@ -178,11 +178,7 @@ func cmdMailCheck(args []string, inject bool, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = args[0]
-	}
-	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail check")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail check")
 	if !ok {
 		if inject {
 			return 0
@@ -247,16 +243,38 @@ func formatInjectOutput(messages []mail.Message) string {
 }
 
 func defaultMailIdentity() string {
-	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
-		return alias
+	return defaultMailIdentityCandidates()[0]
+}
+
+// defaultMailIdentityCandidates returns ordered non-empty identity candidates
+// (GC_SESSION_ID, GC_ALIAS, GC_AGENT), falling back to ["human"] when all are
+// unset. Multiple candidates preserve compatibility for sessions whose concrete
+// ID is unavailable while still preferring the concrete mailbox when it exists.
+func defaultMailIdentityCandidates() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
 	}
-	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
-		return sessionID
+	add(os.Getenv("GC_SESSION_ID"))
+	add(os.Getenv("GC_ALIAS"))
+	add(os.Getenv("GC_AGENT"))
+	if len(out) == 0 {
+		out = append(out, "human")
 	}
-	if agent := strings.TrimSpace(os.Getenv("GC_AGENT")); agent != "" {
-		return agent
-	}
-	return "human"
+	return out
+}
+
+// isStorelessMailProvider reports whether the configured mail provider
+// bypasses the city bead store (exec scripts and test doubles).
+func isStorelessMailProvider() bool {
+	v := mailProviderName()
+	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
 func sessionMailboxAddress(b beads.Bead) string {
@@ -543,9 +561,43 @@ func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName s
 	return target, true
 }
 
+// resolveDefaultMailTargetsForCommand tries each default identity candidate
+// against the city's bead store and returns the first that resolves. A
+// stale GC_ALIAS on a pool worker would otherwise block inbox access when
+// GC_SESSION_ID still matches the bead via session_name.
+func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	candidates := defaultMailIdentityCandidates()
+	if len(candidates) == 1 || isStorelessMailProvider() {
+		return resolveMailTargetsForCommand(candidates[0], stderr, cmdName)
+	}
+	store, code := openCityStore(stderr, cmdName)
+	if store == nil {
+		_ = code
+		return resolvedMailTarget{}, false
+	}
+	for _, c := range candidates {
+		target, err := resolveMailTargets(store, c)
+		if err == nil {
+			return target, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return resolvedMailTarget{}, false
+		}
+	}
+	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
+	return resolvedMailTarget{}, false
+}
+
+func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	if len(args) > 0 {
+		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
+	}
+	return resolveDefaultMailTargetsForCommand(stderr, cmdName)
+}
+
 func resolveRawMailTargetForStorelessProvider(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
-	v := mailProviderName()
-	if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+	if !isStorelessMailProvider() {
 		return resolvedMailTarget{}, false
 	}
 	store, err := openMailTargetStore()
@@ -650,7 +702,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_ALIAS or $GC_SESSION_ID (in sessions) or "human". Use --notify to nudge
+to $GC_SESSION_ID or $GC_ALIAS (in sessions) or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -672,7 +724,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	}
 	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after sending")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
-	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or \"human\")")
+	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or \"human\")")
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
@@ -687,7 +739,7 @@ func newMailInboxCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_ALIAS, $GC_SESSION_ID, or "human". Pass a session alias to view another inbox.`,
+to $GC_SESSION_ID, $GC_ALIAS, or "human". Pass a session alias to view another inbox.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailInbox(args, stdout, stderr) != 0 {
@@ -824,7 +876,7 @@ func newMailCountCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "count [session]",
 		Short: "Show total/unread message count",
 		Long: `Show total and unread message counts for a session alias or human.
-The recipient defaults to $GC_ALIAS, $GC_SESSION_ID, or "human".`,
+The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, or "human".`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailCount(args, stdout, stderr) != 0 {
@@ -854,6 +906,9 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		cfg, _ = loadCityConfig(cityPath)
 		store, err = openCityStoreAt(cityPath)
 	}
+	// Narrower than isStorelessMailProvider: exec: providers can legitimately
+	// run without a city store, but fake/fail still require one for alias
+	// resolution in tests. Do not unify with isStorelessMailProvider.
 	if err != nil && !strings.HasPrefix(mailProviderName(), "exec:") {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1032,11 +1087,7 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = args[0]
-	}
-	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail inbox")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
 	if !ok {
 		return 1
 	}
@@ -1150,8 +1201,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	sender := defaultMailIdentity()
 	var hasStore bool
 	if sender != "human" {
-		v := mailProviderName()
-		if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+		if !isStorelessMailProvider() {
 			hasStore = true
 			store, storeCode := openCityStore(stderr, "gc mail reply")
 			if store == nil {
@@ -1363,11 +1413,7 @@ func cmdMailCount(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := defaultMailIdentity()
-	if len(args) > 0 {
-		recipient = args[0]
-	}
-	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail count")
+	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail count")
 	if !ok {
 		return 1
 	}
