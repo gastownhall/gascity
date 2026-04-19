@@ -364,12 +364,6 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Save original config content.
-	origData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
 
@@ -387,13 +381,22 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 		t.Errorf("output should say re-initialized: %s", output)
 	}
 
-	// city.toml must be unchanged (no duplicate rig or polecat added).
+	// Re-add should migrate the machine-local path out of city.toml while
+	// preserving the effective rig binding.
 	newData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(newData) != string(origData) {
-		t.Errorf("city.toml should be unchanged on re-add.\nBefore:\n%s\nAfter:\n%s", origData, newData)
+	wantCityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\n"
+	if string(newData) != wantCityToml {
+		t.Errorf("city.toml should be rewritten without rig.path on re-add.\nWant:\n%s\nGot:\n%s", wantCityToml, newData)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "my-frontend" || binding.Rigs[0].Path != rigPath {
+		t.Fatalf("site binding = %+v, want my-frontend=%s", binding.Rigs, rigPath)
 	}
 }
 
@@ -1869,6 +1872,14 @@ func (f *failCityTomlWriteFS) WriteFile(name string, data []byte, perm os.FileMo
 	return f.OSFS.WriteFile(name, data, perm)
 }
 
+func (f *failCityTomlWriteFS) Rename(oldpath, newpath string) error {
+	if !f.failed && filepath.Clean(newpath) == filepath.Clean(f.target) {
+		f.failed = true
+		return errors.New("injected write failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
+
 func TestDoRigAdd_RollsBackCanonicalFilesWhenConfigWriteFails(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1936,6 +1947,9 @@ func TestDoRigAdd_RollsBackCanonicalFilesWhenConfigWriteFails(t *testing.T) {
 	}
 	if string(gotCityToml) != cityToml {
 		t.Fatalf("city.toml changed after rollback:\nwant: %s\n got: %s", cityToml, gotCityToml)
+	}
+	if _, err := os.Stat(config.SiteBindingPath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf(".gc/site.toml should be absent after rollback, stat err = %v", err)
 	}
 	for _, tc := range []struct {
 		path string
@@ -2114,7 +2128,7 @@ func TestResolveRigAddPath(t *testing.T) {
 	}
 }
 
-func TestCmdRigAddUsesCityRelativePathWhenOutsideCity(t *testing.T) {
+func TestCmdRigAddStoresMachinePathInSiteBindingWhenOutsideCity(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {
@@ -2152,7 +2166,21 @@ func TestCmdRigAddUsesCityRelativePathWhenOutsideCity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "path = \""+wantRigPath+"\"") {
-		t.Fatalf("city.toml should contain city-relative absolute path %q:\n%s", wantRigPath, data)
+	parsed, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parse city.toml: %v\ncontents:\n%s", err, data)
+	}
+	if len(parsed.Rigs) != 1 {
+		t.Fatalf("parsed rigs = %d, want 1\ncontents:\n%s", len(parsed.Rigs), data)
+	}
+	if got := parsed.Rigs[0].Path; got != "" {
+		t.Fatalf("city.toml rig.path = %q, want empty (moved to site binding)\ncontents:\n%s", got, data)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != wantRigPath {
+		t.Fatalf("site binding = %+v, want frontend=%s", binding.Rigs, wantRigPath)
 	}
 }

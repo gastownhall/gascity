@@ -101,6 +101,15 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig set-endpoint", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if strings.TrimSpace(rig.Path) == "" {
+		// Unbound rig: the downstream helpers join paths against rig.Path
+		// (snapshotRigEndpointFiles, ensureCanonicalScopeMetadataIfPresent,
+		// syncRigManagedPortArtifact, etc.). Empty rig.Path would produce
+		// relative `.beads/...` writes under the current working directory
+		// instead of erroring cleanly.
+		fmt.Fprintf(stderr, "gc rig set-endpoint: rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before setting its endpoint\n", rig.Name, rig.Name) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityState, err := resolveOwnerCityConfigState(cityPath, cfg)
 	if err != nil {
@@ -568,11 +577,7 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 		}
 		cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
 		cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
-		content, err := cfg.Marshal()
-		if err != nil {
-			return err
-		}
-		return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "city.toml"), content, 0o644)
+		return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 	}
 	return fmt.Errorf("rig %q not found in city config", rigName)
 }
@@ -580,6 +585,7 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSnapshot, error) {
 	paths := []string{
 		filepath.Join(cityPath, "city.toml"),
+		config.SiteBindingPath(cityPath),
 		filepath.Join(scopeRoot, ".beads", "metadata.json"),
 		filepath.Join(scopeRoot, ".beads", "config.yaml"),
 	}

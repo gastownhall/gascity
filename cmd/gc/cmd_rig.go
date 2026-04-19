@@ -224,12 +224,19 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	}
 
 	var reAdd bool
+	existingRigIdx := -1
 	var existingRig *config.Rig
 	for i, r := range cfg.Rigs {
 		if r.Name != name {
 			continue
 		}
+		existingRigIdx = i
+		existingRig = &cfg.Rigs[i]
 		existPath := r.Path
+		if strings.TrimSpace(existPath) == "" {
+			reAdd = true
+			break
+		}
 		if !filepath.IsAbs(existPath) {
 			existPath = filepath.Join(cityPath, existPath)
 		}
@@ -238,7 +245,6 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 			return 1
 		}
 		reAdd = true
-		existingRig = &cfg.Rigs[i]
 		break
 	}
 
@@ -319,8 +325,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
-	nextCfg := cfg
-	if !reAdd {
+	var nextCfg *config.City
+	if reAdd {
+		next := *cfg
+		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
+		next.Rigs[existingRigIdx].Path = rigPath
+		nextCfg = &next
+	} else {
 		storedPrefix := ""
 		if prefixOverride != "" {
 			storedPrefix = strings.ToLower(prefixOverride)
@@ -356,18 +367,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		return 1
 	}
 
-	if !reAdd {
-		data, err := nextCfg.Marshal()
-		if err != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "marshaling config", err)
-			return 1
-		}
-		if err := fs.WriteFile(tomlPath, data, 0o644); err != nil {
-			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
-			return 1
-		}
-		cfg = nextCfg
+	if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
+		writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
+		return 1
 	}
+	cfg = nextCfg
 
 	allRigs := collectRigRoutes(cityPath, cfg)
 	if err := writeAllRigRoutes(allRigs); err != nil {
@@ -432,12 +436,17 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 }
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
-	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+4)
+	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+5)
 	cityToml, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil, err
 	}
 	snapshots = append(snapshots, cityToml)
+	siteToml, err := snapshotOptionalFile(fs, config.SiteBindingPath(cityPath))
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, siteToml)
 	citySnapshots, err := snapshotRigCanonicalFiles(fs, cityPath)
 	if err != nil {
 		return nil, err
@@ -523,6 +532,9 @@ func findEnclosingRig(dir string, rigs []config.Rig) (name, rigPath string, foun
 	cleanDir := normalizePathForCompare(dir)
 	bestName, bestPath := "", ""
 	for _, r := range rigs {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
 		cleanRig := normalizePathForCompare(r.Path)
 		if pathWithinScope(cleanDir, cleanRig) {
 			if len(cleanRig) > len(bestPath) {
@@ -732,12 +744,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -817,12 +824,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -890,12 +892,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cfg.Rigs = filtered
 
 	// Write updated config.
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fsys.OSFS{}, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

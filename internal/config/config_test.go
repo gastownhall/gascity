@@ -2577,14 +2577,11 @@ func TestValidateRigs_MissingName(t *testing.T) {
 	}
 }
 
-func TestValidateRigs_MissingPath(t *testing.T) {
+func TestValidateRigs_MissingPathAllowed(t *testing.T) {
 	rigs := []Rig{{Name: "frontend"}}
 	err := ValidateRigs(rigs, "ci")
-	if err == nil {
-		t.Fatal("expected error for missing path")
-	}
-	if !strings.Contains(err.Error(), "path is required") {
-		t.Errorf("error = %q, want 'path is required'", err)
+	if err != nil {
+		t.Fatalf("ValidateRigs: unexpected error: %v", err)
 	}
 }
 

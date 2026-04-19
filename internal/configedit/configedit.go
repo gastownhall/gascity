@@ -8,6 +8,7 @@ package configedit
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -52,9 +53,9 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	cfg, err := config.Load(e.fs, e.tomlPath)
+	cfg, err := e.loadForEdit()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
 
 	if err := fn(cfg); err != nil {
@@ -77,12 +78,7 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 		return fmt.Errorf("validating providers: %w", err)
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshaling config: %w", err)
-	}
-
-	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
+	return e.write(cfg)
 }
 
 // EditExpanded loads both raw and expanded configs, calls fn with both,
@@ -97,7 +93,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	raw, err := config.Load(e.fs, e.tomlPath)
+	raw, err := e.loadForEdit()
 	if err != nil {
 		return fmt.Errorf("loading raw config: %w", err)
 	}
@@ -127,12 +123,47 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 		return fmt.Errorf("validating providers: %w", err)
 	}
 
-	content, err := raw.Marshal()
+	return e.write(raw)
+}
+
+func (e *Editor) loadForEdit() (*config.City, error) {
+	cfg, err := config.Load(e.fs, e.tomlPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	if _, err := config.ApplySiteBindingsForEdit(e.fs, filepath.Dir(e.tomlPath), cfg); err != nil {
+		return nil, fmt.Errorf("loading site binding: %w", err)
+	}
+	return cfg, nil
+}
+
+// write persists city.toml first, then .gc/site.toml. A crash between the
+// two writes leaves city.toml with rig paths stripped while .gc/site.toml
+// retains its previous state — producing an orphan legacy/unbound rig
+// that the loader surfaces via warnings rather than the silent
+// site-wins-over-stale-city state the reverse order would create.
+//
+// The city.toml write is skipped when on-disk content already matches,
+// matching the idempotency guarantee documented on
+// writeCityConfigForEditFS so repeated no-op mutations don't churn
+// watcher mtime or break debounce.
+func (e *Editor) write(cfg *config.City) error {
+	cityPath := filepath.Dir(e.tomlPath)
+	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-
-	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
+	if err := fsys.WriteFileIfChangedAtomic(e.fs, e.tomlPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := config.PersistRigSiteBindings(e.fs, cityPath, cfg.Rigs); err != nil {
+		// Surface the half-migrated state: city.toml has been rewritten
+		// without rig paths, but the site binding wasn't persisted, so
+		// any previously-bound rigs whose path came only from city.toml
+		// are now unbound.
+		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs may be unbound; re-run the command or `gc doctor --fix` to retry: %w", err)
+	}
+	return nil
 }
 
 // AgentOrigin determines whether an agent is defined inline in the raw

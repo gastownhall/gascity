@@ -352,11 +352,10 @@ type ScriptLayers struct {
 type Rig struct {
 	// Name is the unique identifier for this rig.
 	Name string `toml:"name" jsonschema:"required"`
-	// Path is the filesystem path to the rig's repository as stored in
-	// city.toml. May be a relative path; callers must invoke
-	// resolveRigPaths(cityPath, rigs) before using this value for filesystem
-	// operations.
-	Path string `toml:"path" jsonschema:"required"`
+	// Path is the effective filesystem path to the rig's repository. New
+	// writes persist it to .gc/site.toml; legacy city.toml paths are accepted
+	// only so edit/migration flows can move them into site binding state.
+	Path string `toml:"path,omitempty"`
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
@@ -2455,9 +2454,6 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		if r.Name == "" {
 			return fmt.Errorf("rig[%d]: name is required", i)
 		}
-		if r.Path == "" {
-			return fmt.Errorf("rig %q: path is required", r.Name)
-		}
 		if seenNames[r.Name] {
 			return fmt.Errorf("rig %q: duplicate name", r.Name)
 		}
@@ -2550,6 +2546,22 @@ func (c *City) Marshal() ([]byte, error) {
 		return nil, fmt.Errorf("marshaling config: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// MarshalForWrite emits the checked-in city.toml form by stripping
+// machine-local rig path bindings before encoding.
+func (c *City) MarshalForWrite() ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("marshaling config: nil city")
+	}
+	clone := *c
+	if len(c.Rigs) > 0 {
+		clone.Rigs = append([]Rig(nil), c.Rigs...)
+		for i := range clone.Rigs {
+			clone.Rigs[i].Path = ""
+		}
+	}
+	return clone.Marshal()
 }
 
 // Load reads and parses a city.toml file at the given path using the

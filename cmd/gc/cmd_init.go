@@ -742,23 +742,13 @@ func initFromSkip(relPath string, isDir bool) bool {
 
 // overrideCityName reads an existing city.toml, updates workspace.name, and writes it back.
 func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
-	data, err := f.ReadFile(tomlPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: reading %q: %v\n", tomlPath, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cfg, err := config.Parse(data)
+	cfg, err := loadCityConfigForEditFS(f, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg.Workspace.Name = name
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := f.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(f, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

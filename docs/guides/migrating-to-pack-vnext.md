@@ -55,8 +55,10 @@ migrated; that is intentional in this wave.
 >
 > **First-slice note:** skills and MCP are current-city-pack only in this
 > wave. Imported-pack catalogs and provider projection are later slices.
-> The dedicated `.gc/site.toml` path split is still tracked in
-> [#588](https://github.com/gastownhall/gascity/issues/588).
+> The `.gc/site.toml` rig-path split from
+> [#588](https://github.com/gastownhall/gascity/issues/588) is now part of
+> the migration flow: `rig.path` leaves `city.toml`, while `rig.prefix` and
+> `rig.suspended` stay in `city.toml` for the current Phase A rollout.
 
 ## Before you start
 

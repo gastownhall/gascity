@@ -396,6 +396,12 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// materializer.
 	WarnDeprecatedAttachmentFields(root)
 
+	siteBindingWarnings, err := ApplySiteBindings(fs, cityRoot, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
+
 	// v0.15.1: enrich every agent with its convention-discovered
 	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
 	// DiscoverPackAgents only does this for agents it creates — it skips
