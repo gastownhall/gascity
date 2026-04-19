@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStaleManagedDoltSocketPathsExcludesMysqlSock(t *testing.T) {
@@ -42,22 +43,46 @@ func TestStaleManagedDoltSocketPathsExcludesMysqlSock(t *testing.T) {
 	}
 }
 
-func TestFileOpenedByAnyProcessWithoutLsofReturnsUnknown(t *testing.T) {
+func TestFileOpenedByAnyProcessWithoutLsofReturnsClosedOrUnknown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "LOCK")
 	if err := os.WriteFile(path, []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "missing-bin"))
 	open, err := fileOpenedByAnyProcess(path)
-	if !errors.Is(err, errManagedDoltOpenStateUnknown) {
-		t.Fatalf("fileOpenedByAnyProcess() error = %v, want errManagedDoltOpenStateUnknown", err)
+	if err != nil && !errors.Is(err, errManagedDoltOpenStateUnknown) {
+		t.Fatalf("fileOpenedByAnyProcess() error = %v, want nil or errManagedDoltOpenStateUnknown", err)
 	}
 	if open {
 		t.Fatal("fileOpenedByAnyProcess() = true, want false when lsof is unavailable")
 	}
 }
 
-func TestRemoveStaleManagedDoltLocksWithoutLsofKeepsLock(t *testing.T) {
+func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "LOCK")
+	if err := os.WriteFile(path, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\nexec sleep 2\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(lsof): %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	open, err := fileOpenedByAnyProcess(path)
+	if err != nil && !errors.Is(err, errManagedDoltOpenStateUnknown) {
+		t.Fatalf("fileOpenedByAnyProcess() error = %v, want nil or errManagedDoltOpenStateUnknown", err)
+	}
+	if open {
+		t.Fatal("fileOpenedByAnyProcess() = true, want false when lsof times out")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("fileOpenedByAnyProcess() took %s, want bounded timeout", elapsed)
+	}
+}
+
+func TestRemoveStaleManagedDoltLocksWithoutLsofUsesAvailableState(t *testing.T) {
 	dataDir := t.TempDir()
 	lockFile := filepath.Join(dataDir, "hq", ".dolt", "noms", "LOCK")
 	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
@@ -67,11 +92,16 @@ func TestRemoveStaleManagedDoltLocksWithoutLsofKeepsLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "missing-bin"))
+	_, procChecked := fileOpenedByAnyProcessFromProc(lockFile)
 	if err := removeStaleManagedDoltLocks(dataDir); err != nil {
 		t.Fatalf("removeStaleManagedDoltLocks() error = %v", err)
 	}
-	if _, err := os.Stat(lockFile); err != nil {
-		t.Fatalf("LOCK stat err = %v, want preserved when lsof unavailable", err)
+	if _, err := os.Stat(lockFile); procChecked {
+		if !os.IsNotExist(err) {
+			t.Fatalf("LOCK stat err = %v, want stale lock removed when proc state is available", err)
+		}
+	} else if err != nil {
+		t.Fatalf("LOCK stat err = %v, want preserved when open-file state is unknown", err)
 	}
 }
 

@@ -26,6 +26,7 @@ DOLT_HOST="${GC_DOLT_HOST:-0.0.0.0}"
 DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
+LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 
 # Derived paths (set after GC_CITY_PATH validation).
 GC_DIR=""
@@ -93,6 +94,39 @@ tcp_check_port() {
 # tcp_check returns 0 if the dolt port is reachable.
 tcp_check() {
     tcp_check_port "$DOLT_PORT"
+}
+
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    "$@" &
+    local cmd_pid=$!
+    (
+        sleep "$timeout_seconds" 2>/dev/null || sleep 1
+        kill "$cmd_pid" 2>/dev/null || true
+    ) &
+    local watchdog_pid=$!
+    local status=0
+    wait "$cmd_pid" || status=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_lsof() {
+    command -v lsof >/dev/null 2>&1 || return 127
+    run_with_timeout "$LSOF_TIMEOUT_SECONDS" lsof "$@"
+}
+
+lsof_reports_open() {
+    local status
+    run_lsof "$@" >/dev/null 2>&1
+    status=$?
+    case "$status" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
 }
 
 # do_query_probe runs a SELECT active_branch() query against the dolt server.
@@ -472,7 +506,7 @@ run_preflight_cleanup() {
 # find_port_holder returns the PID of the process listening on DOLT_PORT.
 
 find_port_holder() {
-    lsof -i :"$DOLT_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1
+    run_lsof -i :"$DOLT_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1
 }
 
 # verify_our_server checks if a PID belongs to our server (matching data-dir).
@@ -537,7 +571,9 @@ has_deleted_data_inodes() {
     local pid="$1"
     [ -n "$pid" ] || return 1
 
+    local checked_proc=false
     if [ -d "/proc/$pid" ]; then
+        checked_proc=true
         local cwd
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || true
         case "$cwd" in
@@ -548,6 +584,7 @@ has_deleted_data_inodes() {
     fi
 
     if [ -d "/proc/$pid/fd" ]; then
+        checked_proc=true
         local fd target
         for fd in /proc/"$pid"/fd/*; do
             [ -e "$fd" ] || [ -L "$fd" ] || continue
@@ -564,8 +601,12 @@ has_deleted_data_inodes() {
         done
     fi
 
+    if [ "$checked_proc" = "true" ]; then
+        return 1
+    fi
+
     if command -v lsof >/dev/null 2>&1; then
-        if lsof -p "$pid" 2>/dev/null | grep ' (deleted)' | grep -F -- "$DATA_DIR" >/dev/null 2>&1; then
+        if run_lsof -p "$pid" 2>/dev/null | grep ' (deleted)' | grep -F -- "$DATA_DIR" >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -636,11 +677,22 @@ cleanup_stale_locks() {
         [ -d "$dir" ] || continue
         local lock_file="$dir/.dolt/noms/LOCK"
         if [ -f "$lock_file" ]; then
-            # Check if any process holds the lock file.
-            if ! lsof "$lock_file" >/dev/null 2>&1; then
-                echo "removing stale LOCK: $lock_file" >&2
-                rm -f "$lock_file"
-            fi
+            local open_status
+            set +e
+            lsof_reports_open "$lock_file"
+            open_status=$?
+            set -e
+            case "$open_status" in
+                0)
+                    ;;
+                1)
+                    echo "removing stale LOCK: $lock_file" >&2
+                    rm -f "$lock_file"
+                    ;;
+                *)
+                    echo "preserving LOCK with unknown open-file state: $lock_file" >&2
+                    ;;
+            esac
         fi
     done
 }
@@ -796,6 +848,7 @@ wait_for_managed_pid_ready() {
     local attempt=0 max_attempts=1
     [ -n "$pid" ] || return 1
     [ -n "$port" ] || port="$DOLT_PORT"
+    DOLT_PORT="$port"
 
     if load_wait_ready_from_gc "$pid" "$timeout_ms" "$check_deleted"; then
         [ "$GC_WAIT_READY" = "true" ] || return 1
@@ -902,14 +955,16 @@ wait_for_concurrent_start_ready() {
             fi
         fi
         if [ "$GC_EXISTING_USED" != "true" ] && [ "$GC_PROBE_USED" != "true" ]; then
-            existing_pid=$(find_dolt_pid)
             existing_port=$(load_state_field port)
-            if [ -n "$existing_pid" ] && [ -n "$existing_port" ] && verify_our_server "$existing_pid"; then
-                DOLT_PORT="$existing_port"
-                if tcp_check_port "$existing_port" && do_query_probe; then
-                    echo "$existing_pid" > "$PID_FILE"
-                    save_state "$existing_pid" true
-                    return 0
+            if [ -n "$existing_port" ]; then
+                existing_pid=$(find_dolt_pid)
+                if [ -n "$existing_pid" ] && verify_our_server "$existing_pid"; then
+                    DOLT_PORT="$existing_port"
+                    if tcp_check_port "$existing_port" && do_query_probe; then
+                        echo "$existing_pid" > "$PID_FILE"
+                        save_state "$existing_pid" true
+                        return 0
+                    fi
                 fi
             fi
         fi
@@ -1089,7 +1144,7 @@ allocate_port() {
     local port="$hash_val"
     local attempts=0
     while [ "$attempts" -lt 100 ]; do
-        if ! lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! run_lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$port"
             return
         fi
@@ -1111,7 +1166,7 @@ next_available_port() {
         if [ "$port" -gt 60000 ]; then
             port=10000
         fi
-        if ! lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! run_lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$port"
             return
         fi
@@ -1141,11 +1196,22 @@ clean_stale_sockets() {
     local sock
     for sock in /tmp/dolt*.sock; do
         [ -S "$sock" ] || continue
-        # Check if any process holds the socket open.
-        if ! lsof "$sock" >/dev/null 2>&1; then
-            echo "removing stale socket: $sock" >&2
-            rm -f "$sock"
-        fi
+        local open_status
+        set +e
+        lsof_reports_open "$sock"
+        open_status=$?
+        set -e
+        case "$open_status" in
+            0)
+                ;;
+            1)
+                echo "removing stale socket: $sock" >&2
+                rm -f "$sock"
+                ;;
+            *)
+                echo "preserving socket with unknown open-file state: $sock" >&2
+                ;;
+        esac
     done
 }
 

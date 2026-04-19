@@ -416,8 +416,7 @@ func bdDolt(dir string, args ...string) (string, error) {
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)
 		if port, ok := ensureManagedDoltPortForTest(dir); ok {
-			env = filterEnv(env, "GC_DOLT_PORT")
-			env = append(env, "GC_DOLT_PORT="+port)
+			env = appendManagedDoltEndpointEnv(env, port)
 		}
 	}
 	out, err := runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
@@ -425,11 +424,20 @@ func bdDolt(dir string, args ...string) (string, error) {
 		return out, err
 	}
 	if port, ok := ensureManagedDoltPortForTest(dir); ok {
-		env = filterEnv(env, "GC_DOLT_PORT")
-		env = append(env, "GC_DOLT_PORT="+port)
+		env = appendManagedDoltEndpointEnv(env, port)
 		return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
 	}
 	return out, err
+}
+
+func appendManagedDoltEndpointEnv(env []string, port string) []string {
+	env = filterEnvMany(env, "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+	return append(env,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT="+port,
+	)
 }
 
 func runGCWithEnv(env []string, dir string, args ...string) (string, error) {

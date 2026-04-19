@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
+
+const processArgsPSTimeout = time.Second
 
 type managedDoltProcessInspection struct {
 	ManagedPID              int
@@ -69,15 +72,35 @@ func managedPIDFromPIDFile(pidFile string) int {
 }
 
 func findPortHolderPID(port string) int {
-	if strings.TrimSpace(port) == "" {
+	port = strings.TrimSpace(port)
+	if port == "" {
 		return 0
 	}
+	if pid, checked := findPortHolderPIDFromProc(port); checked {
+		return pid
+	}
+	return findPortHolderPIDFromLsof(port)
+}
+
+func findPortHolderPIDFromLsof(port string) int {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+strings.TrimSpace(port), "-sTCP:LISTEN", "-t").Output()
+	cmd := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return 0
 	}
@@ -91,6 +114,82 @@ func findPortHolderPID(port string) int {
 		return 0
 	}
 	return pid
+}
+
+func findPortHolderPIDFromProc(port string) (int, bool) {
+	portNum, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0, true
+	}
+	inodes, checked := listeningSocketInodesFromProc(uint16(portNum))
+	if !checked {
+		return 0, false
+	}
+	if len(inodes) == 0 {
+		return 0, true
+	}
+	return processWithSocketInodes(inodes), true
+}
+
+func listeningSocketInodesFromProc(port uint16) (map[string]struct{}, bool) {
+	inodes := map[string]struct{}{}
+	checked := false
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		checked = true
+		scanner := bufio.NewScanner(strings.NewReader(string(data)))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) < 10 || fields[3] != "0A" {
+				continue
+			}
+			_, portHex, ok := strings.Cut(fields[1], ":")
+			if !ok {
+				continue
+			}
+			gotPort, err := strconv.ParseUint(portHex, 16, 16)
+			if err != nil || uint16(gotPort) != port {
+				continue
+			}
+			inodes[fields[9]] = struct{}{}
+		}
+	}
+	return inodes, checked
+}
+
+func processWithSocketInodes(inodes map[string]struct{}) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !pidAlive(pid) {
+			continue
+		}
+		fdDir := filepath.Join("/proc", entry.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
+				continue
+			}
+			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
+			if _, ok := inodes[inode]; ok {
+				return pid
+			}
+		}
+	}
+	return 0
 }
 
 func managedPIDFromPSByConfig(configFile string) int {
@@ -205,7 +304,53 @@ func loadDoltRuntimeStateDataDir(path string) string {
 }
 
 func processArgs(pid int) (string, error) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	if args, err := processArgsFromProc(pid); err == nil && args != "" {
+		return args, nil
+	}
+	return processArgsFromPS(pid, processArgsPSTimeout)
+}
+
+func processArgsFromProc(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("invalid pid %d", pid)
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return "", err
+	}
+	args := strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+	if args == "" {
+		return "", fmt.Errorf("empty cmdline for pid %d", pid)
+	}
+	return args, nil
+}
+
+func processArgsFromPS(pid int, timeout time.Duration) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("invalid pid %d", pid)
+	}
+	if timeout <= 0 {
+		timeout = processArgsPSTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=")
+	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("ps args for pid %d: %w", pid, ctx.Err())
+	}
 	if err != nil {
 		return "", err
 	}
