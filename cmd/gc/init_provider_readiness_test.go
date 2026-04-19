@@ -752,14 +752,6 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_DOLT", "")
-	spyDir := t.TempDir()
-	callLog := filepath.Join(spyDir, "gc-beads-bd.calls")
-	spy := filepath.Join(spyDir, "gc-beads-bd")
-	scriptBody := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\nexit 0\n", callLog)
-	if err := os.WriteFile(spy, []byte(scriptBody), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_BEADS", "exec:"+spy)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -770,6 +762,15 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
+
+	spyDir := t.TempDir()
+	callLog := filepath.Join(spyDir, "gc-beads-bd.calls")
+	spy := filepath.Join(spyDir, "gc-beads-bd")
+	scriptBody := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\nexit 0\n", callLog)
+	if err := os.WriteFile(spy, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+spy)
 
 	oldProbe := initProbeProvidersReadiness
 	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
