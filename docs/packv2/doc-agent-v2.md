@@ -478,7 +478,7 @@ A rig patch can undo a city-level patch for that one rig.
 ## Scope and impact
 
 - **Breaking:** `[[agent]]` tables move to `agents/` directories. Migration tooling needed.
-- **Config:** city.toml gains `[agents]` defaults section, loses `[[agent]]` tables. `agent.toml` is new per-agent.
+- **Config:** city.toml gains `[agent_defaults]` defaults section, loses `[[agent]]` tables. `agent.toml` is new per-agent.
 - **Prompts:** `.template.md` infix becomes required for template processing. Existing `.md` prompts using `{{` need renaming to `.template.md`.
 - **New features:** Skills, MCP TOML abstraction, `per-provider/` overlays, `template-fragments/` convention, `patches/` directory.
 - **Naming:** Current `[[rigs.overrides]]` renamed to `[[rigs.patches]]` for consistency with `[[patches.agent]]`.

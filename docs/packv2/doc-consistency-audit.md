@@ -3,12 +3,14 @@
 > **Status: Retired.** All findings have been folded into the canonical spec docs:
 > - Orders → top-level `orders/` (doc-directory-conventions.md, doc-pack-v2.md, doc-loader-v2.md)
 > - `[formulas].dir` → fixed convention (doc-directory-conventions.md, doc-pack-v2.md)
-> - `[agents]` alias → `[agent_defaults]` canonical (doc-agent-v2.md)
+> - Pack/city agent defaults use `[agent_defaults]` (doc-agent-v2.md)
 > - `overlay/` (singular) → implementation cleanup
 > - Fallback agents → moot (fallback removed in V2)
 > - Doctor/commands → convention-based dirs (doc-commands.md, doc-directory-conventions.md)
 >
-> This file is kept for historical reference only. Do not update it.
+> This file is kept for historical reference only. The historical content below has
+> been lightly normalized to use the current `[agent_defaults]` terminology so the
+> retired audit does not keep teaching the superseded temporary alias.
 
 # Original Audit (historical)
 
@@ -63,7 +65,7 @@ These are single-instance settings. Pure TOML is the right pattern — no issues
 |---|---|
 | `[pack]` | Pack name, schema version, requirements |
 | `[global]` | Pack-wide session_live commands |
-| `[agents]` (v.next) | Pack-wide agent defaults |
+| `[agent_defaults]` (v.next) | Pack-wide agent defaults |
 
 No issues — these are metadata.
 
