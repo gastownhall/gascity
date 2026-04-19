@@ -17,6 +17,7 @@ import (
 
 func TestFormulaListReturnsCatalogSummaries(t *testing.T) {
 	state := newFakeState(t)
+	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 

@@ -408,7 +408,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
 		p.cityPath,
-		p.cityName,
 		mcpCity,
 		cfgAgent,
 		qualifiedName,

@@ -15,11 +15,15 @@ import (
 
 var validMCPServerName = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+// MCPTransport identifies the neutral transport type supported by the MCP
+// catalog and provider projections.
 type MCPTransport string
 
 const (
+	// MCPTransportStdio is a stdio-launched MCP server.
 	MCPTransportStdio MCPTransport = "stdio"
-	MCPTransportHTTP  MCPTransport = "http"
+	// MCPTransportHTTP is a streamable HTTP MCP server.
+	MCPTransportHTTP MCPTransport = "http"
 )
 
 // MCPServer is the canonical neutral MCP model after parsing,
