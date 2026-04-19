@@ -74,11 +74,8 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 	}
 }
 
-func shouldEmitLoadCityConfigWarning(warning string) bool {
+func isNonFatalLoadConfigWarning(warning string) bool {
 	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
-		return true
-	}
-	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
 		return true
 	}
 	if strings.Contains(warning, "attachment-list fields") {
@@ -90,18 +87,42 @@ func shouldEmitLoadCityConfigWarning(warning string) bool {
 	return strings.Contains(warning, `"agent_defaults.`) || strings.Contains(warning, `"agents.`)
 }
 
+func shouldEmitLoadCityConfigWarning(warning string) bool {
+	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
+		return true
+	}
+	return isNonFatalLoadConfigWarning(warning)
+}
+
 func strictFatalLoadConfigWarnings(warnings []string) []string {
 	if len(warnings) == 0 {
 		return nil
 	}
 	var fatal []string
 	for _, warning := range warnings {
-		if shouldEmitLoadCityConfigWarning(warning) {
+		if isNonFatalLoadConfigWarning(warning) {
 			continue
 		}
 		fatal = append(fatal, warning)
 	}
 	return fatal
+}
+
+func emitNonFatalLoadConfigWarnings(w io.Writer, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !isNonFatalLoadConfigWarning(warning) {
+			continue
+		}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+	}
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include

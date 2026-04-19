@@ -200,6 +200,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 		Warnings: []string{
 			`workspace.name redefined by "/city/defaults.toml"`,
 			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
 			`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
 			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
 		},
@@ -212,6 +213,9 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	if !strings.Contains(output, `[agents] is a deprecated compatibility alias for [agent_defaults]`) {
 		t.Fatalf("expected alias warning, got %q", output)
 	}
+	if !strings.Contains(output, `both [agent_defaults] and [agents] are present`) {
+		t.Fatalf("expected mixed-table warning, got %q", output)
+	}
 	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
 		t.Fatalf("expected unsupported-key warning, got %q", output)
 	}
@@ -223,16 +227,20 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 func TestStrictFatalLoadConfigWarningsExcludesMigrationWarnings(t *testing.T) {
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
 		`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
 		`workspace.name redefined by "/city/defaults.toml"`,
 	}
 
 	got := strictFatalLoadConfigWarnings(warnings)
-	if len(got) != 1 {
-		t.Fatalf("strictFatalLoadConfigWarnings len = %d, want 1; got=%q", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("strictFatalLoadConfigWarnings len = %d, want 2; got=%q", len(got), got)
 	}
-	if got[0] != `workspace.name redefined by "/city/defaults.toml"` {
-		t.Fatalf("strictFatalLoadConfigWarnings = %q, want non-migration warning only", got)
+	if got[0] != `/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps` {
+		t.Fatalf("strictFatalLoadConfigWarnings[0] = %q, want mixed-table warning", got[0])
+	}
+	if got[1] != `workspace.name redefined by "/city/defaults.toml"` {
+		t.Fatalf("strictFatalLoadConfigWarnings[1] = %q, want non-migration warning", got[1])
 	}
 }
 

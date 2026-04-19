@@ -395,6 +395,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Strict mode promotes composition warnings to errors, but migration and
 	// deprecation warnings remain soft so legacy compatibility paths still boot.
 	if fatalWarnings := strictFatalLoadConfigWarnings(prov.Warnings); strictMode && len(fatalWarnings) > 0 {
+		emitNonFatalLoadConfigWarnings(stderr, prov)
 		for _, w := range fatalWarnings {
 			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
 		}

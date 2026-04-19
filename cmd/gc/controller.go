@@ -366,6 +366,7 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 	}
 	applyFeatureFlags(newCfg)
 	if fatalWarnings := strictFatalLoadConfigWarnings(prov.Warnings); strictMode && len(fatalWarnings) > 0 {
+		emitNonFatalLoadConfigWarnings(stderr, prov)
 		for _, w := range fatalWarnings {
 			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
