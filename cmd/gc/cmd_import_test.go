@@ -793,7 +793,7 @@ version = "^1.0"
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
-	syncImports = func(_ string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
 			Packs: map[string]packman.LockedPack{
