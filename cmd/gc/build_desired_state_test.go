@@ -2159,10 +2159,10 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 // paths in buildDesiredState. Different paths (rediscovery, store-backed
 // dependency-floor, realizePoolDesiredSessions) were feeding the same
 // session bead through resolveTemplate with either the base qualified
-// name or a deep-copied instance-agent qualified name. GC_ALIAS is part
-// of the CoreFingerprint allow-list, so the resulting fingerprint flipped
-// every tick and the reconciler drained the live session as config drift.
-// See PR #833.
+// name or a deep-copied instance-agent qualified name. Before GC_ALIAS
+// was excluded from CoreFingerprint, that identity mismatch flipped the
+// fingerprint every tick and the reconciler drained the live session as
+// config drift. See PRs #833 and #869.
 //
 // Pool-instance agents with a stamped pool_slot must resolve to the
 // instance identity; named beads must resolve to the named identity;
@@ -2304,11 +2304,12 @@ func TestSessionBeadConfigAgent_UsesMultipleSessionShapeForMaxZero(t *testing.T)
 // the store-backed dependency-floor path used the base agent identity
 // ("rig/db") while the no-store path used the pool-instance identity
 // ("rig/db-1"). Both paths build FingerprintExtra from their agent and
-// feed qualifiedName into resolveTemplate → GC_ALIAS. GC_ALIAS is part
-// of CoreFingerprint. If a live dep-floor session ever had its bead
-// touched by both code paths, or the system transitioned from no-store
-// to store-backed mid-lifetime, the divergent shape drove the reconciler
-// to declare config drift and drain.
+// feed qualifiedName into resolveTemplate. If a live dep-floor session
+// ever had its bead touched by both code paths, or the system transitioned
+// from no-store to store-backed mid-lifetime, the divergent shape drove
+// the reconciler to declare config drift and drain. GC_ALIAS is no longer
+// a fingerprint input, but the canonicalization still protects the
+// remaining identity-sensitive inputs and runtime-visible identity.
 //
 // The fix canonicalizes the store-backed path onto instance identity to
 // match the no-store branch and realizePoolDesiredSessions. This test
@@ -2395,10 +2396,10 @@ func TestEnsureDependencyOnlyTemplate_StoreBackedUsesInstanceIdentity(t *testing
 // TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 // is the round-trip regression for PR #833's canonicalization. It locks in the
 // actual invariant the fix promises: a pool-managed session bead produces the
-// same CoreFingerprint-contributing (GC_ALIAS, GC_TEMPLATE, FingerprintExtra)
-// triple whether it is resolved through realizePoolDesiredSessions or through
-// canonicalSessionIdentity (the shared helper rediscovery and the store-backed
-// dependency-floor path both use).
+// same identity shape and same CoreFingerprint-contributing (GC_TEMPLATE,
+// FingerprintExtra) pair whether it is resolved through realizePoolDesiredSessions
+// or through canonicalSessionIdentity (the shared helper rediscovery and the
+// store-backed dependency-floor path both use).
 //
 // Catching a regression here matters because the drift bug was silent — the
 // reconciler just drained live sessions every other tick. If a future change
@@ -2473,7 +2474,7 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 	}
 
 	if realizeAlias := realizeTP.Env["GC_ALIAS"]; realizeAlias != helperQN {
-		t.Fatalf("realize GC_ALIAS = %q, canonical helper qn = %q — divergence will oscillate CoreFingerprint across rediscovery/realize",
+		t.Fatalf("realize GC_ALIAS = %q, canonical helper qn = %q — runtime identity diverged across rediscovery/realize",
 			realizeAlias, helperQN)
 	}
 	if want := "gascity/dog"; realizeTP.Env["GC_TEMPLATE"] != want {

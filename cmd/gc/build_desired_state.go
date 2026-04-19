@@ -685,13 +685,14 @@ func discoverSessionBeadsWithRoots(
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
 		} else {
 			// Canonicalize agent identity before calling resolveTemplate so a
-			// pool-managed bead with pool_slot stamped fingerprints as the
+			// pool-managed bead with pool_slot stamped resolves as the
 			// pool-instance form here — the same shape realizePoolDesiredSessions
-			// uses. Without this, GC_ALIAS (part of CoreFingerprint) would read
-			// as the base "rig/dog" in rediscovery and "rig/dog-1" in realize on
-			// the next tick, and the reconciler would declare config drift and
-			// drain the live session. Named beads intentionally pass through
-			// with the base shape (see canonicalSessionIdentity).
+			// uses. Before GC_ALIAS was excluded from CoreFingerprint, this
+			// identity mismatch caused config-drift drains; the canonical shape
+			// still keeps routing/display identity and remaining fingerprint
+			// inputs aligned across buildDesiredState paths. Named beads
+			// intentionally pass through with the base shape (see
+			// canonicalSessionIdentity).
 			resolveAgent, sessionQualifiedName = canonicalSessionIdentity(cfgAgent, b)
 		}
 		fpExtra := buildFingerprintExtra(resolveAgent)
