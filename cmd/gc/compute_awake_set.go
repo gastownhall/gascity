@@ -62,6 +62,7 @@ type AwakeSessionBead struct {
 	HeldUntil        time.Time // zero = not held
 	QuarantinedUntil time.Time // zero = not quarantined
 	IdleSince        time.Time // zero = unknown/not idle
+	BackendReady     bool      // true when an external backend is hot/healthy
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -281,6 +282,17 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				decision.ShouldWake = true
 				decision.Reason = "pin"
 			}
+		}
+
+		// On-demand hot-idle annotation — when an on-demand session is
+		// not awake and not running but its external backend is healthy,
+		// annotate the decision so operators can distinguish "hot but
+		// idle" from "cold" or "broken". This does NOT wake the session;
+		// it only sets the reason for observability (dashboard, status).
+		if !decision.ShouldWake && !bead.Drained && !bead.WaitHold &&
+			bead.BackendReady && !input.RunningSessions[name] &&
+			isOnDemandSession(input.NamedSessions, bead) {
+			decision.Reason = "on-demand:hot-idle"
 		}
 
 		// Idle sleep: desired sessions idle too long should sleep.

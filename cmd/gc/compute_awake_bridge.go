@@ -98,6 +98,7 @@ func buildAwakeInputFromReconciler(
 			Pinned:         lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:        lifecycle.BaseState == session.BaseStateDrained,
 			WaitHold:       b.Metadata["wait_hold"] == "true",
+			BackendReady:   b.Metadata["backend_ready"] == "true",
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
