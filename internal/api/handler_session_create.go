@@ -128,40 +128,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge explicit options with provider effective defaults.
-	// User-specified options override defaults; unspecified options get the
-	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
-	command := firstNonEmptyString(resolved.CommandString(), resolved.Name)
-	if len(resolved.OptionsSchema) > 0 {
-		mergedOptions := make(map[string]string)
-		for k, v := range resolved.EffectiveDefaults {
-			mergedOptions[k] = v
-		}
-		for k, v := range body.Options {
-			mergedOptions[k] = v
-		}
-		if mergedArgs, err := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); err == nil && len(mergedArgs) > 0 {
-			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
-		}
-	}
+	command := sessionCreateAgentCommand(resolved)
 
 	// Build template_overrides metadata. Includes schema overrides AND
 	// the initial message (as "initial_message" key). The reconciler
 	// handles both: schema overrides map to CLI flags, initial_message
 	// is appended to the prompt on first start only.
-	allOverrides := make(map[string]string)
-	for k, v := range body.Options {
-		allOverrides[k] = v
-	}
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		allOverrides["initial_message"] = msg
-	}
-	var extraMeta map[string]string
-	if len(allOverrides) > 0 {
-		if overridesJSON, jsonErr := json.Marshal(allOverrides); jsonErr == nil {
-			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
-		}
-	}
+	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
 	if extraMeta == nil {
 		extraMeta = make(map[string]string)
 	}
@@ -353,9 +326,15 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	if msg := strings.TrimSpace(body.Message); msg != "" {
 		if _, sendErr := s.submitMessageToSession(r.Context(), store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
+			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
+			if rollbackErr != nil {
+				writeError(w, http.StatusInternalServerError, "message_delivery_failed",
+					fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "message_delivery_failed",
-				fmt.Sprintf("session created but initial message failed: %v", sendErr))
+				fmt.Sprintf("initial message delivery failed: %v", sendErr))
 			return
 		}
 	}
@@ -373,6 +352,41 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	statusCode := http.StatusCreated
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
 	writeJSON(w, statusCode, resp)
+}
+
+func sessionCreateAgentCommand(resolved *config.ResolvedProvider) string {
+	return firstNonEmptyString(resolved.CommandString(), resolved.Name)
+}
+
+func sessionTemplateOverridesMetadata(options map[string]string, message string) map[string]string {
+	allOverrides := make(map[string]string, len(options)+1)
+	for k, v := range options {
+		allOverrides[k] = v
+	}
+	if msg := strings.TrimSpace(message); msg != "" {
+		allOverrides["initial_message"] = msg
+	}
+	if len(allOverrides) == 0 {
+		return nil
+	}
+	overridesJSON, err := json.Marshal(allOverrides)
+	if err != nil {
+		return nil
+	}
+	return map[string]string{"template_overrides": string(overridesJSON)}
+}
+
+func (s *Server) rollbackCreatedSession(store beads.Store, sessionID string) error {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	if err := s.sessionManager(store).Close(sessionID); err != nil {
+		return fmt.Errorf("close created session: %w", err)
+	}
+	if err := store.Delete(sessionID); err != nil {
+		return fmt.Errorf("delete created session bead: %w", err)
+	}
+	return nil
 }
 
 // persistSessionMeta writes option metadata and project_id to the session bead.

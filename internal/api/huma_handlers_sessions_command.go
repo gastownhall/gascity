@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -107,33 +106,8 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	command := resolved.CommandString()
-	if len(resolved.OptionsSchema) > 0 {
-		mergedOptions := make(map[string]string)
-		for k, v := range resolved.EffectiveDefaults {
-			mergedOptions[k] = v
-		}
-		for k, v := range body.Options {
-			mergedOptions[k] = v
-		}
-		if mergedArgs, mergeErr := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); mergeErr == nil && len(mergedArgs) > 0 {
-			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
-		}
-	}
-
-	allOverrides := make(map[string]string)
-	for k, v := range body.Options {
-		allOverrides[k] = v
-	}
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		allOverrides["initial_message"] = msg
-	}
-	var extraMeta map[string]string
-	if len(allOverrides) > 0 {
-		if overridesJSON, jsonErr := json.Marshal(allOverrides); jsonErr == nil {
-			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
-		}
-	}
+	command := sessionCreateAgentCommand(resolved)
+	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
 
 	mgr := s.sessionManager(store)
 	var info session.Info
@@ -305,8 +279,12 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 	if msg := strings.TrimSpace(body.Message); msg != "" {
 		if _, sendErr := s.submitMessageToSession(ctx, store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
+			if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
+				return nil, huma.Error500InternalServerError(
+					fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
+			}
 			return nil, huma.Error500InternalServerError(
-				fmt.Sprintf("session created but initial message failed: %v", sendErr))
+				fmt.Sprintf("initial message delivery failed: %v", sendErr))
 		}
 	}
 

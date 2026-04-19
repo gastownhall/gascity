@@ -61,6 +61,21 @@ func (p *cancelStartProvider) Start(ctx context.Context, name string, cfg runtim
 	return p.Fake.Start(ctx, name, cfg)
 }
 
+type failNudgeProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *failNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if err := p.Fake.Nudge(name, content); err != nil {
+		return err
+	}
+	if p.err != nil {
+		return p.err
+	}
+	return nil
+}
+
 type stateWithSessionProvider struct {
 	*fakeState
 	provider runtime.Provider
@@ -1293,6 +1308,60 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 	}
 }
 
+func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *testing.T) {
+	fs := newSessionFakeState(t)
+	provider := &failNudgeProvider{Fake: runtime.NewFake(), err: errors.New("nudge failed")}
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	srv := New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
+
+	body := `{"kind":"provider","name":"test-agent","message":"hello","title":"Retryable"}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "provider-create-rollback")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "initial message delivery failed") {
+		t.Fatalf("first create body = %q, want initial message delivery failure detail", rec.Body.String())
+	}
+
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("session bead count after rollback = %d, want 0", len(items))
+	}
+	running, err := provider.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(running) != 0 {
+		t.Fatalf("running sessions after rollback = %v, want none", running)
+	}
+
+	provider.err = nil
+	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "provider-create-rollback")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("retry create status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	items, err = fs.cityBeadStore.ListByLabel(session.LabelSession, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel after retry: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("session bead count after retry = %d, want 1", len(items))
+	}
+}
+
 func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1494,7 +1563,7 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 	return fs
 }
 
-func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
+func TestHandleSessionCreateDoesNotApplyProviderDefaultsToAgentCommand(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -1519,15 +1588,15 @@ func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if !strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should contain --skip-permissions from provider default permission_mode=unrestricted", cmd)
+	if strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should not contain provider default flags for deferred agent create", cmd)
 	}
-	if !strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should contain --effort max from provider default effort=max", cmd)
+	if strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should not contain provider default effort=max for deferred agent create", cmd)
 	}
 }
 
-func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
+func TestHandleSessionCreateStoresExplicitOverridesWithoutCommandRewrite(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -1552,18 +1621,26 @@ func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if !strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should contain --skip-permissions from unspecified default permission_mode=unrestricted", cmd)
+	if strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort high") || strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should not be rewritten from provider defaults or explicit overrides", cmd)
 	}
-	if !strings.Contains(cmd, "--effort high") {
-		t.Errorf("command %q should contain --effort high from explicit option", cmd)
+	ovr := b.Metadata["template_overrides"]
+	if ovr == "" {
+		t.Fatal("template_overrides not set")
 	}
-	if strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should NOT contain --effort max — user specified high", cmd)
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(ovr), &parsed); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if parsed["effort"] != "high" {
+		t.Errorf("effort = %q, want %q", parsed["effort"], "high")
+	}
+	if _, ok := parsed["permission_mode"]; ok {
+		t.Errorf("permission_mode override unexpectedly present: %#v", parsed)
 	}
 }
 
-func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
+func TestHandleSessionCreatePersistsExplicitOptionsInTemplateOverrides(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -1588,14 +1665,22 @@ func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if !strings.Contains(cmd, "--permission-mode plan") {
-		t.Errorf("command %q should contain --permission-mode plan from explicit option", cmd)
+	if strings.Contains(cmd, "--permission-mode plan") || strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort low") {
+		t.Errorf("command %q should not be rewritten from explicit overrides", cmd)
 	}
-	if strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should NOT contain --skip-permissions — user specified plan", cmd)
+	ovr := b.Metadata["template_overrides"]
+	if ovr == "" {
+		t.Fatal("template_overrides not set")
 	}
-	if !strings.Contains(cmd, "--effort low") {
-		t.Errorf("command %q should contain --effort low from explicit option", cmd)
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(ovr), &parsed); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if parsed["permission_mode"] != "plan" {
+		t.Errorf("permission_mode = %q, want %q", parsed["permission_mode"], "plan")
+	}
+	if parsed["effort"] != "low" {
+		t.Errorf("effort = %q, want %q", parsed["effort"], "low")
 	}
 }
 
