@@ -300,10 +300,10 @@ name = "test-city"
 
 func TestLoadCityConfigFSAppliesFeatureFlags(t *testing.T) {
 	oldFormulaV2 := formula.IsFormulaV2Enabled()
-	oldGraphApply := molecule.GraphApplyEnabled
+	oldGraphApply := molecule.IsGraphApplyEnabled()
 	t.Cleanup(func() {
 		formula.SetFormulaV2Enabled(oldFormulaV2)
-		molecule.GraphApplyEnabled = oldGraphApply
+		molecule.SetGraphApplyEnabled(oldGraphApply)
 	})
 
 	fs := fsys.NewFake()
@@ -324,7 +324,7 @@ formula_v2 = true
 	if !formula.IsFormulaV2Enabled() {
 		t.Fatalf("formula.IsFormulaV2Enabled() = false, want true")
 	}
-	if !molecule.GraphApplyEnabled {
-		t.Fatalf("molecule.GraphApplyEnabled = false, want true")
+	if !molecule.IsGraphApplyEnabled() {
+		t.Fatalf("molecule.IsGraphApplyEnabled() = false, want true")
 	}
 }
