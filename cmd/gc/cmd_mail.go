@@ -159,7 +159,7 @@ $GC_SESSION_ID, or "human".`,
 func cmdMailCheck(args []string, inject bool, stdout, stderr io.Writer) int {
 	// Check city-level suspension before opening the store.
 	if cityPath, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cityPath); err == nil {
+		if cfg, err := loadCityConfig(cityPath, stderr); err == nil {
 			if citySuspended(cfg) {
 				if inject {
 					return 0
@@ -390,7 +390,7 @@ func configuredMailboxAddress(identifier string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return "", false
 	}
@@ -851,7 +851,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 	)
 	cityPath, err := resolveCity()
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 		store, err = openCityStoreAt(cityPath)
 	}
 	if err != nil && !strings.HasPrefix(mailProviderName(), "exec:") {
@@ -1162,7 +1162,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			cfg, _ := loadCityConfig(cityPath)
+			cfg, _ := loadCityConfig(cityPath, stderr)
 			resolved, err := resolveMailIdentityWithConfig(cityPath, cfg, store, sender)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc mail reply: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
