@@ -235,7 +235,7 @@ func collectPackDirs(cfg *config.City) []string {
 // backfillRigIndex registers all rigs from the given city in the global
 // rig index and writes GT_ROOT to each rig's .beads/.env.
 func backfillRigIndex(cityPath string) error {
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return err
 	}

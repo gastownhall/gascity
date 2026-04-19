@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -42,8 +43,8 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 	}, nil
 }
 
-func resolveSessionRuntimeTarget(identifier string) (sessionRuntimeTarget, error) {
-	target, err := resolveNudgeTarget(identifier)
+func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) (sessionRuntimeTarget, error) {
+	target, err := resolveNudgeTarget(identifier, warningWriter...)
 	if err != nil {
 		return sessionRuntimeTarget{}, err
 	}

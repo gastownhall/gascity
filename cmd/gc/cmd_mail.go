@@ -28,7 +28,7 @@ type nudgeFunc func(recipient string) error
 
 func newMailNudgeFunc(sender string) nudgeFunc {
 	return func(recipient string) error {
-		target, err := resolveNudgeTarget(recipient)
+		target, err := resolveNudgeTarget(recipient, io.Discard)
 		if err != nil {
 			return err
 		}
