@@ -270,6 +270,10 @@ func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileC
 				msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
 				fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
 			}
+			// One command per connection — return explicitly instead of
+			// falling through to scanner.Scan() again. The read deadline
+			// would close us anyway, but this makes the contract explicit.
+			return
 		case "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck
 		case "reload":
@@ -431,8 +435,10 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 	case errors.Is(statusErr, io.EOF):
 		// Older supervisor — no done:* line. Fall through to polling.
 	default:
-		// Likely i/o deadline hit. Poll once more to see if the supervisor
-		// is already gone; if not, report the original timeout.
+		// Likely i/o deadline hit on ReadString. The absolute deadline is
+		// already consumed, so the fall-through waitForSupervisorExitUntil
+		// will surface the timeout error directly — there is no additional
+		// budget to retry the probe.
 	}
 
 	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
@@ -443,19 +449,17 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 	return 0
 }
 
-// waitForSupervisorExit polls the supervisor socket until it stops answering
-// (i.e., supervisorAliveAtPath returns 0), or until timeout elapses.
-func waitForSupervisorExit(sockPath string, timeout time.Duration) error {
-	return waitForSupervisorExitUntil(sockPath, time.Now().Add(timeout))
-}
-
-// waitForSupervisorExitUntil is waitForSupervisorExit with an explicit
-// absolute deadline. Each probe is capped to the remaining budget so a
-// half-open socket cannot stretch the total wait past the deadline.
+// waitForSupervisorExitUntil polls the supervisor socket until it stops
+// answering (i.e., supervisorAliveAtPathUntil returns 0), or until the
+// absolute deadline elapses. Each probe is capped to the remaining budget
+// so a half-open socket cannot stretch the total wait past the deadline.
+// The original total budget is reconstructed for the timeout error so
+// operators can see which budget was exhausted in CI logs.
 func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
+	startBudget := time.Until(deadline)
 	for {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for supervisor at %s to exit", sockPath)
+			return fmt.Errorf("timed out after %s waiting for supervisor at %s to exit", startBudget, sockPath)
 		}
 		if supervisorAliveAtPathUntil(sockPath, deadline) == 0 {
 			return nil

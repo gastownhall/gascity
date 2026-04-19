@@ -1091,7 +1091,7 @@ func TestStopSupervisorWithWaitPropagatesDoneErr(t *testing.T) {
 				case "ping":
 					io.WriteString(conn, "4242\n") //nolint:errcheck
 				case "stop":
-					io.WriteString(conn, "ok\n")                                                //nolint:errcheck
+					io.WriteString(conn, "ok\n")                                             //nolint:errcheck
 					io.WriteString(conn, "done:err:city \"alpha\" did not exit within 5s\n") //nolint:errcheck
 				}
 			}(conn)
