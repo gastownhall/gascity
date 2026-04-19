@@ -300,7 +300,7 @@ Import defines a named import of another pack.
 | `source` | string | **yes** |  | Source is the pack location: a local relative path (e.g., "./assets/imports/gastown") or a remote URL (e.g., "github.com/gastownhall/gastown"). Local paths have no version. |
 | `version` | string |  |  | Version is a semver constraint for remote imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" for commit pinning. |
 | `export` | boolean |  |  | Export re-exports this import's contents into the parent pack's namespace. Consumers of the parent get this import's agents flattened under the parent's binding name. |
-| `transitive` | boolean |  |  | Transitive controls whether this import's own transitive pack dependencies are visible to the consumer. Defaults to true (transitive). Set to false to keep only content defined directly in the imported pack, suppressing nested dependencies reached through either [imports] or legacy [pack].includes. |
+| `transitive` | boolean |  |  | Transitive controls whether this import's own imports are visible to the consumer. Defaults to true (transitive). Set to false to suppress transitive resolution for this specific import. |
 | `shadow` | string |  |  | Shadow controls shadow warnings when the importer defines an agent with the same name as one from this import. "warn" (default) emits a warning; "silent" suppresses it. Enum: `warn`, `silent` |
 
 ## K8sConfig

@@ -219,6 +219,106 @@ scope = "city"
 	}
 }
 
+func TestImport_RigImportTransitiveFalseSuppressesNestedDeps(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.tools]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[[agent]]
+name = "direct"
+scope = "rig"
+
+[[named_session]]
+template = "direct"
+scope = "rig"
+mode = "always"
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "doctor/direct-check/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[[agent]]
+name = "nested"
+scope = "rig"
+
+[[named_session]]
+template = "nested"
+scope = "rig"
+mode = "always"
+
+[[service]]
+name = "nested-webhook"
+kind = "workflow"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "doctor/nested-check/run.sh", "#!/bin/sh\nexit 0\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	foundAgents := map[string]bool{}
+	for _, agent := range cfg.Agents {
+		foundAgents[agent.QualifiedName()] = true
+	}
+	if !foundAgents["proj/tools.direct"] {
+		t.Fatalf("expected direct rig agent from b; got %v", foundAgents)
+	}
+	for qn := range foundAgents {
+		if strings.Contains(qn, "nested") {
+			t.Fatalf("transitive=false should block nested rig agents; got %v", foundAgents)
+		}
+	}
+
+	foundSessions := map[string]bool{}
+	for _, named := range cfg.NamedSessions {
+		foundSessions[named.QualifiedName()] = true
+	}
+	if !foundSessions["proj/tools.direct"] {
+		t.Fatalf("expected direct rig named session from b; got %v", foundSessions)
+	}
+	for qn := range foundSessions {
+		if strings.Contains(qn, "nested") {
+			t.Fatalf("transitive=false should block nested rig named sessions; got %v", foundSessions)
+		}
+	}
+
+	foundDoctors := map[string]bool{}
+	for _, doctor := range cfg.PackDoctors {
+		foundDoctors[doctor.Name] = true
+	}
+	if !foundDoctors["direct-check"] {
+		t.Fatalf("expected direct rig import doctor from b; got %v", foundDoctors)
+	}
+	if foundDoctors["nested-check"] {
+		t.Fatalf("transitive=false should block nested rig import doctors; got %v", foundDoctors)
+	}
+}
+
 func TestImport_InvalidPackSchemaInCityPackToml(t *testing.T) {
 	// A city pack.toml with invalid schema should produce a clear error.
 	dir := t.TempDir()

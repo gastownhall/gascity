@@ -198,17 +198,11 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
 				warnings := cachedPackWarnings(cache, impDir)
-				if !imp.ImportIsTransitive() {
-					warnings = cachedPackLocalWarnings(cache, impDir)
-				}
-				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, warnings...)
-				if len(services) > 0 {
-					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
-				}
 				commands := cachedPackCommands(cache, impDir)
 				doctors := cachedPackDoctors(cache, impDir)
 				skills := cachedPackSkills(cache, impDir)
 				if !imp.ImportIsTransitive() {
+					warnings = cachedPackLocalWarnings(cache, impDir)
 					absImpDir, _ := filepath.Abs(impDir)
 					var direct []Agent
 					for _, a := range agents {
@@ -218,9 +212,15 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 						}
 					}
 					agents = direct
+					namedSessions = filterNamedSessionsBySourceDir(namedSessions, impDir)
+					services = filterServicesBySourceDir(services, impDir)
 					commands = filterCommandsByPackDir(commands, impDir)
 					doctors = filterDoctorsByPackDir(doctors, impDir)
 					skills = filterSkillsByPackDir(skills, impDir)
+				}
+				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, warnings...)
+				if len(services) > 0 {
+					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
 				}
 				rigGlobals = append(rigGlobals, globals...)
 				if cfg.RigPackSkills == nil {
@@ -1709,6 +1709,18 @@ func filterCommandsByPackDir(commands []DiscoveredCommand, packDir string) []Dis
 		absDir, _ := filepath.Abs(cmd.PackDir)
 		if absDir == absPackDir {
 			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+func filterServicesBySourceDir(services []Service, sourceDir string) []Service {
+	absSource, _ := filepath.Abs(sourceDir)
+	var out []Service
+	for _, service := range services {
+		absDir, _ := filepath.Abs(service.SourceDir)
+		if absDir == absSource || strings.HasPrefix(absDir, absSource+string(filepath.Separator)) {
+			out = append(out, service)
 		}
 	}
 	return out
