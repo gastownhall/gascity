@@ -44,7 +44,7 @@ func loadSessionProviderContext() sessionProviderContext {
 		providerName: os.Getenv("GC_SESSION"),
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp); err == nil {
+		if cfg, err := loadCityConfig(cp, io.Discard); err == nil {
 			return sessionProviderContextForCity(cfg, cp, ctx.providerName)
 		}
 	}
@@ -411,7 +411,7 @@ func mailProviderName() string {
 		return v
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp); err == nil && cfg.Mail.Provider != "" {
+		if cfg, err := loadCityConfig(cp, io.Discard); err == nil && cfg.Mail.Provider != "" {
 			return cfg.Mail.Provider
 		}
 	}
@@ -464,7 +464,7 @@ func eventsProviderName() string {
 		return v
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp); err == nil && cfg.Events.Provider != "" {
+		if cfg, err := loadCityConfig(cp, io.Discard); err == nil && cfg.Events.Provider != "" {
 			return cfg.Events.Provider
 		}
 	}

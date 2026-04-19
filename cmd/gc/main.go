@@ -531,7 +531,7 @@ func rigFromCwd(cityPath string) string {
 
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
 func rigFromCwdDir(cityPath, cwd string) string {
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return ""
 	}
@@ -573,7 +573,7 @@ func rigCityEntries(reg *supervisor.Registry, rigPath string) []supervisor.CityE
 	}
 	var matched []supervisor.CityEntry
 	for _, c := range cities {
-		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path)
+		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, io.Discard)
 		if err != nil {
 			continue
 		}
@@ -729,7 +729,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 		env := gcExecStoreEnv(runtimeCityPath, target, provider)
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
 			if target.ScopeKind == "rig" {
-				cfg, err := loadCityConfig(runtimeCityPath)
+				cfg, err := loadCityConfig(runtimeCityPath, io.Discard)
 				if err != nil {
 					return nil, err
 				}
@@ -775,7 +775,7 @@ func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		return bdStoreForCity(storePath, cityPath), nil
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}
