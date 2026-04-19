@@ -29,12 +29,13 @@ const initPackSchemaVersion = 2
 const initExitAlreadyInitialized = 2
 
 type initPackMeta struct {
-	Name       string                   `toml:"name"`
-	Version    string                   `toml:"version,omitempty"`
-	Schema     int                      `toml:"schema"`
-	RequiresGC string                   `toml:"requires_gc,omitempty"`
-	Includes   []string                 `toml:"includes,omitempty"`
-	Requires   []config.PackRequirement `toml:"requires,omitempty"`
+	Name        string                   `toml:"name" jsonschema:"required"`
+	Version     string                   `toml:"version"`
+	Schema      int                      `toml:"schema" jsonschema:"required"`
+	Description string                   `toml:"description,omitempty"`
+	RequiresGC  string                   `toml:"requires_gc,omitempty"`
+	Includes    []string                 `toml:"includes,omitempty"`
+	Requires    []config.PackRequirement `toml:"requires,omitempty"`
 }
 
 type packDefaults struct {
@@ -49,19 +50,20 @@ type initPackConfig struct {
 	// Keep this layout in lockstep with internal/config.packConfig so
 	// pack.toml write paths in cmd/gc can round-trip the canonical root
 	// pack shape without dropping supported fields.
-	Pack          initPackMeta                   `toml:"pack"`
-	Imports       map[string]config.Import       `toml:"imports,omitempty"`
-	AgentDefaults config.AgentDefaults           `toml:"agent_defaults,omitempty"`
-	Defaults      packDefaults                   `toml:"defaults,omitempty"`
-	Agents        []config.Agent                 `toml:"agent"`
-	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
-	Services      []config.Service               `toml:"service,omitempty"`
-	Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
-	Formulas      config.FormulasConfig          `toml:"formulas,omitempty"`
-	Patches       config.Patches                 `toml:"patches,omitempty"`
-	Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands      []config.PackCommandEntry      `toml:"commands,omitempty"`
-	Global        config.PackGlobal              `toml:"global,omitempty"`
+	Pack           initPackMeta                   `toml:"pack"`
+	Imports        map[string]config.Import       `toml:"imports,omitempty"`
+	AgentDefaults  config.AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentsDefaults config.AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
+	Defaults       packDefaults                   `toml:"defaults,omitempty"`
+	Agents         []config.Agent                 `toml:"agent"`
+	NamedSessions  []config.NamedSession          `toml:"named_session,omitempty"`
+	Services       []config.Service               `toml:"service,omitempty"`
+	Providers      map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Formulas       config.FormulasConfig          `toml:"formulas,omitempty"`
+	Patches        config.Patches                 `toml:"patches,omitempty"`
+	Doctor         []config.PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands       []config.PackCommandEntry      `toml:"commands,omitempty"`
+	Global         config.PackGlobal              `toml:"global,omitempty"`
 }
 
 var initConventionDirs = []string{
