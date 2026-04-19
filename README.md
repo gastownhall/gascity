@@ -92,7 +92,7 @@ Preview the docs locally:
 ```bash
 make docs-dev
 
-# or from docs/
+# or directly from the repo root
 ./mint.sh dev
 ```
 

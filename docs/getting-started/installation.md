@@ -186,10 +186,10 @@ See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
 
 ## Docs preview
 
-The docs site uses [Mintlify](https://mintlify.com). Preview locally:
+The docs site uses [Mintlify](https://mintlify.com). Preview locally from the
+repo root:
 
 ```bash
-cd docs
 ./mint.sh dev
 ```
 

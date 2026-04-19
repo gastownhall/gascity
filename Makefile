@@ -307,7 +307,7 @@ setup: install-tools
 
 ## docs-dev: run the Mintlify docs locally
 docs-dev:
-	cd docs && ./mint.sh dev
+	./mint.sh dev
 
 ## dashboard-build: regenerate SPA types + compile the dist bundle
 dashboard-build:

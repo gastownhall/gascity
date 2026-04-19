@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-docs_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+docs_dir="$repo_dir/docs"
 args=("$@")
 if [[ ${#args[@]} -eq 0 ]]; then
   args=(dev)
@@ -43,7 +44,7 @@ if node22_bin=$(find_node22_bin); then
   exec npx --yes mint@latest "${args[@]}"
 fi
 
-cat >&2 <<'EOF'
+cat >&2 <<EOF
 Mintlify does not support Node 25+.
 
 Use Node 22 LTS to preview the docs. For example:
@@ -53,6 +54,7 @@ Use Node 22 LTS to preview the docs. For example:
 
 On macOS with Homebrew:
   brew install node@22
+  cd "$repo_dir"
   PATH="/opt/homebrew/opt/node@22/bin:$PATH" ./mint.sh dev
 EOF
 exit 1
