@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
@@ -507,6 +508,15 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// errors are logged inline by runStage1SkillMaterialization
 	// itself; it never returns a non-nil error to its caller.
 	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
+
+	// Stage-1 MCP projection is a hard gate because it mutates the provider's
+	// active runtime config surface. Conflicting shared targets or projection
+	// write failures must block startup before sessions launch against stale or
+	// ambiguous MCP state.
+	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {

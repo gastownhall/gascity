@@ -21,6 +21,7 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 	}
 	cmd.AddCommand(newInternalMaterializeSkillsCmd(stdout, stderr))
+	cmd.AddCommand(newInternalProjectMCPCmd(stdout, stderr))
 	return cmd
 }
 
