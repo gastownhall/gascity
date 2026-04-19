@@ -74,6 +74,10 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 	}
 }
 
+// Alias-only warnings, deferred future-surface keys, and tombstone attachment
+// deprecations stay soft so legacy configs keep booting. A mixed
+// [agent_defaults]/[agents] config remains strict-fatal because overlapping
+// default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
 	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
 		return true

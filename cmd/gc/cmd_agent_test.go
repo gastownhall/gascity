@@ -224,7 +224,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 }
 
-func TestStrictFatalLoadConfigWarningsExcludesMigrationWarnings(t *testing.T) {
+func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T) {
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,

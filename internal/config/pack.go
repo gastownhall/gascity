@@ -165,7 +165,11 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
-				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, cachedPackWarnings(cache, impDir)...)
+				warnings := cachedPackWarnings(cache, impDir)
+				if !imp.ImportIsTransitive() {
+					warnings = cachedPackLocalWarnings(cache, impDir)
+				}
+				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, warnings...)
 				if len(services) > 0 {
 					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
 				}
@@ -462,7 +466,11 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
-			packWarnings = appendUnique(packWarnings, cachedPackWarnings(cache, impDir)...)
+			warnings := cachedPackWarnings(cache, impDir)
+			if !imp.ImportIsTransitive() {
+				warnings = cachedPackLocalWarnings(cache, impDir)
+			}
+			packWarnings = appendUnique(packWarnings, warnings...)
 			commands := cachedPackCommands(cache, impDir)
 			doctors := cachedPackDoctors(cache, impDir)
 
@@ -859,6 +867,7 @@ type packLoadResult struct {
 	globals       []ResolvedPackGlobal
 	commands      []DiscoveredCommand
 	doctors       []DiscoveredDoctor
+	localWarnings []string
 	warnings      []string
 }
 
@@ -1014,7 +1023,11 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
-		inheritedWarnings = appendUnique(inheritedWarnings, cachedPackWarnings(cache, impDir)...)
+		warnings := cachedPackWarnings(cache, impDir)
+		if !imp.ImportIsTransitive() {
+			warnings = cachedPackLocalWarnings(cache, impDir)
+		}
+		inheritedWarnings = appendUnique(inheritedWarnings, warnings...)
 		impCommands := cachedPackCommands(cache, impDir)
 		impDoctors := cachedPackDoctors(cache, impDir)
 
@@ -1262,6 +1275,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		globals:       allGlobals,
 		commands:      includedCommands,
 		doctors:       includedDoctors,
+		localWarnings: append([]string(nil), packWarnings...),
 		warnings:      appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
 	})
 
@@ -1282,6 +1296,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		globals:       deepCopyResolvedPackGlobals(in.globals),
 		commands:      deepCopyCommands(in.commands),
 		doctors:       deepCopyDoctors(in.doctors),
+		localWarnings: append([]string(nil), in.localWarnings...),
 		warnings:      append([]string(nil), in.warnings...),
 	}
 }
@@ -1460,6 +1475,21 @@ func cachedPackWarnings(cache *packLoadCache, topoDir string) []string {
 		return nil
 	}
 	return append([]string(nil), result.warnings...)
+}
+
+func cachedPackLocalWarnings(cache *packLoadCache, topoDir string) []string {
+	if cache == nil {
+		return nil
+	}
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+	result, ok := cache.results[absDir]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), result.localWarnings...)
 }
 
 func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor {

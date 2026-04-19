@@ -392,8 +392,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
-	// Strict mode promotes composition warnings to errors, but migration and
-	// deprecation warnings remain soft so legacy compatibility paths still boot.
+	// Strict mode keeps composition collisions and mixed canonical/compat
+	// default tables fatal. Alias-only, unsupported-key, and deprecation
+	// migration warnings remain soft so legacy compatibility paths still boot.
 	if fatalWarnings := strictFatalLoadConfigWarnings(prov.Warnings); strictMode && len(fatalWarnings) > 0 {
 		emitNonFatalLoadConfigWarnings(stderr, prov)
 		for _, w := range fatalWarnings {
