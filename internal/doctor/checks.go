@@ -157,6 +157,22 @@ func NewConfigRefsCheck(cfg *config.City, cityPath string) *ConfigRefsCheck {
 // Name returns the check identifier.
 func (c *ConfigRefsCheck) Name() string { return "config-refs" }
 
+// resolvePathRef returns the absolute filesystem path for a config
+// reference. Absolute refs pass through unchanged — PackV2's agents/
+// loader and adjustFragmentPath both store convention-derived paths in
+// absolute form. Relative refs are resolved against cityPath.
+//
+// filepath.Join(cityPath, "/abs/path") on Unix produces
+// cityPath + "/" + "/abs/path", which Clean collapses to a nonsense
+// path like "/Users/x/.gc/ws-city/Users/x/.gc/ws-city/...". This
+// helper avoids that by short-circuiting on absolute inputs.
+func resolvePathRef(cityPath, ref string) string {
+	if filepath.IsAbs(ref) {
+		return ref
+	}
+	return filepath.Join(cityPath, ref)
+}
+
 // Run validates that referenced paths exist and provider names are defined.
 func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
@@ -165,19 +181,19 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 	for _, a := range c.cfg.Agents {
 		qn := a.QualifiedName()
 		if a.PromptTemplate != "" {
-			path := filepath.Join(c.cityPath, a.PromptTemplate)
+			path := resolvePathRef(c.cityPath, a.PromptTemplate)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: prompt_template %q not found", qn, a.PromptTemplate))
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := filepath.Join(c.cityPath, a.SessionSetupScript)
+			path := resolvePathRef(c.cityPath, a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, a.SessionSetupScript))
 			}
 		}
 		if a.OverlayDir != "" {
-			path := filepath.Join(c.cityPath, a.OverlayDir)
+			path := resolvePathRef(c.cityPath, a.OverlayDir)
 			if fi, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: overlay_dir %q not found", qn, a.OverlayDir))
 			} else if !fi.IsDir() {

@@ -269,6 +269,77 @@ func TestConfigRefsCheck_MultipleIssues(t *testing.T) {
 	}
 }
 
+// TestConfigRefsCheck_AbsolutePaths verifies that agent refs stored as
+// absolute paths (which PackV2's agents/ loader and adjustFragmentPath
+// produce for convention-derived paths) are checked against the filesystem
+// as-is, not joined to cityPath. filepath.Join(cityPath, absPath) on Unix
+// produces a nonsense path like "cityPath/abs/path" that would always fail
+// os.Stat — so without this handling every PackV2 agent shows as "not found".
+func TestConfigRefsCheck_AbsolutePaths(t *testing.T) {
+	cityDir := t.TempDir()
+	// The actual files live somewhere unrelated to cityDir — simulating a
+	// pack that was resolved to an absolute path pointing inside the city
+	// (or anywhere else the loader might have absolutized to).
+	packDir := t.TempDir()
+	agentDir := filepath.Join(packDir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptPath := filepath.Join(agentDir, "prompt.template.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayPath := filepath.Join(agentDir, "overlay")
+	if err := os.MkdirAll(overlayPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(packDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:               "mayor",
+				PromptTemplate:     promptPath,   // absolute
+				OverlayDir:         overlayPath,  // absolute
+				SessionSetupScript: scriptPath,   // absolute
+			},
+		},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// TestConfigRefsCheck_AbsolutePathMissing verifies that when an absolute
+// ref genuinely does not exist, the check still reports it — ensuring the
+// absolute-path short-circuit doesn't accidentally mask real misconfigs.
+func TestConfigRefsCheck_AbsolutePathMissing(t *testing.T) {
+	cityDir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "does-not-exist", "prompt.template.md")
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", PromptTemplate: missing},
+		},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 {
+		t.Errorf("expected 1 issue, got %d: %v", len(r.Details), r.Details)
+	}
+}
+
 // --- BuiltinPackFamilyCheck ---
 
 func TestBuiltinPackFamilyCheck_Unmodified(t *testing.T) {
