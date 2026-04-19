@@ -200,15 +200,25 @@ func TestDefaultMailIdentityPrefersSessionIDOverGCAgentFallback(t *testing.T) {
 	}
 }
 
-func TestDefaultMailIdentityCandidates_OrdersAliasFirstThenSessionIDThenAgent(t *testing.T) {
+func TestDefaultMailIdentityCandidates_OrdersSessionIDFirstThenAliasThenAgent(t *testing.T) {
 	t.Setenv("GC_ALIAS", "codeprobe-worker-1")
 	t.Setenv("GC_SESSION_ID", "codeprobe-worker-gc-1941")
 	t.Setenv("GC_AGENT", "codeprobe-worker")
 
 	got := defaultMailIdentityCandidates()
-	want := []string{"codeprobe-worker-1", "codeprobe-worker-gc-1941", "codeprobe-worker"}
+	want := []string{"codeprobe-worker-gc-1941", "codeprobe-worker-1", "codeprobe-worker"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("defaultMailIdentityCandidates() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDefaultMailIdentityPrefersSessionIDOverAlias(t *testing.T) {
+	t.Setenv("GC_ALIAS", "public-alias")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", "session-123")
+
+	if got := defaultMailIdentity(); got != "session-123" {
+		t.Fatalf("defaultMailIdentity() = %q, want session-123", got)
 	}
 }
 
@@ -236,13 +246,11 @@ func TestDefaultMailIdentityCandidates_FallsBackToHumanWhenAllEmpty(t *testing.T
 	}
 }
 
-// TestResolveDefaultMailTargetsForCommand_FallsBackToGCSessionIDWhenAliasMissing
-// reproduces a live pool-worker state where GC_ALIAS was set to the
-// pool-instance qualified name (e.g. "codeprobe-worker-1") but the session
-// bead's alias metadata is empty. The bead's session_name matches
-// GC_SESSION_ID. Inbox lookup must succeed via the session_name path rather
-// than failing on the first candidate.
-func TestResolveDefaultMailTargetsForCommand_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
+// TestResolveDefaultMailTargetsForCommand_UsesGCSessionIDBeforeAlias
+// sets up two possible matches: GC_SESSION_ID points at the concrete worker,
+// while GC_ALIAS points at another session. Default mail resolution must choose
+// the concrete session identity first.
+func TestResolveDefaultMailTargetsForCommand_UsesGCSessionIDBeforeAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")
 
@@ -265,7 +273,18 @@ func TestResolveDefaultMailTargetsForCommand_FallsBackToGCSessionIDWhenAliasMiss
 		},
 	})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("Create concrete session: %v", err)
+	}
+	aliasOnly, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "codeprobe-worker-1",
+			"session_name": "stale-alias-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create alias session: %v", err)
 	}
 
 	t.Setenv("GC_ALIAS", "codeprobe-worker-1")
@@ -280,19 +299,22 @@ func TestResolveDefaultMailTargetsForCommand_FallsBackToGCSessionIDWhenAliasMiss
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
 	}
-	foundBeadID := false
+	foundConcrete := false
+	foundAliasOnly := false
 	for _, r := range target.recipients {
 		if r == b.ID {
-			foundBeadID = true
-			break
+			foundConcrete = true
+		}
+		if r == aliasOnly.ID {
+			foundAliasOnly = true
 		}
 	}
-	if !foundBeadID {
-		t.Fatalf("target.recipients = %#v, want to include bead ID %q", target.recipients, b.ID)
+	if !foundConcrete || foundAliasOnly {
+		t.Fatalf("target.recipients = %#v, want concrete bead %q and not alias bead %q", target.recipients, b.ID, aliasOnly.ID)
 	}
 }
 
-func TestResolveDefaultMailTargetsForCommand_UsesGCAliasWhenItResolves(t *testing.T) {
+func TestResolveDefaultMailTargetsForCommand_FallsBackToGCAliasWhenSessionIDMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")
 
@@ -349,8 +371,7 @@ func TestResolveDefaultMailTargetsForCommand_HumanDefaultWhenNoEnv(t *testing.T)
 
 // TestResolveDefaultMailTargetsForCommand_StorelessProviderUsesFirstCandidate
 // confirms the storeless-provider shortcut forwards only candidates[0] —
-// the same identity the old defaultMailIdentity() returned — rather than
-// iterating.
+// the same identity defaultMailIdentity() returns — rather than iterating.
 func TestResolveDefaultMailTargetsForCommand_StorelessProviderUsesFirstCandidate(t *testing.T) {
 	t.Setenv("GC_MAIL", "fake")
 	t.Setenv("GC_ALIAS", "codeprobe-worker-1")
@@ -362,11 +383,11 @@ func TestResolveDefaultMailTargetsForCommand_StorelessProviderUsesFirstCandidate
 	if !ok {
 		t.Fatalf("resolveDefaultMailTargetsForCommand() = not ok; stderr=%q", stderr.String())
 	}
-	if target.display != "codeprobe-worker-1" {
-		t.Fatalf("target.display = %q, want codeprobe-worker-1", target.display)
+	if target.display != "codeprobe-worker-gc-1941" {
+		t.Fatalf("target.display = %q, want codeprobe-worker-gc-1941", target.display)
 	}
-	if len(target.recipients) != 1 || target.recipients[0] != "codeprobe-worker-1" {
-		t.Fatalf("target.recipients = %#v, want [codeprobe-worker-1]", target.recipients)
+	if len(target.recipients) != 1 || target.recipients[0] != "codeprobe-worker-gc-1941" {
+		t.Fatalf("target.recipients = %#v, want [codeprobe-worker-gc-1941]", target.recipients)
 	}
 }
 
@@ -399,8 +420,8 @@ func TestResolveDefaultMailTargetsForCommand_SurfacesAmbiguousError_AndStops(t *
 		}
 	}
 
-	t.Setenv("GC_ALIAS", "ambiguous-target")
-	t.Setenv("GC_SESSION_ID", "would-resolve-if-reached")
+	t.Setenv("GC_SESSION_ID", "ambiguous-target")
+	t.Setenv("GC_ALIAS", "would-resolve-if-reached")
 	_ = os.Unsetenv("GC_AGENT")
 
 	var stderr bytes.Buffer
