@@ -3349,3 +3349,64 @@ func TestFullMetadataPropagationChain(t *testing.T) {
 		t.Fatalf("iteration body review.verdict = %q, want done (propagated from retry member)", iterBodyAfter.Metadata["review.verdict"])
 	}
 }
+
+// TestProcessControlEmitsSkipReasonWhenNotOpen is the regression guard for
+// the 20-minute silent stall on ga-ttn5z. When a rogue worker had flipped
+// a retry-control bead (ga-fw2fm) to status=in_progress, ProcessControl
+// returned {Processed: false} at the very first guard without any trace
+// output. The serve loop upstream traced "serve processed" either way, so
+// nothing in the dispatcher log revealed why the workflow wasn't moving.
+// The fix emits a specific "process-control ... skip reason=bead_not_open"
+// line before the early return.
+func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "rogue in_progress control",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.max_attempts": "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(control.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	control, err = store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("reload control: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	opts := ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&traceBuf, format, args...)
+			traceBuf.WriteByte('\n')
+		},
+	}
+
+	result, err := ProcessControl(store, control, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if result.Processed {
+		t.Fatalf("result.Processed = true, want false when bead is not open")
+	}
+
+	traced := traceBuf.String()
+	if !strings.Contains(traced, "skip reason=bead_not_open") {
+		t.Fatalf("trace missing skip reason; got:\n%s", traced)
+	}
+	if !strings.Contains(traced, control.ID) {
+		t.Fatalf("trace missing control ID %q; got:\n%s", control.ID, traced)
+	}
+	if !strings.Contains(traced, "status=in_progress") {
+		t.Fatalf("trace missing the actual status; got:\n%s", traced)
+	}
+}
