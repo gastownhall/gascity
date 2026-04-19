@@ -458,8 +458,17 @@ func writeInitPackToml(fs fsys.FS, cityPath string, packCfg initPackConfig) erro
 }
 
 func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
+	type encodedInitPackMeta struct {
+		Name        string                   `toml:"name" jsonschema:"required"`
+		Version     string                   `toml:"version,omitempty"`
+		Schema      int                      `toml:"schema" jsonschema:"required"`
+		Description string                   `toml:"description,omitempty"`
+		RequiresGC  string                   `toml:"requires_gc,omitempty"`
+		Includes    []string                 `toml:"includes,omitempty"`
+		Requires    []config.PackRequirement `toml:"requires,omitempty"`
+	}
 	type encodedInitPackConfig struct {
-		Pack          initPackMeta                   `toml:"pack"`
+		Pack          encodedInitPackMeta            `toml:"pack"`
 		Imports       map[string]config.Import       `toml:"imports,omitempty"`
 		AgentDefaults *config.AgentDefaults          `toml:"agent_defaults,omitempty"`
 		Defaults      packDefaults                   `toml:"defaults,omitempty"`
@@ -475,7 +484,15 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 	}
 
 	encCfg := encodedInitPackConfig{
-		Pack:          cfg.Pack,
+		Pack: encodedInitPackMeta{
+			Name:        cfg.Pack.Name,
+			Version:     cfg.Pack.Version,
+			Schema:      cfg.Pack.Schema,
+			Description: cfg.Pack.Description,
+			RequiresGC:  cfg.Pack.RequiresGC,
+			Includes:    cfg.Pack.Includes,
+			Requires:    cfg.Pack.Requires,
+		},
 		Imports:       cfg.Imports,
 		Defaults:      cfg.Defaults,
 		Agents:        cfg.Agents,
