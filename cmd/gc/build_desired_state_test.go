@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -82,41 +83,6 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
-	}
-}
-
-func TestCollectOwnershipWorkBeads_IncludesBlockedOpenAssignedHandoff(t *testing.T) {
-	store := beads.NewMemStore()
-	blocker, err := store.Create(beads.Bead{
-		Title:  "blocker",
-		Type:   "task",
-		Status: "open",
-	})
-	if err != nil {
-		t.Fatalf("create blocker bead: %v", err)
-	}
-	handoff, err := store.Create(beads.Bead{
-		Title:    "merge me later",
-		Type:     "task",
-		Status:   "open",
-		Assignee: "repo/refinery",
-	})
-	if err != nil {
-		t.Fatalf("create handoff bead: %v", err)
-	}
-	if err := store.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
-		t.Fatalf("add blocking dep: %v", err)
-	}
-
-	got, partial := collectOwnershipWorkBeads(&config.City{}, store, nil, nil)
-	if partial {
-		t.Fatal("collectOwnershipWorkBeads unexpectedly reported partial results")
-	}
-	if len(got) != 1 {
-		t.Fatalf("collectOwnershipWorkBeads returned %d beads, want 1: %#v", len(got), got)
-	}
-	if got[0].ID != handoff.ID {
-		t.Fatalf("collectOwnershipWorkBeads returned %q, want %q", got[0].ID, handoff.ID)
 	}
 }
 
@@ -1414,6 +1380,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 		Agents: []config.Agent{{
 			Name:              "worker",
 			BindingName:       "ops",
+			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(2),
 			ScaleCheck:        "printf 1",
@@ -1443,6 +1410,108 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 	}
 	if got.Env["GC_AGENT"] != wantInstance {
 		t.Fatalf("GC_AGENT = %q, want %q", got.Env["GC_AGENT"], wantInstance)
+	}
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "ops.worker-1")
+	if got.WorkDir != wantWorkDir {
+		t.Fatalf("WorkDir = %q, want %q", got.WorkDir, wantWorkDir)
+	}
+}
+
+func TestBuildDesiredState_PendingCreatePoolSessionUsesConcreteBeadIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	workDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-adhoc-abc123")
+	if _, err := store.Create(beads.Bead{
+		Title:  "adhoc ant",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:demo/ant"},
+		Metadata: map[string]string{
+			"template":              "demo/ant",
+			"session_name":          "ant-adhoc-abc123",
+			"session_name_explicit": boolMetadata(true),
+			"agent_name":            "demo/ant-adhoc-abc123",
+			"session_origin":        "manual",
+			"pending_create_claim":  boolMetadata(true),
+			"state":                 "creating",
+			"work_dir":              workDir,
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "ant",
+			Dir:               "demo",
+			Provider:          "test-agent",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	got, ok := dsResult.State["ant-adhoc-abc123"]
+	if !ok {
+		t.Fatalf("desired state missing pending create session: keys=%v", mapKeys(dsResult.State))
+	}
+	if got.TemplateName != "demo/ant" {
+		t.Fatalf("TemplateName = %q, want %q", got.TemplateName, "demo/ant")
+	}
+	if got.InstanceName != "demo/ant-adhoc-abc123" {
+		t.Fatalf("InstanceName = %q, want %q", got.InstanceName, "demo/ant-adhoc-abc123")
+	}
+	if got.WorkDir != workDir {
+		t.Fatalf("WorkDir = %q, want %q", got.WorkDir, workDir)
+	}
+	if got.Env["GC_ALIAS"] != "demo/ant-adhoc-abc123" {
+		t.Fatalf("GC_ALIAS = %q, want %q", got.Env["GC_ALIAS"], "demo/ant-adhoc-abc123")
+	}
+}
+
+func TestBuildDesiredState_LegacyAliaslessEphemeralPoolSessionFallsBackToSessionNameIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy ant",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:demo/ant"},
+		Metadata: map[string]string{
+			"template":       "demo/ant",
+			"agent_name":     "demo/ant",
+			"session_name":   "s-gc-legacy",
+			"session_origin": "ephemeral",
+			"state":          "creating",
+			"work_dir":       filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant"),
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "ant",
+			Dir:               "demo",
+			Provider:          "test-agent",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	got, ok := dsResult.State["s-gc-legacy"]
+	if !ok {
+		t.Fatalf("desired state missing legacy session: keys=%v", mapKeys(dsResult.State))
+	}
+	if got.InstanceName != "demo/s-gc-legacy" {
+		t.Fatalf("InstanceName = %q, want %q", got.InstanceName, "demo/s-gc-legacy")
+	}
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "s-gc-legacy")
+	if got.WorkDir != wantWorkDir {
+		t.Fatalf("WorkDir = %q, want %q", got.WorkDir, wantWorkDir)
 	}
 }
 
@@ -2085,6 +2154,346 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 	}
 }
 
-// PR #216 — skipped for now. Cross-rig pool work visibility is a new
-// feature, not a bug fix. Left as open PR for discussion about the
-// gastown experience with this flow.
+// TestCanonicalSessionIdentity is a regression test for the config-drift
+// oscillation caused by divergent agent-identity resolution across the
+// paths in buildDesiredState. Different paths (rediscovery, store-backed
+// dependency-floor, realizePoolDesiredSessions) were feeding the same
+// session bead through resolveTemplate with either the base qualified
+// name or a deep-copied instance-agent qualified name. GC_ALIAS is part
+// of the CoreFingerprint allow-list, so the resulting fingerprint flipped
+// every tick and the reconciler drained the live session as config drift.
+// See PR #833.
+//
+// Pool-instance agents with a stamped pool_slot must resolve to the
+// instance identity; named beads must resolve to the named identity;
+// everything else falls back to the base qualified name.
+func TestCanonicalSessionIdentity(t *testing.T) {
+	poolAgent := &config.Agent{
+		Name:              "dog",
+		Dir:               "gascity",
+		MinActiveSessions: intPtr(0),
+		// MaxActiveSessions nil = unlimited, which makes SupportsInstanceExpansion true.
+	}
+	singleton := &config.Agent{
+		Name:              "refinery",
+		Dir:               "gascity",
+		MaxActiveSessions: intPtr(1),
+	}
+
+	stampedPoolBead := beads.Bead{
+		Metadata: map[string]string{
+			"template":     "gascity/dog",
+			"agent_name":   "gascity/dog",
+			"pool_slot":    "1",
+			"pool_managed": "true",
+			"session_name": "s-dog-1",
+			"state":        "active",
+		},
+	}
+	unstampedCreatingBead := beads.Bead{
+		Metadata: map[string]string{
+			"template":     "gascity/dog",
+			"agent_name":   "gascity/dog",
+			"pool_managed": "true",
+			"session_name": "s-dog-new",
+			"state":        "creating",
+		},
+	}
+	namedBead := beads.Bead{
+		Metadata: map[string]string{
+			"template":                   "gascity/dog",
+			"agent_name":                 "gascity/dog",
+			"session_name":               "s-opus",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gascity/opus",
+		},
+	}
+
+	t.Run("pool-instance agent with stamped slot returns instance identity", func(t *testing.T) {
+		agent, qn := canonicalSessionIdentity(poolAgent, stampedPoolBead)
+		if agent == poolAgent {
+			t.Errorf("agent = base cfgAgent, want deep-copied instance agent")
+		}
+		if agent == nil || agent.Name != "dog-1" {
+			t.Errorf("agent.Name = %q, want %q", agentName(agent), "dog-1")
+		}
+		if agent != nil && agent.PoolName != "gascity/dog" {
+			t.Errorf("agent.PoolName = %q, want %q", agent.PoolName, "gascity/dog")
+		}
+		if qn != "gascity/dog-1" {
+			t.Errorf("qn = %q, want %q", qn, "gascity/dog-1")
+		}
+	})
+
+	t.Run("pool-instance agent without slot stamp falls back to base", func(t *testing.T) {
+		agent, qn := canonicalSessionIdentity(poolAgent, unstampedCreatingBead)
+		if agent != poolAgent {
+			t.Errorf("agent = deep-copy, want base cfgAgent (no slot stamped yet)")
+		}
+		if qn != "gascity/dog" {
+			t.Errorf("qn = %q, want base %q", qn, "gascity/dog")
+		}
+	})
+
+	t.Run("named bead keeps base identity (out of scope for this canonicalization)", func(t *testing.T) {
+		// Named-session TemplateParams carry ConfiguredNamedIdentity/Mode,
+		// GC_SESSION_ORIGIN=named, and a canonical session_name set by the
+		// main named-sessions loop and reconstructNamedSessionTemplateParams.
+		// Rewriting just the identity qualifier in rediscovery without also
+		// repopulating that contract would produce a partially-named
+		// TemplateParams that downstream consumers don't expect — so the
+		// helper intentionally leaves named beads on the base shape.
+		agent, qn := canonicalSessionIdentity(poolAgent, namedBead)
+		if agent != poolAgent {
+			t.Errorf("named bead must not produce a deep-copied instance agent")
+		}
+		if qn != "gascity/dog" {
+			t.Errorf("qn = %q, want base %q (named canonicalization is scoped out)", qn, "gascity/dog")
+		}
+	})
+
+	t.Run("singleton (non-expanding) agent returns base regardless of bead shape", func(t *testing.T) {
+		agent, qn := canonicalSessionIdentity(singleton, stampedPoolBead)
+		if agent != singleton {
+			t.Errorf("singleton agent should not be deep-copied")
+		}
+		if qn != "gascity/refinery" {
+			t.Errorf("qn = %q, want base %q", qn, "gascity/refinery")
+		}
+	})
+
+	t.Run("nil agent returns empty", func(t *testing.T) {
+		agent, qn := canonicalSessionIdentity(nil, stampedPoolBead)
+		if agent != nil || qn != "" {
+			t.Errorf("nil agent: got (%v, %q), want (nil, \"\")", agent, qn)
+		}
+	})
+}
+
+func agentName(a *config.Agent) string {
+	if a == nil {
+		return "<nil>"
+	}
+	return a.Name
+}
+
+func TestSessionBeadConfigAgent_UsesMultipleSessionShapeForMaxZero(t *testing.T) {
+	cfgAgent := &config.Agent{
+		Name:              "ant",
+		Dir:               "demo",
+		MaxActiveSessions: intPtr(0),
+	}
+
+	got := sessionBeadConfigAgent(cfgAgent, "demo/ant-adhoc-123")
+	if got == cfgAgent {
+		t.Fatal("sessionBeadConfigAgent returned base agent, want deep-copied instance agent")
+	}
+	if got == nil || got.Name != "ant-adhoc-123" {
+		t.Fatalf("agent.Name = %q, want %q", agentName(got), "ant-adhoc-123")
+	}
+	if got.PoolName != "demo/ant" {
+		t.Fatalf("agent.PoolName = %q, want %q", got.PoolName, "demo/ant")
+	}
+	if template := templateNameFor(got, "demo/ant-adhoc-123"); template != "demo/ant" {
+		t.Fatalf("templateNameFor(instance) = %q, want %q", template, "demo/ant")
+	}
+}
+
+// TestEnsureDependencyOnlyTemplate_StoreBackedUsesInstanceIdentity is a
+// regression test for the second half of PR #833's fix. Before the fix,
+// the store-backed dependency-floor path used the base agent identity
+// ("rig/db") while the no-store path used the pool-instance identity
+// ("rig/db-1"). Both paths build FingerprintExtra from their agent and
+// feed qualifiedName into resolveTemplate → GC_ALIAS. GC_ALIAS is part
+// of CoreFingerprint. If a live dep-floor session ever had its bead
+// touched by both code paths, or the system transitioned from no-store
+// to store-backed mid-lifetime, the divergent shape drove the reconciler
+// to declare config drift and drain.
+//
+// The fix canonicalizes the store-backed path onto instance identity to
+// match the no-store branch and realizePoolDesiredSessions. This test
+// exercises the store-backed path (via a seeded pool-managed root bead
+// that anchors realizeDependencyFloors) and asserts GC_ALIAS is the
+// instance qualified name.
+func TestEnsureDependencyOnlyTemplate_StoreBackedUsesInstanceIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              "db",
+				Dir:               "gascity",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+				ScaleCheck:        "printf 0",
+			},
+			{
+				Name:              "api",
+				Dir:               "gascity",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+				ScaleCheck:        "printf 0",
+				DependsOn:         []string{"gascity/db"},
+			},
+		},
+	}
+
+	// Seed a pool-managed root bead for api so discoverSessionBeadsWithRoots
+	// reports api as a realized root; realizeDependencyFloors then walks the
+	// dep graph and materializes the dep-floor for db via the store-backed
+	// branch of ensureDependencyOnlyTemplate.
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "api",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:gascity/api"},
+		Metadata: map[string]string{
+			"template":     "gascity/api",
+			"agent_name":   "gascity/api",
+			"session_name": "s-api-root",
+			"state":        "active",
+			"pool_managed": "true",
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatalf("seed api root bead: %v", err)
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	var tp TemplateParams
+	var found bool
+	for _, entry := range dsResult.State {
+		if entry.TemplateName == "gascity/db" && entry.DependencyOnly {
+			tp = entry
+			found = true
+			break
+		}
+	}
+	if !found {
+		entries := make([]string, 0, len(dsResult.State))
+		for k, v := range dsResult.State {
+			entries = append(entries, fmt.Sprintf("%s{template=%s depOnly=%v alias=%s}", k, v.TemplateName, v.DependencyOnly, v.Env["GC_ALIAS"]))
+		}
+		t.Fatalf("store-backed dependency floor for db not found, desired = %v", entries)
+	}
+
+	alias := tp.Env["GC_ALIAS"]
+	if want := "gascity/db-1"; alias != want {
+		t.Fatalf("store-backed dep-floor GC_ALIAS = %q, want instance identity %q. "+
+			"Before PR #833's canonicalization this came back as base %q, which "+
+			"disagreed with realizePoolDesiredSessions and triggered config-drift drain.",
+			alias, want, "gascity/db")
+	}
+	if template := tp.Env["GC_TEMPLATE"]; template != "gascity/db" {
+		t.Fatalf("store-backed dep-floor GC_TEMPLATE = %q, want base %q", template, "gascity/db")
+	}
+}
+
+// TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
+// is the round-trip regression for PR #833's canonicalization. It locks in the
+// actual invariant the fix promises: a pool-managed session bead produces the
+// same CoreFingerprint-contributing (GC_ALIAS, GC_TEMPLATE, FingerprintExtra)
+// triple whether it is resolved through realizePoolDesiredSessions or through
+// canonicalSessionIdentity (the shared helper rediscovery and the store-backed
+// dependency-floor path both use).
+//
+// Catching a regression here matters because the drift bug was silent — the
+// reconciler just drained live sessions every other tick. If a future change
+// to realizePoolDesiredSessions (different poolInstanceName format, new
+// identity field in deepCopyAgent) diverges from the helper, nothing else in
+// CI will notice until a city starts losing sessions again.
+func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              "dog",
+				Dir:               "gascity",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+				ScaleCheck:        "printf 1",
+			},
+		},
+	}
+
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "dog pool session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:gascity/dog"},
+		Metadata: map[string]string{
+			"template":     "gascity/dog",
+			"agent_name":   "gascity/dog-1",
+			"session_name": "s-dog-1",
+			"state":        "active",
+			"pool_managed": "true",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed pool bead: %v", err)
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	// realize should have claimed our seeded bead (slot 1) and produced a
+	// desired entry keyed by session_name.
+	var realizeTP TemplateParams
+	var realized bool
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "gascity/dog" && !tp.DependencyOnly {
+			realizeTP = tp
+			realized = true
+			break
+		}
+	}
+	if !realized {
+		keys := make([]string, 0, len(dsResult.State))
+		for k, v := range dsResult.State {
+			keys = append(keys, fmt.Sprintf("%s{template=%s depOnly=%v}", k, v.TemplateName, v.DependencyOnly))
+		}
+		t.Fatalf("realize did not produce a desired entry for gascity/dog; desired = %v", keys)
+	}
+
+	// The helper is what rediscovery and the store-backed dep-floor path
+	// feed into resolveTemplate. For a stamped pool bead this must exactly
+	// match what realize produced — same qualified name, same agent shape,
+	// same FingerprintExtra.
+	helperAgent, helperQN := canonicalSessionIdentity(&cfg.Agents[0], bead)
+	if helperAgent == nil || helperAgent.Name != "dog-1" {
+		t.Fatalf("canonicalSessionIdentity agent = %v, want dog-1", helperAgent)
+	}
+	if want := "gascity/dog-1"; helperQN != want {
+		t.Fatalf("canonicalSessionIdentity qn = %q, want %q", helperQN, want)
+	}
+
+	if realizeAlias := realizeTP.Env["GC_ALIAS"]; realizeAlias != helperQN {
+		t.Fatalf("realize GC_ALIAS = %q, canonical helper qn = %q — divergence will oscillate CoreFingerprint across rediscovery/realize",
+			realizeAlias, helperQN)
+	}
+	if want := "gascity/dog"; realizeTP.Env["GC_TEMPLATE"] != want {
+		t.Fatalf("realize GC_TEMPLATE = %q, want base %q", realizeTP.Env["GC_TEMPLATE"], want)
+	}
+
+	helperFPExtra := buildFingerprintExtra(helperAgent)
+	if len(helperFPExtra) != len(realizeTP.FPExtra) {
+		t.Fatalf("FPExtra size mismatch: realize=%v helper=%v", realizeTP.FPExtra, helperFPExtra)
+	}
+	for k, rv := range realizeTP.FPExtra {
+		if hv, present := helperFPExtra[k]; !present {
+			t.Errorf("helper FPExtra missing key %q (realize has %q)", k, rv)
+		} else if hv != rv {
+			t.Errorf("FPExtra[%q] mismatch: realize=%q helper=%q", k, rv, hv)
+		}
+	}
+	// pool.check must be absent from both — it was the QualifiedName-bearing
+	// field that drove the original oscillation.
+	if _, has := realizeTP.FPExtra["pool.check"]; has {
+		t.Errorf("realize FPExtra still contains pool.check — fix incomplete: %v", realizeTP.FPExtra)
+	}
+}

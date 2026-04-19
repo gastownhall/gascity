@@ -143,6 +143,36 @@ func TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep(t *testing.T) {
 	}
 }
 
+func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T) {
+	for _, tc := range reviewCheckCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			writeFakeBDCommand(t, filepath.Join(fakeDir, "bd"), tc)
+
+			env := newIsolatedToolEnv(t, false)
+			envMap := parseEnvList(env)
+			env = replaceEnv(env, "PATH", prependPath(fakeDir, envMap["PATH"]))
+			env = filterEnvMany(env,
+				"GC_BEAD_ID",
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+			)
+			env = append(env, "GC_BEAD_ID=check-1")
+
+			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
+			if err != nil {
+				t.Fatalf("%s failed: %v\noutput: %s", tc.script, err, out)
+			}
+			if !strings.Contains(out, tc.approvedText) {
+				t.Fatalf("%s output = %q, want %q", tc.script, out, tc.approvedText)
+			}
+		})
+	}
+}
+
 func setupReviewCheckScriptCity(t *testing.T) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, true)
@@ -234,4 +264,53 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 		env = append(env, "GC_DOLT_PORT="+port)
 	}
 	return env
+}
+
+func writeFakeBDCommand(t *testing.T, path string, tc reviewCheckCase) {
+	t.Helper()
+
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+  show)
+    printf '%%s\n' '{"metadata":{"gc.attempt":"1","gc.root_bead_id":"root-1"}}'
+    ;;
+  list)
+    cat <<'EOF'
+[
+  {
+    "id": "old-verdict",
+    "created_at": "2026-01-01T00:00:00Z",
+    "metadata": {
+      "gc.step_ref": %q,
+      "gc.root_bead_id": "root-1",
+      %q: "iterate"
+    }
+  },
+  {
+    "id": "new-verdict",
+    "created_at": "2026-01-01T00:00:01Z",
+    "metadata": {
+      "gc.step_ref": %q,
+      "gc.root_bead_id": "root-1",
+      %q: "done"
+    }
+  }
+]
+EOF
+    ;;
+  *)
+    echo "unexpected bd command: $cmd" >&2
+    exit 1
+    ;;
+esac
+`, tc.attemptStepRef(1), tc.verdictKey, tc.attemptStepRef(1), tc.verdictKey)
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd command: %v", err)
+	}
 }

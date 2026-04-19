@@ -230,11 +230,11 @@ version = "^1.2"
 
 Local path imports have no version constraint.
 
-Resolved versions for remote imports are recorded in the lock file (`pack.lock`; format owned by [doc-packman.md](doc-packman.md)). The loader reads the lock file to find which commit each import resolves to and which directory under `~/.gc/cache/repos/` holds it. The loader itself does not clone git — that responsibility belongs to `gc import install`. A missing lock entry is a load-time error telling the user to run `gc import install`.
+Resolved versions for remote imports are recorded in the lock file (`packs.lock`; format owned by [doc-packman.md](doc-packman.md)). The loader reads the lock file to find which commit each import resolves to and which directory under `~/.gc/cache/repos/` holds it. The loader itself does not clone git — that responsibility belongs to the built-in `gc import install`. A missing lock entry is a load-time error telling the user to run `gc import install`.
 
 #### Implicit imports
 
-Some packs are spliced into every city without the city declaring them. The set lives in `~/.gc/implicit-import.toml`, managed by `gc import`. At load time the loader reads that file and treats each entry as if the root pack had declared it, recording `parent = "(implicit)"` in provenance. This is how `import` and `registry` themselves load for every city — they ship as packs but don't have to be declared.
+Some packs are spliced into every city without the city declaring them. The set lives in `~/.gc/implicit-import.toml`, managed by the bootstrap/init flow and consumed by the loader. At load time the loader reads that file and treats each entry as if the root pack had declared it, recording `parent = "(implicit)"` in provenance. This is how bootstrap-managed packs such as `registry` can load for every city without being authored in every city. `gc import` itself is a built-in command surface, not an implicit pack.
 
 #### Transitive import and export
 
@@ -264,7 +264,7 @@ With `export = true`, maintenance's agents appear flattened into gastown's names
 
 #### Lock file model
 
-The root city's lock file records every pack in the entire transitive import graph. Imported packs do **not** carry their own lock files. `gc import install` walks the full DAG from the root and writes one flat lock at the root. This is the npm/Cargo model: one source of truth, one place for version-conflict resolution, one file read for the loader. See [doc-packman.md](doc-packman.md) for the lock file format.
+The root city's lock file records every pack in the entire transitive import graph. Imported packs do **not** carry their own lock files. `gc import install` walks the full DAG from the root and writes one flat `packs.lock` at the root. This is the npm/Cargo model: one source of truth, one place for version-conflict resolution, one file read for the loader. See [doc-packman.md](doc-packman.md) for the lock file format.
 
 #### Lifecycle verbs
 

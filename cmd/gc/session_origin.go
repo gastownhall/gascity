@@ -43,6 +43,34 @@ func isEphemeralSessionBead(bead beads.Bead) bool {
 	return sessionOrigin(bead) == "ephemeral"
 }
 
+// Legacy pooled sessions created before manual-session origin backfill were
+// persisted as session_origin="ephemeral" even though they were user-created.
+// Pool-managed controller beads always stamp pool_managed/pool_slot, so a
+// multi-session bead with ephemeral origin but without those markers is the
+// upgrade shape we need to preserve and migrate.
+func isLegacyManualSessionBeadForAgent(bead beads.Bead, cfgAgent *config.Agent) bool {
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata["session_origin"]) != "ephemeral" {
+		return false
+	}
+	if isNamedSessionBead(bead) {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata[poolManagedMetadataKey]) == boolMetadata(true) {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata["pool_slot"]) != "" {
+		return false
+	}
+	return strings.TrimSpace(bead.Metadata["dependency_only"]) != boolMetadata(true)
+}
+
+func isManualSessionBeadForAgent(bead beads.Bead, cfgAgent *config.Agent) bool {
+	return isManualSessionBead(bead) || isLegacyManualSessionBeadForAgent(bead, cfgAgent)
+}
+
 func isEphemeralSessionBeadForAgent(bead beads.Bead, cfgAgent *config.Agent) bool {
 	if isEphemeralSessionBead(bead) {
 		return true

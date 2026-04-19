@@ -10,7 +10,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -455,6 +457,179 @@ interval = "24h"
 	if aa[0].Name != "digest" {
 		t.Fatalf("order name = %q, want digest", aa[0].Name)
 	}
+}
+
+func TestControllerStateMutationsPokeController(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial func(*config.City)
+		mutate  func(*controllerState) error
+		verify  func(*testing.T, *config.City)
+	}{
+		{
+			name: "suspend agent",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendAgent("rig1/worker")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if !cfg.Agents[0].Suspended {
+					t.Fatal("agent should be suspended after SuspendAgent")
+				}
+			},
+		},
+		{
+			name: "resume agent",
+			initial: func(cfg *config.City) {
+				cfg.Agents[0].Suspended = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeAgent("rig1/worker")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Agents[0].Suspended {
+					t.Fatal("agent should not be suspended after ResumeAgent")
+				}
+			},
+		},
+		{
+			name: "suspend rig",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendRig("rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if !cfg.Rigs[0].Suspended {
+					t.Fatal("rig should be suspended after SuspendRig")
+				}
+			},
+		},
+		{
+			name: "resume rig",
+			initial: func(cfg *config.City) {
+				cfg.Rigs[0].Suspended = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeRig("rig1")
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Rigs[0].Suspended {
+					t.Fatal("rig should not be suspended after ResumeRig")
+				}
+			},
+		},
+		{
+			name: "suspend city",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendCity()
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if !cfg.Workspace.Suspended {
+					t.Fatal("city should be suspended after SuspendCity")
+				}
+			},
+		},
+		{
+			name: "resume city",
+			initial: func(cfg *config.City) {
+				cfg.Workspace.Suspended = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeCity()
+			},
+			verify: func(t *testing.T, cfg *config.City) {
+				t.Helper()
+				if cfg.Workspace.Suspended {
+					t.Fatal("city should not be suspended after ResumeCity")
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, tomlPath := newControllerStateMutationHarness(t)
+
+			cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if tc.initial != nil {
+				tc.initial(cfg)
+				content, err := cfg.Marshal()
+				if err != nil {
+					t.Fatalf("marshal initial config: %v", err)
+				}
+				if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+					t.Fatalf("write initial config: %v", err)
+				}
+			}
+
+			if err := tc.mutate(cs); err != nil {
+				t.Fatalf("mutation failed: %v", err)
+			}
+			select {
+			case <-cs.pokeCh:
+			default:
+				t.Fatal("expected controller mutation to poke reconciler")
+			}
+
+			got, err := config.Load(fsys.OSFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("reload config: %v", err)
+			}
+			tc.verify(t, got)
+		})
+	}
+}
+
+func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
+	cs, _ := newControllerStateMutationHarness(t)
+
+	if err := cs.SuspendAgent("rig1/missing"); err == nil {
+		t.Fatal("SuspendAgent unexpectedly succeeded for missing agent")
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("failed mutation should not poke reconciler")
+	default:
+	}
+}
+
+func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) {
+	t.Helper()
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rig1")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig1"},
+		},
+		Rigs: []config.Rig{
+			{Name: "rig1", Path: rigDir},
+		},
+	}
+	content, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	return &controllerState{
+		editor: configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		pokeCh: make(chan struct{}, 1),
+	}, tomlPath
 }
 
 // Verify controllerState satisfies the api.State interface at compile time.

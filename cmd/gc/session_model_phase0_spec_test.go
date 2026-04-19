@@ -224,8 +224,8 @@ func TestPhase0CanonicalMetadata_TemplateFactoryMaterializationWritesEphemeralOr
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
-	if got := bead.Metadata["session_origin"]; got != "ephemeral" {
-		t.Fatalf("session_origin = %q, want ephemeral", got)
+	if got := bead.Metadata["session_origin"]; got != "manual" {
+		t.Fatalf("session_origin = %q, want manual", got)
 	}
 	if got := bead.Metadata["manual_session"]; got != "" {
 		t.Fatalf("manual_session = %q, want empty", got)

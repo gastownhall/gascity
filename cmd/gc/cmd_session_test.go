@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -198,6 +199,210 @@ func TestResolveWorkDir(t *testing.T) {
 	}
 }
 
+func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	for _, alias := range []string{"demo/ant-fenrir", "demo/ant-grendel"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionNew(%q) = %d, want 0; stderr=%s", alias, code, stderr.String())
+		}
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 2 {
+		t.Fatalf("session beads = %d, want 2", len(all))
+	}
+
+	wantWorkDir := map[string]string{
+		"demo/ant-fenrir":  filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants", "ant-fenrir"),
+		"demo/ant-grendel": filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants", "ant-grendel"),
+	}
+	seenWorkDir := make(map[string]string, len(all))
+	for _, bead := range all {
+		alias := bead.Metadata["alias"]
+		want, ok := wantWorkDir[alias]
+		if !ok {
+			t.Fatalf("unexpected alias %q in bead metadata", alias)
+		}
+		if got := bead.Metadata["work_dir"]; got != want {
+			t.Fatalf("work_dir(%q) = %q, want %q", alias, got, want)
+		}
+		if otherAlias, collision := seenWorkDir[bead.Metadata["work_dir"]]; collision {
+			t.Fatalf("work_dir collision: %q and %q both use %q", otherAlias, alias, bead.Metadata["work_dir"])
+		}
+		seenWorkDir[bead.Metadata["work_dir"]] = alias
+	}
+}
+
+func TestCmdSessionNew_PoolTemplateCanonicalizesQualifiedAliasCollisions(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(first) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, &stdout, &stderr); code == 0 {
+		t.Fatal("cmdSessionNew(second) = 0, want alias conflict")
+	}
+	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
+		t.Fatalf("stderr = %q, want alias conflict", stderr.String())
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata["alias"]; got != "demo/ant-fenrir" {
+		t.Fatalf("alias = %q, want canonical qualified alias", got)
+	}
+}
+
+func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig(%q): %v", cityDir, err)
+	}
+	store, code := openCityStore(io.Discard, "test")
+	if store == nil {
+		t.Fatalf("openCityStore = nil, code=%d", code)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "ant-fenrir")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(ant-fenrir): %v", err)
+	}
+	all := sessionBeads(t, cityDir)
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	if id != all[0].ID {
+		t.Fatalf("resolved ID = %q, want %q", id, all[0].ID)
+	}
+}
+
+func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	for i := 0; i < 2; i++ {
+		stdout.Reset()
+		stderr.Reset()
+		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionNew(aliasless #%d) = %d, want 0; stderr=%s", i+1, code, stderr.String())
+		}
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 2 {
+		t.Fatalf("session beads = %d, want 2", len(all))
+	}
+
+	seenSessionName := make(map[string]bool, len(all))
+	seenWorkDir := make(map[string]bool, len(all))
+	for _, bead := range all {
+		if got := bead.Metadata["alias"]; got != "" {
+			t.Fatalf("alias = %q, want empty for aliasless pooled session", got)
+		}
+		sessionName := bead.Metadata["session_name"]
+		if sessionName == "" {
+			t.Fatal("session_name should be populated for aliasless pooled session")
+		}
+		if got := bead.Metadata["session_name_explicit"]; got != boolMetadata(true) {
+			t.Fatalf("session_name_explicit = %q, want %q", got, boolMetadata(true))
+		}
+		if !strings.HasPrefix(sessionName, "ant-adhoc-") {
+			t.Fatalf("session_name = %q, want ant-adhoc-*", sessionName)
+		}
+		if seenSessionName[sessionName] {
+			t.Fatalf("duplicate session_name %q for aliasless pooled sessions", sessionName)
+		}
+		seenSessionName[sessionName] = true
+		workDir := bead.Metadata["work_dir"]
+		if filepath.Dir(workDir) != filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants") {
+			t.Fatalf("work_dir(%q) parent = %q, want %q", sessionName, filepath.Dir(workDir), filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants"))
+		}
+		base := filepath.Base(workDir)
+		if base == "ant" {
+			t.Fatalf("work_dir(%q) base = %q, want unique generated identity", sessionName, base)
+		}
+		if !strings.HasPrefix(base, "ant-adhoc-") {
+			t.Fatalf("work_dir(%q) base = %q, want ant-adhoc-*", sessionName, base)
+		}
+		if seenWorkDir[workDir] {
+			t.Fatalf("duplicate work_dir %q for aliasless pooled sessions", workDir)
+		}
+		seenWorkDir[workDir] = true
+		if got := bead.Metadata["agent_name"]; got != "demo/"+sessionName {
+			t.Fatalf("agent_name(%q) = %q, want %q", sessionName, got, "demo/"+sessionName)
+		}
+	}
+}
+
+func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(aliasless) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	sessionName := all[0].Metadata["session_name"]
+	if sessionName == "" {
+		t.Fatal("session_name should be populated for aliasless pooled session")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, &stdout, &stderr); code == 0 {
+		t.Fatal("cmdSessionNew(alias collision) = 0, want conflict")
+	}
+	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
+		t.Fatalf("stderr = %q, want alias conflict", stderr.String())
+	}
+}
+
 // NOTE: session kill is tested via internal/session.Manager.Kill which
 // delegates to Provider.Stop. The CLI layer (cmdSessionKill) is a thin
 // wrapper that resolves the session ID and calls mgr.Kill, so it does
@@ -318,7 +523,7 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 		WorkDir:  "/tmp/workdir",
 	}
 
-	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
+	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
 	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
 		t.Fatalf("resume command = %q, want %q", got, want)
 	}
@@ -359,7 +564,7 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 		ResumeFlag: "--resume",
 	}
 
-	cmd, _ := buildResumeCommand(cityDir, cfg, info, "")
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
 
 	// Must include --settings pointing to .gc/settings.json.
 	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(gcDir, "settings.json"))
@@ -782,7 +987,40 @@ template = "mayor"
 	}
 }
 
-func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
+func writePoolSessionCityTOML(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	rigRoot := filepath.Join(dir, "repos", "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig root): %v", err)
+	}
+	data := []byte(fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "demo"
+path = %q
+
+[[agent]]
+name = "ant"
+dir = "demo"
+provider = "codex"
+start_command = "echo"
+work_dir = ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}"
+min_active_sessions = 0
+max_active_sessions = 4
+`, rigRoot))
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+}
+
+func sessionBeads(t *testing.T, cityDir string) []beads.Bead {
 	t.Helper()
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
@@ -792,6 +1030,12 @@ func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
 	if err != nil {
 		t.Fatalf("ListByLabel(session): %v", err)
 	}
+	return all
+}
+
+func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
+	t.Helper()
+	all := sessionBeads(t, cityDir)
 	if len(all) != 1 {
 		t.Fatalf("session beads = %d, want 1", len(all))
 	}

@@ -201,6 +201,15 @@ func drainWorkflowServeWork(agentCfg config.Agent, workDir string, workEnv map[s
 				return fmt.Errorf("bead %s has unexpected non-control kind %q", beadID, kind)
 			}
 			workflowTracef("serve process bead=%s kind=%s", beadID, kind)
+			// controlDispatcherServe currently returns nil both when it
+			// successfully advanced a control bead AND when ProcessControl
+			// chose to no-op (e.g., status != "open"). The caller cannot
+			// tell those apart without cross-referencing the store, so the
+			// trace line just below was previously identical in both
+			// cases. That masked a 20-minute stall on ga-ttn5z's retry
+			// control ga-fw2fm. The silent no-op now emits a separate
+			// `process-control ... skip reason=bead_not_open` line inside
+			// ProcessControl itself; see runtime.go.
 			if err := controlDispatcherServe(beadID, io.Discard, stderr); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++

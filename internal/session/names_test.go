@@ -357,6 +357,31 @@ func TestEnsureAliasAvailableWithConfigForOwner_AllowsConfiguredSingletonCreate(
 	}
 }
 
+func TestEnsureAliasAvailableWithConfigForOwner_AllowsConfiguredAliasAgainstOrdinaryConcreteIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{
+			{Template: "worker", Dir: "myrig"},
+		},
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-ordinary-worker",
+			"template":     "myrig/worker",
+			"agent_name":   "myrig/worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "myrig/worker", "", "myrig/worker"); err != nil {
+		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(named owner vs concrete identity) = %v, want nil", err)
+	}
+}
+
 func TestEnsureSessionNameAvailableWithConfig_UsesResolvedWorkspaceName(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{

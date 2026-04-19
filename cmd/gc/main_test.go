@@ -1659,9 +1659,11 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 
 func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	f := fsys.NewFake()
-	// Pre-populate .gc/ and settings.json with custom content.
-	// doInit will see .gc/ exists and return "already initialized".
-	// So test installClaudeHooks directly instead.
+	// Pre-populate hooks/claude.json with a user-authored custom key. The
+	// file was historically preserved verbatim, which meant new default
+	// hooks added to the embedded base in later releases never landed for
+	// legacy users. Current contract: the custom key is preserved via merge
+	// while embedded defaults are pulled in.
 	settingsPath := filepath.Join("/city", "hooks", "claude.json")
 	f.Dirs[filepath.Join("/city", "hooks")] = true
 	f.Files[settingsPath] = []byte(`{"custom": true}`)
@@ -1670,12 +1672,17 @@ func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("installClaudeHooks = %d, want 0", code)
 	}
-	got := string(f.Files[settingsPath])
-	if got != `{"custom": true}` {
-		t.Errorf("settings.json was overwritten: %q", got)
+
+	hookData := string(f.Files[settingsPath])
+	runtimeData := string(f.Files[filepath.Join("/city", ".gc", "settings.json")])
+	if !strings.Contains(hookData, `"custom": true`) {
+		t.Errorf("user-authored custom key not preserved in hook file:\n%s", hookData)
 	}
-	if runtime := string(f.Files[filepath.Join("/city", ".gc", "settings.json")]); runtime != `{"custom": true}` {
-		t.Errorf("runtime settings were not mirrored from existing hooks file: %q", runtime)
+	if !strings.Contains(hookData, "SessionStart") {
+		t.Errorf("embedded default hooks not merged into hook file:\n%s", hookData)
+	}
+	if hookData != runtimeData {
+		t.Error("runtime settings must mirror merged hook settings")
 	}
 }
 
@@ -1766,6 +1773,45 @@ func TestSettingsArgsMissingFile(t *testing.T) {
 	got := settingsArgs(dir, "claude")
 	if got != "" {
 		t.Errorf("settingsArgs(claude, no file) = %q, want empty", got)
+	}
+}
+
+// TestEnsureClaudeSettingsArgsPropagatesMalformedOverride verifies that a
+// malformed .claude/settings.json surfaces as an error from
+// ensureClaudeSettingsArgs rather than silently returning a --settings arg
+// that points at stale bytes from a prior tick. resolveTemplate relies on
+// this so a bad override fails agent creation loudly; a best-effort caller
+// like buildResumeCommand may choose to log-and-continue.
+func TestEnsureClaudeSettingsArgsPropagatesMalformedOverride(t *testing.T) {
+	dir := t.TempDir()
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ensureClaudeSettingsArgs(fsys.OSFS{}, dir, "claude", io.Discard)
+	if err == nil {
+		t.Fatalf("expected propagated error for malformed override; got arg=%q", got)
+	}
+	if got != "" {
+		t.Errorf("arg must be empty when projection fails; got %q", got)
+	}
+}
+
+// TestEnsureClaudeSettingsArgsNoOpForNonClaude verifies the helper is a
+// no-op for non-Claude providers — projection never runs and no error is
+// returned regardless of filesystem state.
+func TestEnsureClaudeSettingsArgsNoOpForNonClaude(t *testing.T) {
+	dir := t.TempDir()
+	got, err := ensureClaudeSettingsArgs(fsys.OSFS{}, dir, "codex", io.Discard)
+	if err != nil {
+		t.Fatalf("non-Claude provider must return nil error; got %v", err)
+	}
+	if got != "" {
+		t.Errorf("non-Claude provider must return empty arg; got %q", got)
 	}
 }
 

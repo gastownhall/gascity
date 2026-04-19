@@ -158,20 +158,24 @@ If rebase SUCCEEDED (exit 0): close this step, proceed to run-tests.
 If rebase FAILED (conflicts):
 
 1. Abort: `git rebase --abort`
-2. Put the work bead back in the pool with rejection metadata:
+2. Clean up the existing workflow and reopen the source bead:
 ```bash
-bd update $WORK --status=open --assignee="" \
+gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
+```
+3. Put the work bead back in the pool with rejection metadata:
+```bash
+bd update $WORK \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
   --set-metadata gc.routed_to=<rig>/polecat
 ```
-3. Do NOT delete the branch (new polecat needs it for conflict resolution).
-4. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
-5. Pour next patrol iteration before burning:
+4. Do NOT delete the branch (new polecat needs it for conflict resolution).
+5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
+6. Pour next patrol iteration before burning:
 ```bash
 NEXT=$(bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
 bd update "$NEXT" --assignee=$GC_AGENT
 ```
-6. Burn this wisp: `bd mol burn <wisp-id> --force`
+7. Burn this wisp: `bd mol burn <wisp-id> --force`
 
 **A new polecat will pick up the bead, see the branch and rejection,
 rebase, and reassign to refinery.**"""
@@ -224,9 +228,13 @@ TARGET=$(bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
 1. Diagnose: branch regression or pre-existing on target?
 
 2. If branch caused it:
+   - Clean up the existing workflow and reopen the source bead:
+     ```bash
+     gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
+     ```
    - Put the work bead back in the pool with rejection metadata:
      ```bash
-     bd update $WORK --status=open --assignee="" \
+     bd update $WORK \
        --set-metadata rejection_reason="<failure summary>"
      ```
    - Delete branch: `git push origin --delete $BRANCH`

@@ -444,6 +444,8 @@ func (h *APIHandler) runViaAPI(command string) (string, bool, error) {
 		for _, p := range parts[1:] {
 			if strings.HasPrefix(p, "--rig=") {
 				payload["rig"] = strings.TrimPrefix(p, "--rig=")
+			} else if p == "--force" {
+				payload["force"] = true
 			} else if strings.HasPrefix(p, "--formula=") {
 				payload["formula"] = strings.TrimPrefix(p, "--formula=")
 			} else if _, ok := payload["bead"]; !ok {

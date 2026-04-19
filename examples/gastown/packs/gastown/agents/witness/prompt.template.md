@@ -246,7 +246,7 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 |------------|----------------|
 | Pour next wisp | `bd mol wisp mol-witness-patrol --root-only` |
 | Context exhaustion | `gc runtime request-restart` |
-| Recover orphaned bead | `bd update <id> --status=open --assignee=""` |
+| Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |
 | Delete worktree | `git worktree remove <path> --force` |
 | Set branch metadata | `bd update <id> --set-metadata branch=<name>` |

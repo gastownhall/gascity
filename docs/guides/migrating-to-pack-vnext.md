@@ -42,6 +42,10 @@ migrated; that is intentional in this wave.
 > still exist as a transitional command surface even though the target
 > model is `gc doctor` followed by `gc doctor --fix`.
 
+> **Command ownership note:** In the current product, `gc import` is a
+> built-in Go CLI surface. Older bootstrap-pack experiments are legacy
+> compatibility material, not the target implementation model for PackV2.
+
 > **Scope note:** This guide describes the target PackV2 migration
 > shape. Some sections below point at surfaces that are only in the first
 > slice of the current rollout. When that is true, the guide calls it out

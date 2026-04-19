@@ -96,6 +96,62 @@ commit = "deadbeef"
 	}
 }
 
+// Surfacing a retired bootstrap-owned implicit import must be visible
+// from plain `gc doctor` (not just --fix), so an upgraded install that
+// still carries [imports.import] is diagnosable before the prune runs.
+func TestImplicitImportCacheCheckSurfacesRetiredBootstrapEntry(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	implicitPath := filepath.Join(gcHome, "implicit-import.toml")
+	if err := os.WriteFile(implicitPath, []byte(`
+schema = 1
+
+[imports.import]
+source = "github.com/gastownhall/gc-import"
+version = "0.2.0"
+commit = "deadbeef"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", implicitPath, err)
+	}
+
+	check := &ImplicitImportCacheCheck{}
+	result := check.Run(&CheckContext{})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "retired bootstrap pack") {
+		t.Fatalf("details %q do not mention retired bootstrap pack", details)
+	}
+	if !strings.Contains(details, "github.com/gastownhall/gc-import") {
+		t.Fatalf("details %q do not mention retired source", details)
+	}
+}
+
+// Conservative source matching must leave hand-edited entries alone,
+// even if the user reused the retired name under a fork source.
+func TestImplicitImportCacheCheckLeavesHandEditedEntryAlone(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	implicitPath := filepath.Join(gcHome, "implicit-import.toml")
+	if err := os.WriteFile(implicitPath, []byte(`
+schema = 1
+
+[imports.import]
+source = "example.com/my-fork"
+version = "9.9.9"
+commit = "feedface"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", implicitPath, err)
+	}
+
+	check := &ImplicitImportCacheCheck{}
+	result := check.Run(&CheckContext{})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+}
+
 func prepareImplicitImportCacheFixture(t *testing.T) (string, config.ImplicitImport, string, string) {
 	t.Helper()
 
@@ -109,13 +165,13 @@ func prepareImplicitImportCacheFixture(t *testing.T) (string, config.ImplicitImp
 	if err != nil {
 		t.Fatalf("ReadImplicitImports(): %v", err)
 	}
-	imp, ok := imports["import"]
+	imp, ok := imports["registry"]
 	if !ok {
-		t.Fatal("bootstrap import entry missing")
+		t.Fatal("bootstrap registry entry missing")
 	}
 
 	canonical := config.GlobalRepoCachePath(gcHome, imp.Source, imp.Commit)
-	legacy := legacyImplicitImportCachePath(gcHome, bootstrapSource(t, "import"), imp.Commit)
+	legacy := legacyImplicitImportCachePath(gcHome, bootstrapSource(t, "registry"), imp.Commit)
 	if !hasImplicitImportPack(canonical) {
 		t.Fatalf("canonical cache %s missing", canonical)
 	}

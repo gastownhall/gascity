@@ -1828,6 +1828,22 @@ func (a *Agent) SupportsGenericEphemeralSessions() bool {
 	return true
 }
 
+// SupportsMultipleSessions reports whether the template may materialize more
+// than one distinct concrete session identity. Unlike
+// SupportsGenericEphemeralSessions, max_active_sessions = 0 still represents a
+// multi-session template shape even though generic ephemeral session creation
+// is disabled.
+func (a *Agent) SupportsMultipleSessions() bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
+	}
+	maxSessions := a.EffectiveMaxActiveSessions()
+	return maxSessions == nil || *maxSessions != 1
+}
+
 // SupportsInstanceExpansion reports whether the template may have multiple
 // simultaneously addressable concrete instances and therefore needs instance
 // discovery / synthetic member naming.

@@ -561,6 +561,34 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	}
 }
 
+func TestResolveConfiguredSessionLogContext_RebrandedSingletonUsesTemplateWorkDirIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gastown"},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "witness",
+			Dir:               "demo",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/{{.AgentBase}}",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "boot",
+			Template: "witness",
+			Dir:      "demo",
+		}},
+	}
+
+	got, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "demo/boot")
+	if !ok {
+		t.Fatal("resolveConfiguredSessionLogContext() = not found, want found")
+	}
+	want := filepath.Join(cityPath, ".gc", "worktrees", "demo", "witness")
+	if got != want {
+		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", got, want)
+	}
+}
+
 func TestResolveConfiguredSessionLogContext_RejectsNonExactOrPoolTargets(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

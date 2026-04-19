@@ -28,13 +28,13 @@ func TestLoadWithIncludes_SplicesImplicitImports(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 
 	gcHome := os.Getenv("GC_HOME")
-	cacheDir := GlobalRepoCachePath(gcHome, "github.com/gastownhall/gc-import", "abc123")
+	cacheDir := GlobalRepoCachePath(gcHome, "github.com/example/ops-pack", "abc123")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cacheDir, "pack.toml"), []byte(`
 [pack]
-name = "gc-import"
+name = "ops-pack"
 schema = 1
 
 [[agent]]
@@ -46,9 +46,9 @@ scope = "city"
 	if err := os.WriteFile(filepath.Join(gcHome, "implicit-import.toml"), []byte(`
 schema = 1
 
-[imports.import]
-source = "github.com/gastownhall/gc-import"
-version = "0.2.0"
+[imports.ops]
+source = "github.com/example/ops-pack"
+version = "1.0.0"
 commit = "abc123"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -78,11 +78,11 @@ scope = "city"
 	if !found["mayor"] {
 		t.Fatalf("missing mayor agent: %v", found)
 	}
-	if !found["import.runner"] {
+	if !found["ops.runner"] {
 		t.Fatalf("missing implicit import agent: %v", found)
 	}
-	if got := prov.Imports["import"]; got != "(implicit)" {
-		t.Fatalf("prov.Imports[import] = %q, want %q", got, "(implicit)")
+	if got := prov.Imports["ops"]; got != "(implicit)" {
+		t.Fatalf("prov.Imports[ops] = %q, want %q", got, "(implicit)")
 	}
 }
 
@@ -96,13 +96,13 @@ func TestLoadWithIncludes_ExplicitImportCollidingWithImplicitIsHardError(t *test
 	t.Setenv("GC_HOME", t.TempDir())
 
 	gcHome := os.Getenv("GC_HOME")
-	implicitCacheDir := GlobalRepoCachePath(gcHome, "github.com/gastownhall/gc-import", "abc123")
+	implicitCacheDir := GlobalRepoCachePath(gcHome, "github.com/gastownhall/gc-registry", "abc123")
 	if err := os.MkdirAll(implicitCacheDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(implicitCacheDir, "pack.toml"), []byte(`
 [pack]
-name = "gc-import"
+name = "registry"
 schema = 1
 
 [[agent]]
@@ -114,9 +114,9 @@ scope = "city"
 	if err := os.WriteFile(filepath.Join(gcHome, "implicit-import.toml"), []byte(`
 schema = 1
 
-[imports.import]
-source = "github.com/gastownhall/gc-import"
-version = "0.2.0"
+[imports.registry]
+source = "github.com/gastownhall/gc-registry"
+version = "0.1.0"
 commit = "abc123"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ scope = "city"
 [workspace]
 name = "test-city"
 
-[imports.import]
+[imports.registry]
 source = "./packs/explicit-import"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ source = "./packs/explicit-import"
 	if !strings.Contains(msg, "shadows the bootstrap implicit import") {
 		t.Fatalf("error missing diagnostic: %v", err)
 	}
-	if !strings.Contains(msg, "import") {
+	if !strings.Contains(msg, "registry") {
 		t.Fatalf("error should name the colliding import: %v", err)
 	}
 }

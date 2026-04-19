@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func builtinFormulaDir(t *testing.T) string {
@@ -400,6 +401,9 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 	}
 	if root.Metadata["gc.source_bead_id"] != issueID {
 		t.Fatalf("root source_bead_id = %q, want %q", root.Metadata["gc.source_bead_id"], issueID)
+	}
+	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "city:test-city" {
+		t.Fatalf("root %s = %q, want city:test-city", sourceworkflow.SourceStoreRefMetadataKey, got)
 	}
 
 	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", t.TempDir(), "success")

@@ -500,8 +500,8 @@ mode = "on_demand"
 	if got := b.Metadata["alias"]; got != "" {
 		t.Fatalf("alias = %q, want empty because factory create must not claim named identity mayor", got)
 	}
-	if got := b.Metadata["session_origin"]; got != "ephemeral" {
-		t.Fatalf("session_origin = %q, want ephemeral", got)
+	if got := b.Metadata["session_origin"]; got != "manual" {
+		t.Fatalf("session_origin = %q, want manual", got)
 	}
 }
 

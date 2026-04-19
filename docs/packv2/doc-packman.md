@@ -29,6 +29,18 @@ The merge-wave design decisions now settled around `packs.lock` are:
 - The remaining Track 6 work should be a narrow loader-read-path harvest
   that fits this contract, not a wholesale merge of the old branch.
 
+## Status update — 2026-04-18
+
+The current shipped direction is now also settled:
+
+- `gc import` is a built-in Go command surface (`cmd/gc/cmd_import.go`),
+  not a Python bootstrap pack.
+- The legacy `gc-import` pack remains in-tree only as compatibility
+  material and is no longer bootstrapped by default.
+- `packs.lock` and PackV2 `pack.toml` authoring are the current contract.
+  Historical v1/`city.toml`/Python passages below are design context, not
+  the active implementation plan.
+
 ---BEGIN ISSUE---
 
 > **This proposal is part of a three-part design** that seeks to:
@@ -43,7 +55,7 @@ The merge-wave design decisions now settled around `packs.lock` are:
 
 Gas City packs today are wired by hand. To use a remote pack, you copy a git URL into city.toml, pick a ref, run `gc pack fetch`, and hope the version you chose is compatible. There's no discovery, no version constraints, no way to add/remove/update packs without editing TOML by hand, and no concept of transitive resolution — if `gastown` depends on `polecat`, you have to know that and wire `polecat` yourself.
 
-This proposal introduces **`gc import`**: an "in the small" package manager that handles URL-based pack identity, semver constraints, transitive resolution, lock files, and vendoring. It ships as a Gas City pack — pure Python, no Go changes required for v1 — and migrates to a cleaner v2 schema when the gascity loader gains a few small capabilities.
+This proposal introduces **`gc import`**: an "in the small" package manager that handles URL-based pack identity, semver constraints, transitive resolution, lock files, and reproducible installs. The shipped product path is the built-in Go CLI. Earlier Python-pack experiments remain historical compatibility material only.
 
 ### What we need
 
@@ -51,8 +63,8 @@ This proposal introduces **`gc import`**: an "in the small" package manager that
 2. **Reproducibility.** A teammate clones the city repo and runs one command to get an identical working tree.
 3. **Upgrade in place.** Bump locked versions within the user's existing constraints without hand-editing TOML.
 4. **Transitive resolution.** Importing a pack pulls in its dependencies automatically. The user only thinks about what they directly want.
-5. **Implicit baseline imports.** A small, hardcoded list of packs that every city implicitly imports unless it opts out. v1 has exactly one: `maintenance`. The point is that essential infrastructure agents are always present without each city having to know to wire them up.
-6. **No new gascity Go work for v1.** The package manager runs against the current schema. v2 is a clean migration when the loader catches up.
+5. **Implicit baseline imports.** A small, hardcoded list of bootstrap-managed packs that every city can inherit unless it opts out. The exact set is release-owned through `~/.gc/implicit-import.toml`; the point is still that essential infrastructure arrives without each city having to wire it up by hand.
+6. **One authoritative implementation.** The public `gc import` surface is built into gascity in Go. Any older Python pack remains compatibility-only and must not be treated as the primary path.
 
 ### What we don't need (yet)
 
@@ -140,11 +152,11 @@ they resolve to the same clone URL and commit.
 
 **The local handle is the namespace key.** Each `[imports.X]` block introduces a local handle `X` that becomes the pack's namespace inside the importing city — what appears in the city's cache directory at `.gc/cache/packs/X/`, what agents are qualified by (`X.mayor`), what the loader uses to look up the pack at startup. The URL is identity for *resolution* (deduplication, conflict detection); the handle is identity for *consumption*.
 
-**Transitive resolution is automatic.** When `gc import add gastown` runs, the resolver fetches gastown's repo, reads its `pack.toml`, sees `[imports.polecat]`, fetches polecat's repo, reads *its* `pack.toml`, and so on until everything is materialized. Every node in the closure ends up in `pack.lock` with a `parent` field marking transitive entries.
+**Transitive resolution is automatic.** When `gc import add gastown` runs, the resolver fetches gastown's repo, reads its `pack.toml`, sees `[imports.polecat]`, fetches polecat's repo, reads *its* `pack.toml`, and so on until everything is materialized. Every node in the closure ends up in `packs.lock` with a `parent` field marking transitive entries.
 
 **The hidden download accelerator** at `~/.gc/cache/repos/<sha256(url+commit)>/` stores git clones, keyed by URL+commit. Two cities with different commits get separate clones; two cities with the same commit share. Never user-visible — no commands inspect or manipulate it; wiping it just makes the next fetch slower. This is the Go modules model.
 
-**`pack.lock` is the source of truth.** It records the exact resolved transitive closure: URL, commit SHA, content hash, version, constraint, and parent (when transitive). It's committed. `gc import install` reproduces a city's state exactly from the lock without any other input.
+**`packs.lock` is the source of truth.** It records the exact resolved transitive closure: URL, commit SHA, content hash, version, constraint, and parent (when transitive). It's committed. `gc import install` reproduces a city's state exactly from the lock without any other input.
 
 #### Implicit imports
 
@@ -177,35 +189,26 @@ This file format is deliberately **identical to a fragment of `pack.toml`/`city.
 The reason it lives in a file rather than in source code is purely implementation hygiene:
 
 - The file format is identical to a `[imports]` fragment, so the splice can use the same parser and the same merge logic that the resolver already uses for the city's own imports.
-- If we ever need to update the implicit list — bump the maintenance pack version, add a second entry — that's a `gc-import` (or gascity loader) update that ships a new default file. Users get the new default the next time they upgrade.
+- If we ever need to update the implicit list — bump one of the bootstrap-managed pack versions, add a second entry, or retire one — that's a bootstrap/loader update that ships a new default file. Users get the new default the next time they initialize or repair their GC home.
 - If we ever need a per-machine escape hatch (e.g. an internal team needs to point at their fork), we have one available without inventing a new mechanism: edit the file. That's an emergency exit, not a documented user-facing capability.
 
-The package manager writes a default `~/.gc/implicit-import.toml` on first run if it doesn't already exist. The default contains exactly one entry: `maintenance`, pointing at the canonical URL. Once written, the package manager doesn't touch the file again unless we ship a new default and the user runs `gc import` after the upgrade.
+The bootstrap/init flow writes a default `~/.gc/implicit-import.toml` when GC home is initialized and the file doesn't already exist. Once written, it is treated as managed product state rather than hand-authored user configuration.
 
 #### When the splice happens
 
 The splice runs at **resolution time**: any time the city's import closure needs to be computed, the implicit file is read and merged in.
 
-In **v1**, that means `gc-import` (the pack) does the splice in Python whenever `gc import add` / `install` / `upgrade` runs. The resolver reads `~/.gc/implicit-import.toml`, merges its `[imports]` into the city's `[imports]`, and then resolves the union as if all the entries had come from `city.toml`. The merged closure is written to `pack.lock`; entries that came from the implicit file are tagged with `parent = "(implicit)"` so `gc import list` can show them.
+In the current product, the built-in loader and Go import/bootstrap path own the splice. They read `~/.gc/implicit-import.toml`, merge `[imports]` into the city's authored imports, and resolve the union as if the entries had come from the root pack. Historical Python-pack experiments used the same file format, but they are no longer the canonical implementation path.
 
-In **v1.5+**, after the gascity loader patches land (which already include "recognize `[imports]` blocks in `city.toml`"), the loader picks up the same splice. It reads `~/.gc/implicit-import.toml`, merges `[imports]` into the city's `[imports]`, hands the merged dict to whatever does resolution. **The file format is identical between v1 and v1.5+; only the consumer changes.**
+#### Current behavior
 
-#### Known v1 limitation
-
-In v1, the splice only happens when `gc-import` runs. That means a user who creates a city via `gc init` and starts it via `gc start` — without ever invoking `gc-import` directly — would not get the maintenance pack until they ran `gc import install` once.
-
-Two mitigations:
-
-1. **`gc init` runs `gc import install` once at the end of city creation** (when `gc-import` is installed on the machine). This makes the typical flow zero-touch: `gc init my-city` produces a city that already has the maintenance pack materialized in `pack.lock` and `.gc/cache/packs/`.
-2. **In v1.5+, the loader does the splice at startup**, removing the dependency on running `gc-import` at all. The implicit list is honored regardless of whether the package manager has been invoked. This is the long-term answer; the `gc init` workaround is just a v1 bridge.
-
-This is documented as a known v1 wrinkle and called out in Open Questions.
+`gc init` bootstraps the managed implicit-import state, and the loader honors it at startup. A city does not need a separate Python package-manager pack in order to see bootstrap-managed implicit imports.
 
 #### Visibility, opt-out, and override
 
 All three of these knobs live **in the city's own `city.toml`** — never in `~/.gc/implicit-import.toml`. The implicit file is not a user-config layer; the city is.
 
-- **Visibility.** Implicit imports do **not** appear in the `[imports]` section of `city.toml` (or `pack.toml` in v2). They're external inputs to the resolver, recorded only in `pack.lock` and the cache. `[imports]` in city.toml shows the user's *direct intent*; `pack.lock` shows what's *actually installed*. `gc import list` shows implicit entries with an `(implicit)` marker so users can see the maintenance pack appearing in their city without having to know that `~/.gc/implicit-import.toml` exists.
+- **Visibility.** Implicit imports do **not** appear in the `[imports]` section of `city.toml` (or `pack.toml` in v2). They're external inputs to the resolver, recorded only in `packs.lock` and the cache. `[imports]` in city.toml shows the user's *direct intent*; `packs.lock` shows what's *actually installed*. `gc import list` shows implicit entries with an `(implicit)` marker so users can see the maintenance pack appearing in their city without having to know that `~/.gc/implicit-import.toml` exists.
 - **Opt-out.** A city can disable implicit imports entirely by setting `implicit_imports = false` at the top level of `city.toml` (v1) or `pack.toml` (v2). When that flag is false, the resolver skips `~/.gc/implicit-import.toml` entirely; the maintenance pack is not fetched, locked, or materialized. This is the per-city escape hatch for embedded / minimal / specialized cities that don't want the baseline.
 - **Override.** A city that wants a *different* maintenance pack — a fork, an internal version, a pinned older version — can add an explicit `[imports.maintenance]` block to its own `city.toml`. The merge rule (city wins on collision) means the explicit version wins and the implicit one is silently dropped. No auto-suffixing, no parallel installs, no special-case code — it falls out of normal collision handling.
 
@@ -216,12 +219,12 @@ The value proposition of `gc import` is best seen against the world we live in *
 | Pain | Hand-editing today | With `gc import` |
 |---|---|---|
 | Wiring a new remote pack | Hand-edit two TOML sections (`[packs.X]` and `[workspace].includes`) | `gc import add <url>` |
-| Knowing which version you'll get | Whatever the git ref points at right now — could be a moving branch | A specific tag matching your semver constraint, recorded in `pack.lock` |
-| Reproducing on another machine | Hope the ref hasn't moved; clone everything by hand | `gc import install` from `pack.lock` (same commit, hash-verified) |
+| Knowing which version you'll get | Whatever the git ref points at right now — could be a moving branch | A specific tag matching your semver constraint, recorded in `packs.lock` |
+| Reproducing on another machine | Hope the ref hasn't moved; clone everything by hand | `gc import install` from `packs.lock` (same commit, hash-verified) |
 | Bumping versions | Edit ref by hand, hope nothing breaks | `gc import upgrade [<name>]` with constraint-respecting re-resolution |
 | Picking up a pack's dependencies | You have to know about them and wire each one yourself | Transitive resolution does it for you |
 | Baseline infrastructure (maintenance pack) | Each city has to know to wire it | Implicit; every city gets it automatically (opt-out via `implicit_imports = false`) |
-| Knowing where a pack came from | Inferred from `[packs.X].source`; no commit pinning | URL + commit + content hash recorded in `pack.lock` |
+| Knowing where a pack came from | Inferred from `[packs.X].source`; no commit pinning | URL + commit + content hash recorded in `packs.lock` |
 | Constraint visibility | n/a — there are no constraints | `[imports.<name>] version = "..."` block, hand-editable |
 
 The runtime behavior of the loader is **unchanged** by `gc import`. After running `gc import add foo`, the city's `[packs]` and `[workspace].includes` sections look exactly like what you'd write by hand — the package manager is just the tool that wrote them, with versioning and a lock file to back up its choices.
@@ -250,7 +253,7 @@ The `--version` flag accepts semver constraints such as `^1.2`, `~1.2.3`,
 - plain directory targets omit `version`
 
 The recorded `version` string lives in `[imports.<name>] version = "..."`; the
-resolved version/commit lives separately in `pack.lock`. Subsequent
+resolved version/commit lives separately in `packs.lock`. Subsequent
 `gc import upgrade` re-runs semver-managed imports against fresh tags but never
 modifies the declared constraint itself.
 
@@ -275,7 +278,7 @@ Resolving https://github.com/example/gastown...
       Selected: 0.4.1 (constraint ^0.4)
       Cloned → ~/.gc/cache/repos/<hash>/  (hidden)
   Materialized → .gc/cache/packs/gastown/, .gc/cache/packs/polecat/
-  Updated city.toml ([imports], [packs], includes) and pack.lock (2 entries)
+  Updated city.toml ([imports], [packs], includes) and packs.lock (2 entries)
 ```
 
 #### `gc import remove <name>`
@@ -298,22 +301,22 @@ Removing gastown...
     polecat (was a dep of gastown only)
   Removed [packs.polecat], "polecat" from includes
   Deleted .gc/cache/packs/gastown/, .gc/cache/packs/polecat/
-  Updated pack.lock
+  Updated packs.lock
 ```
 
 #### `gc import install`
 
-Restore the city to the exact state recorded in `pack.lock`. This is the cold-clone / CI / teammate-onboarding command.
+Restore the city to the exact state recorded in `packs.lock`. This is the cold-clone / CI / teammate-onboarding command.
 
-- Reads `pack.lock`.
+- Reads `packs.lock`.
 - For each entry, fetches the URL at the recorded commit (using the hidden accelerator if a copy already exists for that commit hash).
 - Materializes each pack into `.gc/cache/packs/<name>/`.
 - Verifies the content hash matches the lock entry; errors on mismatch.
-- Does **not** modify `city.toml`, `pack.toml`, or `pack.lock`. Pure restore.
+- Does **not** modify `city.toml`, `pack.toml`, or `packs.lock`. Pure restore.
 
 ```
 $ gc import install
-Installing from pack.lock...
+Installing from packs.lock...
   gastown v1.2.3 ✓
   polecat v0.4.1 ✓ (transitive: gastown)
   maintenance v2.0.1 ✓
@@ -321,7 +324,7 @@ Installing from pack.lock...
 
 #### `gc import upgrade [<name>]`
 
-Re-resolve the constraints in `[imports]` (in `city.toml` for v1, in `pack.toml` for v2) against the latest available tags, pick higher versions where the constraint allows, and rewrite `pack.lock`.
+Re-resolve the constraints in `[imports]` (in `city.toml` for v1, in `pack.toml` for v2) against the latest available tags, pick higher versions where the constraint allows, and rewrite `packs.lock`.
 
 **How constraints get set.** A constraint is written to `[imports.<name>] version = "..."` exactly once — when the user runs `gc import add <url> [--version <c>]`. From that point on, the constraint can be changed in two ways:
 
@@ -341,14 +344,14 @@ Fetching tags for https://github.com/example/gastown...
   1.2.3 → 1.3.0
   Re-reading [imports]: polecat ^0.4 (unchanged)
   Materialized → .gc/cache/packs/gastown/
-  Updated city.toml [packs.gastown].ref, pack.lock
+  Updated city.toml [packs.gastown].ref, packs.lock
 ```
 
 #### `gc import list [--tree]`
 
 Show what this city imports.
 
-- Default: a flat table of every pack in `pack.lock` (direct + transitive), one row per pack, with the constraint, resolved version, URL, and parent (for transitive).
+- Default: a flat table of every pack in `packs.lock` (direct + transitive), one row per pack, with the constraint, resolved version, URL, and parent (for transitive).
 - `--tree`: an indented tree showing the import graph.
 
 **Name collisions in the transitive closure.** Two transitive imports can resolve to the same local handle from different parents — for example, both `gastown` and `maintenance` may pull in something they each call `polecat`. There are three cases:
@@ -384,7 +387,7 @@ source = "../foo"
 
 Three distinct cases, all resolved by treating the local handle as the namespace key and the URL as the resolution identity.
 
-**Case 1: Different versions in different cities on the same machine.** Trivial. The hidden accelerator is keyed by URL+commit; each city has its own `pack.lock` and its own checkout. They never share state at the city level.
+**Case 1: Different versions in different cities on the same machine.** Trivial. The hidden accelerator is keyed by URL+commit; each city has its own `packs.lock` and its own checkout. They never share state at the city level.
 
 **Case 2: Within-city transitive conflict.** When two transitive constraints on the same URL meet:
 
@@ -422,10 +425,10 @@ Add explicit imports to disambiguate. In your city.toml (v1) or pack.toml (v2):
 <city>/
 ├── city.toml                   # committed; user-managed deployment config + machine-managed [packs]/includes (v1 only)
 ├── pack.toml                   # committed; v2 only — replaces v1's [imports]/[packs]/includes in city.toml
-├── pack.lock                   # committed; full resolved transitive closure
+├── packs.lock                  # committed; full resolved transitive closure
 └── .gc/
     └── cache/
-        └── packs/              # gitignored, derived from pack.lock
+        └── packs/              # gitignored, derived from packs.lock
             ├── gastown/
             ├── polecat/
             └── maintenance/    # the implicit import
@@ -485,56 +488,22 @@ The lock file's keys are **local handles**, not URLs. URLs may repeat across ent
 
 ## Implementation
 
-`gc import` is itself a Gas City pack — pure Python, no Go changes for v1. Under V2 the commands and doctor check are convention-discovered: each command lives in its own `commands/<name>/` directory with a `command.toml` sidecar pointing at the Python entrypoint (V2 discovery defaults to `run.sh`, so non-shell entrypoints need an explicit `run = "<name>.py"` override). The pack is published as a git repo (the conventional name is `gc-import`) and installed by users via the existing `gc pack` mechanism (or, after v1 ships, via `gc import add` itself, which is a fun bootstrap).
+`gc import` is implemented as a built-in Go command surface in gascity. The authoritative code lives in `cmd/gc/cmd_import.go` and `internal/packman`, with the loader consuming `packs.lock` through `internal/config`. The old `gc-import` pack layout remains only as legacy compatibility material and should not be treated as the primary implementation.
 
 ### Repo layout
 
 ```
-gc-import/
-├── pack.toml                  # [pack] schema = 2 — no [[commands]] inventory
-├── README.md                  # user guide (the canonical entry point)
-├── doctor/
-│   └── python3.11/
-│       ├── doctor.toml        # description only; run.sh is the V2 default
-│       └── run.sh             # verifies Python 3.11+ is available
-├── commands/
-│   ├── add/
-│   │   ├── command.toml       # description + run = "add.py"
-│   │   └── add.py
-│   ├── remove/
-│   │   ├── command.toml
-│   │   └── remove.py
-│   ├── install/
-│   │   ├── command.toml
-│   │   └── install.py
-│   ├── upgrade/
-│   │   ├── command.toml
-│   │   └── upgrade.py
-│   └── list/
-│       ├── command.toml
-│       └── list.py
-├── lib/
-│   ├── __init__.py
-│   ├── semver.py              # constraint parsing and matching
-│   ├── git.py                 # subprocess wrappers around git
-│   ├── lockfile.py            # pack.lock read/write
-│   ├── manifest.py            # [imports] section read from city.toml
-│   ├── citytoml.py            # surgical edits to city.toml ([packs] + includes)
-│   ├── implicit.py            # hardcoded implicit-imports list
-│   ├── resolver.py            # transitive resolution + conflict detection
-│   ├── cache.py               # ~/.gc/cache/repos/ + .gc/cache/packs/ management
-│   └── ui.py                  # consistent output formatting
-└── tests/
-    └── ...                    # integration tests using a known test repo
+gascity/
+├── cmd/gc/cmd_import.go       # add/remove/install/upgrade/list CLI
+├── cmd/gc/cmd_migrate.go      # transitional migration surface
+├── internal/packman/          # manifest + lockfile + install/upgrade logic
+├── internal/config/           # loader-side import and implicit-import splice
+└── internal/bootstrap/        # managed implicit-import bootstrap state
 ```
 
 ### Dependencies
 
-**Python 3.11+, stdlib only.** The reader uses `tomllib` (stdlib in 3.11). Writers are hand-rolled — they generate small, well-formed TOML for `pack.lock` (which the package manager fully owns), and do surgical text edits to `city.toml` (which the user partly owns) using bracketed-section finding rather than full TOML parsing. Three sections in `city.toml` are managed by `gc import`: `[imports]` (user-facing), `[packs.X]` blocks (machine-managed view of the resolved closure), and `[workspace].includes` (the loader's pack list). All three get rewritten on every `add`/`remove`/`upgrade`.
-
-No `tomlkit`, no `tomli_w`, no `packaging`, no `gitpython`. Git operations are subprocess calls. Semver is a small custom module (~100 lines) — Gas City's needs are simple and well-bounded.
-
-The motivation for stdlib-only: zero install friction. Users running `gc import add` for the first time should not need to `pip install` anything.
+The shipped implementation follows the native Go dependency surface already used by the rest of gascity. There is no Python runtime dependency in the primary path.
 
 ### Resolution algorithm (transitive)
 
@@ -602,28 +571,24 @@ These aren't open questions — they're settled, but they're decisions worth bei
 
 ## Phasing
 
-**Phase 1: Verbs against v1 schema.** Everything described above, running against the current `[packs]`+`includes` schema with a new `[imports]` section added inline in `city.toml`. Ships as the `gc-import` pack with no gascity Go changes — `[imports]` is a section the v1 loader doesn't recognize, so it's silently ignored by gascity until v2 lands. The package manager owns three sections in `city.toml`: `[imports]` (user-facing), `[packs.X]` (machine-managed view of the resolved closure), and `[workspace].includes` (machine-managed pack list for the loader). Yes, this writes the imports view twice — once as `[imports]` for users, once as `[packs]`/`includes` for the loader. This is not DRY-ideal, but it's the price of making v1 ship without loader changes; v2 collapses the two views into one. The duplication is mechanical (the `[packs]`/`includes` view is fully derived from `[imports]` + `pack.lock`), so there's no risk of the two going out of sync as long as users don't hand-edit `[packs]`.
+**Current wave:** native Go `gc import`, PackV2 `pack.toml` authoring, `packs.lock`, and loader-read-path integration are the authoritative implementation.
 
-**Phase 1.5: Loader patches.** Two small additions to `internal/config/` in gascity: read pack.toml at city root, recognize `[imports]` blocks. Independent track from the package manager. See [gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360) for the Pack/City v.next design that defines what these patches need to do.
+**Transitional wave:** `gc import migrate` can remain available while doctor-first migration fully lands, but it is not the target long-term public flow.
 
-**Phase 2:  v2 migration — TBD whether we even build it.** When the v2 loader patches land, we *could* ship `gc import migrate` to convert v1 cities to the v2 schema. But it's not yet decided whether we support migration at all; we might just say "v1 cities keep using the v1 schema until the user manually rewrites them" if migration tooling proves more trouble than it's worth. The lock file is identical between v1 and v2, so there's nothing to lose if a user wants to do the migration by hand. **Defer the migration-tooling decision until v2 loader work is closer.**
-
-**Phase 3: Graph awareness.** `gc import outdated`, `info`, `why`, and improved `list --tree` once transitive imports are battle-tested.
-
-**Later:** `gc import publish`, `gc import downgrade`, drift detection UX, and discovery surface integration via the registry.
+**Follow-on wave:** graph awareness (`outdated`, `info`, `why`), rig-scoped import authoring, and validation/repair UX once the base contract is fully settled.
 
 ## Alternatives considered
 
-- **Built into gascity.** Would violate the "packs are a sufficient extension mechanism" thesis. If the package manager needs Go changes that's a signal the pack command system needs work, not that the package manager belongs in Go.
+- **Standalone Python pack as the primary implementation.** Earlier drafts pursued this, but the repo has now converged on native Go as the authoritative path. The Python pack remains compatibility material only.
 - **Centralized registry server *as part of `gc import`*.** Requires hosting infrastructure, auth, upload pipeline. Overkill for an ecosystem this size and contradicts the URL-as-identity model. (Note: a separate `gc registry` surface for *discovery* — pure pointer service, never load-bearing for builds — IS in scope as a companion design. The thing rejected here is a registry that participates in resolution, not a registry that helps with discovery.)
 - **Tap-based model (brew style).** Considered and rejected during the design session. Tap monoliths force authors into multi-pack repos and add a discovery surface that's load-bearing for builds. URL-as-identity is simpler.
 - **User-level registry of named packs as a `gc import` dependency** (`~/.gc/registered.toml` + register/unregister verbs as part of the package manager). Considered and rejected. `gc import` deduplicates clones invisibly via the hidden accelerator. The user-level *catalog* of named packs is real but it belongs to `gc registry`, not to `gc import`.
 - **Vendoring (`gc import freeze` and `./packs/`).** Earlier drafts shipped this as experimental. Cut for v1 — see "What we don't need (yet)". The five-verb surface (`add`/`remove`/`install`/`upgrade`/`list`) is the v1 deliverable. If users scream we'll bring vendoring back, probably reframed in terms of the local registry rather than the tree-side `./packs/` directory.
 - **`tomlkit` for TOML editing.** More capable but adds an install dependency. Hand-rolled writers + surgical text edits are sufficient for the small set of files we touch.
 
-## Appendix: v1 vs v2 schema
+## Appendix: historical v1 vs v2 schema
 
-This appendix is here for reference. **The package manager's behavior is the same under v1 and v2.** What changes between schemas is *where* the data lives — which file has the `[imports]` section and what the gascity loader reads. Those changes are owned by the Pack/City v.next design at [gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360); `gc import` is congruent with both schemas and migrates between them.
+This appendix is here for reference. It describes the earlier v1-to-v2 migration framing that predated the current native-Go/PackV2 convergence. Read it as historical design context, not as the active implementation plan.
 
 The information in this appendix is not load-bearing for understanding `gc import`. Skip it unless you specifically want to know how the package manager interacts with the schema work.
 
@@ -652,7 +617,7 @@ version = "^2.0"
 source = "../my-helper"
 
 # ─── machine-managed: resolved [packs] for the gascity loader ───
-# gc import rewrites these from [imports] + pack.lock. Treat as outputs, not inputs.
+# gc import rewrites these from [imports] + packs.lock. Treat as outputs, not inputs.
 
 [packs.gastown]
 source = "https://github.com/example/gastown"
@@ -673,10 +638,10 @@ provider = "bd"
 ```
 my-city/
 ├── city.toml                 ← contains [imports], [packs], [workspace], [beads] — one file
-├── pack.lock                 ← committed; full transitive closure with commit + hash
+├── packs.lock                 ← committed; full transitive closure with commit + hash
 └── .gc/
     └── cache/
-        └── packs/            ← gitignored, derived from pack.lock
+        └── packs/            ← gitignored, derived from packs.lock
             ├── gastown/
             ├── polecat/      ← transitive dep of gastown
             └── maintenance/
@@ -686,9 +651,9 @@ Three things to notice about the v1 shape:
 
 1. **`[imports]` is the new user-facing surface that `gc import` introduces.** Today, without `gc import`, the user-facing surface for declaring packs is `[workspace].includes` — the user lists pack names there and the loader picks them up. With `gc import`, `[imports]` becomes the place where users declare what they want (with version constraints), and `gc import` re-emits the includes list and `[packs]` blocks as a derived view. `[workspace].includes` remains user-facing in the no-gc-import world; it just becomes machine-managed once `gc import` is in play.
 
-2. **`[packs]` and `[workspace].includes` are machine-managed.** `gc import` rewrites these every time `[imports]` or the lock changes. They're a derived view of `[imports]` + `pack.lock` — treat them as outputs, not inputs.
+2. **`[packs]` and `[workspace].includes` are machine-managed.** `gc import` rewrites these every time `[imports]` or the lock changes. They're a derived view of `[imports]` + `packs.lock` — treat them as outputs, not inputs.
 
-3. **Transitive deps appear in `[packs]` and `pack.lock` but NOT in `[imports]`.** In the example above, `polecat` is a transitive dep that the user never directly asked for. The user only ever sees `polecat` in the lock file (and in `gc import list`, which reads the lock). This is the boundary between "what the user asked for" (`[imports]`) and "what the resolver figured out" (`[packs]` + lock).
+3. **Transitive deps appear in `[packs]` and `packs.lock` but NOT in `[imports]`.** In the example above, `polecat` is a transitive dep that the user never directly asked for. The user only ever sees `polecat` in the lock file (and in `gc import list`, which reads the lock). This is the boundary between "what the user asked for" (`[imports]`) and "what the resolver figured out" (`[packs]` + lock).
 
 ### What gc import will write after the gascity loader patches (v2 schema)
 
@@ -720,10 +685,10 @@ provider = "bd"
 my-city/
 ├── pack.toml                 ← imports + city pack identity
 ├── city.toml                 ← deployment config only
-├── pack.lock                 ← committed; full transitive closure
+├── packs.lock                 ← committed; full transitive closure
 └── .gc/
     └── cache/
-        └── packs/            ← gitignored, derived from pack.lock
+        └── packs/            ← gitignored, derived from packs.lock
             ├── gastown/
             ├── polecat/
             └── maintenance/
@@ -739,14 +704,14 @@ Beyond file locations and TOML syntax, the differences are smaller than you'd th
 |---|---|---|
 | User-facing imports live in | `[imports]` in `city.toml` | `[imports]` in `pack.toml` (city root) |
 | Loader-facing pack list | `[packs.X]` + `[workspace].includes` in `city.toml` (machine-managed) | The same `[imports]` block — no separate machine-managed view |
-| Number of TOML sections `gc import` writes per add | Three (`[imports]`, `[packs]`, `[workspace].includes`) plus `pack.lock` | One (`[imports]`) plus `pack.lock` |
+| Number of TOML sections `gc import` writes per add | Three (`[imports]`, `[packs]`, `[workspace].includes`) plus `packs.lock` | One (`[imports]`) plus `packs.lock` |
 | Loader behavior on unrecognized sections | Ignores `[imports]` (it's a section the loader doesn't know) | Reads `[imports]` directly |
 | Transitive resolution in pack manager | Same | Same |
 | Hidden download accelerator | Same | Same |
-| Reproducibility | `gc import install` reads `pack.lock` and rebuilds the city cache + the [packs] view | `gc import install` reads `pack.lock` and rebuilds the city cache |
+| Reproducibility | `gc import install` reads `packs.lock` and rebuilds the city cache + the [packs] view | `gc import install` reads `packs.lock` and rebuilds the city cache |
 | Hand-editable user surface | `[imports]` (constraints) | `[imports]` (constraints) |
 
-The take-away: **the user-facing experience is identical**. The same `[imports]` syntax, the same verbs, the same `pack.lock`, the same constraints, the same transitive resolution. v2 is a refactor of *where* the data lives, not *what* the data is. The migration is a one-shot file move, not a behavior change.
+The take-away: **the user-facing experience is identical**. The same `[imports]` syntax, the same verbs, the same `packs.lock`, the same constraints, the same transitive resolution. v2 is a refactor of *where* the data lives, not *what* the data is. The migration is a one-shot file move, not a behavior change.
 
 ### Migration
 

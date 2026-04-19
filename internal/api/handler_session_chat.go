@@ -107,6 +107,34 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string) runti
 	}
 }
 
+func sessionExplicitNameForCreate(agentCfg config.Agent, alias string) (string, error) {
+	if !agentCfg.SupportsMultipleSessions() || strings.TrimSpace(alias) != "" {
+		return "", nil
+	}
+	return session.GenerateAdhocExplicitName(agentCfg.Name)
+}
+
+func (s *Server) resolveSessionWorkDir(agentCfg config.Agent, qualifiedName string) (string, error) {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return "", errors.New("no city config loaded")
+	}
+	workDir, err := workdirutil.ResolveWorkDirPathStrict(
+		s.state.CityPath(),
+		workdirutil.CityName(s.state.CityPath(), cfg),
+		qualifiedName,
+		agentCfg,
+		cfg.Rigs,
+	)
+	if err != nil {
+		return "", err
+	}
+	if workDir == "" {
+		workDir = s.state.CityPath()
+	}
+	return workDir, nil
+}
+
 func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvider, string, string, string, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
@@ -120,18 +148,9 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 	if err != nil {
 		return nil, "", "", "", err
 	}
-	workDir, err := workdirutil.ResolveWorkDirPathStrict(
-		s.state.CityPath(),
-		workdirutil.CityName(s.state.CityPath(), cfg),
-		agentCfg.QualifiedName(),
-		agentCfg,
-		cfg.Rigs,
-	)
+	workDir, err := s.resolveSessionWorkDir(agentCfg, agentCfg.QualifiedName())
 	if err != nil {
 		return nil, "", "", "", err
-	}
-	if workDir == "" {
-		workDir = s.state.CityPath()
 	}
 	return resolved, workDir, agentCfg.Session, agentCfg.QualifiedName(), nil
 }
@@ -270,23 +289,34 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resolved *config.ResolvedProvider
+	var agentCfg config.Agent
 	var workDir, transport, template string
 	var optMeta map[string]string
+	var err error
 
 	switch kind {
 	case "agent":
-		var err error
-		resolved, workDir, transport, template, err = s.resolveSessionTemplate(name)
+		cfg := s.state.Config()
+		if cfg == nil {
+			s.idem.unreserve(idemKey)
+			writeError(w, http.StatusInternalServerError, "internal", "no city config loaded")
+			return
+		}
+		var ok bool
+		agentCfg, ok = resolveSessionTemplateAgent(cfg, name)
+		if !ok {
+			s.idem.unreserve(idemKey)
+			writeError(w, http.StatusNotFound, "agent_not_found", "agent '"+name+"' not found")
+			return
+		}
+		resolved, err = config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
 		if err != nil {
-			if errors.Is(err, errSessionTemplateNotFound) {
-				s.idem.unreserve(idemKey)
-				writeError(w, http.StatusNotFound, "agent_not_found", "agent '"+name+"' not found")
-				return
-			}
 			s.idem.unreserve(idemKey)
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
+		transport = agentCfg.Session
+		template = agentCfg.QualifiedName()
 		// Agent track: command comes from the agent config as-is.
 		// Do NOT inject OptionsSchema defaults — agents encode their own CLI flags.
 		// Options are stored as template_overrides and applied at start time
@@ -331,6 +361,27 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
+	if kind == "agent" && alias != "" && agentCfg.SupportsMultipleSessions() {
+		alias = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, s.state.Config().Rigs, alias, "")
+	}
+	explicitName := ""
+	workDirQualifiedName := ""
+	if kind == "agent" {
+		var explicitErr error
+		explicitName, explicitErr = sessionExplicitNameForCreate(agentCfg, alias)
+		if explicitErr != nil {
+			s.idem.unreserve(idemKey)
+			writeSessionManagerError(w, explicitErr)
+			return
+		}
+		workDirQualifiedName = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, s.state.Config().Rigs, alias, explicitName)
+		workDir, err = s.resolveSessionWorkDir(agentCfg, workDirQualifiedName)
+		if err != nil {
+			s.idem.unreserve(idemKey)
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+	}
 
 	// Merge explicit options with provider effective defaults.
 	// User-specified options override defaults; unspecified options get the
@@ -373,14 +424,34 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// show the session in the sidebar immediately via optimistic UI.
 	mgr := s.sessionManager(store)
 	var info session.Info
-	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+	reservationIDs := []string{alias, explicitName}
+	reserveConcreteIdentity := kind == "agent" && agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
+	if reserveConcreteIdentity {
+		reservationIDs = append(reservationIDs, workDirQualifiedName)
+	}
+	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
+		}
+		if reserveConcreteIdentity && workDirQualifiedName != alias {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); err != nil {
+				return err
+			}
+		}
+		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); err != nil {
+			return err
+		}
+		if kind == "agent" {
+			if extraMeta == nil {
+				extraMeta = make(map[string]string)
+			}
+			extraMeta["agent_name"] = workDirQualifiedName
+			extraMeta["session_origin"] = "manual"
 		}
 		var createErr error
 		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
 			alias,
-			"",
+			explicitName,
 			template,
 			title,
 			command,

@@ -682,9 +682,11 @@ func applyBootstrapProfile(cfg *config.City, profile string) {
 
 // installClaudeHooks writes Claude Code hook settings for the city.
 // Delegates to hooks.Install which is idempotent (won't overwrite existing files).
+// The stderr prefix is neutral ("claude hooks:") because this function runs
+// both at `gc init` time and on every reconciler tick via resolveTemplate.
 func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
 	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
-		fmt.Fprintf(stderr, "gc init: installing claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0

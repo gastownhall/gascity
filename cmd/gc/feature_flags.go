@@ -12,5 +12,5 @@ import (
 func applyFeatureFlags(cfg *config.City) {
 	gw := cfg.Daemon.FormulaV2
 	formula.SetFormulaV2Enabled(gw)
-	molecule.GraphApplyEnabled = gw
+	molecule.SetGraphApplyEnabled(gw)
 }

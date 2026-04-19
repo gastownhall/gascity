@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -99,6 +101,7 @@ func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
 
 // New creates a Server with all routes registered. Does not start listening.
 func New(state State) *Server {
+	syncFeatureFlags(state.Config())
 	s := &Server{
 		state: state,
 		mux:   http.NewServeMux(),
@@ -111,6 +114,7 @@ func New(state State) *Server {
 // NewReadOnly creates a read-only Server that rejects all mutation requests.
 // Use this when the server binds to a non-localhost address.
 func NewReadOnly(state State) *Server {
+	syncFeatureFlags(state.Config())
 	s := &Server{
 		state:    state,
 		mux:      http.NewServeMux(),
@@ -119,6 +123,16 @@ func NewReadOnly(state State) *Server {
 	}
 	s.registerRoutes()
 	return s
+}
+
+func syncFeatureFlags(cfg *config.City) {
+	enabled := cfg != nil && cfg.Daemon.FormulaV2
+	if formula.IsFormulaV2Enabled() != enabled {
+		formula.SetFormulaV2Enabled(enabled)
+	}
+	if molecule.IsGraphApplyEnabled() != enabled {
+		molecule.SetGraphApplyEnabled(enabled)
+	}
 }
 
 // ServeHTTP implements http.Handler for testing with httptest.

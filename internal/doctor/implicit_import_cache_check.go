@@ -131,6 +131,10 @@ func inspectBootstrapImplicitImportCaches(gcHome string, imports map[string]conf
 	for _, entry := range bootstrap.BootstrapPacks {
 		bootstrapByName[entry.Name] = entry
 	}
+	retiredByName := make(map[string]bootstrap.Entry, len(bootstrap.RetiredBootstrapPacks))
+	for _, entry := range bootstrap.RetiredBootstrapPacks {
+		retiredByName[entry.Name] = entry
+	}
 
 	names := make([]string, 0, len(imports))
 	for name := range imports {
@@ -141,6 +145,23 @@ func inspectBootstrapImplicitImportCaches(gcHome string, imports map[string]conf
 	var issues []implicitImportCacheIssue
 	for _, name := range names {
 		imp := imports[name]
+
+		// Stale entries from retired bootstrap packs must be surfaced even
+		// before the user runs --fix, so the "why is this city splicing a
+		// retired pack" failure mode is diagnosable from plain `gc doctor`.
+		if retired, ok := retiredByName[name]; ok &&
+			config.NormalizeRemoteSource(retired.Source) == config.NormalizeRemoteSource(imp.Source) {
+			issues = append(issues, implicitImportCacheIssue{
+				name:   name,
+				status: StatusError,
+				message: fmt.Sprintf(
+					"implicit import %q points at retired bootstrap pack %s; run \"gc doctor --fix\" or \"gc init\" to prune it from %s",
+					name, retired.Source, filepath.Join(gcHome, "implicit-import.toml"),
+				),
+			})
+			continue
+		}
+
 		if imp.Commit == "" {
 			continue
 		}

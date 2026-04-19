@@ -491,7 +491,7 @@ func collidesWithImplicitImports(userImports map[string]Import, implicitNames []
 // User-added implicit imports (e.g. custom entries that a user wrote
 // into ~/.gc/implicit-import.toml by hand) retain the pre-v0.15.1
 // "explicit wins over implicit" contract and are shadowed silently.
-var bootstrapManagedImportNames = []string{"import", "registry", "core"}
+var bootstrapManagedImportNames = []string{"registry", "core"}
 
 // BootstrapManagedImportNames returns a copy of the bootstrap-managed
 // implicit-import binding names recognized by the composer's collision

@@ -468,32 +468,44 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 // SuspendAgent writes suspended=true to city.toml (durable desired state).
 // Uses configedit.Editor for provenance-aware edit (inline vs patch).
 func (cs *controllerState) SuspendAgent(name string) error {
-	return cs.editor.SuspendAgent(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SuspendAgent(name)
+	})
 }
 
 // ResumeAgent clears suspended in city.toml (durable desired state).
 func (cs *controllerState) ResumeAgent(name string) error {
-	return cs.editor.ResumeAgent(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.ResumeAgent(name)
+	})
 }
 
 // SuspendRig writes suspended=true on the rig in city.toml.
 func (cs *controllerState) SuspendRig(name string) error {
-	return cs.editor.SuspendRig(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SuspendRig(name)
+	})
 }
 
 // ResumeRig clears suspended on the rig in city.toml.
 func (cs *controllerState) ResumeRig(name string) error {
-	return cs.editor.ResumeRig(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.ResumeRig(name)
+	})
 }
 
 // SuspendCity sets workspace.suspended = true.
 func (cs *controllerState) SuspendCity() error {
-	return cs.editor.SuspendCity()
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SuspendCity()
+	})
 }
 
 // ResumeCity sets workspace.suspended = false.
 func (cs *controllerState) ResumeCity() error {
-	return cs.editor.ResumeCity()
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.ResumeCity()
+	})
 }
 
 // CreateAgent adds a new agent to city.toml.
@@ -585,6 +597,14 @@ func (cs *controllerState) SetProviderPatch(patch config.ProviderPatch) error {
 // DeleteProviderPatch removes a provider patch from city.toml.
 func (cs *controllerState) DeleteProviderPatch(name string) error {
 	return cs.editor.DeleteProviderPatch(name)
+}
+
+func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	if err := mutate(); err != nil {
+		return err
+	}
+	cs.Poke()
+	return nil
 }
 
 // Poke signals the controller to trigger an immediate reconciler tick.

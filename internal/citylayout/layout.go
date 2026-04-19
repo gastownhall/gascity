@@ -20,6 +20,7 @@ const (
 
 	HooksRoot      = "hooks"
 	ClaudeHookFile = "hooks/claude.json"
+	ClaudeSettings = ".claude/settings.json"
 
 	ScriptsRoot = "scripts"
 
@@ -82,6 +83,9 @@ func ScriptsPath(cityRoot string) string { return filepath.Join(cityRoot, Script
 
 // ClaudeHookFilePath returns the absolute path to the Claude hook file.
 func ClaudeHookFilePath(cityRoot string) string { return filepath.Join(cityRoot, ClaudeHookFile) }
+
+// ClaudeSettingsPath returns the absolute path to the city-local Claude settings override.
+func ClaudeSettingsPath(cityRoot string) string { return filepath.Join(cityRoot, ClaudeSettings) }
 
 // ResolveFormulasDir resolves the city-local formulas directory. If configured
 // is empty or ".", returns the default formulas path. If absolute, returns as-is.

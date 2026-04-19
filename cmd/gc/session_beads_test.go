@@ -645,6 +645,113 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_BackfillsLegacyConcretePoolIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	bead, err := store.Create(beads.Bead{
+		Title:  "legacy ant",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":     "demo/ant",
+			"session_name":   "s-gc-legacy",
+			"template":       "demo/ant",
+			"session_origin": "ephemeral",
+			"state":          "creating",
+			"work_dir":       "/tmp/stale",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating legacy bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"s-gc-legacy": {
+			TemplateName:  "demo/ant",
+			InstanceName:  "demo/s-gc-legacy",
+			Command:       "true",
+			WorkDir:       "/tmp/fixed",
+			ManualSession: true,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Metadata["agent_name"] != "demo/s-gc-legacy" {
+		t.Fatalf("agent_name = %q, want %q", got.Metadata["agent_name"], "demo/s-gc-legacy")
+	}
+	if got.Metadata["work_dir"] != "/tmp/fixed" {
+		t.Fatalf("work_dir = %q, want %q", got.Metadata["work_dir"], "/tmp/fixed")
+	}
+	if got.Metadata["session_origin"] != "manual" {
+		t.Fatalf("session_origin = %q, want %q", got.Metadata["session_origin"], "manual")
+	}
+}
+
+func TestSyncSessionBeads_ActiveLegacyConcretePoolIdentityKeepsCurrentWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "s-gc-legacy", runtime.Config{}); err != nil {
+		t.Fatalf("start fake session: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "legacy ant",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":     "demo/ant",
+			"session_name":   "s-gc-legacy",
+			"template":       "demo/ant",
+			"session_origin": "ephemeral",
+			"state":          "active",
+			"work_dir":       "/tmp/stale",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating legacy bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"s-gc-legacy": {
+			TemplateName:  "demo/ant",
+			InstanceName:  "demo/s-gc-legacy",
+			Command:       "true",
+			WorkDir:       "/tmp/fixed",
+			ManualSession: true,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Metadata["agent_name"] != "demo/s-gc-legacy" {
+		t.Fatalf("agent_name = %q, want %q", got.Metadata["agent_name"], "demo/s-gc-legacy")
+	}
+	if got.Metadata["work_dir"] != "/tmp/stale" {
+		t.Fatalf("work_dir = %q, want %q", got.Metadata["work_dir"], "/tmp/stale")
+	}
+	if got.Metadata["session_origin"] != "manual" {
+		t.Fatalf("session_origin = %q, want %q", got.Metadata["session_origin"], "manual")
+	}
+}
+
 func TestSyncSessionBeads_UpdatesNamedModeForWizardMayor(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

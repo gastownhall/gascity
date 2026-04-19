@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // newSlingTestServer creates a test server with a fake runner that captures
@@ -23,6 +27,29 @@ func newSlingTestServer(t *testing.T) (*Server, *fakeMutatorState) {
 		return "", nil // no-op runner
 	}
 	return srv, state
+}
+
+func TestNewSyncsFormulaV2FeatureFlags(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Daemon.FormulaV2 = true
+
+	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	formula.SetFormulaV2Enabled(false)
+	molecule.SetGraphApplyEnabled(false)
+	t.Cleanup(func() {
+		formula.SetFormulaV2Enabled(prevFormulaV2)
+		molecule.SetGraphApplyEnabled(prevGraphApply)
+	})
+
+	_ = New(state)
+
+	if !formula.IsFormulaV2Enabled() {
+		t.Fatal("formula.IsFormulaV2Enabled() = false, want true")
+	}
+	if !molecule.IsGraphApplyEnabled() {
+		t.Fatal("molecule.IsGraphApplyEnabled() = false, want true")
+	}
 }
 
 func TestSlingWithBead(t *testing.T) {
@@ -152,6 +179,70 @@ func TestSlingPoolTarget(t *testing.T) {
 	}
 	if resp["status"] != "slung" {
 		t.Fatalf("status = %q, want slung", resp["status"])
+	}
+}
+
+func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	state.cfg.Agents = append(state.cfg.Agents,
+		config.Agent{Name: config.ControlDispatcherAgentName, MaxActiveSessions: intPtr(1)},
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "myrig", MaxActiveSessions: intPtr(1)},
+	)
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := state.stores["myrig"]
+	source, err := store.Create(beads.Bead{ID: "BL-42", Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title:  "existing workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   source.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"myrig/worker","formula":"graph-work","attached_bead_id":"` + source.ID + `"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp["code"]; got != "conflict" {
+		t.Fatalf("code = %#v, want conflict", got)
+	}
+	if got := resp["source_bead_id"]; got != source.ID {
+		t.Fatalf("source_bead_id = %#v, want %s", got, source.ID)
+	}
+	ids, ok := resp["blocking_workflow_ids"].([]any)
+	if !ok || len(ids) != 1 || ids[0] != root.ID {
+		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", resp["blocking_workflow_ids"], root.ID)
+	}
+	if hint, _ := resp["hint"].(string); !strings.Contains(hint, "--store-ref rig:myrig --apply") {
+		t.Fatalf("hint = %q, want store-ref cleanup command", hint)
 	}
 }
 

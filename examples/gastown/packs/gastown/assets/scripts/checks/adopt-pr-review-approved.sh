@@ -23,7 +23,18 @@ load_verdict() {
         verdict=$(
             bd list --all --json --limit=0 2>/dev/null |
                 jq -r --arg ref "$apply_ref" --arg root "$root_id" '
-                    [ .[] | select(.metadata["gc.step_ref"] == $ref and .metadata["gc.root_bead_id"] == $root) | .metadata["review.verdict"] ] | first // ""
+                    [
+                        .[]
+                        | select(.metadata["gc.step_ref"] == $ref and .metadata["gc.root_bead_id"] == $root)
+                        | {
+                            verdict: .metadata["review.verdict"],
+                            timestamp: (.updated_at // .created_at // ""),
+                            id: (.id // "")
+                        }
+                        | select(.verdict != null and .verdict != "")
+                    ]
+                    | sort_by(.timestamp, .id)
+                    | .[-1].verdict // ""
                 ' 2>/dev/null
         ) || verdict=""
         if [ -n "$verdict" ]; then

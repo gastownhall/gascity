@@ -1,2 +1,0 @@
-description = "Re-resolve constraints and bump pack.lock"
-run = "upgrade.py"

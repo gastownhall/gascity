@@ -554,6 +554,11 @@ func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {
 	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	state := newFakeState(t)
+	// api.New(state) calls syncFeatureFlags(state.Config()), which pulls
+	// formula_v2 back out of cfg.Daemon and overrides the global set above.
+	// Without this, the server sees v2 as disabled and rejects the v2
+	// formula compile with a 400 "formula_v2 is disabled" error.
+	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows"
 )
 
 func TestCompileSimpleFormula(t *testing.T) {
@@ -544,6 +546,107 @@ needs = ["a"]
 	_, err := Compile(context.Background(), "graph-cycle", []string{dir}, nil)
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
 		t.Fatalf("Compile(graph-cycle) error = %v, want dependency cycle", err)
+	}
+}
+
+func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
+		"issue":       "GC-1",
+		"pr_ref":      "refs/heads/test",
+		"skip_gemini": "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if strings.Contains(step.ID, "review-gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini lane with skip_gemini=true: %s", step.ID)
+		}
+	}
+	for _, dep := range recipe.Deps {
+		if strings.Contains(dep.StepID, "review-gemini") || strings.Contains(dep.DependsOnID, "review-gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini dependency with skip_gemini=true: %+v", dep)
+		}
+	}
+
+	for _, want := range []string{
+		"mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-claude",
+		"mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-codex",
+		"mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.synthesize",
+		"mol-adopt-pr-v2.review-loop.iteration.1.apply-fixes",
+	} {
+		if recipe.StepByID(want) == nil {
+			t.Fatalf("compiled recipe missing expected step %q", want)
+		}
+	}
+}
+
+func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
+		"issue":       "GC-1",
+		"pr_ref":      "refs/heads/test",
+		"skip_gemini": "false",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	assertRetryStep := func(stepID, onExhausted string) {
+		t.Helper()
+		step := recipe.StepByID(stepID)
+		if step == nil {
+			t.Fatalf("missing retry control step %q", stepID)
+		}
+		if got := step.Metadata["gc.kind"]; got != "retry" {
+			t.Fatalf("%s gc.kind = %q, want retry", stepID, got)
+		}
+		if got := step.Metadata["gc.on_exhausted"]; got != onExhausted {
+			t.Fatalf("%s gc.on_exhausted = %q, want %q", stepID, got, onExhausted)
+		}
+		if got := step.Metadata["gc.max_attempts"]; got != "3" {
+			t.Fatalf("%s gc.max_attempts = %q, want 3", stepID, got)
+		}
+
+		attempt := recipe.StepByID(stepID + ".attempt.1")
+		if attempt == nil {
+			t.Fatalf("missing first retry attempt for %q", stepID)
+		}
+		if got := attempt.Metadata["gc.attempt"]; got != "1" {
+			t.Fatalf("%s gc.attempt = %q, want 1", attempt.ID, got)
+		}
+		if got := attempt.Metadata["gc.step_id"]; got == "" {
+			t.Fatalf("%s gc.step_id should be populated for retry attempts", attempt.ID)
+		}
+	}
+
+	assertRetryStep("mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-codex", "hard_fail")
+	assertRetryStep("mol-adopt-pr-v2.review-loop.iteration.1.review-pipeline.review-gemini", "soft_fail")
+}
+
+func writeReviewWorkflowFixtures(t *testing.T, dir string) {
+	t.Helper()
+	for name, content := range map[string]string{
+		"expansion-review-pr.toml": reviewworkflows.ExpansionReviewPR,
+		"mol-adopt-pr-v2.toml":     reviewworkflows.AdoptPR,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 }
 

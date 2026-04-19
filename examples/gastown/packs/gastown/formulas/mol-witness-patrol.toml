@@ -262,9 +262,9 @@ rm -rf <worktree-path> 2>/dev/null  # Fallback
 git worktree prune
 ```
 
-Reset bead to pool:
+Close any orphaned workflow subtree, then return the bead to pool:
 ```bash
-bd update <bead> --status=open --assignee=""
+gc workflow delete-source <bead> --apply && gc workflow reopen-source <bead>
 ```
 
 **Step 4: Assess and notify.**

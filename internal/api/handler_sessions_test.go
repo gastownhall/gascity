@@ -967,6 +967,103 @@ func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "ant",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(4),
+	}}
+	fs.cfg.NamedSessions = nil
+	srv := New(fs)
+
+	for i := 0; i < 2; i++ {
+		req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant"}`))
+		req.Header.Set("Idempotency-Key", "pool-create-"+string(rune('a'+i)))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("create #%d status = %d, want %d; body: %s", i+1, rec.Code, http.StatusAccepted, rec.Body.String())
+		}
+	}
+
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("session bead count = %d, want 2", len(items))
+	}
+	seenWorkDir := make(map[string]bool, len(items))
+	for _, bead := range items {
+		if got := bead.Metadata["alias"]; got != "" {
+			t.Fatalf("alias = %q, want empty", got)
+		}
+		sessionName := bead.Metadata["session_name"]
+		if got := bead.Metadata["session_name_explicit"]; got != "true" {
+			t.Fatalf("session_name_explicit = %q, want %q", got, "true")
+		}
+		if !strings.HasPrefix(sessionName, "ant-adhoc-") {
+			t.Fatalf("session_name = %q, want ant-adhoc-*", sessionName)
+		}
+		workDir := bead.Metadata["work_dir"]
+		if filepath.Dir(workDir) != filepath.Join(fs.cityPath, ".gc", "worktrees", "myrig", "ants") {
+			t.Fatalf("work_dir parent = %q, want %q", filepath.Dir(workDir), filepath.Join(fs.cityPath, ".gc", "worktrees", "myrig", "ants"))
+		}
+		base := filepath.Base(workDir)
+		if !strings.HasPrefix(base, "ant-adhoc-") {
+			t.Fatalf("work_dir base = %q, want ant-adhoc-*", base)
+		}
+		if seenWorkDir[workDir] {
+			t.Fatalf("duplicate work_dir %q", workDir)
+		}
+		seenWorkDir[workDir] = true
+		if got := bead.Metadata["agent_name"]; got != "myrig/"+sessionName {
+			t.Fatalf("agent_name(%q) = %q, want %q", sessionName, got, "myrig/"+sessionName)
+		}
+	}
+}
+
+func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "ant",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(4),
+	}}
+	fs.cfg.NamedSessions = nil
+	srv := New(fs)
+
+	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"ant-fenrir"}`))
+	req.Header.Set("Idempotency-Key", "pool-alias-1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Alias != "myrig/ant-fenrir" {
+		t.Fatalf("Alias = %q, want canonical qualified alias", resp.Alias)
+	}
+
+	req = newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
+	req.Header.Set("Idempotency-Key", "pool-alias-2")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second create status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
 func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -984,6 +1081,43 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	}
 	if fs.pokeCount != 0 {
 		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
+	}
+}
+
+func TestMaterializeNamedSession_RebrandedSingletonKeepsTemplateWorkDirIdentity(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "witness",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/{{.AgentBase}}",
+		MaxActiveSessions: intPtr(1),
+	}}
+	fs.cfg.NamedSessions = []config.NamedSession{{
+		Name:     "boot",
+		Template: "witness",
+		Dir:      "myrig",
+	}}
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/boot")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec")
+	}
+	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	if err != nil {
+		t.Fatalf("materializeNamedSession: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	wantWorkDir := filepath.Join(fs.cityPath, ".gc", "worktrees", "myrig", "witness")
+	if got := bead.Metadata["work_dir"]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
 	}
 }
 

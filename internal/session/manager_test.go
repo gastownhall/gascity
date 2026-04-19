@@ -713,6 +713,58 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestCreateAliaslessMultiSessionUsesConcreteRuntimeIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
+		context.Background(),
+		"",
+		"ant-adhoc-123",
+		"demo/ant",
+		"Ant",
+		"claude",
+		"/tmp",
+		"claude",
+		"",
+		nil,
+		ProviderResume{},
+		runtime.Config{},
+		map[string]string{
+			"agent_name":     "demo/ant-adhoc-123",
+			"session_origin": "manual",
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+	}
+
+	var start *runtime.Call
+	for i := range sp.Calls {
+		if sp.Calls[i].Method == "Start" {
+			start = &sp.Calls[i]
+			break
+		}
+	}
+	if start == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	env := start.Config.Env
+	for key, want := range map[string]string{
+		"GC_SESSION_ID":     info.ID,
+		"GC_SESSION_NAME":   "ant-adhoc-123",
+		"GC_ALIAS":          "demo/ant-adhoc-123",
+		"GC_TEMPLATE":       "demo/ant",
+		"GC_SESSION_ORIGIN": "manual",
+		"GC_AGENT":          "demo/ant-adhoc-123",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
+		}
+	}
+}
+
 func TestCloseSuspended(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 type slingBody struct {
@@ -25,6 +27,7 @@ type slingBody struct {
 	Vars           map[string]string `json:"vars"`
 	ScopeKind      string            `json:"scope_kind"`
 	ScopeRef       string            `json:"scope_ref"`
+	Force          bool              `json:"force"`
 }
 
 type slingResponse struct {
@@ -37,6 +40,15 @@ type slingResponse struct {
 	AttachedBeadID string   `json:"attached_bead_id,omitempty"`
 	Mode           string   `json:"mode,omitempty"`
 	Warnings       []string `json:"warnings,omitempty"`
+}
+
+func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
+	args := []string{"gc workflow delete-source", sourceBeadID}
+	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
+		args = append(args, "--store-ref", storeRef)
+	}
+	args = append(args, "--apply")
+	return strings.Join(args, " ")
 }
 
 func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +69,7 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
 
 	cfg := s.state.Config()
+	syncFeatureFlags(cfg)
 
 	// UI dispatches carry scope_kind/scope_ref but not the CLI's ambient
 	// rig directory. Dashboard dispatches use body.Rig (from --rig=X).
@@ -142,8 +155,18 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, status, code, message := s.execSlingDirect(r.Context(), body, agentCfg)
+	resp, status, code, message, conflict := s.execSlingDirect(r.Context(), body, agentCfg)
 	if code != "" {
+		if conflict != nil {
+			writeJSON(w, status, map[string]any{
+				"code":                  code,
+				"message":               message,
+				"source_bead_id":        conflict.SourceBeadID,
+				"blocking_workflow_ids": conflict.WorkflowIDs,
+				"hint":                  fmt.Sprintf("use --force to override, or %s to clean up", sourceWorkflowCleanupHint(conflict.SourceBeadID, s.slingStoreRef(body.Rig, agentCfg))),
+			})
+			return
+		}
 		writeError(w, status, code, message)
 		return
 	}
@@ -151,7 +174,7 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 }
 
 // execSlingDirect calls the intent-based Sling API directly.
-func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg config.Agent) (*slingResponse, int, string, string) {
+func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg config.Agent) (*slingResponse, int, string, string, *sourceworkflow.ConflictError) {
 	formulaName := strings.TrimSpace(body.Formula)
 	attachedBeadID := strings.TrimSpace(body.AttachedBeadID)
 
@@ -164,6 +187,9 @@ func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg c
 		SP:       s.state.SessionProvider(),
 		Store:    store,
 		StoreRef: s.slingStoreRef(body.Rig, agentCfg),
+		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
+			return s.sourceWorkflowStores(), nil
+		},
 		Runner:   s.slingRunner(),
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
@@ -171,7 +197,7 @@ func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg c
 	}
 	sl, err := sling.New(deps)
 	if err != nil {
-		return nil, http.StatusInternalServerError, "internal", err.Error()
+		return nil, http.StatusInternalServerError, "internal", err.Error(), nil
 	}
 
 	// Build vars slice from map (sorted for determinism).
@@ -192,6 +218,7 @@ func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg c
 		Vars:      varSlice,
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
+		Force:     body.Force,
 	}
 
 	// Dispatch to the right intent-based method.
@@ -218,14 +245,18 @@ func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg c
 		attachedBeadID = strings.TrimSpace(body.Bead)
 		formulaName = agentCfg.EffectiveDefaultSlingFormula()
 		// Default formula: route the bead and let the domain apply the default.
-		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{})
+		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force})
 
 	default:
-		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{})
+		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force})
 	}
 
 	if err != nil {
-		return nil, http.StatusBadRequest, "invalid", err.Error()
+		var conflictErr *sourceworkflow.ConflictError
+		if errors.As(err, &conflictErr) {
+			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
+		}
+		return nil, http.StatusBadRequest, "invalid", err.Error(), nil
 	}
 
 	resp := &slingResponse{
@@ -236,7 +267,7 @@ func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg c
 		Warnings: result.MetadataErrors,
 	}
 	if !workflowLaunch {
-		return resp, http.StatusOK, "", ""
+		return resp, http.StatusOK, "", "", nil
 	}
 
 	resp.Formula = formulaName
@@ -245,9 +276,9 @@ func (s *Server) execSlingDirect(ctx context.Context, body slingBody, agentCfg c
 	resp.WorkflowID = result.WorkflowID
 	resp.RootBeadID = result.BeadID
 	if resp.WorkflowID == "" && resp.RootBeadID == "" {
-		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id"
+		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id", nil
 	}
-	return resp, http.StatusCreated, "", ""
+	return resp, http.StatusCreated, "", "", nil
 }
 
 // findSlingStore returns the bead store for sling operations.
@@ -274,6 +305,26 @@ func (s *Server) slingStoreRef(rig string, agentCfg config.Agent) string {
 		return "rig:" + agentCfg.Dir
 	}
 	return "city:" + s.state.CityName()
+}
+
+func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
+	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+1)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		stores = append(stores, sling.SourceWorkflowStore{
+			Store:    cityStore,
+			StoreRef: "city:" + s.state.CityName(),
+		})
+	}
+	for rigName, store := range s.state.BeadStores() {
+		if store == nil {
+			continue
+		}
+		stores = append(stores, sling.SourceWorkflowStore{
+			Store:    store,
+			StoreRef: "rig:" + rigName,
+		})
+	}
+	return stores
 }
 
 // slingRunner returns the SlingRunner for the API context.

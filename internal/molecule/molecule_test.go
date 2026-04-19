@@ -102,8 +102,8 @@ func TestInstantiateSimple(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(false) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -201,8 +201,8 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 
 func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(false) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -239,8 +239,8 @@ func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 	// Verify the NON-graph-apply (sequential) path also preserves step metadata.
 	store := beads.NewMemStore() // MemStore does NOT implement GraphApplyStore
-	GraphApplyEnabled = false
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(false) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -279,8 +279,8 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(false) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -355,8 +355,8 @@ func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyPriorityOverride(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(false) })
 
 	recipe := &formula.Recipe{
 		Name: "wf",
@@ -459,8 +459,8 @@ func TestInstantiateRejectsPartialGraphApplyResult(t *testing.T) {
 			},
 		},
 	}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(false) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -1405,8 +1405,8 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 
 	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
 		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-		GraphApplyEnabled = true
-		t.Cleanup(func() { GraphApplyEnabled = false })
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(false) })
 
 		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
 			Title: "My Feature",
@@ -1443,8 +1443,8 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		GraphApplyEnabled = false
-		t.Cleanup(func() { GraphApplyEnabled = false })
+		SetGraphApplyEnabled(false)
+		t.Cleanup(func() { SetGraphApplyEnabled(false) })
 
 		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
 			RootID: root.ID,
@@ -1465,8 +1465,8 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		GraphApplyEnabled = true
-		t.Cleanup(func() { GraphApplyEnabled = false })
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(false) })
 
 		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
 			RootID: root.ID,
