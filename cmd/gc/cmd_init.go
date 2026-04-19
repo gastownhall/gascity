@@ -890,7 +890,10 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 	}
 
 	// Resolve formulas and scripts from pack layers.
-	expandedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, copiedToml)
+	expandedCfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, copiedToml)
+	if loadErr == nil {
+		emitLoadCityConfigWarnings(stderr, prov)
+	}
 	if loadErr == nil && len(expandedCfg.FormulaLayers.City) > 0 {
 		if rfErr := ResolveFormulas(cityPath, expandedCfg.FormulaLayers.City); rfErr != nil {
 			fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr

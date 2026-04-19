@@ -2559,6 +2559,38 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 	}
 }
 
+func TestDoInitFromDirEmitsLoadWarningsFromCopiedConfig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "template")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte(`[workspace]
+name = "template"
+provider = "claude"
+
+[agent_defaults]
+skills = ["demo"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "target-dir")
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "attachment-list fields") {
+		t.Fatalf("stderr = %q, want deprecated attachment-list warning", stderr.String())
+	}
+}
+
 func TestInitNameFlagWithFile(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
