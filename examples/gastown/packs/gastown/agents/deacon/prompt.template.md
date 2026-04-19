@@ -59,14 +59,14 @@ Your formula: `mol-deacon-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-bd list --assignee="$GC_ALIAS" --status=in_progress
+gc bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # Step 2: Nothing? Check mail for attached work
 gc mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEW_WISP" --assignee="$GC_ALIAS"
+NEW_WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
 ```
@@ -88,7 +88,7 @@ re-reads formula steps and resumes from context.
 
 Mail beads can be hooked for ad-hoc instruction handoff:
 - Mayor or human sends mail with special instructions
-- Your next session sees the mail on the hook via `bd list --assignee="$GC_ALIAS"`
+- Your next session sees the mail on the hook via `gc bd list --assignee="$GC_ALIAS"`
 - GUPP applies: read the content, interpret, execute
 
 This enables ad-hoc tasks (e.g., "focus on debugging convoy resolution this
@@ -103,7 +103,7 @@ response is always the same:
 
 1. **File a warrant bead:**
 ```bash
-bd create --type=warrant \
+gc bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
   --label=pool:dog
@@ -155,18 +155,18 @@ Individual stuck agents don't need escalation — the warrant system handles the
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `bd mol wisp mol-deacon-patrol --root-only` |
+| Pour next wisp | `gc bd mol wisp mol-deacon-patrol --root-only` |
 | Context exhaustion | `gc runtime request-restart` |
 | Request target restart | `gc session kill <target>` |
-| Check gates | `bd gate check --type=timer --escalate` |
-| List gate beads | `bd gate list --json` |
+| Check gates | `gc bd gate check --type=timer --escalate` |
+| List gate beads | `gc bd gate list --json` |
 | List convoys | `gc convoy list` |
-| Find cross-rig deps | `bd dep list <id> --direction=up --type=blocks --json` |
-| Convert dep type | `bd dep remove <id> <dep>` then `bd dep add <id> <dep> --type=related` |
-| File stuck-agent warrant | `bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| Find cross-rig deps | `gc bd dep list <id> --direction=up --type=blocks --json` |
+| Convert dep type | `gc bd dep remove <id> <dep>` then `gc bd dep add <id> <dep> --type=related` |
+| File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
 | Run system diagnostics | `gc doctor` |
-| Compact wisps (dry run) | `bd mol wisp gc --age 24h --dry-run` |
-| Compact wisps | `bd mol wisp gc --age 24h` |
+| Compact wisps (dry run) | `gc bd mol wisp gc --age 24h --dry-run` |
+| Compact wisps | `gc bd mol wisp gc --age 24h` |
 
 Working directory: {{ .WorkDir }}
 Your mail address: deacon/

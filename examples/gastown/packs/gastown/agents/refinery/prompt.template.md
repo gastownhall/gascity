@@ -50,11 +50,11 @@ Your formula: `mol-refinery-patrol`
 
 ```bash
 # Check for an in-progress patrol wisp
-bd list --assignee="$GC_ALIAS" --status=in_progress
+gc bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
-bd update "$WISP" --assignee="$GC_ALIAS"
+WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
+gc bd update "$WISP" --assignee="$GC_ALIAS"
 ```
 
 Then follow the formula. The step descriptions below are your instructions —
@@ -93,9 +93,9 @@ Polecats set these metadata fields before assigning a work bead to you:
 
 Read them mechanically:
 ```bash
-bd show $WORK --json | jq -r '.metadata.branch'
-bd show $WORK --json | jq -r '.metadata.target // "{{ .DefaultBranch }}"'
-bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"'
+gc bd show $WORK --json | jq -r '.metadata.branch'
+gc bd show $WORK --json | jq -r '.metadata.target // "{{ .DefaultBranch }}"'
+gc bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"'
 ```
 
 Never infer a branch name. If `metadata.branch` is missing, reject the bead.
@@ -104,7 +104,7 @@ Never infer a branch name. If `metadata.branch` is missing, reject the bead.
 
 On rebase conflict or test failure:
 1. Put work bead back in pool:
-   `bd update $WORK --status=open --assignee="" --set-metadata rejection_reason="..."`
+   `gc bd update $WORK --status=open --assignee="" --set-metadata rejection_reason="..."`
 2. Branch handling depends on failure type:
    - Conflict: leave branch intact (polecat needs it for rebase)
    - Test failure: delete branch (polecat redoes work)
@@ -157,14 +157,14 @@ alert the witness, not `gc mail send`.
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `bd mol wisp mol-refinery-patrol --root-only` |
-| Burn current wisp | `bd mol burn <wisp-id> --force` |
-| Find assigned work | `bd list --assignee="$GC_ALIAS" --status=open` |
+| Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only` |
+| Burn current wisp | `gc bd mol burn <wisp-id> --force` |
+| Find assigned work | `gc bd list --assignee="$GC_ALIAS" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
-| Read work metadata | `bd show $WORK --json \| jq '.metadata'` |
-| Set metadata field | `bd update $WORK --set-metadata key=value` |
-| Remove metadata field | `bd update $WORK --unset-metadata key` |
+| Read work metadata | `gc bd show $WORK --json \| jq '.metadata'` |
+| Set metadata field | `gc bd update $WORK --set-metadata key=value` |
+| Remove metadata field | `gc bd update $WORK --unset-metadata key` |
 | Fetch remote branches | `git fetch --prune origin` |
 | Rebase on target | `git rebase origin/$TARGET` |
 | Fast-forward merge | `git merge --ff-only temp` |

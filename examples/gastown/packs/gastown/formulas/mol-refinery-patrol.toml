@@ -1,8 +1,8 @@
 description = """
 Refinery patrol loop. Poured as a root-only wisp on startup:
 
-  bd mol wisp mol-refinery-patrol --root-only
-  bd update $WISP --assignee=$GC_AGENT
+  gc bd mol wisp mol-refinery-patrol --root-only
+  gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, merge one branch, pour
 the next iteration. On crash, re-read the formula steps and determine
@@ -110,13 +110,13 @@ description = """
 
 Search for work beads assigned to you with branch metadata:
 ```bash
-WORK=$(bd list --assignee=$GC_AGENT --status=open \
+WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
   --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
 ```
 
 If found: read the bead metadata to confirm it has a branch:
 ```bash
-bd show $WORK --json | jq '.metadata'
+gc bd show $WORK --json | jq '.metadata'
 ```
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
@@ -142,8 +142,8 @@ description = """
 
 Read the work bead metadata:
 ```bash
-BRANCH=$(bd show $WORK --json | jq -r '.metadata.branch')
-TARGET=$(bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
+BRANCH=$(gc bd show $WORK --json | jq -r '.metadata.branch')
+TARGET=$(gc bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
 ```
 
 Fetch and attempt mechanical rebase:
@@ -164,7 +164,7 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 ```
 3. Put the work bead back in the pool with rejection metadata:
 ```bash
-bd update $WORK \
+gc bd update $WORK \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
   --set-metadata gc.routed_to=<rig>/polecat
 ```
@@ -172,10 +172,10 @@ bd update $WORK \
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
 6. Pour next patrol iteration before burning:
 ```bash
-NEXT=$(bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEXT" --assignee=$GC_AGENT
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
-7. Burn this wisp: `bd mol burn <wisp-id> --force`
+7. Burn this wisp: `gc bd mol burn <wisp-id> --force`
 
 **A new polecat will pick up the bead, see the branch and rejection,
 rebase, and reassign to refinery.**"""
@@ -221,8 +221,8 @@ If any check or test FAILED:
 
 Read the current branch and target again:
 ```bash
-BRANCH=$(bd show $WORK --json | jq -r '.metadata.branch')
-TARGET=$(bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
+BRANCH=$(gc bd show $WORK --json | jq -r '.metadata.branch')
+TARGET=$(gc bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
 ```
 
 1. Diagnose: branch regression or pre-existing on target?
@@ -234,27 +234,27 @@ TARGET=$(bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
      ```
    - Put the work bead back in the pool with rejection metadata:
      ```bash
-     bd update $WORK \
+     gc bd update $WORK \
        --set-metadata rejection_reason="<failure summary>"
      ```
    - Delete branch: `git push origin --delete $BRANCH`
    - Clean up: `git checkout "$TARGET" && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
-     NEXT=$(bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-     bd update "$NEXT" --assignee=$GC_AGENT
+     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+     gc bd update "$NEXT" --assignee=$GC_AGENT
      ```
-   - Burn this wisp: `bd mol burn <wisp-id> --force`
+   - Burn this wisp: `gc bd mol burn <wisp-id> --force`
 
 3. If pre-existing on target:
    - Check for duplicates first:
      ```bash
-     bd list --type=bug --status=open --search "<failure summary>"
+     gc bd list --type=bug --status=open --search "<failure summary>"
      ```
    - If a matching bug already exists: note its ID and proceed with merge.
    - If no duplicate: file a new bead:
      ```bash
-     bd create --type=bug --priority=1 --title="Pre-existing failure: <summary>"
+     gc bd create --type=bug --priority=1 --title="Pre-existing failure: <summary>"
      ```
    - Proceed with merge (failure not caused by this branch)
 
@@ -271,9 +271,9 @@ description = """
 
 Read the merge target and merge strategy from the work bead metadata:
 ```bash
-BRANCH=$(bd show $WORK --json | jq -r '.metadata.branch')
-TARGET=$(bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
-MERGE_STRATEGY=$(bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"')
+BRANCH=$(gc bd show $WORK --json | jq -r '.metadata.branch')
+TARGET=$(gc bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
+MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.metadata.merge_strategy // "direct"')
 if [ "$MERGE_STRATEGY" = "pr" ]; then
   MERGE_STRATEGY="mr"
 fi
@@ -299,11 +299,11 @@ If SHAs differ: STOP. Debug and retry. Do NOT continue.
 
 **3. Record merge metadata and close work bead:**
 ```bash
-bd update $WORK \
+gc bd update $WORK \
   --set-metadata merge_result=merged \
   --set-metadata merged_sha=$(git rev-parse HEAD) \
   --set-metadata merged_target=$TARGET
-bd close $WORK --reason "Merged to $TARGET at $(git rev-parse --short HEAD)"
+gc bd close $WORK --reason "Merged to $TARGET at $(git rev-parse --short HEAD)"
 ```
 
 **4. Cleanup:**
@@ -325,7 +325,7 @@ git push origin HEAD:$BRANCH --force-with-lease
 
 **2. Create or discover the pull request:**
 ```bash
-ISSUE_TITLE=$(bd show $WORK --json | jq -r '.title')
+ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.title')
 PR_BODY=$(cat <<EOF
 ## Summary
 
@@ -359,12 +359,12 @@ If this command fails or prints empty output: STOP. Debug and retry. Do NOT cont
 **4. Record PR metadata and close the work bead:**
 ```bash
 PR_NUMBER=$(gh pr view "$BRANCH" --json number -q '.number')
-bd update $WORK \
+gc bd update $WORK \
   --set-metadata merge_result=pull_request \
   --set-metadata pr_url="$PR_URL" \
   --set-metadata pr_number="$PR_NUMBER" \
   --set-metadata merged_target="$TARGET"
-bd close $WORK --reason "Pull request ready: $PR_URL"
+gc bd close $WORK --reason "Pull request ready: $PR_URL"
 ```
 
 **5. Cleanup:**
@@ -407,7 +407,7 @@ If the cycle ended early (conflict rejection, no work found), note
 why and what state was left.
 
 This summary is not stored separately — it lives in the wisp's
-closing reason. The next session can find it via `bd list --type=wisp
+closing reason. The next session can find it via `gc bd list --type=wisp
 --status=closed --limit=5` if it needs predecessor context."""
 
 [[steps]]
@@ -422,13 +422,13 @@ description = """
 If the merge target was an integration branch, check if the parent
 owned convoy is now fully closed:
 ```bash
-bd list --type=convoy --status=open
+gc bd list --type=convoy --status=open
 ```
 For each owned convoy with an integration branch: if ALL children are
 closed, assign the convoy bead itself to you with the metadata needed
 for a merge:
 ```bash
-bd update <convoy-id> --assignee=$GC_AGENT \
+gc bd update <convoy-id> --assignee=$GC_AGENT \
   --set-metadata branch=<integration-branch> \
   --set-metadata target={{target_branch}}
 ```
@@ -442,13 +442,13 @@ If auto_land = "false": skip this entirely.
 
 **2. Pour next iteration:**
 ```bash
-NEXT=$(bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEXT" --assignee=$GC_AGENT
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
 **4. Burn this wisp:**
 ```bash
-bd mol burn <this-wisp-id> --force
+gc bd mol burn <this-wisp-id> --force
 ```
 
 Close this step. The new wisp is ready — re-read formula steps to begin."""

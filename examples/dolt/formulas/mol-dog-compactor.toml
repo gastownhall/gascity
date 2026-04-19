@@ -1,7 +1,7 @@
 description = """
 Compact Dolt commit history on production databases.
 
-Every bd mutation creates a Dolt commit. Over time, this builds an enormous
+Every bead mutation creates a Dolt commit. Over time, this builds an enormous
 commit graph (5,000-10,000 commits/day from wisp churn). The commit graph IS
 the storage cost — deleting rows without compaction leaves ghost commits forever.
 
@@ -182,7 +182,7 @@ gc nudge deacon/ "DOG_DONE: compactor — compacted <count> databases, mode: {{m
 
 **3. Close work and exit:**
 ```bash
-bd close <work-bead> --reason "Compaction cycle complete"
+gc bd close <work-bead> --reason "Compaction cycle complete"
 gc runtime drain-ack
 exit
 ```

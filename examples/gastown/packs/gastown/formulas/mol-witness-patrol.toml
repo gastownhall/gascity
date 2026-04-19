@@ -1,8 +1,8 @@
 description = """
 Witness patrol loop. Poured as a root-only wisp on startup:
 
-  bd mol wisp mol-witness-patrol --root-only
-  bd update $WISP --assignee=$GC_AGENT
+  gc bd mol wisp mol-witness-patrol --root-only
+  gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, patrol, pour the next
 iteration. On crash, re-read the formula steps and determine where
@@ -138,8 +138,8 @@ This happens when:
 
 List beads assigned to agents in YOUR rig:
 ```bash
-bd list --status=in_progress --json --limit=0
-bd list --status=open --json --limit=0
+gc bd list --status=in_progress --json --limit=0
+gc bd list --status=open --json --limit=0
 ```
 
 Filter for beads assigned to polecat-pattern agents (e.g., `<rig>/polecats/<name>`).
@@ -169,7 +169,7 @@ Our job is to ensure work reaches the branch so it's schedulable.
 
 Read the bead metadata to find the worktree and branch:
 ```bash
-META=$(bd show <bead> --json | jq '.metadata')
+META=$(gc bd show <bead> --json | jq '.metadata')
 WORKTREE=$(echo "$META" | jq -r '.worktree // empty')
 BRANCH=$(echo "$META" | jq -r '.branch // empty')
 ```
@@ -209,7 +209,7 @@ git commit -m "witness: salvage uncommitted work (<bead>)"
 Publish the work to make branch canonical:
 ```bash
 git push origin HEAD
-bd update <bead> --set-metadata branch=$BRANCH
+gc bd update <bead> --set-metadata branch=$BRANCH
 ```
 Skip to Step 3 (cleanup).
 
@@ -221,7 +221,7 @@ git add -A
 git commit -m "witness: salvage work from orphaned agent (<bead>)"
 BRANCH=$(git branch --show-current)
 git push origin HEAD
-bd update <bead> --set-metadata branch=$BRANCH
+gc bd update <bead> --set-metadata branch=$BRANCH
 ```
 Skip to Step 3 (cleanup).
 
@@ -243,7 +243,7 @@ git merge-base --is-ancestor origin/$BRANCH origin/main
 If the work is already on main:
 - **Close the bead** (work is done, don't re-dispatch):
 ```bash
-bd close <bead>
+gc bd close <bead>
 gc mail send mayor/ -s "ORPHAN_CLOSED: <bead> already merged" \
   -m "Branch $BRANCH already on main. Closed instead of resetting."
 ```
@@ -291,7 +291,7 @@ Concern: <why this one warrants attention>"
 
 Mark recovered beads so spawn storm detection can track patterns:
 ```bash
-bd update <bead> --set-metadata recovered=true
+gc bd update <bead> --set-metadata recovered=true
 ```
 
 **Exit criteria:** All orphaned beads recovered, worktrees cleaned.
@@ -306,7 +306,7 @@ Ensure the refinery is processing work and the queue is healthy.
 
 **Step 1: Check work beads assigned to refinery:**
 ```bash
-bd list --assignee=<rig>/refinery --status=open --json
+gc bd list --assignee=<rig>/refinery --status=open --json
 ```
 
 These are work beads with `metadata.branch` and `metadata.target` that
@@ -352,7 +352,7 @@ progressing. The controller can't detect this; it's a work-layer judgment.
 
 **Step 1: Find active polecat work beads:**
 ```bash
-bd list --status=in_progress --json --limit=0
+gc bd list --status=in_progress --json --limit=0
 ```
 Filter for beads assigned to polecat-pattern agents in YOUR rig.
 
@@ -375,7 +375,7 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-bd create --type=warrant \
+gc bd create --type=warrant \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
   --label=pool:dog
@@ -414,8 +414,8 @@ is already assigned — the new session resumes from context.
 
 **2. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEXT" --assignee=$GC_AGENT
+NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
 **3. Wait for activity (exponential backoff):**
@@ -430,7 +430,7 @@ On timeout: double the timeout (cap 300s) and proceed anyway.
 
 **4. Burn this wisp:**
 ```bash
-bd mol burn <this-wisp-id> --force
+gc bd mol burn <this-wisp-id> --force
 ```
 
 The new wisp is ready. Re-read formula steps to start

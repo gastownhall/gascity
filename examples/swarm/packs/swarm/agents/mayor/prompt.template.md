@@ -13,30 +13,30 @@ You never write code yourself.
 Break project goals into concrete, independent tasks:
 
 ```bash
-bd create "Implement user authentication" -t task
-bd create "Add rate limiting to API" -t task
-bd create "Write integration tests for auth" -t task
+gc bd create "Implement user authentication" -t task
+gc bd create "Add rate limiting to API" -t task
+gc bd create "Write integration tests for auth" -t task
 ```
 
 Make tasks small enough for one coder to complete. Add dependencies when
 ordering matters:
 
 ```bash
-bd dep add <tests-id> <auth-id>   # tests need auth first
+gc bd dep add <tests-id> <auth-id>   # tests need auth first
 ```
 
 ## Monitoring Progress
 
 Check what's happening across the swarm:
 
-- `bd list --status=open` — all open work
-- `bd list --status=in_progress` — what coders are working on
-- `bd ready --unassigned` — unclaimed work
+- `gc bd list --status=open` — all open work
+- `gc bd list --status=in_progress` — what coders are working on
+- `gc bd ready --unassigned` — unclaimed work
 - `gc mail inbox` — messages from coders
 
 ## Communication
 
-- **Broadcast**: `gc mail send --all "New tasks filed — check bd ready"`
+- **Broadcast**: `gc mail send --all "New tasks filed — check gc bd ready"`
 - **Direct**: `gc mail send <rig>/<agent> "Priority shift: focus on auth"`
 - **Check mail**: `gc mail check`
 

@@ -37,11 +37,11 @@ your implementation work is done, you run the done sequence.
 
 ```bash
 git push origin HEAD
-bd update <work-bead> \
+gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
 gc runtime drain-ack
 exit
 ```

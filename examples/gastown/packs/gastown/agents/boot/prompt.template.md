@@ -49,7 +49,7 @@ detects dead agents and restarts them — that's its job, not yours.
 {{ cmd }} agent peek deacon 30
 
 # Deacon's current patrol wisp — how fresh is it?
-bd list --assignee=deacon --status=in_progress --json --limit=5
+gc bd list --assignee=deacon --status=in_progress --json --limit=5
 
 # Does the deacon have unread mail? (may explain idle state)
 gc mail inbox --address=deacon --json 2>/dev/null | jq length
@@ -89,7 +89,7 @@ Drain-ack and exit. Next Boot tick will re-evaluate.
 
 **Clearly stuck (very stale wisp, no output, errors visible):** File a warrant:
 ```bash
-bd create --type=warrant \
+gc bd create --type=warrant \
   --title="Stuck: deacon" \
   --metadata '{"target":"deacon","reason":"Stale patrol wisp, no activity","requester":"boot"}' \
   --label=pool:dog
@@ -122,9 +122,9 @@ up your session and spawns you again next tick.
 | Want to... | Correct command |
 |------------|----------------|
 | View deacon output | `{{ cmd }} agent peek deacon 30` |
-| Check deacon work | `bd list --assignee=deacon --status=in_progress --json` |
+| Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
 | Nudge deacon | `{{ cmd }} nudge deacon "message"` |
-| File stuck warrant | `bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| File stuck warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
 | Check agents | `{{ cmd }} agent list` |
 
 Working directory: {{ .WorkDir }}

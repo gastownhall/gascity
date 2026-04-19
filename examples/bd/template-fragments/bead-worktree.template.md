@@ -5,11 +5,11 @@ When you create a git worktree (via `git worktree add` or the EnterWorktree tool
 
 1. Find your assigned bead:
    ```
-   bd list --json --assignee="{{.AgentName}}" --status=in-progress
+   gc bd list --json --assignee="{{.AgentName}}" --status=in-progress
    ```
 2. Update the bead with the absolute worktree path:
    ```
-   bd update <bead_id> --set-metadata work_dir=<absolute_worktree_path>
+   gc bd update <bead_id> --set-metadata work_dir=<absolute_worktree_path>
    ```
 
 Replace `<bead_id>` with the `id` field from step 1 and `<absolute_worktree_path>` with the full path to the worktree directory.
