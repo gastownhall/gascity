@@ -13,6 +13,9 @@ third-party client can do too — there is no hidden surface.
   the authoritative contract. Drop it into Stoplight, Postman,
   Swagger UI, or any OpenAPI-aware tool to browse operations
   interactively.
+- **<a href="/schema/events.txt" download="events.json">Download events.json</a>** —
+  the `gc events` JSONL line schema. It references DTO components in
+  `openapi.json`, so the API remains the source of truth.
 
 ## Endpoint families
 
@@ -74,20 +77,20 @@ at three different presentation layers. The API is the source of
 truth.
 
 For the explicit CLI output contract, including JSONL framing, empty-output
-behavior, heartbeat suppression, and the `--seq` scalar format, see
+behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
 [gc events Formats](/reference/events).
 
 ### City Scope
 
 - `GET /v0/city/{cityName}/events`
-  returns `ListBody<Event>` and includes `X-GC-Index`.
+  returns `ListBodyWireEvent` and includes `X-GC-Index`.
 - `GET /v0/city/{cityName}/events/stream`
   emits:
   - `event: event` with `EventStreamEnvelope`
   - `event: heartbeat` with `HeartbeatEvent`
 - Resume:
   - `Last-Event-ID` or `after_seq`
-- `gc events` in city scope outputs one `Event` JSON object per line.
+- `gc events` in city scope outputs one `WireEvent` JSON object per line.
 - `gc events --watch` and `gc events --follow` in city scope output one
   `EventStreamEnvelope` JSON object per line.
 - `gc events --seq` in city scope prints the API's `X-GC-Index` value.
@@ -95,14 +98,14 @@ behavior, heartbeat suppression, and the `--seq` scalar format, see
 ### Supervisor Scope
 
 - `GET /v0/events`
-  returns `{ items: TaggedEvent[], total }`.
+  returns `SupervisorEventListOutputBody` with `WireTaggedEvent` items.
 - `GET /v0/events/stream`
   emits:
   - `event: tagged_event` with `TaggedEventStreamEnvelope`
   - `event: heartbeat` with `HeartbeatEvent`
 - Resume:
   - `Last-Event-ID` or `after_cursor`
-- `gc events` in supervisor scope outputs one `TaggedEvent` JSON object
+- `gc events` in supervisor scope outputs one `WireTaggedEvent` JSON object
   per line.
 - `gc events --watch` and `gc events --follow` in supervisor scope
   output one `TaggedEventStreamEnvelope` JSON object per line.

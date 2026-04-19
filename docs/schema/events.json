@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "cityListLine": {
+      "$ref": "openapi.json#/components/schemas/WireEvent",
+      "description": "A JSONL line from `gc events` when a city is in scope."
+    },
+    "cityStreamLine": {
+      "$ref": "openapi.json#/components/schemas/EventStreamEnvelope",
+      "description": "A JSONL line from `gc events --watch` or `gc events --follow` when a city is in scope."
+    },
+    "supervisorListLine": {
+      "$ref": "openapi.json#/components/schemas/WireTaggedEvent",
+      "description": "A JSONL line from `gc events` when no city is in scope."
+    },
+    "supervisorStreamLine": {
+      "$ref": "openapi.json#/components/schemas/TaggedEventStreamEnvelope",
+      "description": "A JSONL line from `gc events --watch` or `gc events --follow` when no city is in scope."
+    }
+  },
+  "$id": "https://docs.gascityhall.com/schema/events.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "openapi.json#/components/schemas/WireEvent"
+    },
+    {
+      "$ref": "openapi.json#/components/schemas/WireTaggedEvent"
+    },
+    {
+      "$ref": "openapi.json#/components/schemas/EventStreamEnvelope"
+    },
+    {
+      "$ref": "openapi.json#/components/schemas/TaggedEventStreamEnvelope"
+    }
+  ],
+  "description": "Validates one JSON object line emitted by `gc events`, `gc events --watch`, or `gc events --follow`. The referenced DTO schemas live in the supervisor OpenAPI document; the API remains the source of truth. `gc events --seq` emits a plain-text cursor and is documented in /reference/events.",
+  "title": "gc events JSONL line schema",
+  "x-gc-events": {
+    "cursorMode": "`gc events --seq` is not JSONL; it writes the current city index or supervisor composite cursor as text.",
+    "heartbeatSuppression": "HeartbeatEvent SSE frames are consumed internally and are not written to stdout.",
+    "listMode": [
+      "WireEvent",
+      "WireTaggedEvent"
+    ],
+    "sourceOfTruth": "openapi.json",
+    "streamMode": [
+      "EventStreamEnvelope",
+      "TaggedEventStreamEnvelope"
+    ]
+  }
+}

@@ -19,14 +19,15 @@ These CLI formats are projections of the supervisor API and SSE contract:
 
 The underlying DTOs come from the published OpenAPI document:
 
-- `Event`
-- `TaggedEvent`
+- `WireEvent`
+- `WireTaggedEvent`
 - `EventStreamEnvelope`
 - `TaggedEventStreamEnvelope`
 - `HeartbeatEvent`
 
-Download the canonical schema from [Schemas](/schema), or read the broader
-event-bus notes in the [Supervisor REST API](/reference/api).
+Download the canonical supervisor spec and the `gc events` JSONL line schema
+from [Schemas](/schema), or read the broader event-bus notes in the
+[Supervisor REST API](/reference/api).
 
 ## Output Modes
 
@@ -49,7 +50,8 @@ There is one exception:
 
 #### City Scope
 
-When a city is in scope, each output line is one `Event` object.
+When a city is in scope, each output line is one `WireEvent` object from
+`GET /v0/city/{cityName}/events`.
 
 Example:
 
@@ -60,7 +62,7 @@ Example:
 #### Supervisor Scope
 
 When no city is in scope and the supervisor API is being used, each output line
-is one `TaggedEvent` object.
+is one `WireTaggedEvent` object from `GET /v0/events`.
 
 Example:
 
@@ -143,6 +145,20 @@ the JSON shape:
 
 The same rule applies to both list mode and stream mode.
 
+## Machine-Readable Schema
+
+The downloadable <a href="/schema/events.txt" download="events.json">events.json</a>
+schema validates one JSON object line from list, watch, or follow mode. It
+contains only framing metadata and `$ref`s into `openapi.json`:
+
+- City list lines use `WireEvent`.
+- Supervisor list lines use `WireTaggedEvent`.
+- City stream lines use `EventStreamEnvelope`.
+- Supervisor stream lines use `TaggedEventStreamEnvelope`.
+
+`gc events --seq` is not covered by the JSON Schema because it writes plain
+text, not JSON.
+
 ## Transport vs Semantic Type
 
 For stream mode, keep these separate:
@@ -168,10 +184,10 @@ non-zero exit status. Examples include:
 
 ## Stability Contract
 
-The CLI does not define an independent event schema. Its stability contract is:
+The CLI does not define independent event DTOs. Its stability contract is:
 
-- the published supervisor OpenAPI schemas for `Event`, `TaggedEvent`,
-  `EventStreamEnvelope`, and `TaggedEventStreamEnvelope`
+- the published supervisor OpenAPI schemas for `WireEvent`,
+  `WireTaggedEvent`, `EventStreamEnvelope`, and `TaggedEventStreamEnvelope`
 - the explicit CLI framing rules on this page:
   JSONL for list and stream modes, plain text for `--seq`, empty stdout for
   no-match list queries, and heartbeat suppression in stream mode

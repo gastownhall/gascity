@@ -18,8 +18,13 @@ func newDashboardCmd(stdout, stderr io.Writer) *cobra.Command {
 	var apiURL string
 	cmd := &cobra.Command{
 		Use:   "dashboard",
-		Short: "Web dashboard for monitoring the city",
-		Args:  cobra.NoArgs,
+		Short: "Web dashboard for monitoring the supervisor and managed cities",
+		Long: `Open the static GC dashboard against the machine-wide supervisor API.
+
+Without a city in scope, the dashboard shows supervisor-level state and managed
+city tabs. From a city directory or with --city, city-specific panels and action
+forms are enabled for that city.`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if runDashboardServe("gc dashboard", port, apiURL, stderr) != nil {
 				return errExit
@@ -39,7 +44,12 @@ func newDashboardServeCmd(_, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the web dashboard",
-		Args:  cobra.NoArgs,
+		Long: `Start the static GC dashboard against the machine-wide supervisor API.
+
+Without a city in scope, the dashboard shows supervisor-level state and managed
+city tabs. From a city directory or with --city, city-specific panels and action
+forms are enabled for that city.`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if runDashboardServe("gc dashboard serve", port, apiURL, stderr) != nil {
 				return errExit

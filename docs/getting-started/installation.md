@@ -49,6 +49,14 @@ Verify the installation:
 gc version
 ```
 
+<Warning>
+If you use Oh My Zsh with the `git` plugin, `gc` may already be an alias for
+`git commit --verbose`. Run `command gc version` once to bypass the alias. For
+a persistent fix, add `unalias gc 2>/dev/null` after Oh My Zsh loads in
+`~/.zshrc`, or put that line in a file such as
+`~/.oh-my-zsh/custom/gascity.zsh`.
+</Warning>
+
 ### Upgrading via Homebrew
 
 ```bash
@@ -160,6 +168,11 @@ Regardless of install method, confirm everything is working:
 ```bash
 gc version          # should print the installed version and commit
 ```
+
+If that runs `git commit` instead of Gas City, your shell has a `gc` alias.
+Use `command gc version` for this check and see
+[Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc)
+for the permanent fix.
 
 Then create your first city:
 

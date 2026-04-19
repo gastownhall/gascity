@@ -25,8 +25,21 @@ go run ./cmd/genspec
 For the narrative API overview, endpoint families, and wire-level notes, see
 the [Supervisor REST API](/reference/api) page.
 
-For the explicit `gc events` CLI output contract layered on top of those API
-schemas, see [gc events Formats](/reference/events).
+## gc events JSONL Schema
+
+`gc events` list/watch/follow output is published as a small JSON Schema that
+references the OpenAPI DTO components instead of duplicating their fields:
+
+- <a href="/schema/events.txt" download="events.json">Download <code>events.json</code></a>
+
+Use this file to validate one JSON object line emitted by `gc events`,
+`gc events --watch`, or `gc events --follow`. Cursor mode is intentionally
+outside the JSON Schema because `gc events --seq` writes a plain-text cursor,
+not JSONL.
+
+For the explicit CLI output contract, including scope selection, empty-output
+behavior, heartbeat suppression, and cursor formats, see
+[gc events Formats](/reference/events).
 
 ## City Config JSON Schema
 

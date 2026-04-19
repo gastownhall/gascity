@@ -66,6 +66,72 @@ func TestOpenAPISpecInSync(t *testing.T) {
 	}
 }
 
+func TestEventsSchemaPublished(t *testing.T) {
+	root := filepath.Join("..", "..")
+	jsonPath := filepath.Join(root, "docs", "schema", "events.json")
+	txtPath := filepath.Join(root, "docs", "schema", "events.txt")
+
+	jsonData, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (run `go run ./cmd/genspec` to create it)", jsonPath, err)
+	}
+	txtData, err := os.ReadFile(txtPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (run `go run ./cmd/genspec` to create it)", txtPath, err)
+	}
+	if !bytes.Equal(jsonData, txtData) {
+		t.Fatalf("%s and %s differ; run `go run ./cmd/genspec`", jsonPath, txtPath)
+	}
+
+	type schemaRef struct {
+		Ref string `json:"$ref"`
+	}
+	var eventsDoc struct {
+		AnyOf []schemaRef          `json:"anyOf"`
+		Defs  map[string]schemaRef `json:"$defs"`
+	}
+	if err := json.Unmarshal(jsonData, &eventsDoc); err != nil {
+		t.Fatalf("parse %s: %v", jsonPath, err)
+	}
+
+	wantRefs := []string{
+		"openapi.json#/components/schemas/WireEvent",
+		"openapi.json#/components/schemas/WireTaggedEvent",
+		"openapi.json#/components/schemas/EventStreamEnvelope",
+		"openapi.json#/components/schemas/TaggedEventStreamEnvelope",
+	}
+	gotRefs := make(map[string]bool, len(eventsDoc.AnyOf)+len(eventsDoc.Defs))
+	for _, ref := range eventsDoc.AnyOf {
+		gotRefs[ref.Ref] = true
+	}
+	for _, ref := range eventsDoc.Defs {
+		gotRefs[ref.Ref] = true
+	}
+	for _, want := range wantRefs {
+		if !gotRefs[want] {
+			t.Errorf("%s is missing ref %q", jsonPath, want)
+		}
+	}
+
+	openAPIData, err := os.ReadFile(filepath.Join(root, "docs", "schema", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read openapi.json: %v", err)
+	}
+	var openAPI struct {
+		Components struct {
+			Schemas map[string]any `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(openAPIData, &openAPI); err != nil {
+		t.Fatalf("parse openapi.json: %v", err)
+	}
+	for _, component := range []string{"WireEvent", "WireTaggedEvent", "EventStreamEnvelope", "TaggedEventStreamEnvelope"} {
+		if _, ok := openAPI.Components.Schemas[component]; !ok {
+			t.Errorf("events schema references missing OpenAPI component %q", component)
+		}
+	}
+}
+
 // emptyTestResolver is a CityResolver with no cities. Huma schema
 // generation is reflection-based and never calls resolver methods.
 type emptyTestResolver struct{}
