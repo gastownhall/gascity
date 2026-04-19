@@ -238,6 +238,38 @@ append_fragments = ["legacy"]
 	}
 }
 
+func TestParseWithMetaSkipsMixedTableWarningWhenCanonicalAndAliasAreDisjoint(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+append_fragments = ["canonical"]
+
+[agents]
+allow_overlay = ["GC_HOME"]
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			t.Fatalf("expected no mixed-table warning for disjoint keys, got: %v", warnings)
+		}
+	}
+	foundAlias := false
+	for _, w := range warnings {
+		if strings.Contains(w, agentsAliasWarning) {
+			foundAlias = true
+			break
+		}
+	}
+	if !foundAlias {
+		t.Fatalf("expected alias warning, got: %v", warnings)
+	}
+}
+
 func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T) {
 	tests := []struct {
 		name  string

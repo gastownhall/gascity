@@ -12,6 +12,20 @@ import (
 
 const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
 
+var agentDefaultsCompatibilityKeys = []string{
+	"model",
+	"wake_mode",
+	"default_sling_formula",
+	"allow_overlay",
+	"allow_env_override",
+	"append_fragments",
+	"skills",
+	"mcp",
+	"provider",
+	"scope",
+	"install_agent_hooks",
+}
+
 // CheckUndecodedKeys examines TOML metadata for keys that were present in
 // the input but not mapped to any struct field. For each unknown key, it
 // computes edit distance against known field names and suggests the closest
@@ -47,10 +61,19 @@ func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []strin
 		return nil
 	}
 	warnings := []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
-	if md.IsDefined("agent_defaults") {
+	if md.IsDefined("agent_defaults") && agentDefaultsTablesOverlap(md) {
 		warnings = append(warnings, fmt.Sprintf("%s: both [agent_defaults] and [agents] are present; canonical [agent_defaults] wins for overlapping keys", source))
 	}
 	return warnings
+}
+
+func agentDefaultsTablesOverlap(md toml.MetaData) bool {
+	for _, key := range agentDefaultsCompatibilityKeys {
+		if md.IsDefined("agent_defaults", key) && md.IsDefined("agents", key) {
+			return true
+		}
+	}
+	return false
 }
 
 func specializedUndecodedWarning(source, key string) (string, bool) {
