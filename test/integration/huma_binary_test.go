@@ -39,6 +39,9 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	runtimeDir := shortTempDir(t)
 	port := reserveFreePort(t)
 	writeSupervisorConfig(t, gcHome, port)
+	if err := seedDoltIdentityForRoot(gcHome); err != nil {
+		t.Fatalf("seed dolt identity: %v", err)
+	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	cityRoot := filepath.Join(gcHome, "city")
