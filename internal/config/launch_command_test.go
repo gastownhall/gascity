@@ -57,3 +57,21 @@ func TestBuildProviderLaunchCommandAppliesOptionOverrides(t *testing.T) {
 		t.Fatalf("unexpected settings source: %#v", got)
 	}
 }
+
+func TestBuildProviderLaunchCommandIgnoresInitialMessageOverride(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	got, err := BuildProviderLaunchCommand("", rp, map[string]string{
+		"initial_message": "hello",
+		"effort":          "low",
+	})
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+
+	want := "claude --dangerously-skip-permissions --effort low"
+	if got.Command != want {
+		t.Fatalf("Command = %q, want %q", got.Command, want)
+	}
+}

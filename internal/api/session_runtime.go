@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -117,7 +118,11 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) 
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
 	}
 	resolvedInfo := info
-	resolvedInfo.Command = resolved.CommandString()
+	if command, err := s.resolvedSessionRuntimeCommand(resolved, info.Command); err == nil {
+		resolvedInfo.Command = command
+	} else {
+		resolvedInfo.Command = firstNonEmptyString(info.Command, resolved.CommandString(), resolved.Name)
+	}
 	resolvedInfo.Provider = resolved.Name
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
@@ -125,13 +130,40 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) 
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
 }
 
+func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, storedCommand string) (string, error) {
+	if command := strings.TrimSpace(storedCommand); shouldPreserveStoredRuntimeCommand(command, resolved.CommandString()) {
+		return command, nil
+	}
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil)
+	if err != nil {
+		return "", fmt.Errorf("building provider launch command: %w", err)
+	}
+	return firstNonEmptyString(launchCommand.Command, resolved.CommandString(), resolved.Name), nil
+}
+
+func shouldPreserveStoredRuntimeCommand(storedCommand, resolvedCommand string) bool {
+	storedCommand = strings.TrimSpace(storedCommand)
+	if storedCommand == "" {
+		return false
+	}
+	resolvedCommand = strings.TrimSpace(resolvedCommand)
+	if resolvedCommand == "" {
+		return true
+	}
+	return storedCommand == resolvedCommand || strings.HasPrefix(storedCommand, resolvedCommand+" ")
+}
+
 func (s *Server) resolveWorkerSessionRuntime(info session.Info, _ string) (*worker.ResolvedRuntime, error) {
 	resolved, workDir := s.resolveSessionRuntime(info)
 	if resolved == nil {
 		return nil, nil
 	}
+	command, err := s.resolvedSessionRuntimeCommand(resolved, info.Command)
+	if err != nil {
+		return nil, err
+	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
-		Command:    firstNonEmptyString(resolved.CommandString(), info.Command, resolved.Name),
+		Command:    command,
 		WorkDir:    firstNonEmptyString(workDir, info.WorkDir),
 		Provider:   firstNonEmptyString(resolved.Name, info.Provider),
 		SessionEnv: resolved.Env,

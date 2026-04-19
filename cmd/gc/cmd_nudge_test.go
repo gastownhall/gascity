@@ -42,8 +42,56 @@ func (s *missingNudgeBeadStore) Close(id string) error {
 	return s.MemStore.Close(id)
 }
 
+type unrelatedNotFoundNudgeBeadStore struct {
+	*beads.MemStore
+	errorID string
+}
+
+func (s *unrelatedNotFoundNudgeBeadStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.errorID {
+		return fmt.Errorf("setting metadata on %q: backend path not found", id)
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
 func (p *noActivityCapabilityProvider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{}
+}
+
+func TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	item := queuedNudge{
+		ID:        "nudge-empty-bead",
+		Agent:     "wendy.wendy",
+		SessionID: "mc-ayq6xi",
+		Source:    "session",
+		Message:   "follow up",
+		CreatedAt: time.Now().Add(-time.Minute).UTC(),
+	}
+	createdID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected ensureQueuedNudgeBead to create a backing nudge bead")
+	}
+
+	now := time.Now().UTC()
+	item.LastError = "expired"
+	if err := markQueuedNudgeTerminal(store, item, "expired", "expired", "", now); err != nil {
+		t.Fatalf("markQueuedNudgeTerminal: %v", err)
+	}
+
+	bead, err := store.Get(createdID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", createdID, err)
+	}
+	if bead.Status != "closed" {
+		t.Fatalf("bead.Status = %q, want closed", bead.Status)
+	}
+	if bead.Metadata["state"] != "expired" {
+		t.Fatalf("state = %q, want expired", bead.Metadata["state"])
+	}
 }
 
 func TestMarkQueuedNudgeTerminalFallsBackFromMissingStoredBeadID(t *testing.T) {
@@ -83,6 +131,32 @@ func TestMarkQueuedNudgeTerminalFallsBackFromMissingStoredBeadID(t *testing.T) {
 	}
 	if bead.Metadata["terminal_reason"] != "expired" {
 		t.Fatalf("terminal_reason = %q, want expired", bead.Metadata["terminal_reason"])
+	}
+}
+
+func TestMarkQueuedNudgeTerminalReturnsUnrelatedNotFoundErrors(t *testing.T) {
+	store := &unrelatedNotFoundNudgeBeadStore{MemStore: beads.NewMemStore()}
+	item := queuedNudge{
+		ID:        "nudge-terminal-error",
+		Agent:     "wendy.wendy",
+		SessionID: "mc-ayq6xi",
+		Source:    "session",
+		Message:   "follow up",
+		CreatedAt: time.Now().Add(-time.Minute).UTC(),
+	}
+	createdID, _, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	store.errorID = createdID
+	item.BeadID = createdID
+
+	err = markQueuedNudgeTerminal(store, item, "expired", "expired", "", time.Now().UTC())
+	if err == nil {
+		t.Fatal("markQueuedNudgeTerminal returned nil, want unrelated not found error")
+	}
+	if !strings.Contains(err.Error(), "backend path not found") {
+		t.Fatalf("markQueuedNudgeTerminal error = %v, want backend path not found", err)
 	}
 }
 

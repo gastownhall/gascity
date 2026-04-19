@@ -67,6 +67,52 @@ func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 	}
 }
 
+func TestWorkerFactorySessionByIDPreservesStoredResolvedCommand(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Provider = "resolved-worker"
+	fs.cfg.Providers["resolved-worker"] = config.ProviderSpec{
+		DisplayName:   "Resolved Worker",
+		Command:       "/bin/echo",
+		SessionIDFlag: "--session-id-resolved",
+	}
+
+	srv := New(fs)
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateBeadOnly(
+		"myrig/worker",
+		"Chat",
+		"/bin/echo --composed",
+		t.TempDir(),
+		"resolved-worker",
+		"",
+		nil,
+		session.ProviderResume{SessionIDFlag: "--stale-session-id"},
+	)
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+
+	factory, err := srv.workerFactory(fs.cityBeadStore)
+	if err != nil {
+		t.Fatalf("workerFactory: %v", err)
+	}
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("SessionByID(%q): %v", info.ID, err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	start := fs.sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatal("LastStartConfig() = nil")
+	}
+	if got, want := start.Command, "/bin/echo --composed --session-id-resolved "+info.SessionKey; got != want {
+		t.Fatalf("start command = %q, want %q", got, want)
+	}
+}
+
 func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg.Agents[0].Provider = "resolved-worker"

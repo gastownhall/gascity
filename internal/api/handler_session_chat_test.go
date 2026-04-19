@@ -80,3 +80,34 @@ func TestBuildSessionResumeUsesResolvedProviderCommand(t *testing.T) {
 		t.Fatalf("hints.Env[GC_HOME] = %q, want %q", got, want)
 	}
 }
+
+func TestBuildSessionResumePreservesStoredResolvedCommand(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", Provider: "wrapped"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"wrapped": {
+				DisplayName: "Wrapped Claude",
+				Command:     "claude",
+				PathCheck:   "true",
+			},
+		},
+	}
+
+	srv := New(fs)
+	info := session.Info{
+		ID:       "gc-1",
+		Template: "mayor",
+		Command:  "claude --dangerously-skip-permissions --settings /tmp/settings.json",
+		Provider: "wrapped",
+		WorkDir:  "/tmp/workdir",
+	}
+
+	cmd, _ := srv.buildSessionResume(info)
+	if got, want := cmd, "claude --dangerously-skip-permissions --settings /tmp/settings.json"; got != want {
+		t.Fatalf("resume command = %q, want %q", got, want)
+	}
+}

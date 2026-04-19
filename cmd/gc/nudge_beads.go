@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,16 +133,16 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 
 	tryTerminalize := func(beadID string) error {
 		if beadID == "" {
-			return nil
+			return beads.ErrNotFound
 		}
 		if err := store.SetMetadataBatch(beadID, update); err != nil {
-			if isMissingQueuedNudgeBeadErr(err) {
+			if isMissingQueuedNudgeBeadErr(err, beadID) {
 				return beads.ErrNotFound
 			}
 			return err
 		}
 		if err := store.Close(beadID); err != nil {
-			if isMissingQueuedNudgeBeadErr(err) {
+			if isMissingQueuedNudgeBeadErr(err, beadID) {
 				return beads.ErrNotFound
 			}
 			return err
@@ -168,15 +169,20 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 	return nil
 }
 
-func isMissingQueuedNudgeBeadErr(err error) bool {
+func isMissingQueuedNudgeBeadErr(err error, beadID string) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, beads.ErrNotFound) {
 		return true
 	}
+	beadID = strings.ToLower(strings.TrimSpace(beadID))
+	if beadID == "" {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
+	return strings.Contains(msg, "no issue found matching "+strings.ToLower(strconv.Quote(beadID))) ||
+		strings.Contains(msg, "error resolving "+beadID+": no issue found")
 }
 
 func marshalNudgeReference(ref *nudgeReference) string {

@@ -106,12 +106,32 @@ func (s *Server) extmsgNotifyMembers(
 	}
 
 	excludedResolvedID := ""
+	excludedSelector := apiNormalizeSessionTarget(excludeSelector)
 	if selector := strings.TrimSpace(excludeSelector); selector != "" {
-		resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, selector)
+		resolvedID, err := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
 		if err != nil {
 			log.Printf("extmsg: resolve sender %s failed: %v", selector, err)
 		} else {
 			excludedResolvedID = resolvedID
+		}
+	}
+
+	notifyResolved := func(sessionSelector, resolvedID string) {
+		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
+		nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
+			"- %s (%s): %s\n\n"+
+			"To reply in Discord, write your response to a file and run:\n"+
+			"  gc discord reply-current --conversation-id %s --body-file <path>\n"+
+			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
+			"Run 'gc transcript read --ack' after responding to mark as read.\n"+
+			"</system-reminder>",
+			conv.Provider, conv.ConversationID,
+			actorDisplayName, actorKind, text,
+			conv.ConversationID,
+			handle,
+		)
+		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
+			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
 		}
 	}
 
@@ -120,30 +140,29 @@ func (s *Server) extmsgNotifyMembers(
 		wg.Add(1)
 		go func(sessionSelector string) {
 			defer wg.Done()
+			if excludedSelector != "" && apiNormalizeSessionTarget(sessionSelector) == excludedSelector {
+				return
+			}
+			preexistingID, preErr := s.resolveSessionTargetIDWithContext(ctx, store, sessionSelector, apiSessionResolveOptions{})
+			if preErr == nil && preexistingID != "" {
+				if excludedResolvedID != "" && preexistingID == excludedResolvedID {
+					return
+				}
+				notifyResolved(sessionSelector, preexistingID)
+				return
+			}
 			resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionSelector)
 			if err != nil {
 				log.Printf("extmsg: resolve session %s failed: %v", sessionSelector, err)
 				return
 			}
+			if preErr != nil {
+				log.Printf("extmsg: materialized session %s as %s for conversation %s/%s", sessionSelector, resolvedID, conv.Provider, conv.ConversationID)
+			}
 			if excludedResolvedID != "" && resolvedID == excludedResolvedID {
 				return
 			}
-			handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-			nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
-				"- %s (%s): %s\n\n"+
-				"To reply in Discord, write your response to a file and run:\n"+
-				"  gc discord reply-current --conversation-id %s --body-file <path>\n"+
-				"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
-				"Run 'gc transcript read --ack' after responding to mark as read.\n"+
-				"</system-reminder>",
-				conv.Provider, conv.ConversationID,
-				actorDisplayName, actorKind, text,
-				conv.ConversationID,
-				handle,
-			)
-			if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
-				log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
-			}
+			notifyResolved(sessionSelector, resolvedID)
 		}(m.SessionID)
 	}
 	wg.Wait()

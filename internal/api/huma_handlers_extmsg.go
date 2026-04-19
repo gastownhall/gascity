@@ -119,9 +119,13 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 	if err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
-	if result.Receipt.Delivered {
+	if result != nil && result.Receipt.Delivered {
+		notifyConversation := input.Body.Conversation
+		if result.Receipt.Conversation != (extmsg.ConversationRef{}) {
+			notifyConversation = result.Receipt.Conversation
+		}
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
-		go s.extmsgNotifyMembers(s.backgroundCtx(), input.Body.Conversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID)
+		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID)
 	}
 	out := &ExtMsgOutboundOutput{}
 	if result != nil {

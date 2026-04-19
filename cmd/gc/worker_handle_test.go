@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,6 +100,45 @@ STUB_ENV = "present"
 	}
 	if start.Env["STUB_ENV"] != "present" {
 		t.Fatalf("Env[STUB_ENV] = %q, want present", start.Env["STUB_ENV"])
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "claude",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": claude,
+		},
+	}
+
+	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "")
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if !strings.Contains(resolved.Command, "--dangerously-skip-permissions") {
+		t.Fatalf("Command = %q, want unrestricted default", resolved.Command)
+	}
+	if !strings.Contains(resolved.Command, "--effort max") {
+		t.Fatalf("Command = %q, want effort max default", resolved.Command)
+	}
+	if !strings.Contains(resolved.Command, "--settings") {
+		t.Fatalf("Command = %q, want settings arg", resolved.Command)
 	}
 }
 

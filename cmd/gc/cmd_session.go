@@ -400,28 +400,11 @@ func resolvedSessionCommand(cityPath string, resolved *config.ResolvedProvider, 
 	if resolved == nil {
 		return "", fmt.Errorf("resolved provider is nil")
 	}
-	command := resolved.CommandString()
-	if len(resolved.OptionsSchema) > 0 {
-		fullOptions := make(map[string]string, len(resolved.EffectiveDefaults)+len(optionOverrides))
-		for k, v := range resolved.EffectiveDefaults {
-			fullOptions[k] = v
-		}
-		for k, v := range optionOverrides {
-			if k == "initial_message" {
-				continue
-			}
-			fullOptions[k] = v
-		}
-		if args, err := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions); err != nil {
-			return "", fmt.Errorf("resolving provider defaults: %w", err)
-		} else if len(args) > 0 {
-			command = replaceSchemaFlags(command, resolved.OptionsSchema, args)
-		}
+	launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, optionOverrides)
+	if err != nil {
+		return "", fmt.Errorf("resolving provider launch command: %w", err)
 	}
-	if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
-		command = command + " " + sa
-	}
-	return command, nil
+	return launchCommand.Command, nil
 }
 
 func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {

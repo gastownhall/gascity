@@ -11,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -323,12 +322,10 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 		return nil
 	}
 
+	launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, nil)
 	command := resolved.CommandString()
-	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-		command = command + " " + shellquote.Join(defaultArgs)
-	}
-	if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
-		command = command + " " + sa
+	if err == nil {
+		command = launchCommand.Command
 	}
 
 	workDir := strings.TrimSpace(info.WorkDir)

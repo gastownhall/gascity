@@ -34,6 +34,9 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 			mergedOptions[key] = value
 		}
 		for key, value := range optionOverrides {
+			if key == "initial_message" {
+				continue
+			}
 			mergedOptions[key] = value
 		}
 		if len(mergedOptions) > 0 {
