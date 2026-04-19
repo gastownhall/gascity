@@ -4,8 +4,6 @@ package config
 import (
 	"bytes"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -2054,24 +2052,18 @@ func ApplyAgentDefaults(cfg *City) {
 // warning test can assert on its substring.
 const deprecatedAttachmentWarning = "gc: warning: attachment-list fields (`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`) are deprecated as of v0.15.1 and ignored. They may appear on agents, [agent_defaults], [[patches.agent]], [[rigs.overrides]], or [[rigs.patches]]. Remove them from your config (or run `gc doctor --fix` once available). Hard parse error lands in v0.16."
 
-// deprecationWarningSink is the writer used by WarnDeprecatedAttachmentFields.
-// Overridable from tests.
-var deprecationWarningSink io.Writer = os.Stderr
-
-// WarnDeprecatedAttachmentFields emits a one-time deprecation warning to
-// deprecationWarningSink (defaults to os.Stderr) if any of the v0.15.0
-// attachment-list tombstone fields appears populated anywhere in the
-// loaded config — agents, agent_defaults, patches, or rig-level overrides.
-// The check is best-effort and does not error; it only notifies the user
-// so they can clean up ahead of the v0.16 hard parse error.
-func WarnDeprecatedAttachmentFields(cfg *City) {
+// WarnDeprecatedAttachmentFields returns the canonical deprecation warning if
+// any v0.15.0 attachment-list tombstone field appears populated anywhere in
+// the loaded config — agents, agent_defaults, patches, or rig-level overrides.
+// Callers are responsible for routing the warning through their chosen sink.
+func WarnDeprecatedAttachmentFields(cfg *City) string {
 	if cfg == nil {
-		return
+		return ""
 	}
 	if !hasDeprecatedAttachmentFields(cfg) {
-		return
+		return ""
 	}
-	fmt.Fprintln(deprecationWarningSink, deprecatedAttachmentWarning) //nolint:errcheck // best-effort warning sink
+	return deprecatedAttachmentWarning
 }
 
 func hasDeprecatedAttachmentFields(cfg *City) bool {

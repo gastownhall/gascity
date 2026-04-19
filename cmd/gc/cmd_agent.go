@@ -81,6 +81,9 @@ func shouldEmitLoadCityConfigWarning(warning string) bool {
 	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
 		return true
 	}
+	if strings.Contains(warning, "attachment-list fields") {
+		return true
+	}
 	if !strings.Contains(warning, `" is not supported`) {
 		return false
 	}
