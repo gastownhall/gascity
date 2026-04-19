@@ -81,12 +81,9 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Auto-fetch remote packs before full config load.
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc config show: fetching packs: %v\n", fErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc config show: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
@@ -440,12 +437,9 @@ func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	// Auto-fetch remote packs before full config load.
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", fErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)

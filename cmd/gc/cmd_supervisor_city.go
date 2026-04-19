@@ -54,16 +54,6 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 	return timeout
 }
 
-func fetchCityPacksIfNeeded(cityPath string) error {
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
-		if err := config.FetchPacks(quickCfg.Packs, cityPath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func effectiveCityName(cityPath string) (string, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
@@ -179,7 +169,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 			return 1
 		}
 	}
-	if err := fetchCityPacksIfNeeded(cityPath); err != nil {
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

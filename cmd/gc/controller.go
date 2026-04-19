@@ -774,11 +774,8 @@ func reloadWarningsFromError(err error) []string {
 // canonical/compat default tables stay strict-fatal unless --no-strict
 // disables the gate.
 func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
-	// Auto-fetch remote packs before full config load (mirrors cmd_start).
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityRoot); fErr != nil {
-			return nil, fmt.Errorf("fetching packs: %w", fErr)
-		}
+	if err := ensureLegacyNamedPacksCached(cityRoot); err != nil {
+		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
 
 	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)

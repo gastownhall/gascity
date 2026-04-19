@@ -381,12 +381,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	// Auto-fetch remote packs before full config load.
-	if qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", fErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	allIncludes := make([]string, 0, len(extraConfigFiles)+3)

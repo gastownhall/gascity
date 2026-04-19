@@ -79,7 +79,7 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 			logInitProgress(stdout, 6, "Checking provider readiness")
 		}
 	}
-	if err := fetchCityPacksIfNeeded(cityPath); err != nil {
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

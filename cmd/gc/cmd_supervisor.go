@@ -1090,12 +1090,9 @@ func reconcileCities(
 			}
 		}
 
-		// Auto-fetch remote packs before full config load (same as doStart).
-		if qErr == nil && len(quickCfg.Packs) > 0 {
-			if fErr := config.FetchPacks(quickCfg.Packs, path); fErr != nil {
-				recordInitFailure(name, fmt.Sprintf("fetching packs: %v", fErr))
-				continue
-			}
+		if err := ensureLegacyNamedPacksCached(path); err != nil {
+			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
+			continue
 		}
 
 		// Load city config with provenance so WatchTargets covers included files.

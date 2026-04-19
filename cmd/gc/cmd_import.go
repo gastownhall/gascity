@@ -217,7 +217,7 @@ func newImportRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
 func newImportInstallCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Install imports from packs.lock",
+		Short: "Install imports from pack.toml and packs.lock",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cityPath, err := resolveImportRoot()
@@ -443,7 +443,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
-	lock, err := syncImports(cityPath, manifest.Imports, packman.InstallFromLock)
+	lock, err := syncImports(cityPath, manifest.Imports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1

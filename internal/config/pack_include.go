@@ -175,6 +175,23 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 	return resolveConfigPath(ref, declDir, cityRoot), nil
 }
 
+func resolveImportRef(ref, declDir, cityRoot string) (string, error) {
+	if isRemoteInclude(ref) {
+		_, subpath, gitRef := parseRemoteInclude(ref)
+		if gitRef == "" {
+			cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+			if err != nil {
+				return "", err
+			}
+			if subpath != "" {
+				return filepath.Join(cacheDir, subpath), nil
+			}
+			return cacheDir, nil
+		}
+	}
+	return resolvePackRef(ref, declDir, cityRoot)
+}
+
 type remoteImportLockfile struct {
 	Packs map[string]remoteImportLockEntry `toml:"packs"`
 }
@@ -210,11 +227,45 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, entry.Commit))
 	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
 		if os.IsNotExist(err) {
-			return "", false, fmt.Errorf("remote import %s is locked but not cached at %s", source, cacheDir)
+			return "", false, fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
 		}
 		return "", false, fmt.Errorf("checking cached import %s: %w", source, err)
 	}
 	return cacheDir, true, nil
+}
+
+func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
+	lockPath := filepath.Join(cityRoot, "packs.lock")
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
+		}
+		return "", fmt.Errorf("reading packs.lock: %w", err)
+	}
+
+	var lock remoteImportLockfile
+	if _, err := toml.Decode(string(data), &lock); err != nil {
+		return "", fmt.Errorf("parsing packs.lock: %w", err)
+	}
+	entry, ok := lock.Packs[source]
+	if !ok || entry.Commit == "" {
+		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home dir: %w", err)
+	}
+
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, entry.Commit))
+	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+		}
+		return "", fmt.Errorf("checking cached import %s: %w", source, err)
+	}
+	return cacheDir, nil
 }
 
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.

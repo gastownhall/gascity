@@ -186,7 +186,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			for _, bindingName := range importNames {
 				imp := rig.Imports[bindingName]
 
-				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+				impDir, err := resolveImportRef(imp.Source, cityRoot, cityRoot)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
@@ -571,7 +571,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+			impDir, err := resolveImportRef(imp.Source, cityRoot, cityRoot)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -1176,10 +1176,9 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 	for _, bindingName := range importNames {
 		imp := tc.Imports[bindingName]
 
-		// Resolve the import source. For now, only local paths are
-		// supported. Remote sources require the cache populated by
-		// gc import install (which we don't have yet).
-		impDir, err := resolvePackRef(imp.Source, topoDir, cityRoot)
+		// Remote imports are resolved from packs.lock + shared cache;
+		// local imports still resolve like ordinary pack refs.
+		impDir, err := resolveImportRef(imp.Source, topoDir, cityRoot)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}

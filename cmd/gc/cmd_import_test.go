@@ -557,8 +557,8 @@ version = "^1.4"
 		if cityRoot != dir {
 			t.Fatalf("cityRoot = %q, want %q", cityRoot, dir)
 		}
-		if mode != packman.InstallFromLock {
-			t.Fatalf("mode = %v, want InstallFromLock", mode)
+		if mode != packman.InstallResolveIfNeeded {
+			t.Fatalf("mode = %v, want InstallResolveIfNeeded", mode)
 		}
 		if _, ok := imports["tools"]; !ok {
 			t.Fatalf("imports = %#v, want tools import", imports)
@@ -645,6 +645,69 @@ version = "^1.0"
 	code := doImportInstall(dir, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
+func TestDoImportInstallBootstrapsMissingLockfile(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+`)
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+
+	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if cityRoot != dir {
+			t.Fatalf("cityRoot = %q, want %q", cityRoot, dir)
+		}
+		if mode != packman.InstallResolveIfNeeded {
+			t.Fatalf("mode = %v, want InstallResolveIfNeeded", mode)
+		}
+		if _, ok := imports["tools"]; !ok {
+			t.Fatalf("imports = %#v, want tools import", imports)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://example.com/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+		lock, err := packman.ReadLockfile(fsys.OSFS{}, cityRoot)
+		if err != nil {
+			t.Fatalf("ReadLockfile during install: %v", err)
+		}
+		if _, ok := lock.Packs["https://example.com/tools.git"]; !ok {
+			t.Fatalf("lock = %#v, want tools entry", lock.Packs)
+		}
+		return lock, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportInstall(dir, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	lock, err := packman.ReadLockfile(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ReadLockfile: %v", err)
+	}
+	if _, ok := lock.Packs["https://example.com/tools.git"]; !ok {
+		t.Fatalf("lock = %#v, want tools entry", lock.Packs)
 	}
 }
 

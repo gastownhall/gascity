@@ -601,8 +601,39 @@ fetched = "2026-04-10T00:00:00Z"
 	if err == nil {
 		t.Fatal("expected missing shared cache error")
 	}
-	if !strings.Contains(err.Error(), "locked but not cached") {
-		t.Fatalf("error = %v, want locked but not cached", err)
+	if !strings.Contains(err.Error(), "locked but not cached") || !strings.Contains(err.Error(), `run "gc import install"`) {
+		t.Fatalf("error = %v, want locked-but-not-cached install hint", err)
+	}
+}
+
+func TestImport_RootPackRemoteImportMissingLockfileSuggestsInstall(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/example/gastown.git"
+version = "^1.2"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected missing lockfile error")
+	}
+	if !strings.Contains(err.Error(), "missing packs.lock") || !strings.Contains(err.Error(), `run "gc import install"`) {
+		t.Fatalf("error = %v, want missing packs.lock install hint", err)
 	}
 }
 
