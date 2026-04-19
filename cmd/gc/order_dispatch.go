@@ -241,6 +241,9 @@ func resolveOrderExecTarget(cityPath string, cfg *config.City, a orders.Order) (
 	if !ok {
 		return execStoreTarget{}, fmt.Errorf("rig %q not found in %s", a.Rig, filepath.Join(cityPath, "city.toml"))
 	}
+	if strings.TrimSpace(rig.Path) == "" {
+		return execStoreTarget{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before dispatching rig-scoped orders", rig.Name, rig.Name)
+	}
 	return execStoreTarget{
 		ScopeRoot: rig.Path,
 		ScopeKind: "rig",

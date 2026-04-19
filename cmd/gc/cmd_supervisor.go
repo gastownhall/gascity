@@ -1286,6 +1286,11 @@ func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
 			break
 		}
 		for _, rig := range cfg.Rigs {
+			// Skip unbound rigs; their empty path would map to the
+			// city root and shadow real rigs in the supervisor index.
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			rigPath := rig.Path
 			if !filepath.IsAbs(rigPath) {
 				rigPath = filepath.Join(c.Path, rigPath)

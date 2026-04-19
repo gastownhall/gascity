@@ -101,6 +101,15 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig set-endpoint", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if strings.TrimSpace(rig.Path) == "" {
+		// Unbound rig: the downstream helpers join paths against rig.Path
+		// (snapshotRigEndpointFiles, ensureCanonicalScopeMetadataIfPresent,
+		// syncRigManagedPortArtifact, etc.). Empty rig.Path would produce
+		// relative `.beads/...` writes under the current working directory
+		// instead of erroring cleanly.
+		fmt.Fprintf(stderr, "gc rig set-endpoint: rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before setting its endpoint\n", rig.Name, rig.Name) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityState, err := resolveOwnerCityConfigState(cityPath, cfg)
 	if err != nil {

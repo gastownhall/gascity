@@ -474,6 +474,9 @@ func workflowDeleteStoreLabel(cfg *config.City, cityPath, scopePath string) stri
 	}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			if resolveStoreScopeRoot(cityPath, rig.Path) == scopePath {
 				return "rig:" + rig.Name
 			}

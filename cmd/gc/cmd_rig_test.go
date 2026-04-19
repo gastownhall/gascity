@@ -2166,8 +2166,15 @@ func TestCmdRigAddStoresMachinePathInSiteBindingWhenOutsideCity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "path = ") {
-		t.Fatalf("city.toml should not persist rig.path:\n%s", data)
+	parsed, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parse city.toml: %v\ncontents:\n%s", err, data)
+	}
+	if len(parsed.Rigs) != 1 {
+		t.Fatalf("parsed rigs = %d, want 1\ncontents:\n%s", len(parsed.Rigs), data)
+	}
+	if got := parsed.Rigs[0].Path; got != "" {
+		t.Fatalf("city.toml rig.path = %q, want empty (moved to site binding)\ncontents:\n%s", got, data)
 	}
 	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
 	if err != nil {

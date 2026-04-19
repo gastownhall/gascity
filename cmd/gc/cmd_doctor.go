@@ -248,6 +248,12 @@ func backfillRigIndex(cityPath string) error {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	for _, rig := range cfg.Rigs {
 		rigPath := rig.Path
+		// Unbound rigs (no .gc/site.toml binding) have an empty path;
+		// registering that would pollute the supervisor registry with
+		// an entry pointing at the city root.
+		if strings.TrimSpace(rigPath) == "" {
+			continue
+		}
 
 		if err := reg.RegisterRig(rigPath, rig.Name, cityPath); err != nil {
 			// Non-fatal — may be a name conflict with another city's rig.

@@ -99,6 +99,52 @@ path = "/site/frontend"
 	}
 }
 
+func TestLoadWithIncludes_WarnsOnUnboundRig(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Rigs[0].Path != "" {
+		t.Fatalf("Path = %q, want empty for unbound rig", cfg.Rigs[0].Path)
+	}
+	if len(prov.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one unbound-rig warning", prov.Warnings)
+	}
+	if !strings.Contains(prov.Warnings[0], "frontend") || !strings.Contains(prov.Warnings[0], "no path binding") {
+		t.Fatalf("warnings[0] = %q, want mention of rig name and unbound state", prov.Warnings[0])
+	}
+	// The remediation must be a valid CLI form: `gc rig add <dir> --name <rig>`,
+	// not the nonexistent `--path` flag form.
+	if !strings.Contains(prov.Warnings[0], "gc rig add <dir> --name frontend") {
+		t.Fatalf("warnings[0] = %q, want real CLI form `gc rig add <dir> --name <rig>`", prov.Warnings[0])
+	}
+}
+
+func TestApplySiteBindingsForEdit_NoWarnForUnboundRig(t *testing.T) {
+	fs := fsys.NewFake()
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs:      []Rig{{Name: "frontend"}},
+	}
+
+	warnings, err := ApplySiteBindingsForEdit(fs, "/city", cfg)
+	if err != nil {
+		t.Fatalf("ApplySiteBindingsForEdit: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want no warnings in edit mode (edit flow is migrating)", warnings)
+	}
+}
+
 func TestLoadWithIncludes_FallsBackToLegacyRigPathWithoutSiteBinding(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

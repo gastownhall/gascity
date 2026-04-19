@@ -1756,3 +1756,46 @@ var (
 	_ = (*memRecorder).hasSubject
 	_ = strings.Contains
 )
+
+func TestResolveOrderExecTarget_UnboundRigErrors(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: "", // unbound — no site binding
+		}},
+	}
+	_, err := resolveOrderExecTarget("/city", cfg, orders.Order{Name: "deploy", Rig: "frontend"})
+	if err == nil {
+		t.Fatal("resolveOrderExecTarget: expected error for unbound rig, got nil")
+	}
+	if !strings.Contains(err.Error(), "frontend") {
+		t.Errorf("error = %q, want mention of rig name 'frontend'", err)
+	}
+	if !strings.Contains(err.Error(), "no path binding") {
+		t.Errorf("error = %q, want mention of 'no path binding'", err)
+	}
+}
+
+func TestResolveOrderExecTarget_BoundRigDispatchesNormally(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{{
+			Name: "frontend",
+			Path: "/home/user/frontend",
+		}},
+	}
+	target, err := resolveOrderExecTarget("/city", cfg, orders.Order{Name: "deploy", Rig: "frontend"})
+	if err != nil {
+		t.Fatalf("resolveOrderExecTarget: unexpected error: %v", err)
+	}
+	if target.ScopeKind != "rig" {
+		t.Errorf("ScopeKind = %q, want %q", target.ScopeKind, "rig")
+	}
+	if target.RigName != "frontend" {
+		t.Errorf("RigName = %q, want %q", target.RigName, "frontend")
+	}
+	if target.ScopeRoot != "/home/user/frontend" {
+		t.Errorf("ScopeRoot = %q, want %q", target.ScopeRoot, "/home/user/frontend")
+	}
+}

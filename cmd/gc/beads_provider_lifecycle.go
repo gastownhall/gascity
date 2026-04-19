@@ -576,7 +576,11 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 	if err := waitForBeadsScopeReadyAfterRecovery(cityPath, cityPath, deadline); err != nil {
 		return err
 	}
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	// Use the full config load (site-binding overlay applied) so
+	// migrated rigs (rig.path only in .gc/site.toml) are still waited
+	// for. A raw config.Load here would silently skip every migrated
+	// rig — the site binding wouldn't populate rig.Path.
+	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		return nil
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1084,6 +1085,14 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 	}
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
+		// Unbound rigs (declared in city.toml but missing a
+		// .gc/site.toml binding) have an empty rig.Path;
+		// openStoreAtForCity would silently fall back to the city
+		// scope, aliasing the rig store to the city store. Skip them
+		// so supervisor-mode store maps match api_state.buildStores.
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
 		store, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", rig.Name, err) //nolint:errcheck // best-effort stderr
