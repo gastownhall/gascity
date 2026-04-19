@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -236,11 +235,10 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	}
 }
 
-func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
+func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
-	t.Setenv("GC_BOOTSTRAP", "on")
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -269,77 +267,8 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 	}
 
 	implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
-	data, err := os.ReadFile(implicitPath)
-	if err != nil {
-		t.Fatalf("reading implicit-import.toml: %v", err)
-	}
-	text := string(data)
-	if !strings.Contains(text, `[imports."registry"]`) {
-		t.Fatalf("implicit-import.toml missing registry entry:\n%s", text)
-	}
-	if !strings.Contains(text, `source = "github.com/gastownhall/gc-registry"`) {
-		t.Fatalf("implicit-import.toml missing registry source:\n%s", text)
-	}
-}
-
-func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_DOLT", "skip")
-	configureIsolatedRuntimeEnv(t)
-	t.Setenv("GC_BOOTSTRAP", "on")
-
-	oldBootstrap := bootstrap.BootstrapPacks
-	bootstrap.BootstrapPacks = []bootstrap.Entry{{
-		Name:     "registry",
-		Source:   "github.com/gastownhall/gc-registry",
-		Version:  "0.1.0",
-		AssetDir: "packs/missing",
-	}}
-	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
-
-	cityPath := filepath.Join(t.TempDir(), "bright-lights")
-	var initStdout, initStderr bytes.Buffer
-	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
-	if code != 0 {
-		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
-	}
-
-	var stdout, stderr bytes.Buffer
-	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
-		commandName:           "gc init",
-		skipProviderReadiness: true,
-	})
-	if code != 1 {
-		t.Fatalf("finalizeInit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
-		t.Fatalf("stderr = %q, want bootstrap failure message", stderr.String())
-	}
-}
-
-func TestInitRunVersionTimesOut(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "hang-version.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	oldTimeout := initVersionTimeout
-	oldWaitDelay := initVersionWaitDelay
-	initVersionTimeout = 200 * time.Millisecond
-	initVersionWaitDelay = 50 * time.Millisecond
-	t.Cleanup(func() { initVersionTimeout = oldTimeout })
-	t.Cleanup(func() { initVersionWaitDelay = oldWaitDelay })
-
-	started := time.Now()
-	_, err := initRunVersion(script)
-	if err == nil {
-		t.Fatal("initRunVersion error = nil, want timeout")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("initRunVersion error = %v, want context deadline exceeded", err)
-	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("initRunVersion elapsed = %s, want fast timeout", elapsed)
+	if _, err := os.Stat(implicitPath); !os.IsNotExist(err) {
+		t.Fatalf("implicit-import.toml should not be created during finalizeInit, stat err = %v", err)
 	}
 }
 
