@@ -687,6 +687,31 @@ func TestCityRegistryReportsRunningOnlyAfterStartup(t *testing.T) {
 	}
 }
 
+func TestDeleteManagedCityIfCurrentKeepsReplacementCity(t *testing.T) {
+	oldCity := &managedCity{name: "bright-lights"}
+	newCity := &managedCity{name: "bright-lights"}
+	cities := map[string]*managedCity{"/city": newCity}
+
+	if deleted := deleteManagedCityIfCurrent(cities, "/city", oldCity); deleted {
+		t.Fatal("deleteManagedCityIfCurrent returned true for stale city pointer")
+	}
+	if got := cities["/city"]; got != newCity {
+		t.Fatalf("city at /city = %#v, want replacement city %#v", got, newCity)
+	}
+}
+
+func TestDeleteManagedCityIfCurrentRemovesMatchingCity(t *testing.T) {
+	current := &managedCity{name: "bright-lights"}
+	cities := map[string]*managedCity{"/city": current}
+
+	if deleted := deleteManagedCityIfCurrent(cities, "/city", current); !deleted {
+		t.Fatal("deleteManagedCityIfCurrent returned false, want true")
+	}
+	if _, ok := cities["/city"]; ok {
+		t.Fatalf("cities still contains /city after delete: %#v", cities["/city"])
+	}
+}
+
 func TestControllerAliveNoSocket(t *testing.T) {
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")

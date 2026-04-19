@@ -551,6 +551,16 @@ type managedCity struct {
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
 }
 
+// deleteManagedCityIfCurrent prevents a stale city goroutine from removing
+// a replacement city that has already been published at the same path.
+func deleteManagedCityIfCurrent(cities map[string]*managedCity, path string, current *managedCity) bool {
+	if published, ok := cities[path]; ok && published == current {
+		delete(cities, path)
+		return true
+	}
+	return false
+}
+
 // managedCityStopTimeout returns the grace period for a city stop.
 // Only ShutdownTimeoutDuration is used — startup and drift-drain timeouts
 // are intentionally excluded because they govern unrelated lifecycle phases.
@@ -1458,7 +1468,7 @@ func reconcileCities(
 						}
 						pr.backoff = time.Now().Add(delay)
 						fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", n, pr.count, delay) //nolint:errcheck
-						delete(cities, p)
+						deleteManagedCityIfCurrent(cities, p, mc)
 					})
 				} else {
 					// Normal exit (context canceled) — reset panic counter
@@ -1470,7 +1480,7 @@ func reconcileCities(
 						panicHistory map[string]*panicRecord,
 					) {
 						delete(panicHistory, p)
-						delete(cities, p)
+						deleteManagedCityIfCurrent(cities, p, mc)
 					})
 				}
 				// Signal completion last — ensures all cleanup is done before
