@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseBlockingParams(t *testing.T) {
-	req := httptest.NewRequest("GET", "/v0/agents?index=42&wait=10s", nil)
+	req := httptest.NewRequest("GET", "/v0/city/test-city/agents?index=42&wait=10s", nil)
 	bp := parseBlockingParams(req)
 
 	if bp.Index != 42 {
@@ -22,7 +22,7 @@ func TestParseBlockingParams(t *testing.T) {
 }
 
 func TestParseBlockingParamsDefaults(t *testing.T) {
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", "/v0/city/test-city/agents", nil)
 	bp := parseBlockingParams(req)
 
 	if bp.Index != 0 {
@@ -37,7 +37,7 @@ func TestParseBlockingParamsDefaults(t *testing.T) {
 }
 
 func TestParseBlockingParamsMaxWait(t *testing.T) {
-	req := httptest.NewRequest("GET", "/v0/agents?index=1&wait=10m", nil)
+	req := httptest.NewRequest("GET", "/v0/city/test-city/agents?index=1&wait=10m", nil)
 	bp := parseBlockingParams(req)
 
 	if bp.Wait != maxWait {

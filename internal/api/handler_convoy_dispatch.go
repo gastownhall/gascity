@@ -1,9 +1,7 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -12,50 +10,11 @@ import (
 
 var errWorkflowNotFound = errors.New("workflow not found")
 
-type workflowSnapshotResponse struct {
-	WorkflowID        string                 `json:"workflow_id"`
-	RootBeadID        string                 `json:"root_bead_id"`
-	RootStoreRef      string                 `json:"root_store_ref"`
-	ScopeKind         string                 `json:"scope_kind"`
-	ScopeRef          string                 `json:"scope_ref"`
-	Beads             []workflowBeadResponse `json:"beads"`
-	Deps              []workflowDepResponse  `json:"deps"`
-	LogicalNodes      []logicalNodeResponse  `json:"logical_nodes"`
-	LogicalEdges      []workflowDepResponse  `json:"logical_edges"`
-	ScopeGroups       []scopeGroupResponse   `json:"scope_groups"`
-	Partial           bool                   `json:"partial"`
-	ResolvedRootStore string                 `json:"resolved_root_store"`
-	StoresScanned     []string               `json:"stores_scanned"`
-	SnapshotVersion   uint64                 `json:"snapshot_version"`
-	SnapshotEventSeq  *uint64                `json:"snapshot_event_seq,omitempty"`
-}
-
-type workflowBeadResponse struct {
-	ID            string            `json:"id"`
-	Title         string            `json:"title"`
-	Status        string            `json:"status"`
-	Kind          string            `json:"kind"`
-	StepRef       string            `json:"step_ref,omitempty"`
-	Attempt       *int              `json:"attempt,omitempty"`
-	LogicalBeadID string            `json:"logical_bead_id,omitempty"`
-	ScopeRef      string            `json:"scope_ref,omitempty"`
-	Assignee      string            `json:"assignee,omitempty"`
-	Metadata      map[string]string `json:"metadata"`
-}
-
-type workflowDepResponse struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Kind string `json:"kind,omitempty"`
-}
-
-// Presentation types (logical_nodes, logical_edges, scope_groups) are
-// computed by the MC server's workflow_presentation module. GC exports
-// empty arrays — these types exist only for JSON serialization.
-type (
-	logicalNodeResponse = json.RawMessage
-	scopeGroupResponse  = json.RawMessage
-)
+// Response types (workflowSnapshotResponse, workflowBeadResponse,
+// workflowDepResponse, LogicalNode, ScopeGroup) live in
+// huma_types_convoys.go so every response-body struct has one
+// canonical home. This file contains only the dispatch helpers that
+// populate them from the bead store.
 
 type workflowStoreInfo struct {
 	ref       string
@@ -67,163 +26,6 @@ type workflowStoreInfo struct {
 type workflowRootMatch struct {
 	info workflowStoreInfo
 	root beads.Bead
-}
-
-func (s *Server) handleWorkflowGet(w http.ResponseWriter, r *http.Request) {
-	workflowID := strings.TrimSpace(r.PathValue("workflow_id"))
-	if workflowID == "" {
-		workflowID = strings.TrimSpace(r.PathValue("id"))
-	}
-	if workflowID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "convoy id is required")
-		return
-	}
-
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseOptionalWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	index := s.latestIndex()
-
-	snapshot, err := s.buildWorkflowSnapshot(workflowID, scopeKind, scopeRef, index)
-	if err != nil {
-		if errors.Is(err, errWorkflowNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "workflow "+workflowID+" not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", "workflow snapshot failed")
-		return
-	}
-
-	writeIndexJSON(w, index, snapshot)
-}
-
-func (s *Server) handleWorkflowDelete(w http.ResponseWriter, r *http.Request) {
-	workflowID := strings.TrimSpace(r.PathValue("workflow_id"))
-	if workflowID == "" {
-		workflowID = strings.TrimSpace(r.PathValue("id"))
-	}
-	if workflowID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "convoy id is required")
-		return
-	}
-
-	q := r.URL.Query()
-	scopeKind := strings.TrimSpace(q.Get("scope_kind"))
-	scopeRef := strings.TrimSpace(q.Get("scope_ref"))
-	deleteFromStore := q.Get("delete") == "true"
-
-	stores := s.workflowStores()
-
-	closed := 0
-	deleted := 0
-	found := false
-
-	for _, info := range stores {
-		if info.store == nil {
-			continue
-		}
-		// Skip stores that don't match the requested scope.
-		if scopeKind != "" && info.scopeKind != scopeKind {
-			continue
-		}
-		if scopeRef != "" && info.scopeRef != scopeRef {
-			continue
-		}
-
-		var ids []string
-		seen := make(map[string]struct{}, 4)
-		rootIDs := make([]string, 0, 2)
-		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
-				return
-			}
-			if _, ok := seen[id]; ok {
-				return
-			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
-		}
-		addRoot := func(root beads.Bead) {
-			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
-				return
-			}
-			if _, ok := rootSeen[root.ID]; ok {
-				return
-			}
-			rootSeen[root.ID] = struct{}{}
-			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
-		}
-		if root, err := info.store.Get(workflowID); err == nil {
-			addRoot(root)
-		}
-		if roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				"gc.kind":        "workflow",
-				"gc.workflow_id": workflowID,
-			},
-			IncludeClosed: true,
-		}); err == nil {
-			for _, root := range roots {
-				addRoot(root)
-			}
-		}
-		for _, rootID := range rootIDs {
-			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{"gc.root_bead_id": rootID},
-				IncludeClosed: true,
-			})
-			if err != nil {
-				continue
-			}
-			for _, b := range all {
-				addID(b.ID)
-			}
-		}
-		if len(ids) == 0 {
-			continue
-		}
-		found = true
-
-		// Phase 1: Batch close all open beads.
-		n, _ := info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
-		closed += n
-
-		// Phase 2: Delete if requested.
-		if deleteFromStore {
-			for _, id := range ids {
-				// Remove deps before delete.
-				if deps, err := info.store.DepList(id, "down"); err == nil {
-					for _, dep := range deps {
-						_ = info.store.DepRemove(id, dep.DependsOnID)
-					}
-				}
-				if deps, err := info.store.DepList(id, "up"); err == nil {
-					for _, dep := range deps {
-						_ = info.store.DepRemove(dep.IssueID, id)
-					}
-				}
-				if err := info.store.Delete(id); err == nil {
-					deleted++
-				}
-			}
-		}
-	}
-
-	if !found {
-		writeError(w, http.StatusNotFound, "not_found", "workflow "+workflowID+" not found")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"workflow_id": workflowID,
-		"closed":      closed,
-		"deleted":     deleted,
-	})
 }
 
 func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
@@ -385,9 +187,9 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 		ScopeRef:          scopeRef,
 		Beads:             beadResponses,
 		Deps:              workflowDeps,
-		LogicalNodes:      []logicalNodeResponse{},
+		LogicalNodes:      []LogicalNode{},
 		LogicalEdges:      []workflowDepResponse{},
-		ScopeGroups:       []scopeGroupResponse{},
+		ScopeGroups:       []ScopeGroup{},
 		Partial:           partial,
 		ResolvedRootStore: info.ref,
 		StoresScanned:     storesScanned,

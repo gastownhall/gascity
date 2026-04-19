@@ -237,71 +237,6 @@ func TestSupervisorCityNotFound(t *testing.T) {
 	}
 }
 
-func TestSupervisorBarePathSingleCity(t *testing.T) {
-	s := newFakeState(t)
-	s.cityName = "sole-city"
-
-	sm := newTestSupervisorMux(t, map[string]*fakeState{
-		"sole-city": s,
-	})
-
-	// Bare /v0/status should route to the sole running city.
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	var resp statusResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Name != "sole-city" {
-		t.Errorf("Name = %q, want %q", resp.Name, "sole-city")
-	}
-}
-
-func TestSupervisorBareServicePathSingleCity(t *testing.T) {
-	state := newFakeState(t)
-	state.cityName = "sole-city"
-	state.services = &fakeServiceRegistry{
-		items: []workspacesvc.Status{{
-			ServiceName: "github-webhook",
-			PublishMode: "private",
-		}},
-		serve: func(w http.ResponseWriter, r *http.Request) bool {
-			if r.URL.Path != "/svc/github-webhook/v0/github/webhook" {
-				t.Fatalf("path = %q, want /svc/github-webhook/v0/github/webhook", r.URL.Path)
-			}
-			if r.Header.Get("X-GC-Request") != "1" {
-				t.Fatalf("X-GC-Request = %q, want 1", r.Header.Get("X-GC-Request"))
-			}
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte("proxied"))
-			return true
-		},
-	}
-
-	sm := newTestSupervisorMux(t, map[string]*fakeState{
-		"sole-city": state,
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
-	req.RemoteAddr = "127.0.0.1:9000"
-	req.Header.Set("X-GC-Request", "1")
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
-	}
-	if strings.TrimSpace(rec.Body.String()) != "proxied" {
-		t.Fatalf("body = %q, want proxied", rec.Body.String())
-	}
-}
-
 func TestSupervisorCityScopedServicePath(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "bright-lights"
@@ -329,38 +264,6 @@ func TestSupervisorCityScopedServicePath(t *testing.T) {
 	req.Header.Set("X-GC-Request", "1")
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
-	}
-	if strings.TrimSpace(rec.Body.String()) != "proxied" {
-		t.Fatalf("body = %q, want proxied", rec.Body.String())
-	}
-}
-
-func TestSupervisorHandlerAllowsDirectServiceMutationWithoutCSRF(t *testing.T) {
-	state := newFakeState(t)
-	state.cityName = "sole-city"
-	state.services = &fakeServiceRegistry{
-		items: []workspacesvc.Status{{
-			ServiceName: "github-webhook",
-			PublishMode: "direct",
-		}},
-		serve: func(w http.ResponseWriter, _ *http.Request) bool {
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte("proxied"))
-			return true
-		},
-	}
-
-	sm := newTestSupervisorMux(t, map[string]*fakeState{
-		"sole-city": state,
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
-	req.RemoteAddr = "198.51.100.10:9000"
-	rec := httptest.NewRecorder()
-	sm.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
@@ -402,130 +305,6 @@ func TestSupervisorHandlerAllowsCityScopedDirectServiceMutationWithoutCSRF(t *te
 	}
 }
 
-func TestSupervisorHandlerReadOnlyAllowsDirectServiceMutationWithoutCSRF(t *testing.T) {
-	state := newFakeState(t)
-	state.cityName = "sole-city"
-	state.services = &fakeServiceRegistry{
-		items: []workspacesvc.Status{{
-			ServiceName: "github-webhook",
-			PublishMode: "direct",
-		}},
-		serve: func(w http.ResponseWriter, _ *http.Request) bool {
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte("proxied"))
-			return true
-		},
-	}
-
-	sm := NewSupervisorMux(&fakeCityResolver{cities: map[string]*fakeState{
-		"sole-city": state,
-	}}, true, "test", time.Now())
-
-	req := httptest.NewRequest(http.MethodPost, "/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
-	req.RemoteAddr = "198.51.100.10:9000"
-	rec := httptest.NewRecorder()
-	sm.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
-	}
-	if strings.TrimSpace(rec.Body.String()) != "proxied" {
-		t.Fatalf("body = %q, want proxied", rec.Body.String())
-	}
-}
-
-func TestSupervisorHandlerReadOnlyStillBlocksPrivateServiceMutation(t *testing.T) {
-	state := newFakeState(t)
-	state.cityName = "sole-city"
-	state.services = &fakeServiceRegistry{
-		items: []workspacesvc.Status{{
-			ServiceName: "github-webhook",
-			PublishMode: "private",
-		}},
-		serve: func(http.ResponseWriter, *http.Request) bool {
-			t.Fatal("private service mutation should not be invoked through read-only supervisor")
-			return false
-		},
-	}
-
-	sm := NewSupervisorMux(&fakeCityResolver{cities: map[string]*fakeState{
-		"sole-city": state,
-	}}, true, "test", time.Now())
-
-	req := httptest.NewRequest(http.MethodPost, "/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
-	req.RemoteAddr = "127.0.0.1:9000"
-	req.Header.Set("X-GC-Request", "1")
-	rec := httptest.NewRecorder()
-	sm.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
-	}
-}
-
-func TestSupervisorBarePathNoCities(t *testing.T) {
-	sm := newTestSupervisorMux(t, map[string]*fakeState{})
-
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
-	}
-}
-
-func TestSupervisorBarePathMultipleCities(t *testing.T) {
-	s1 := newFakeState(t)
-	s1.cityName = "alpha"
-	s2 := newFakeState(t)
-	s2.cityName = "beta"
-
-	sm := newTestSupervisorMux(t, map[string]*fakeState{
-		"alpha": s1,
-		"beta":  s2,
-	})
-
-	// Bare /v0/status with multiple cities should return 400 requiring
-	// explicit city scope.
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "city_required") {
-		t.Errorf("body = %q, want city_required error", body)
-	}
-}
-
-func TestSupervisorBareServicePathMultipleCities(t *testing.T) {
-	s1 := newFakeState(t)
-	s1.cityName = "alpha"
-	s2 := newFakeState(t)
-	s2.cityName = "beta"
-
-	sm := newTestSupervisorMux(t, map[string]*fakeState{
-		"alpha": s1,
-		"beta":  s2,
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
-	req.RemoteAddr = "127.0.0.1:9000"
-	req.Header.Set("X-GC-Request", "1")
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	if !strings.Contains(rec.Body.String(), "city_required") {
-		t.Fatalf("body = %q, want city_required error", rec.Body.String())
-	}
-}
-
 func TestSupervisorHealth(t *testing.T) {
 	s := newFakeState(t)
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
@@ -558,12 +337,16 @@ func TestSupervisorHealth(t *testing.T) {
 func TestSupervisorEmptyCityName(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 
+	// "/v0/city/" is not a registered route — every per-city operation
+	// is registered at a specific scoped path like /v0/city/{cityName}/foo,
+	// and the /svc pass-through requires /v0/city/{cityName}/svc/... . A
+	// bare "/v0/city/" correctly 404s.
 	req := httptest.NewRequest("GET", "/v0/city/", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 
@@ -679,6 +462,21 @@ func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	}
 }
 
+func TestSupervisorGlobalEventListRejectsInvalidSince(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+
+	req := httptest.NewRequest("GET", "/v0/events?since=notaduration", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid since duration") {
+		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
 func TestSupervisorGlobalEventListEmpty(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 
@@ -699,6 +497,32 @@ func TestSupervisorGlobalEventListEmpty(t *testing.T) {
 	}
 	if resp.Total != 0 {
 		t.Errorf("total = %d, want 0", resp.Total)
+	}
+}
+
+// TestSupervisorGlobalEventStreamNoProviders guards the Codex-flagged
+// precheck bug: when no running city has an event provider, the
+// supervisor must reject /v0/events/stream with 503 Problem Details
+// *before* committing 200 text/event-stream headers. Otherwise clients
+// see "stream opened, then immediate EOF" and can't distinguish it
+// from a dropped connection.
+func TestSupervisorGlobalEventStreamNoProviders(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+
+	req := httptest.NewRequest("GET", "/v0/events/stream", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "problem+json") && !strings.Contains(ct, "json") {
+		t.Errorf("Content-Type = %q, want Problem Details", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "no_providers") {
+		t.Errorf("body missing no_providers code: %s", body)
 	}
 }
 

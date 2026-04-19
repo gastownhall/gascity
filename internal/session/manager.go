@@ -608,8 +608,12 @@ func (m *Manager) Suspend(id string) error {
 		if err != nil {
 			return err
 		}
-		if State(b.Metadata["state"]) == StateSuspended {
-			return nil // already suspended
+		current := State(b.Metadata["state"])
+		if current == StateSuspended {
+			return nil // idempotent: already suspended
+		}
+		if _, err := Transition(current, CmdSuspend); err != nil {
+			return err
 		}
 
 		// Kill the runtime session (skip if already dead).
@@ -639,7 +643,17 @@ func (m *Manager) Close(id string) error {
 			return err
 		}
 		if b.Status == "closed" {
-			return nil // already closed
+			return nil // idempotent: already closed
+		}
+		// CmdClose is legal from any non-none state; this is effectively a
+		// documentation check that will catch future table changes. Treat
+		// empty metadata state as StateActive for bootstrap beads.
+		current := State(b.Metadata["state"])
+		if current == StateNone {
+			current = StateActive
+		}
+		if _, err := Transition(current, CmdClose); err != nil {
+			return err
 		}
 
 		// Best-effort stop cleans up any live runtime and allows auto.Provider
@@ -711,23 +725,35 @@ func (m *Manager) Kill(id string) error {
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 func (m *Manager) BeginDrain(id, reason string) error {
+	if err := m.validateTransition(id, CmdDrain); err != nil {
+		return err
+	}
 	return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
 }
 
 // Archive transitions a session from draining to archived. The runtime
 // process should already be stopped.
 func (m *Manager) Archive(id, reason string) error {
+	if err := m.validateTransition(id, CmdArchive); err != nil {
+		return err
+	}
 	return m.store.SetMetadataBatch(id, ArchivePatch(time.Now().UTC(), reason, false))
 }
 
 // Quarantine marks a session as crash-quarantined until the given time.
 func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
+	if err := m.validateTransition(id, CmdQuarantine); err != nil {
+		return err
+	}
 	return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
 }
 
 // Reactivate clears archive/quarantine blockers and returns a session to
 // asleep so normal wake machinery owns the next runtime start.
 func (m *Manager) Reactivate(id string) error {
+	if err := m.validateTransition(id, CmdWake); err != nil {
+		return err
+	}
 	b, err := m.store.Get(id)
 	if err != nil {
 		return err
@@ -745,7 +771,24 @@ func (m *Manager) Reactivate(id string) error {
 // ConfirmCreation transitions a session from creating to active after the
 // runtime process has been confirmed alive.
 func (m *Manager) ConfirmCreation(id string) error {
+	if err := m.validateTransition(id, CmdReady); err != nil {
+		return err
+	}
 	return m.store.SetMetadataBatch(id, ConfirmStartedPatch(time.Now()))
+}
+
+// validateTransition reads the current state of session id and confirms
+// that cmd is legal via the state machine. Returns an *IllegalTransitionError
+// wrapping ErrIllegalTransition when the transition is disallowed. Callers
+// at the API boundary map that to 409 Conflict.
+func (m *Manager) validateTransition(id string, cmd TransitionCommand) error {
+	b, _, err := m.sessionBead(id)
+	if err != nil {
+		return err
+	}
+	current := State(b.Metadata["state"])
+	_, err = Transition(current, cmd)
+	return err
 }
 
 // Rename updates the title of a chat session.

@@ -14,244 +14,41 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-var errFormulaNotWorkflow = errors.New("formula is not a workflow")
+var (
+	errFormulaNotWorkflow = errors.New("formula is not a workflow")
+	errFormulaNotFound    = errors.New("formula not found")
+)
 
-type formulaRecentRunResponse struct {
-	WorkflowID string `json:"workflow_id"`
-	Status     string `json:"status"`
-	Target     string `json:"target"`
-	StartedAt  string `json:"started_at"`
-	UpdatedAt  string `json:"updated_at"`
-}
-
-type formulaVarDefResponse struct {
-	Name        string   `json:"name"`
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Required    bool     `json:"required,omitempty"`
-	Default     any      `json:"default,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
-	Pattern     string   `json:"pattern,omitempty"`
-}
-
-type formulaSummaryResponse struct {
-	Name        string                     `json:"name"`
-	Description string                     `json:"description"`
-	Version     string                     `json:"version"`
-	VarDefs     []formulaVarDefResponse    `json:"var_defs"`
-	RunCount    int                        `json:"run_count"`
-	RecentRuns  []formulaRecentRunResponse `json:"recent_runs"`
-}
-
-type formulaRunsResponse struct {
-	Formula       string                     `json:"formula"`
-	RunCount      int                        `json:"run_count"`
-	RecentRuns    []formulaRecentRunResponse `json:"recent_runs"`
-	Partial       bool                       `json:"partial"`
-	PartialErrors []string                   `json:"partial_errors,omitempty"`
-}
+// Response types (formulaDetailResponse, formulaSummaryResponse,
+// formulaRunsResponse, and the formulaPreview* / formulaVarDef /
+// formulaRecentRun building blocks) live in huma_types_formulas.go so
+// every response-body struct has one canonical home. This file
+// contains only the dispatch helpers that populate them.
 
 const (
 	defaultFormulaRunsLimit = 3
 	maxFormulaRunsLimit     = 20
 )
 
-type formulaPreviewNodeResponse struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Kind     string `json:"kind"`
-	ScopeRef string `json:"scope_ref,omitempty"`
-}
-
-type formulaPreviewEdgeResponse struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Kind string `json:"kind,omitempty"`
-}
-
-type formulaDetailResponse struct {
-	Name        string                       `json:"name"`
-	Description string                       `json:"description"`
-	Version     string                       `json:"version"`
-	VarDefs     []formulaVarDefResponse      `json:"var_defs"`
-	Steps       []map[string]any             `json:"steps"`
-	Deps        []formulaPreviewEdgeResponse `json:"deps"`
-	Preview     struct {
-		Nodes []formulaPreviewNodeResponse `json:"nodes"`
-		Edges []formulaPreviewEdgeResponse `json:"edges"`
-	} `json:"preview"`
-}
-
-func (s *Server) handleFormulaList(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-
-	paths, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef)
-	if status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-
-	items, err := buildFormulaCatalog(paths)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula catalog failed")
-		return
-	}
-
-	resp := map[string]any{
-		"items":   items,
-		"partial": false,
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleFormulaRuns(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSpace(r.PathValue("name"))
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "formula name is required")
-		return
-	}
-
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-	limit := defaultFormulaRunsLimit
-	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 {
-			writeError(w, http.StatusBadRequest, "invalid", "limit must be a non-negative integer")
-			return
-		}
-		limit = normalizeFormulaRunsLimit(parsed)
-	}
-
-	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula runs failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleFormulaFeed(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-
-	limit := parseOrdersFeedLimit(q.Get("limit"))
-	index := s.latestIndex()
-	cacheKey := responseCacheKey("formula-feed", r)
-	if body, ok := s.cachedResponse(cacheKey, index); ok {
-		writeCachedJSON(w, r, index, body)
-		return
-	}
-
-	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula feed failed")
-		return
-	}
-
-	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
-	for _, run := range projections.Items {
-		items = append(items, workflowRunProjectionFeedItem(run))
-	}
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-
-	resp := map[string]any{
-		"items":   items,
-		"partial": projections.Partial,
-	}
-	if len(projections.PartialErrors) > 0 {
-		resp["partial_errors"] = projections.PartialErrors
-	}
-
-	body, err := s.storeResponse(cacheKey, index, resp)
-	if err != nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	writeCachedJSON(w, r, index, body)
-}
-
-func (s *Server) handleFormulaDetail(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSpace(r.PathValue("name"))
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "formula name is required")
-		return
-	}
-
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	target := strings.TrimSpace(q.Get("target"))
-	if target == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "target is required")
-		return
-	}
-
-	paths, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef)
-	if status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-
-	detail, err := buildFormulaDetail(r.Context(), name, paths, target, queryFormulaVars(q))
-	if err != nil {
-		if errors.Is(err, errFormulaNotWorkflow) || strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, detail)
-}
-
-func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string, string) {
+func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string) {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil, http.StatusServiceUnavailable, "unavailable", "config is unavailable"
+		return nil, http.StatusServiceUnavailable, "config is unavailable"
 	}
 
 	switch scopeKind {
 	case "city":
 		if scopeRef != strings.TrimSpace(s.state.CityName()) {
-			return nil, http.StatusNotFound, "not_found", "city scope " + scopeRef + " not found"
+			return nil, http.StatusNotFound, "city scope " + scopeRef + " not found"
 		}
-		return cfg.FormulaLayers.City, http.StatusOK, "", ""
+		return cfg.FormulaLayers.City, http.StatusOK, ""
 	case "rig":
 		if s.state.BeadStore(scopeRef) == nil {
-			return nil, http.StatusNotFound, "not_found", "rig scope " + scopeRef + " not found"
+			return nil, http.StatusNotFound, "rig scope " + scopeRef + " not found"
 		}
-		return cfg.FormulaLayers.SearchPaths(scopeRef), http.StatusOK, "", ""
+		return cfg.FormulaLayers.SearchPaths(scopeRef), http.StatusOK, ""
 	default:
-		return nil, http.StatusBadRequest, "invalid", "scope_kind must be 'city' or 'rig'"
+		return nil, http.StatusBadRequest, "scope_kind must be 'city' or 'rig'"
 	}
 }
 
@@ -375,7 +172,7 @@ func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedSco
 
 func buildFormulaDetail(ctx context.Context, name string, paths []string, _ string, vars map[string]string) (*formulaDetailResponse, error) {
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("formula %q not found in search paths", name)
+		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
 	parser := formula.NewParser(paths...)
 	resolved, err := loadResolvedWorkflowFormula(parser, name)
@@ -392,7 +189,7 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	if root := recipe.RootStep(); root != nil {
 		rootID = root.ID
 	}
-	steps := make([]map[string]any, 0, len(recipe.Steps))
+	steps := make([]FormulaStepResponse, 0, len(recipe.Steps))
 	nodes := make([]formulaPreviewNodeResponse, 0, len(recipe.Steps))
 	included := make(map[string]bool, len(recipe.Steps))
 	for _, step := range recipe.Steps {
@@ -402,22 +199,18 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 		included[step.ID] = true
 		kind := recipeStepKind(step)
 		title := formula.Substitute(step.Title, displayVars)
-		item := map[string]any{
-			"id":    step.ID,
-			"title": title,
-			"kind":  kind,
-		}
-		if step.Type != "" {
-			item["type"] = step.Type
-		}
-		if step.Assignee != "" {
-			item["assignee"] = step.Assignee
+		item := FormulaStepResponse{
+			ID:       step.ID,
+			Title:    title,
+			Kind:     kind,
+			Type:     step.Type,
+			Assignee: step.Assignee,
 		}
 		if len(step.Labels) > 0 {
-			item["labels"] = step.Labels
+			item.Labels = step.Labels
 		}
 		if len(step.Metadata) > 0 {
-			item["metadata"] = step.Metadata
+			item.Metadata = step.Metadata
 		}
 		steps = append(steps, item)
 
@@ -542,27 +335,6 @@ func formulaVarDefs(vars map[string]*formula.VarDef) []formulaVarDefResponse {
 		items = append(items, item)
 	}
 	return items
-}
-
-func queryFormulaVars(q map[string][]string) map[string]string {
-	if len(q) == 0 {
-		return nil
-	}
-	out := make(map[string]string)
-	for key, values := range q {
-		if !strings.HasPrefix(key, "var.") || len(values) == 0 {
-			continue
-		}
-		name := strings.TrimPrefix(key, "var.")
-		if name == "" {
-			continue
-		}
-		out[name] = values[len(values)-1]
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func recipeStepKind(step formula.RecipeStep) string {

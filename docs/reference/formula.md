@@ -3,8 +3,8 @@ title: Formula Files
 description: Structure and placement of Gas City formula files.
 ---
 
-Gas City resolves formula files from configured formula layers and stages the
-winning `*.formula.toml` files into `.beads/formulas/` with
+Gas City resolves formula files from PackV2 formula layers and stages the
+winning formula files into `.beads/formulas/` with
 [`ResolveFormulas`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/formula_resolve.go).
 
 Formula instantiation happens via the CLI or the store interface:
@@ -86,9 +86,17 @@ Convergence uses a formula subset defined in
 
 ## Where Formulas Come From
 
-- City-level layers are resolved from `[formulas].dir`
-- Rig-local overrides come from `[[rigs]].formulas_dir`
-- Pack formulas participate through pack composition and formula layers
+PackV2 formula discovery is convention-based:
+
+- a pack's reusable formulas live in `formulas/`
+- a city pack's own `formulas/` layer wins over imported pack formulas
+- rig-level imports can provide rig-specific formulas
+- imported pack formulas keep their pack provenance during resolution
+
+Legacy fields such as `[formulas].dir` and `[[rigs]].formulas_dir` may still
+appear in the config schema for migration compatibility. New packs should use
+the PackV2 `formulas/` directory convention instead of declaring formula
+directories in TOML.
 
 For the current formula-resolution behavior, see
 Architecture: Formulas & Molecules (`engdocs/architecture/formulas`).

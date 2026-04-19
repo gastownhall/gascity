@@ -2,9 +2,23 @@
 
 // Dashboard acceptance tests.
 //
-// Issue #431: `gc dashboard` should work out of the box in a running city.
-// Issue #432: if the user explicitly points `--api` at a dead endpoint, the
-// command should fail fast instead of serving an empty dashboard.
+// The dashboard is now a TypeScript SPA served as a static bundle by
+// `gc dashboard`. The Go layer has no data proxy; the SPA calls the
+// supervisor's typed OpenAPI endpoints directly from the browser.
+// These tests assert the minimum the static server promises:
+//
+//   - The SPA index loads and carries a <meta name="supervisor-url">
+//     tag so the SPA can reach the supervisor.
+//   - The compiled bundle assets (dashboard.js, dashboard.css) are
+//     served.
+//   - The legacy /api/* proxy is gone — hitting any of those paths
+//     should 404.
+//
+// The behavioral tests that previously asserted on rendered HTML
+// (selected-city meta, 💓 heartbeat banner, /api/options payload)
+// belong in the browser-level test suite now — they depend on the
+// live supervisor + SPA rendering, not on the Go static server's
+// contract.
 package acceptance_test
 
 import (
@@ -14,7 +28,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,59 +36,53 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-func TestDashboard_DefaultCommand_WorksOutOfBoxUnderSupervisor(t *testing.T) {
+func TestDashboard_ServesSPABundle(t *testing.T) {
 	c := newShortDashboardCity(t)
 	startOut := startCityUnderSupervisor(t, c)
 	dashboardPort := reserveLoopbackPort(t)
 
 	dashboard := startDashboardCommand(t, c, "dashboard", "--port", strconv.Itoa(dashboardPort))
-	page, options := waitForHealthyDashboard(t, dashboard, dashboardPort, startOut)
+	waitForDashboardReady(t, dashboard, dashboardPort, startOut)
 
-	cityName := filepath.Base(c.Dir)
-	if !strings.Contains(page, fmt.Sprintf(`meta name="selected-city" content="%s"`, cityName)) {
-		t.Fatalf("dashboard did not default to the current city %q\npage:\n%s", cityName, page)
+	base := fmt.Sprintf("http://127.0.0.1:%d", dashboardPort)
+
+	// The SPA index must embed a supervisor-url meta tag that points
+	// at a non-empty URL — that's how the SPA discovers the
+	// supervisor at page-load time.
+	page, err := httpGetText(base + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v\nlogs:\n%s", err, dashboard.logs(t))
 	}
-	if strings.TrimSpace(options) == "{}" {
-		t.Fatalf("dashboard /api/options stayed empty under supervisor auto-discovery\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+	if !strings.Contains(page, `<meta name="supervisor-url"`) {
+		t.Fatalf("index missing supervisor-url meta tag; body=\n%s", page)
 	}
-}
+	if strings.Contains(page, `<meta name="supervisor-url" content="">`) {
+		t.Fatalf("supervisor-url meta tag was not injected; body=\n%s", page)
+	}
 
-func TestDashboardServe_ExplicitDeadAPI_FailsFast(t *testing.T) {
-	c := newShortDashboardCity(t)
-	cityAPIPort := reserveLoopbackPort(t)
-	c.AppendToConfig(fmt.Sprintf("\n[api]\nport = %d\n", cityAPIPort))
-	startOut := startCityUnderSupervisor(t, c)
-	dashboardPort := reserveLoopbackPort(t)
+	// The compiled JS bundle and CSS must be served; without them
+	// the SPA cannot render anything.
+	if _, err := httpGetText(base + "/dashboard.js"); err != nil {
+		t.Errorf("GET /dashboard.js: %v", err)
+	}
+	if _, err := httpGetText(base + "/dashboard.css"); err != nil {
+		t.Errorf("GET /dashboard.css: %v", err)
+	}
 
-	apiURL := fmt.Sprintf("http://127.0.0.1:%d", cityAPIPort)
-	dashboard := startDashboardCommand(t, c,
-		"dashboard", "serve",
-		"--port", strconv.Itoa(dashboardPort),
-		"--api", apiURL,
-	)
-
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if exited, err := dashboard.exited(); exited {
-			if err == nil {
-				t.Fatalf("dashboard exited successfully for dead API override\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
-			}
-			logs := strings.ToLower(dashboard.logs(t))
-			if !strings.Contains(logs, "not reachable") &&
-				!strings.Contains(logs, "connection refused") &&
-				!strings.Contains(logs, "unreachable") &&
-				!strings.Contains(logs, "failed to reach") {
-				t.Fatalf("dashboard exited without a clear API connectivity error\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
-			}
-			if strings.Contains(logs, "listening on http://localhost") {
-				t.Fatalf("dashboard started serving before rejecting the dead API override\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
-			}
-			return
+	// The old Go proxy surface is gone. /api/* is a reserved non-SPA
+	// prefix: stale callers get an explicit 404 rather than silently
+	// receiving the SPA index.html, which would mask migration breakage.
+	for _, path := range []string{"/api/run", "/api/commands", "/api/options", "/api/mail/inbox"} {
+		resp, err := http.Get(base + path) //nolint:gosec // acceptance test against localhost
+		if err != nil {
+			t.Errorf("GET %s: %v", path, err)
+			continue
 		}
-		time.Sleep(200 * time.Millisecond)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s: expected 404, got %d", path, resp.StatusCode)
+		}
 	}
-
-	t.Fatalf("dashboard did not fail fast for dead API override\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
 }
 
 type backgroundCmd struct {
@@ -125,29 +132,26 @@ func startCityUnderSupervisor(t *testing.T, c *helpers.City) string {
 	return startOut
 }
 
-func waitForHealthyDashboard(t *testing.T, dashboard *backgroundCmd, port int, startOut string) (string, string) {
+// waitForDashboardReady polls the dashboard root until it returns a
+// document containing the SPA shell. We key on the presence of the
+// <meta name="supervisor-url"> tag since that's the server's only
+// dynamic responsibility.
+func waitForDashboardReady(t *testing.T, dashboard *backgroundCmd, port int, startOut string) {
 	t.Helper()
 
-	dashboardURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if exited, err := dashboard.exited(); exited {
-			t.Fatalf("dashboard exited before becoming healthy: %v\nstart output:\n%s\nlogs:\n%s", err, startOut, dashboard.logs(t))
+			t.Fatalf("dashboard exited before serving index: %v\nstart output:\n%s\nlogs:\n%s", err, startOut, dashboard.logs(t))
 		}
-
-		page, err := httpGetText(dashboardURL + "/")
-		if err == nil {
-			options, optErr := httpGetText(dashboardURL + "/api/options")
-			if optErr == nil && dashboardLooksHealthy(page, options) {
-				return page, options
-			}
+		page, err := httpGetText(base + "/")
+		if err == nil && strings.Contains(page, `<meta name="supervisor-url"`) {
+			return
 		}
-
 		time.Sleep(200 * time.Millisecond)
 	}
-
-	t.Fatalf("dashboard never became healthy\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
-	return "", ""
+	t.Fatalf("dashboard did not serve SPA index in time\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
 }
 
 func startDashboardCommand(t *testing.T, c *helpers.City, args ...string) *backgroundCmd {
@@ -219,13 +223,9 @@ func (b *backgroundCmd) logs(t *testing.T) string {
 	return string(data)
 }
 
-func dashboardLooksHealthy(page, options string) bool {
-	return strings.Contains(page, "💓 active") && strings.TrimSpace(options) != "{}"
-}
-
 func httpGetText(rawURL string) (string, error) {
 	client := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get(rawURL)
+	resp, err := client.Get(rawURL) //nolint:gosec // acceptance test against localhost
 	if err != nil {
 		return "", err
 	}

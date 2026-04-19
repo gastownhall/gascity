@@ -1,7 +1,7 @@
-# Events — verify event recording and gc events command
+# Events — verify local event recording and API-backed gc events behavior
 #
 # Tests that bead create/close and mail send/read emit events,
-# and that gc events displays them with filtering.
+# and that gc events no longer reads the local file-backed log directly.
 
 env GC_BEADS=file
 env GC_DOLT=skip
@@ -31,40 +31,33 @@ stdout 'Sent message gc-3 to mayor'
 exec gc mail read gc-3
 stdout 'Body:     hey there'
 
-# --- View all events ---
+# --- Event-producing commands append to the local city log ---
 
-exec gc events
-stdout 'bead.created'
-stdout 'bead.closed'
-stdout 'mail.sent'
-stdout 'mail.read'
-stdout 'gc-1'
+exec grep 'bead.created' .gc/events.jsonl
+exec grep 'bead.closed' .gc/events.jsonl
+exec grep 'mail.sent' .gc/events.jsonl
+exec grep 'mail.read' .gc/events.jsonl
+exec grep 'gc-1' .gc/events.jsonl
 
-# --- Filter by type ---
+# --- gc events is a supervisor API reflection, not a local log reader ---
 
-exec gc events --type bead.created
-stdout 'bead.created'
-! stdout 'bead.closed'
-! stdout 'mail.sent'
+! exec gc events
+stderr 'could not auto-discover the supervisor API'
 
-# --- No events for unknown type ---
-
-exec gc events --type agent.crashed
-stdout 'No events.'
+! exec gc events --type bead.created
+stderr 'could not auto-discover the supervisor API'
 
 # --- gc event emit (external event recording) ---
 
 exec gc event emit bead.updated --subject gc-1 --message 'Updated title'
-exec gc events --type bead.updated
-stdout 'bead.updated'
-stdout 'gc-1'
+exec grep 'bead.updated' .gc/events.jsonl
+exec grep 'gc-1' .gc/events.jsonl
 
 # --- gc event emit with --actor ---
 
 exec gc event emit agent.started --subject mayor --actor gc --message 'started session'
-exec gc events --type agent.started
-stdout 'agent.started'
-stdout 'gc'
+exec grep 'agent.started' .gc/events.jsonl
+exec grep 'gc' .gc/events.jsonl
 
 # --- gc event emit (missing type arg → exit 1) ---
 
@@ -80,10 +73,10 @@ stderr 'missing subcommand'
 ! exec gc events --since notaduration
 stderr 'invalid --since'
 
-# --- Watch mode: timeout with no matching events ---
+# --- Watch mode still requires the supervisor API ---
 
-exec gc events --watch --type=agent.crashed --timeout=100ms
-! stdout '.'
+! exec gc events --watch --type=agent.crashed --timeout=100ms
+stderr 'could not auto-discover the supervisor API'
 
 # --- Watch mode: invalid --timeout ---
 

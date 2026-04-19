@@ -24,10 +24,11 @@ func TestPhase0HandleSessionSuspend_MaterializesReservedNamedIntoSuspendedState(
 	fs.cfg.Agents[0].Dir = ""
 	fs.cfg.NamedSessions[0].Dir = ""
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/suspend", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/worker/suspend"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("suspend status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -54,6 +55,7 @@ func TestPhase0HandleSessionClose_AllowsConfiguredAlwaysNamedSession(t *testing.
 	fs.cfg.NamedSessions[0].Dir = ""
 	fs.cfg.NamedSessions[0].Mode = "always"
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -68,8 +70,8 @@ func TestPhase0HandleSessionClose_AllowsConfiguredAlwaysNamedSession(t *testing.
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/close", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/"+id+"/close"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -87,6 +89,7 @@ func TestPhase0HandleSessionClose_AllowsConfiguredAlwaysNamedSession(t *testing.
 func TestPhase0HandleSessionClose_ClearsBeadScopedWakeAndHoldOverrides(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
 		"pin_awake":    "true",
@@ -98,8 +101,8 @@ func TestPhase0HandleSessionClose_ClearsBeadScopedWakeAndHoldOverrides(t *testin
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/close", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/"+id+"/close"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -121,14 +124,15 @@ func TestPhase0HandleSessionClose_ClearsBeadScopedWakeAndHoldOverrides(t *testin
 func TestPhase0HandleSessionWake_ClosedBeadIDDoesNotCreateSuccessor(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.Close(id); err != nil {
 		t.Fatalf("Close(%s): %v", id, err)
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/wake", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/"+id+"/wake"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code == http.StatusOK {
 		t.Fatalf("wake closed bead ID status = %d, want rejection; body: %s", rec.Code, rec.Body.String())
@@ -145,14 +149,15 @@ func TestPhase0HandleSessionWake_ClosedBeadIDDoesNotCreateSuccessor(t *testing.T
 func TestPhase0HandleSessionWake_ClosingBeadIDDoesNotWakeOrMaterialize(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadata(id, "state", "closing"); err != nil {
 		t.Fatalf("SetMetadata(state=closing): %v", err)
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/wake", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/"+id+"/wake"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code == http.StatusOK {
 		t.Fatalf("wake closing bead ID status = %d, want rejection; body: %s", rec.Code, rec.Body.String())
@@ -172,16 +177,17 @@ func TestPhase0HandleSessionWake_ClosingBeadIDDoesNotWakeOrMaterialize(t *testin
 func TestPhase0HandleSessionWake_NamedIdentityAfterTerminalCloseUsesFreshCanonicalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	oldID := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 
 	closeRec := httptest.NewRecorder()
-	srv.ServeHTTP(closeRec, newPostRequest("/v0/session/"+oldID+"/close", nil))
+	h.ServeHTTP(closeRec, newPostRequest(cityURL(fs, "/session/"+oldID+"/close"), nil))
 	if closeRec.Code != http.StatusOK {
 		t.Fatalf("close status = %d, want %d; body: %s", closeRec.Code, http.StatusOK, closeRec.Body.String())
 	}
 
 	wakeRec := httptest.NewRecorder()
-	srv.ServeHTTP(wakeRec, newPostRequest("/v0/session/worker/wake", nil))
+	h.ServeHTTP(wakeRec, newPostRequest(cityURL(fs, "/session/worker/wake"), nil))
 	if wakeRec.Code != http.StatusOK {
 		t.Fatalf("wake named identity after close status = %d, want %d; body: %s", wakeRec.Code, http.StatusOK, wakeRec.Body.String())
 	}
@@ -204,6 +210,7 @@ func TestPhase0HandleSessionWake_NamedIdentityAfterTerminalCloseUsesFreshCanonic
 func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistoricalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	historicalID := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(historicalID, map[string]string{
 		"state":               "archived",
@@ -213,7 +220,7 @@ func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistorica
 	}
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/session/worker/wake", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/worker/wake"), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("wake named identity with historical bead status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -260,7 +267,7 @@ func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistorica
 	}
 
 	oldIDWake := httptest.NewRecorder()
-	srv.ServeHTTP(oldIDWake, newPostRequest("/v0/session/"+historicalID+"/wake", nil))
+	h.ServeHTTP(oldIDWake, newPostRequest(cityURL(fs, "/session/"+historicalID+"/wake"), nil))
 	if oldIDWake.Code == http.StatusOK {
 		t.Fatalf("wake archived historical bead ID status = %d, want rejection; body: %s", oldIDWake.Code, oldIDWake.Body.String())
 	}
@@ -311,6 +318,7 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
 		"state":               "archived",
@@ -321,7 +329,7 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 	}
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/session/"+id+"/wake", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/"+id+"/wake"), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("wake archived continuity-eligible bead status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -341,6 +349,7 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCanonicalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 	historicalID := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(historicalID, map[string]string{
 		"state":               "archived",
@@ -385,7 +394,7 @@ func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCan
 	}
 
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/session/worker/wake", nil))
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/worker/wake"), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("wake named identity with historical state status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -432,10 +441,11 @@ func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCan
 func TestPhase0HandleSessionWake_RejectsTemplateTokenOnSessionSurface(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/template:worker/wake", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/template:worker/wake"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code == http.StatusOK {
 		t.Fatalf("wake status = %d, want non-200 session-targeting rejection; body: %s", rec.Code, rec.Body.String())
@@ -453,10 +463,11 @@ func TestPhase0HandleSessionWake_RejectsTemplateTokenOnSessionSurface(t *testing
 func TestPhase0ProviderCompatibility_CreateWritesManualOrigin(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())

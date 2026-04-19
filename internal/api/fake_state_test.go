@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -161,7 +162,7 @@ func (f *fakeMutatorState) SuspendRig(name string) error {
 		}
 	}
 	if !found {
-		return fmt.Errorf("rig %q not found", name)
+		return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 	}
 	tmpl := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -187,7 +188,7 @@ func (f *fakeMutatorState) ResumeRig(name string) error {
 		}
 	}
 	if !found {
-		return fmt.Errorf("rig %q not found", name)
+		return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 	}
 	tmpl := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -226,7 +227,7 @@ func (f *fakeMutatorState) UpdateAgent(name string, patch AgentUpdate) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("agent %q not found", name)
+	return fmt.Errorf("%w: agent %q", configedit.ErrNotFound, name)
 }
 
 func (f *fakeMutatorState) DeleteAgent(name string) error {
@@ -237,7 +238,7 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("agent %q not found", name)
+	return fmt.Errorf("%w: agent %q", configedit.ErrNotFound, name)
 }
 
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
@@ -260,7 +261,7 @@ func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig %q not found", name)
+	return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 }
 
 func (f *fakeMutatorState) DeleteRig(name string) error {
@@ -270,7 +271,7 @@ func (f *fakeMutatorState) DeleteRig(name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig %q not found", name)
+	return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 }
 
 func (f *fakeMutatorState) CreateProvider(name string, spec config.ProviderSpec) error {
@@ -278,7 +279,7 @@ func (f *fakeMutatorState) CreateProvider(name string, spec config.ProviderSpec)
 		f.cfg.Providers = make(map[string]config.ProviderSpec)
 	}
 	if _, exists := f.cfg.Providers[name]; exists {
-		return fmt.Errorf("provider %q already exists", name)
+		return fmt.Errorf("%w: provider %q", configedit.ErrAlreadyExists, name)
 	}
 	f.cfg.Providers[name] = spec
 	return nil
@@ -286,11 +287,11 @@ func (f *fakeMutatorState) CreateProvider(name string, spec config.ProviderSpec)
 
 func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) error {
 	if f.cfg.Providers == nil {
-		return fmt.Errorf("provider %q not found", name)
+		return fmt.Errorf("%w: provider %q", configedit.ErrNotFound, name)
 	}
 	spec, ok := f.cfg.Providers[name]
 	if !ok {
-		return fmt.Errorf("provider %q not found", name)
+		return fmt.Errorf("%w: provider %q", configedit.ErrNotFound, name)
 	}
 	if patch.DisplayName != nil {
 		spec.DisplayName = *patch.DisplayName
@@ -325,10 +326,10 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 
 func (f *fakeMutatorState) DeleteProvider(name string) error {
 	if f.cfg.Providers == nil {
-		return fmt.Errorf("provider %q not found", name)
+		return fmt.Errorf("%w: provider %q", configedit.ErrNotFound, name)
 	}
 	if _, ok := f.cfg.Providers[name]; !ok {
-		return fmt.Errorf("provider %q not found", name)
+		return fmt.Errorf("%w: provider %q", configedit.ErrNotFound, name)
 	}
 	delete(f.cfg.Providers, name)
 	return nil
@@ -353,7 +354,7 @@ func (f *fakeMutatorState) DeleteAgentPatch(name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("agent patch %q not found", name)
+	return fmt.Errorf("%w: agent patch %q", configedit.ErrNotFound, name)
 }
 
 func (f *fakeMutatorState) SetRigPatch(patch config.RigPatch) error {
@@ -374,7 +375,7 @@ func (f *fakeMutatorState) DeleteRigPatch(name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig patch %q not found", name)
+	return fmt.Errorf("%w: rig patch %q", configedit.ErrNotFound, name)
 }
 
 func (f *fakeMutatorState) SetProviderPatch(patch config.ProviderPatch) error {
@@ -395,7 +396,7 @@ func (f *fakeMutatorState) DeleteProviderPatch(name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("provider patch %q not found", name)
+	return fmt.Errorf("%w: provider patch %q", configedit.ErrNotFound, name)
 }
 
 func intPtr(n int) *int { return &n }

@@ -7,6 +7,8 @@ description: CLI, config, formula, and provider reference material.
 
 - [CLI Reference](/reference/cli)
 - [Config Reference](/reference/config)
+- [Supervisor REST API](/reference/api)
+- [gc events Formats](/reference/events)
 
 ## Hand-Maintained Reference Docs
 
@@ -15,4 +17,5 @@ description: CLI, config, formula, and provider reference material.
 - [Exec Beads Provider](/reference/exec-beads-provider)
 
 The config and CLI references are generated from code and should be regenerated
-when the schema or Cobra surface changes.
+when the schema or Cobra surface changes. The API and `gc events` contracts are
+published as downloadable schema artifacts on the [Schemas](/schema) page.

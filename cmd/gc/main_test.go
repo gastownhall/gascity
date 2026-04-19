@@ -1508,8 +1508,8 @@ func TestDoInitAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("doInit = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("doInit = %d, want %d (initExitAlreadyInitialized)", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2398,8 +2398,8 @@ func TestCmdInitFromTOMLFileAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2418,8 +2418,8 @@ func TestCmdInitFromTOMLFileAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2798,8 +2798,8 @@ func TestDoInitFromDirAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2829,8 +2829,8 @@ func TestDoInitFromDirAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())

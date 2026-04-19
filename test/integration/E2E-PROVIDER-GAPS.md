@@ -150,7 +150,7 @@ minutes — far beyond the 10-minute test timeout.
 
 **Impact:** 1 Docker failure (TestE2E_AgentLifecycleEvents)
 
-`gc events --type agent.started` returns "No events." after `gc start`.
+`gc events --type agent.started` returns empty output after `gc start`.
 The events may only be emitted by the controller loop (not one-shot
 start), or the exec provider path in `doStart` may skip event recording.
 

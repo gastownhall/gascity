@@ -2,7 +2,6 @@ package api
 
 import (
 	"log"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,78 +52,6 @@ type workflowRunProjectionResult struct {
 	Items         []workflowRunProjection
 	Partial       bool
 	PartialErrors []string
-}
-
-func (s *Server) handleOrdersFeed(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-
-	limit := parseOrdersFeedLimit(q.Get("limit"))
-	index := s.latestIndex()
-	cacheKey := responseCacheKey("orders-feed", r)
-	if body, ok := s.cachedResponse(cacheKey, index); ok {
-		writeCachedJSON(w, r, index, body)
-		return
-	}
-
-	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "workflow feed failed")
-		return
-	}
-	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "order feed failed")
-		return
-	}
-
-	items := make([]monitorFeedItemResponse, 0, len(workflowRuns.Items)+len(orderRuns))
-	for _, run := range workflowRuns.Items {
-		items = append(items, workflowRunProjectionFeedItem(run))
-	}
-	items = append(items, orderRuns...)
-
-	sort.SliceStable(items, func(i, j int) bool {
-		iRank := monitorStatusRank(items[i].Status)
-		jRank := monitorStatusRank(items[j].Status)
-		if iRank != jRank {
-			return iRank < jRank
-		}
-		iTypeRank := monitorItemRank(items[i])
-		jTypeRank := monitorItemRank(items[j])
-		if iTypeRank != jTypeRank {
-			return iTypeRank < jTypeRank
-		}
-		iUpdated := parseMonitorTimestamp(items[i].UpdatedAt)
-		jUpdated := parseMonitorTimestamp(items[j].UpdatedAt)
-		if !iUpdated.Equal(jUpdated) {
-			return iUpdated.After(jUpdated)
-		}
-		return items[i].Title < items[j].Title
-	})
-
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-
-	resp := map[string]any{
-		"items":   items,
-		"partial": workflowRuns.Partial,
-	}
-	if len(workflowRuns.PartialErrors) > 0 {
-		resp["partial_errors"] = workflowRuns.PartialErrors
-	}
-
-	body, err := s.storeResponse(cacheKey, index, resp)
-	if err != nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	writeCachedJSON(w, r, index, body)
 }
 
 func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScopeRef, formulaNameFilter string) (workflowRunProjectionResult, error) {
@@ -580,15 +507,26 @@ func orderTrackingStatus(bead beads.Bead) string {
 	return "completed"
 }
 
-func parseOrdersFeedLimit(raw string) int {
+// normalizeFeedLimit clamps a caller-supplied feed limit to a sensible
+// range. 0 (or negative) means "use the default"; anything past the
+// hard ceiling is clipped.
+func normalizeFeedLimit(raw int) int {
 	limit := 50
-	if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && parsed > 0 {
-		limit = parsed
+	if raw > 0 {
+		limit = raw
 	}
 	if limit > maxOrdersFeedLimit {
 		return maxOrdersFeedLimit
 	}
 	return limit
+}
+
+// parseOrdersFeedLimit keeps the string-input path alive for the feed
+// helpers that still read untyped config values. Prefer normalizeFeedLimit
+// in typed handlers.
+func parseOrdersFeedLimit(raw string) int {
+	parsed, _ := strconv.Atoi(strings.TrimSpace(raw))
+	return normalizeFeedLimit(parsed)
 }
 
 func workflowRunProjectionFeedItem(run workflowRunProjection) monitorFeedItemResponse {

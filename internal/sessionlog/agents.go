@@ -36,6 +36,23 @@ type AgentSession struct {
 	Status   AgentStatus `json:"status"`
 }
 
+// RawPayloads decodes each non-empty Entry.Raw into a generic JSON value
+// and returns the slice. Same semantics as Session.RawPayloads.
+func (s *AgentSession) RawPayloads() []any {
+	out := make([]any, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(entry.Raw, &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // agentDir returns the subagents directory for a session log path.
 // Claude Code stores subagent files in {slug}/{session-uuid}/subagents/.
 func agentDir(parentLogPath string) string {

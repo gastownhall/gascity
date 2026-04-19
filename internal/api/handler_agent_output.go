@@ -3,14 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -31,41 +29,12 @@ type agentOutputResponse struct {
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
-// handleAgentOutput returns unified conversation output for an agent.
-// Tries structured session logs first, falls back to Peek().
-//
-// Query params:
-//   - tail: number of compaction segments to return (default 1, 0 = all)
-//   - before: message UUID cursor for loading older messages
-func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name string) {
-	cfg := s.state.Config()
-	agentCfg, ok := findAgent(cfg, name)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
-		return
-	}
-
-	// Try structured session log first.
-	resp, err := s.trySessionLogOutput(r, name, agentCfg)
-	if err != nil {
-		// Session file exists but failed to read — surface the error.
-		writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
-		return
-	}
-	if resp != nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-
-	// No session file found — fall back to Peek() (raw terminal text).
-	s.peekFallbackOutput(w, name, cfg)
-}
-
-// trySessionLogOutput attempts to read structured conversation data from
-// a Claude JSONL session file. Returns (nil, nil) if no session file is
-// found (expected — triggers fallback). Returns (nil, err) if the file
-// exists but cannot be read (unexpected — surface to caller).
-func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg config.Agent) (*agentOutputResponse, error) {
+// trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
+// tail carries the client's ?tail= value; tailProvided reports whether
+// the client supplied the param at all. When tailProvided is false, we
+// apply the endpoint default (1 compaction); when tailProvided is true
+// and tail==0, we return all segments (sessionlog "no pagination" mode).
+func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, tailProvided bool, before string) (*agentOutputResponse, error) {
 	cfg := s.state.Config()
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	if workDir == "" {
@@ -86,12 +55,9 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	}
 
 	tail := 1
-	if v := r.URL.Query().Get("tail"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			tail = n
-		}
+	if tailProvided {
+		tail = tailInput
 	}
-	before := r.URL.Query().Get("before")
 
 	var sess *sessionlog.Session
 	var err error
@@ -119,34 +85,6 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 		Turns:      turns,
 		Pagination: sess.Pagination,
 	}, nil
-}
-
-// peekFallbackOutput returns raw terminal text wrapped as a single turn.
-func (s *Server) peekFallbackOutput(w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
-	if !sp.IsRunning(sessionName) {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
-		return
-	}
-
-	output, err := sp.Peek(sessionName, 100)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-
-	turns := []outputTurn{}
-	if output != "" {
-		turns = append(turns, outputTurn{Role: "output", Text: output})
-	}
-
-	writeJSON(w, http.StatusOK, agentOutputResponse{
-		Agent:  name,
-		Format: "text",
-		Turns:  turns,
-	})
 }
 
 // resolveAgentWorkDir returns the absolute working directory for an agent,
@@ -243,73 +181,14 @@ func extractToolResultText(raw json.RawMessage) string {
 // outputStreamPollInterval controls how often the stream checks for new output.
 const outputStreamPollInterval = 2 * time.Second
 
-// handleAgentOutputStream streams agent output as SSE events.
-// New turns are sent as they appear; keepalives are sent every 15s.
-//
-// SSE event format:
-//
-//	event: turn
-//	data: {"turns": [...]}
-func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request, name string) {
-	cfg := s.state.Config()
-	agentCfg, ok := findAgent(cfg, name)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
-		return
-	}
-
-	// Try session log streaming first, fall back to peek polling.
-	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	}
-
-	var logPath string
-	if workDir != "" {
-		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
-	}
-
-	// Check if agent is running.
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
-
-	// If no session log and agent isn't running, return 404 before committing SSE headers.
-	if logPath == "" && !running {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
-		return
-	}
-
-	// Commit SSE headers. Include agent status so clients can distinguish
-	// live streaming from historical replay.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if !running {
-		w.Header().Set("GC-Agent-Status", "stopped")
-	}
-	w.WriteHeader(http.StatusOK)
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-
-	ctx := r.Context()
-	if logPath != "" {
-		s.streamSessionLog(ctx, w, name, logPath)
-	} else {
-		s.streamPeekOutput(ctx, w, name, cfg)
-	}
-}
-
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name string, logPath string) {
+func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name string, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	// Derive provider from agent config for session log parsing.
 	cfg := s.state.Config()
 	agentCfg, _ := findAgent(cfg, name)
@@ -323,7 +202,7 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 	var lastSize int64
 	lw.onReset = func() { lastSize = 0 }
 	var lastSentUUID string
-	var seq uint64
+	var seq int
 	sentUUIDs := make(map[string]struct{})
 
 	readAndEmit := func() {
@@ -396,25 +275,24 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 		}
 		seq++
 
-		data, err := json.Marshal(agentOutputResponse{
+		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
 			Agent:  name,
 			Format: "conversation",
 			Turns:  toSend,
-		})
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			_ = err
-		}
+		}})
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	})
 }
 
 // streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, cfg *config.City) {
+func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, cfg *config.City) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
 
@@ -424,7 +302,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 	defer keepalive.Stop()
 
 	var lastOutput string
-	var seq uint64
+	var seq int
 
 	emitPeek := func() {
 		if !sp.IsRunning(sessionName) {
@@ -441,18 +319,11 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		data, err := json.Marshal(agentOutputResponse{
+		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
 			Agent:  name,
 			Format: "text",
 			Turns:  turns,
-		})
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			_ = err
-		}
+		}})
 	}
 
 	// Emit initial state immediately.
@@ -465,7 +336,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 		case <-poll.C:
 			emitPeek()
 		case <-keepalive.C:
-			writeSSEComment(w)
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }

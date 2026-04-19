@@ -1,0 +1,27 @@
+{
+  "name": "gc-dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Gas City dashboard SPA. Typed against the supervisor OpenAPI spec.",
+  "scripts": {
+    "gen": "openapi-ts && openapi-typescript ../../../../internal/api/openapi.json -o src/generated/schema.d.ts",
+    "test": "vitest run --environment jsdom",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "^0.96.0",
+    "jsdom": "^26.0.0",
+    "openapi-typescript": "^7.5.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@hey-api/client-fetch": "^0.13.1",
+    "openapi-fetch": "^0.13.4"
+  }
+}

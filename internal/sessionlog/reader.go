@@ -39,6 +39,26 @@ type PaginationInfo struct {
 	TotalCompactions       int    `json:"total_compactions"`
 }
 
+// RawPayloads decodes each non-empty Entry.Raw into a generic JSON value
+// (map[string]any for objects, []any for arrays, etc.) and returns the
+// slice. Used by API response builders so handlers can emit the
+// provider-native transcript frames as typed `any` fields without
+// touching json.RawMessage in the API layer.
+func (s *Session) RawPayloads() []any {
+	out := make([]any, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(entry.Raw, &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // displayTypes are entry types included in the display output.
 var displayTypes = map[string]bool{
 	"user":      true,

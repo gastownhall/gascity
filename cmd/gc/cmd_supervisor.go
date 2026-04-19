@@ -495,6 +495,19 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: binding to %s — mutation endpoints disabled (non-localhost)\n", bind) //nolint:errcheck
 	}
 	apiMux := api.NewSupervisorMux(registry, readOnly, version, startedAt)
+
+	pprofSrv, pprofErr := api.StartPprof("")
+	if pprofErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: pprof: %v\n", pprofErr) //nolint:errcheck
+	}
+	if pprofSrv != nil {
+		defer func() {
+			shutCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
+			defer c()
+			pprofSrv.Shutdown(shutCtx) //nolint:errcheck
+		}()
+	}
+
 	addr := net.JoinHostPort(bind, strconv.Itoa(port))
 	apiLis, apiErr := net.Listen("tcp", addr)
 	if apiErr != nil {

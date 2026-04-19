@@ -15,10 +15,11 @@ import (
 func TestPhase0ProviderCompatibility_CreateKeepsResponseKindButDoesNotPersistSpecialSessionKind(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())

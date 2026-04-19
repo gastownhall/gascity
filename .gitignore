@@ -8,6 +8,8 @@ cmd/gc/.runtime/
 /genschema
 /bd
 /br
+/tmp/
+.runtime/
 *.test
 **/.beads/*
 !**/.beads/config.yaml
@@ -36,3 +38,10 @@ reports/
 # Bugflow policy — strictly local state, configured per operator
 .github/bugflow.toml
 
+.vscode/settings.json
+.env
+/gen-client
+
+# Developer scratch — diff dumps and ad-hoc patches created during review
+tmp_*.diff
+tmp_*.patch
