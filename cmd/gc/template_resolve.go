@@ -387,12 +387,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 	canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 	mcpCity := p.city
+	mcpCityIsSynthetic := false
 	if mcpCity == nil {
-		// Most production callers route through newAgentBuildParams and carry the
-		// fully-expanded city config. Tests sometimes construct agentBuildParams
-		// directly; keep a best-effort fallback so MCP still sees the city pack's
-		// top-level mcp/ and any explicit pack graph dirs instead of silently
-		// degrading all the way to agent-local MCP only.
+		// Tests sometimes construct agentBuildParams directly without
+		// setting `city`. Build a minimal synthetic config.City so
+		// non-MCP resolution still works — but mark the result and
+		// hard-error downstream if the synthetic city resolves any
+		// effective MCP. The synthetic city cannot see
+		// ExplicitImportPackDirs/ImplicitImportPackDirs/BootstrapImportPackDirs
+		// or rig import bindings, so silently returning a degraded MCP
+		// catalog would hide production divergence behind "green" tests.
+		mcpCityIsSynthetic = true
 		mcpCity = &config.City{
 			Providers:         p.providers,
 			Rigs:              p.rigs,
@@ -417,7 +422,21 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	if mcpProjection.Provider != "" {
+	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
+		return TemplateParams{}, fmt.Errorf(
+			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) — "+
+				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
+				"cannot see import/implicit/bootstrap layers and would diverge from production)",
+			qualifiedName, len(mcpCatalog.Servers),
+		)
+	}
+	// MCP delivery only fires when there's an actual catalog to project.
+	// An empty catalog with a supported provider kind still produces a
+	// non-empty projection shell (Provider+Target populated) but has no
+	// servers — skipping it here avoids spurious fingerprint churn and
+	// redundant `gc internal project-mcp` PreStart entries (which is what
+	// TestPhase2StartupMaterialization/WC-START-002 guards against).
+	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
 		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
 		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
@@ -427,7 +446,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				projectAgent := templateNameFor(cfgAgent, qualifiedName)
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
 			}
-		case len(mcpCatalog.Servers) > 0:
+		default:
 			return TemplateParams{}, fmt.Errorf(
 				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
 				qualifiedName, workDir, p.sessionProvider,

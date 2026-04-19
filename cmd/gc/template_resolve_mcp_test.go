@@ -117,17 +117,23 @@ args = ["notes-mcp"]
 		}
 	})
 
-	t.Run("best-effort fallback still sees city-root mcp when city is nil", func(t *testing.T) {
+	t.Run("nil city hard-errors when MCP would resolve non-empty", func(t *testing.T) {
+		// Regression guard: the prior fallback silently constructed a
+		// synthetic City that omitted imports/implicit/bootstrap layers,
+		// so tests saw a different MCP precedence stack than production.
+		// resolveTemplate now refuses to proceed when the synthetic
+		// fallback would yield non-empty MCP — tests exercising MCP
+		// must construct a real config.City.
 		params := buildParams("tmux")
 		params.city = nil
 		params.packDirs = []string{cityPath}
 		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "gemini"}
-		tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
-		if err != nil {
-			t.Fatalf("resolveTemplate: %v", err)
+		_, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+		if err == nil {
+			t.Fatal("expected hard error when synthetic fallback would resolve MCP, got nil")
 		}
-		if tp.FPExtra["mcp:gemini"] == "" {
-			t.Fatalf("expected city-root MCP to survive fallback, got %+v", tp.FPExtra)
+		if !strings.Contains(err.Error(), "resolveTemplate invoked without config.City") {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	iofs "io/fs"
 	"os"
 	"path/filepath"
@@ -72,25 +73,71 @@ func (p MCPProjection) Hash() string {
 }
 
 // Apply reconciles the provider-native MCP target. A non-empty projection
-// intentionally adopts the provider-native MCP surface immediately: once an
-// agent/workdir has effective MCP, GC overwrites the provider's MCP target from
-// the neutral source of truth. The managed marker only gates later cleanup when
-// the effective catalog becomes empty, so GC does not remove an unmanaged file
-// it never adopted.
+// adopts the provider-native MCP surface on first write: GC snapshots the
+// existing content to .gc/mcp-adopted/<provider>/<timestamp>.<ext>, emits a
+// one-line stderr warning, then overwrites from the neutral catalog. The
+// managed marker gates later cleanup when the effective catalog becomes
+// empty so GC does not remove an unmanaged file it never adopted.
 //
-// Claude owns the whole file; Gemini and Codex preserve unrelated config while
-// replacing the MCP subtree.
+// Claude owns the whole file; Gemini and Codex preserve unrelated config
+// while replacing the MCP subtree.
+//
+// Apply is safe against concurrent writers for the same target: when the
+// backing FS is the real OS filesystem, the read-validate-write sequence
+// runs under an flock keyed by (provider, target). Concurrent supervisor
+// ticks and stage-2 pre-start commands therefore serialize instead of
+// overwriting each other's work.
+//
+// Symlinked target paths are rejected unconditionally — managed targets
+// must be regular files or directories.
 func (p MCPProjection) Apply(fs fsys.FS) error {
-	switch p.Provider {
-	case MCPProviderClaude:
-		return p.applyClaude(fs)
-	case MCPProviderCodex:
-		return p.applyCodex(fs)
-	case MCPProviderGemini:
-		return p.applyGemini(fs)
-	default:
-		return fmt.Errorf("unsupported MCP provider %q", p.Provider)
+	return p.applyWithStderr(fs, adoptionStderr)
+}
+
+// ApplyWithStderr is identical to Apply but routes the one-time adoption
+// warning to the caller-supplied writer. Callers that already plumb their
+// own stderr sink (cmd surfaces, supervisor) prefer this entrypoint so
+// warnings land in a deterministic place.
+func (p MCPProjection) ApplyWithStderr(fs fsys.FS, stderr io.Writer) error {
+	return p.applyWithStderr(fs, stderr)
+}
+
+func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
+	if err := ensureNotSymlink(fs, p); err != nil {
+		return err
 	}
+	// Short-circuit: nothing to do for an empty catalog on an unmanaged
+	// target. Skipping early avoids taking an adoption snapshot of a
+	// file we are not about to overwrite (the prior-review fix moved
+	// snapshotting into Apply, but emitting a snapshot + warning with
+	// no corresponding write violates the "snapshot only before first
+	// overwrite" contract and lets .gc/mcp-adopted/ grow unbounded on
+	// repeated stage-2 pre-starts that resolve to empty catalogs).
+	if len(p.Servers) == 0 && !p.isManaged(fs) {
+		return nil
+	}
+	lockRoot := ""
+	if _, ok := fs.(fsys.OSFS); ok {
+		lockRoot = lockRootForProjection(p)
+	}
+	return withTargetLock(lockRoot, p.Provider, p.Target, func() error {
+		// Snapshot inside the lock so the backup reflects the exact
+		// content about to be replaced — no TOCTOU against another
+		// writer.
+		if err := snapshotExistingIfUnmanaged(fs, p, nil, stderr); err != nil {
+			return err
+		}
+		switch p.Provider {
+		case MCPProviderClaude:
+			return p.applyClaude(fs)
+		case MCPProviderCodex:
+			return p.applyCodex(fs)
+		case MCPProviderGemini:
+			return p.applyGemini(fs)
+		default:
+			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
+		}
+	})
 }
 
 func (p MCPProjection) normalizedBytes() []byte {
@@ -332,11 +379,10 @@ func writeManagedMCPFile(fs fsys.FS, path string, data []byte) error {
 	if err := fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
+	// WriteFileAtomic chmods the temp file pre-rename, so the final path is
+	// never briefly group/world-readable. No post-rename chmod needed.
 	if err := fsys.WriteFileAtomic(fs, path, data, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := fs.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	return nil
 }
@@ -371,9 +417,6 @@ func (p MCPProjection) writeManagedMarker(fs fsys.FS) error {
 	data = append(data, '\n')
 	if err := fsys.WriteFileAtomic(fs, p.markerPath(), data, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", p.markerPath(), err)
-	}
-	if err := fs.Chmod(p.markerPath(), 0o600); err != nil {
-		return fmt.Errorf("chmod %s: %w", p.markerPath(), err)
 	}
 	return nil
 }

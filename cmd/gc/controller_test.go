@@ -1214,6 +1214,7 @@ func (osFS) ReadFile(name string) ([]byte, error)                 { return os.Re
 func (osFS) WriteFile(name string, d []byte, p os.FileMode) error { return os.WriteFile(name, d, p) }
 func (osFS) MkdirAll(path string, perm os.FileMode) error         { return os.MkdirAll(path, perm) }
 func (osFS) Stat(name string) (os.FileInfo, error)                { return os.Stat(name) }
+func (osFS) Lstat(name string) (os.FileInfo, error)               { return os.Lstat(name) }
 func (osFS) ReadDir(name string) ([]os.DirEntry, error)           { return os.ReadDir(name) }
 func (osFS) Rename(oldpath, newpath string) error                 { return os.Rename(oldpath, newpath) }
 func (osFS) Remove(name string) error                             { return os.Remove(name) }

@@ -79,7 +79,11 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 			if projection.Provider == "" {
 				return nil
 			}
-			if err := projection.Apply(fsys.OSFS{}); err != nil {
+			if err := validateStage2TargetClaimants(cityPath, cfg, &agent, projection, exec.LookPath); err != nil {
+				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if err := projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
