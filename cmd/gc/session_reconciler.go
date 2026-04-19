@@ -37,6 +37,33 @@ type wakeTarget struct {
 	alive   bool
 }
 
+func assignedWorkAssigneeMap(assignedWorkBeads []beads.Bead) map[string]bool {
+	if len(assignedWorkBeads) == 0 {
+		return nil
+	}
+	assigneeHasWork := make(map[string]bool, len(assignedWorkBeads))
+	for _, wb := range assignedWorkBeads {
+		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee != "" {
+			assigneeHasWork[assignee] = true
+		}
+	}
+	return assigneeHasWork
+}
+
+func poolSessionHasActiveDemand(session beads.Bead, template string, poolDesired map[string]int) bool {
+	if strings.TrimSpace(session.Metadata[poolManagedMetadataKey]) != "true" {
+		return false
+	}
+	if strings.TrimSpace(template) == "" || poolDesired == nil {
+		return false
+	}
+	return poolDesired[template] > 0
+}
+
 // buildDepsMap extracts template dependency edges from config for topo ordering.
 // Maps template QualifiedName -> list of dependency template QualifiedNames.
 func buildDepsMap(cfg *config.City) map[string][]string {
@@ -242,6 +269,7 @@ func reconcileSessionBeadsTraced(
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
+	assigneeHasWork := assignedWorkAssigneeMap(assignedWorkBeads)
 	for i := range ordered {
 		session := &ordered[i]
 
@@ -573,6 +601,16 @@ func reconcileSessionBeadsTraced(
 							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
 						}
 						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
+						if sessionHasAssignedWork(*session, assigneeHasWork) ||
+							poolSessionHasActiveDemand(*session, template, poolDesired) {
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "active_work", "deferred_active_work", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							continue
+						}
 						if isNamedSessionBead(*session) {
 							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
 							if trace != nil {

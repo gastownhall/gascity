@@ -212,10 +212,24 @@ func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
 }
 
 func (e *reconcilerTestEnv) reconcileWithPoolDesired(sessions []beads.Bead, poolDesired map[string]int) int {
+	return e.reconcileWithPoolDesiredAndAssignedWork(sessions, poolDesired, nil)
+}
+
+func (e *reconcilerTestEnv) reconcileWithAssignedWork(sessions []beads.Bead, assignedWorkBeads []beads.Bead) int {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	return e.reconcileWithPoolDesiredAndAssignedWork(sessions, poolDesired, assignedWorkBeads)
+}
+
+func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndAssignedWork(sessions []beads.Bead, poolDesired map[string]int, assignedWorkBeads []beads.Bead) int {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeads(
 		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
-		e.store, nil, nil, nil, e.dt, poolDesired, false, nil, "",
+		e.store, nil, assignedWorkBeads, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 	)
 }
@@ -1102,6 +1116,42 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	}
 	if ds.reason != "config-drift" {
 		t.Errorf("drain reason = %q, want %q", ds.reason, "config-drift")
+	}
+}
+
+func TestReconcileSessionBeads_ConfigDriftDefersWhileWorkAssigned(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	assigned := []beads.Bead{{ID: "work-1", Status: "in_progress", Assignee: "worker"}}
+
+	env.reconcileWithAssignedWork([]beads.Bead{session}, assigned)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected assigned work to defer config-drift drain, got %+v", ds)
+	}
+}
+
+func TestReconcileSessionBeads_ConfigDriftDefersPoolDemandBeforeAssignment(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+	env.addDesiredWithConfig("worker-mc-1", "worker", true, "new-cmd")
+	session := env.createSessionBead("worker-mc-1", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash":  runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	env.reconcileWithPoolDesiredAndAssignedWork([]beads.Bead{session}, map[string]int{"worker": 1}, nil)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected pool demand to defer config-drift drain before assignment, got %+v", ds)
 	}
 }
 
