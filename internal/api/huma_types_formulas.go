@@ -4,10 +4,6 @@ package api
 // group. Split out of the original huma_types.go; mirrors the layout
 // of huma_handlers_formulas.go.
 
-import (
-	"github.com/danielgtaylor/huma/v2"
-)
-
 // --- Formula response body types ---
 //
 // These are the shared response shapes returned by formula and
@@ -131,33 +127,39 @@ type FormulaRunsInput struct {
 // --- Formula detail types ---
 
 // FormulaDetailInput is the Huma input for GET /v0/city/{cityName}/formulas/{name} and GET /v0/city/{cityName}/formula/{name}.
+//
+// This endpoint returns a compiled preview with declared variables at
+// their defaults. Callers that need to supply variable values use
+// POST /v0/city/{cityName}/formulas/{name}/preview (FormulaPreviewInput)
+// so the variable dictionary is a spec-visible typed body rather than
+// a dynamic wildcard query scheme. See architecture.md §3.5.1.
 type FormulaDetailInput struct {
 	CityScope
 	Name      string `path:"name" doc:"Formula name."`
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
-	Target    string `query:"target" required:"false" doc:"Target agent for preview compilation."`
-
-	// vars holds dynamic var.* query params, populated by Resolve.
-	vars map[string]string
+	Target    string `query:"target" required:"true" doc:"Target agent for preview compilation."`
 }
 
-// Resolve implements huma.Resolver to extract dynamic var.* query params.
-func (f *FormulaDetailInput) Resolve(ctx huma.Context) []error {
-	u := ctx.URL()
-	f.vars = make(map[string]string)
-	for key, values := range u.Query() {
-		if len(values) > 0 && len(key) > 4 && key[:4] == "var." {
-			name := key[4:]
-			if name != "" {
-				f.vars[name] = values[len(values)-1]
-			}
-		}
-	}
-	if len(f.vars) == 0 {
-		f.vars = nil
-	}
-	return nil
+// FormulaPreviewBody is the request body for POST /v0/city/{cityName}/formulas/{name}/preview.
+//
+// Supplying variable values via a typed map on the body keeps the
+// input surface spec-visible. A prior revision accepted dynamic
+// var.* query parameters via a huma.Resolver; that scheme was
+// removed because OpenAPI 3.1 cannot describe wildcard query keys.
+// See architecture.md §3.5.1.
+type FormulaPreviewBody struct {
+	ScopeKind string            `json:"scope_kind,omitempty" doc:"Scope kind (city or rig)."`
+	ScopeRef  string            `json:"scope_ref,omitempty" doc:"Scope reference."`
+	Target    string            `json:"target" minLength:"1" doc:"Target agent for preview compilation."`
+	Vars      map[string]string `json:"vars,omitempty" doc:"Variable name-to-value overrides applied to the compiled preview."`
+}
+
+// FormulaPreviewInput is the Huma input for POST /v0/city/{cityName}/formulas/{name}/preview.
+type FormulaPreviewInput struct {
+	CityScope
+	Name string `path:"name" doc:"Formula name."`
+	Body FormulaPreviewBody
 }
 
 // --- Workflow backward-compat types ---

@@ -2456,6 +2456,35 @@
         ],
         "type": "object"
       },
+      "FormulaPreviewBody": {
+        "additionalProperties": false,
+        "properties": {
+          "scope_kind": {
+            "description": "Scope kind (city or rig).",
+            "type": "string"
+          },
+          "scope_ref": {
+            "description": "Scope reference.",
+            "type": "string"
+          },
+          "target": {
+            "description": "Target agent for preview compilation.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "vars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variable name-to-value overrides applied to the compiled preview.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
       "FormulaPreviewEdgeResponse": {
         "additionalProperties": false,
         "properties": {
@@ -10521,6 +10550,7 @@
             "explode": false,
             "in": "query",
             "name": "target",
+            "required": true,
             "schema": {
               "description": "Target agent for preview compilation.",
               "type": "string"
@@ -10739,6 +10769,7 @@
             "explode": false,
             "in": "query",
             "name": "target",
+            "required": true,
             "schema": {
               "description": "Target agent for preview compilation.",
               "type": "string"
@@ -10768,6 +10799,68 @@
           }
         },
         "summary": "Get v0 city by city name formulas by name"
+      }
+    },
+    "/v0/city/{cityName}/formulas/{name}/preview": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-formulas-by-name-preview",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Formula name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Formula name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FormulaPreviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormulaDetailResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name formulas by name preview"
       }
     },
     "/v0/city/{cityName}/formulas/{name}/runs": {

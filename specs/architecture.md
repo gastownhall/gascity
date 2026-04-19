@@ -234,6 +234,51 @@ figure out the union later", and "it's just internal" are not
 qualifying exceptions. If our code constructs the map, we know the
 keys. Make it a struct.
 
+### 3.5.1 No hidden inputs — every accepted parameter appears in the spec
+
+Every input a handler reads MUST be a typed field on its Huma
+input struct (`path:`, `query:`, `header:`, or `Body`). The
+generated OpenAPI spec is the complete and exhaustive description
+of the inputs an endpoint accepts. Running a request through a
+handler must not produce a different outcome than running the same
+request through the spec.
+
+Three anti-patterns are specifically forbidden:
+
+- **Dynamic or wildcard query parameters.** Any scheme where a
+  handler accepts query keys matching a pattern (`var.*`, `meta_*`,
+  `x-*`) rather than declared names. OpenAPI 3.1 cannot express
+  wildcard query keys; accepting them creates a hidden contract
+  the spec cannot describe. When a handler needs an open-ended
+  string-to-string dictionary as input, move the input into a
+  typed request body field (`Vars map[string]string` on a POST
+  body). Dictionary bodies have a schema; dictionary query
+  parameters do not.
+- **Resolvers that read raw URL query or header values that
+  aren't declared input fields.** `huma.Resolver` implementations
+  may validate or normalize values the struct already declares,
+  but may not read keys off `ctx.URL().Query()` or `ctx.Header()`
+  that aren't present on the input struct. If a resolver needs a
+  value, that value is a declared field — no exceptions.
+- **Presence-vs-empty semantics not expressible in JSONSchema.**
+  If a handler behaves differently for "parameter absent" vs
+  "parameter present with empty value", the input field must be a
+  pointer type (`*string`) so the distinction appears on the wire
+  contract. Resolver-based presence flags hide the semantics.
+
+The test a reviewer applies: does running an undeclared query
+parameter or an undeclared body field through the handler change
+its behavior? If yes, violation. The spec is the contract; the
+handler does not get a second, private contract the spec doesn't
+know about.
+
+Huma does not reject undeclared query parameters by default
+(they are silently ignored). That is not permission to rely on
+them — silent acceptance of undeclared parameters is a property
+of the framework, not a blessing of hidden contract. Callers that
+send undeclared parameters are sending noise; handlers that read
+them are violating this principle.
+
 ### 3.6 Raw pass-through for provider-native session frames
 
 Session transcript streaming and query endpoints forward

@@ -88,22 +88,46 @@ func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInpu
 }
 
 // humaHandleFormulaDetail is the Huma-typed handler for GET /v0/formulas/{name}
-// and GET /v0/formula/{name}. Supports dynamic var.* query params via
-// the Resolve interface on FormulaDetailInput.
+// and GET /v0/formula/{name}. Returns a compiled preview with declared
+// variables at their defaults. Callers that need to supply variable
+// values use humaHandleFormulaPreview (POST /preview) so the variable
+// dictionary is a spec-visible typed body.
 func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDetailInput) (*struct {
 	Body formulaDetailResponse
 }, error,
 ) {
-	name := strings.TrimSpace(input.Name)
+	return s.formulaDetail(ctx, input.Name, input.ScopeKind, input.ScopeRef, input.Target, nil)
+}
+
+// humaHandleFormulaPreview is the Huma-typed handler for
+// POST /v0/city/{cityName}/formulas/{name}/preview. It accepts a typed
+// body carrying the variable dictionary so the preview inputs are
+// fully described by the OpenAPI spec.
+func (s *Server) humaHandleFormulaPreview(ctx context.Context, input *FormulaPreviewInput) (*struct {
+	Body formulaDetailResponse
+}, error,
+) {
+	return s.formulaDetail(ctx, input.Name, input.Body.ScopeKind, input.Body.ScopeRef, input.Body.Target, input.Body.Vars)
+}
+
+// formulaDetail is the shared backing implementation for the GET detail
+// and POST preview endpoints. The two endpoints differ only in how they
+// receive the variable dictionary: GET compiles with defaults, POST
+// accepts a caller-supplied map.
+func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawScopeRef, rawTarget string, vars map[string]string) (*struct {
+	Body formulaDetailResponse
+}, error,
+) {
+	name := strings.TrimSpace(rawName)
 	if name == "" {
 		return nil, huma.Error400BadRequest("formula name is required")
 	}
 
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(rawScopeKind, rawScopeRef)
 	if scopeErr != "" {
 		return nil, huma.Error400BadRequest(scopeErr)
 	}
-	target := strings.TrimSpace(input.Target)
+	target := strings.TrimSpace(rawTarget)
 	if target == "" {
 		return nil, huma.Error400BadRequest("target is required")
 	}
@@ -119,7 +143,7 @@ func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDeta
 		return nil, huma.Error400BadRequest(msg)
 	}
 
-	detail, err := buildFormulaDetail(ctx, name, paths, target, input.vars)
+	detail, err := buildFormulaDetail(ctx, name, paths, target, vars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, huma.Error404NotFound(err.Error())

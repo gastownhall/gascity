@@ -226,6 +226,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/formulas/{name}/runs", (*Server).humaHandleFormulaRuns)
 	cityGet(sm, "/formulas/{name}", (*Server).humaHandleFormulaDetail)
 	cityGet(sm, "/formula/{name}", (*Server).humaHandleFormulaDetail)
+	cityPost(sm, "/formulas/{name}/preview", (*Server).humaHandleFormulaPreview)
 	cityGet(sm, "/formulas/feed", (*Server).humaHandleFormulaFeed)
 	// Backwards-compatible workflow aliases.
 	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet)

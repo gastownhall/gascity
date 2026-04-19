@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -548,7 +549,7 @@ func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 	return s.Store.List(query)
 }
 
-func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {
+func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
 	prev := formula.IsFormulaV2Enabled()
 	formula.SetFormulaV2Enabled(true)
 	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
@@ -578,8 +579,11 @@ needs = ["prep"]
 metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 `)
 
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker","vars":{"issue":"BD-123"}}`)
 	h := newTestCityHandler(t, state)
-	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-preview?scope_kind=city&scope_ref=test-city&target=worker&var.issue=BD-123"), nil)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/mol-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -614,6 +618,52 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	}
 }
 
+// TestFormulaDetailIgnoresDynamicVarQueryParams pins the §3.5.1
+// invariant: undeclared var.* query parameters on the GET detail
+// endpoint are noise, not input. Callers supply variables through
+// the typed POST /preview body instead.
+func TestFormulaDetailIgnoresDynamicVarQueryParams(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	state := newFakeState(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-preview", `
+description = "Preview {{issue}}"
+formula = "mol-preview"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+default = "DEFAULT"
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-preview?scope_kind=city&scope_ref=test-city&target=worker&var.issue=BD-123"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	if detail.Description != "Preview DEFAULT" {
+		t.Fatalf("description = %q, want default substitution (var.* query params must be ignored)", detail.Description)
+	}
+}
+
 func TestFormulaDetailRequiresTarget(t *testing.T) {
 	state := newFakeState(t)
 	formulaDir := t.TempDir()
@@ -634,8 +684,10 @@ title = "Prep"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	// target is declared required:"true" on FormulaDetailInput, so Huma
+	// fails validation with 422 before the handler runs.
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
 	}
 }
 
