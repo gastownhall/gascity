@@ -77,18 +77,29 @@ This forks "gc supervisor run", verifies it became ready, and returns.`,
 }
 
 func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
+	var wait bool
+	var waitTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the machine-wide supervisor",
-		Long:  `Stop the running machine-wide supervisor and all its cities.`,
-		Args:  cobra.NoArgs,
+		Long: `Stop the running machine-wide supervisor and all its cities.
+
+By default, returns as soon as the supervisor acknowledges the stop
+request — shutdown continues asynchronously. Pass --wait to block
+until the supervisor socket is no longer answering, which is what
+most callers that need deterministic cleanup want (e.g., integration
+tests that then expect to remove temp directories without racing
+against lingering supervisor / controller subprocesses).`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if stopSupervisor(stdout, stderr) != 0 {
+			if stopSupervisorWithWait(stdout, stderr, wait, waitTimeout) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor process to actually exit before returning")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set")
 	return cmd
 }
 
@@ -266,10 +277,23 @@ func supervisorAliveAtPath(sockPath string) int {
 	return pid
 }
 
-// stopSupervisor sends a stop command to the running supervisor.
-// It also unloads the platform service (without removing the unit file)
-// so launchd/systemd doesn't immediately restart the supervisor.
+// stopSupervisor sends a stop command to the running supervisor and returns
+// as soon as the supervisor acknowledges. Shutdown continues asynchronously.
+// Callers that need to block until the supervisor process has actually
+// exited should use stopSupervisorWithWait(stdout, stderr, true, timeout).
 func stopSupervisor(stdout, stderr io.Writer) int {
+	return stopSupervisorWithWait(stdout, stderr, false, 0)
+}
+
+// stopSupervisorWithWait is stopSupervisor with an optional wait-for-exit
+// phase. When wait is true, after the supervisor ACKs the stop command the
+// function polls the supervisor socket until it stops answering (or until
+// waitTimeout elapses). This is the shape tests and shell scripts want when
+// they need deterministic cleanup: on return, the supervisor is gone.
+//
+// It also unloads the platform service (without removing the unit file) so
+// launchd/systemd doesn't immediately restart the supervisor.
+func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
 	// Unload the platform service first so the service manager doesn't
 	// restart the supervisor after we send the stop command.
 	unloadSupervisorService()
@@ -289,12 +313,38 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, _ := conn.Read(buf)
-	if n > 0 && string(buf[:n]) == "ok\n" {
-		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	if n == 0 || string(buf[:n]) != "ok\n" {
+		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	if !wait {
 		return 0
 	}
-	fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
-	return 1
+	if waitTimeout <= 0 {
+		waitTimeout = 30 * time.Second
+	}
+	if err := waitForSupervisorExit(sockPath, waitTimeout); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
+	return 0
+}
+
+// waitForSupervisorExit polls the supervisor socket until it stops answering
+// (i.e., supervisorAliveAtPath returns 0), or until timeout elapses.
+func waitForSupervisorExit(sockPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if supervisorAliveAtPath(sockPath) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for supervisor at %s to exit", timeout, sockPath)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // supervisorStatus checks and reports whether the supervisor is running.

@@ -62,8 +62,17 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
+		}
+		// Pass --wait so the supervisor (and its controller children)
+		// is confirmed gone before t.TempDir() tries to rmdir the city.
+		// Without this, the supervisor's async shutdown races against
+		// tempdir cleanup and produces "unlinkat: directory not empty"
+		// flakes tied to orphan gc subprocesses.
+		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+		}
 	})
 
 	time.Sleep(200 * time.Millisecond)

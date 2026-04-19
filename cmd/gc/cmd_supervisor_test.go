@@ -907,3 +907,147 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 		t.Fatalf("unexpected bead provider op: %v", ops)
 	}
 }
+
+// TestStopSupervisorWithWaitBlocksUntilSocketStops exercises the --wait
+// path of `gc supervisor stop`. The fake socket answers "ping" with a PID
+// (so supervisorAliveAtPath keeps returning alive) for ~200ms after the
+// "stop" request, then closes the listener. stopSupervisorWithWait must
+// block across that window and return success.
+func TestStopSupervisorWithWaitBlocksUntilSocketStops(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+
+	stopDelay := 200 * time.Millisecond
+	go func() {
+		stopRequested := false
+		var stopAt time.Time
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close() //nolint:errcheck
+				buf := make([]byte, 64)
+				n, err := conn.Read(buf)
+				if err != nil || n == 0 {
+					return
+				}
+				cmd := strings.TrimSpace(string(buf[:n]))
+				switch cmd {
+				case "ping":
+					if stopRequested && time.Now().After(stopAt) {
+						// Stop answering ping so the waiter sees us as gone.
+						return
+					}
+					io.WriteString(conn, "4242\n") //nolint:errcheck
+				case "stop":
+					stopRequested = true
+					stopAt = time.Now().Add(stopDelay)
+					io.WriteString(conn, "ok\n") //nolint:errcheck
+				}
+			}(conn)
+		}
+	}()
+
+	start := time.Now()
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if code != 0 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if elapsed < stopDelay {
+		t.Fatalf("returned after %s, expected at least %s (must have waited for socket to stop answering)", elapsed, stopDelay)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout = %q, want final confirmation message", stdout.String())
+	}
+}
+
+// TestStopSupervisorWithoutWaitReturnsAfterAck confirms the default
+// (non-wait) path returns as soon as the supervisor ACKs the stop. The
+// fake socket keeps answering "ping" indefinitely; without --wait,
+// stopSupervisor must not block on the ping result.
+func TestStopSupervisorWithoutWaitReturnsAfterAck(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			return "4242\n"
+		case "stop":
+			return "ok\n"
+		}
+		return ""
+	})
+
+	start := time.Now()
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisor(&stdout, &stderr)
+	elapsed := time.Since(start)
+
+	if code != 0 {
+		t.Fatalf("stopSupervisor code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("returned after %s, expected fast return (no wait) — waited anyway?", elapsed)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor stopping...") {
+		t.Fatalf("stdout = %q, want 'Supervisor stopping...' message", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout unexpectedly contains 'Supervisor stopped.' — wait flag was false")
+	}
+}
+
+// TestStopSupervisorWithWaitTimesOutWhenSocketKeepsAnswering guards the
+// wait-timeout path. The fake socket keeps answering ping forever; --wait
+// with a tiny timeout must return non-zero and mention the timeout.
+func TestStopSupervisorWithWaitTimesOutWhenSocketKeepsAnswering(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			return "4242\n"
+		case "stop":
+			return "ok\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 300*time.Millisecond)
+
+	if code != 1 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 1 (timeout)", code)
+	}
+	if !strings.Contains(stderr.String(), "timed out") {
+		t.Fatalf("stderr = %q, want timeout message", stderr.String())
+	}
+}

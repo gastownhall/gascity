@@ -287,8 +287,15 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
+		}
+		// --wait blocks until the supervisor socket stops answering so
+		// cleanupTestCityDir and t.TempDir() don't race against lingering
+		// supervisor/controller subprocesses.
+		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+		}
 		cleanupTestCityDir(cityDir)
 	})
 
@@ -329,8 +336,15 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
+		}
+		// --wait blocks until the supervisor socket stops answering so
+		// cleanupTestCityDir and t.TempDir() don't race against lingering
+		// supervisor/controller subprocesses.
+		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+		}
 		cleanupTestCityDir(cityDir)
 	})
 
