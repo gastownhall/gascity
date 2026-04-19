@@ -45,12 +45,7 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	cityRoot := filepath.Join(gcHome, "city")
-	env := append(os.Environ(),
-		"GC_HOME="+gcHome,
-		"XDG_RUNTIME_DIR="+runtimeDir,
-		"GC_BEADS=file",
-		"GC_DOLT=skip",
-	)
+	env := integrationEnvFor(gcHome, runtimeDir, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
