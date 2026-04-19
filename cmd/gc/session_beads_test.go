@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -104,6 +107,94 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	}
 	if b.Metadata["instance_token"] == "" {
 		t.Error("instance_token is empty")
+	}
+}
+
+func TestSyncSessionBeads_CreatesImportedConfiguredNamedSessionBeads(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repo")
+	for path, contents := range map[string]string{
+		filepath.Join(cityPath, "pack.toml"): `
+[pack]
+name = "import-regression"
+schema = 2
+
+[imports.gs]
+source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, "city.toml"): `
+[workspace]
+name = "import-regression"
+provider = "claude"
+
+[[rigs]]
+name = "repo"
+path = "./repo"
+
+[rigs.imports.gs]
+source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, "assets", "sidecar", "pack.toml"): `
+[pack]
+name = "sidecar"
+schema = 2
+
+[[named_session]]
+template = "captain"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "watcher"
+scope = "rig"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "agent.toml"): "scope = \"city\"\nstart_command = \"true\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "prompt.md"):  "You are the imported captain.\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "agent.toml"): "scope = \"rig\"\nstart_command = \"true\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "prompt.md"):  "You are the imported watcher.\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", rigPath, err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)}
+	ds := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now(), cfg, sp, store, io.Discard).State
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 2 {
+		t.Fatalf("session bead count = %d, want 2: %+v", len(all), all)
+	}
+
+	found := map[string]string{}
+	for _, b := range all {
+		found[strings.TrimSpace(b.Metadata["configured_named_identity"])] = strings.TrimSpace(b.Metadata["session_name"])
+	}
+	if found["gs.captain"] != "gs__captain" {
+		t.Fatalf("captain session_name = %q, want %q", found["gs.captain"], "gs__captain")
+	}
+	if found["repo/gs.watcher"] != "repo--gs__watcher" {
+		t.Fatalf("watcher session_name = %q, want %q", found["repo/gs.watcher"], "repo--gs__watcher")
 	}
 }
 
