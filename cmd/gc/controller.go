@@ -365,12 +365,16 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
 	applyFeatureFlags(newCfg)
-	if strictMode && len(prov.Warnings) > 0 {
-		for _, w := range prov.Warnings {
+	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
+	if strictMode && len(fatalWarnings) > 0 {
+		for _, w := range fatalWarnings {
 			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
+		for _, w := range nonFatalWarnings {
+			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
-		return nil, fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings))
+		return nil, fmt.Errorf("strict mode: %d fatal warning(s)", len(fatalWarnings))
 	}
 	for _, w := range prov.Warnings {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
