@@ -119,7 +119,23 @@ func installClaude(fs fsys.FS, cityDir string) error {
 		return err
 	}
 
-	if sourceKind == claudeSettingsSourceLegacyHook || hookFileSafeToRewrite(fs, hookDst) {
+	// Write hooks/claude.json when:
+	//  (a) it's the explicitly selected source (claudeSettingsSourceLegacyHook),
+	//      so the user's merged settings land back in the file they own; or
+	//  (b) the existing hook file is a known-stale gc-generated pattern and
+	//      needs the in-place upgrade (old embedded bytes → new embedded bytes).
+	//
+	// Previous revisions also seeded the hook file on FRESH installs
+	// whenever it was absent — that behavior created a stale-mirror bug:
+	// a user who started with .claude/settings.json got a mirrored
+	// hooks/claude.json written on first install, then if they later
+	// removed .claude/settings.json desiredClaudeSettings would fall
+	// back to the mirror as "legacy hook source" and ship the previous
+	// generation's settings instead of the current embedded defaults.
+	// Fresh installs now leave hooks/claude.json untouched; the
+	// gc-managed .gc/settings.json is what gc passes to Claude via
+	// --settings.
+	if sourceKind == claudeSettingsSourceLegacyHook || isStaleHookFile(fs, hookDst) {
 		if err := writeManagedFile(fs, hookDst, data, preserveUnreadable); err != nil {
 			return err
 		}
@@ -145,22 +161,16 @@ const (
 	forceOverwrite
 )
 
-// hookFileSafeToRewrite reports whether hooks/claude.json can be safely
-// overwritten by installClaude without clobbering user-owned content. It is
-// safe when the file does not exist (fresh install seed) or when its bytes
-// match a known stale auto-generated pattern (proactive upgrade of leftover
-// state). Any other content — including existing-but-unreadable files,
-// content equal to the embedded base, or user-authored content — is
-// preserved.
-func hookFileSafeToRewrite(fs fsys.FS, hookDst string) bool {
+// isStaleHookFile reports whether hooks/claude.json exists AND matches a
+// known stale gc-generated pattern. Only true for files we can prove gc
+// wrote: user-authored content and the current-embedded-defaults case
+// both return false so they are preserved in place.
+func isStaleHookFile(fs fsys.FS, hookDst string) bool {
 	data, err := fs.ReadFile(hookDst)
-	if err == nil {
-		return claudeFileNeedsUpgrade(data)
+	if err != nil {
+		return false
 	}
-	// Only a genuine "not found" means we can safely seed. Any other read
-	// error (permission, i/o) is an existing file in an unknown state —
-	// preserve it rather than risk clobbering user content.
-	return errors.Is(err, os.ErrNotExist)
+	return claudeFileNeedsUpgrade(data)
 }
 
 // readEmbedded returns the embedded Claude defaults (config/claude.json).

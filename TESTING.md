@@ -102,6 +102,14 @@ testing tmux session lifecycle with real processes.
 
 Run with: `go test -tags integration ./test/...`
 
+**Supervisor binary smoke test** (`test/integration/huma_binary_test.go`):
+builds `gc`, boots the supervisor against an isolated `GC_HOME`, waits
+for `/health`, fetches `/openapi.json`, and runs `gc cities` as a
+subprocess. Proves the whole stack — build tags, Huma registration,
+listener bootstrap, socket paths — wires end-to-end through a real
+binary. Run with `make test-integration-huma` or
+`go test -tags integration -run TestHumaBinary ./test/integration/`.
+
 ### 4. Documentation sync tests (`test/docsync`)
 
 These tests keep the public docs surface honest.

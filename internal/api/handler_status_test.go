@@ -14,11 +14,11 @@ func TestHandleStatus(t *testing.T) {
 	state := newFakeState(t)
 	// Start a fake session so Running > 0.
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -50,11 +50,11 @@ func TestHandleStatus(t *testing.T) {
 func TestHandleStatusEnriched(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp statusResponse
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
@@ -85,11 +85,11 @@ func TestHandleStatusEnriched(t *testing.T) {
 
 func TestHandleHealth(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/health", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/health"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -115,11 +115,11 @@ func TestHandleHealth(t *testing.T) {
 func TestHandleStatus_Suspended(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Workspace.Suspended = true
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)

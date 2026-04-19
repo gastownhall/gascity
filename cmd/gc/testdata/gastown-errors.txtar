@@ -28,7 +28,7 @@ cd $WORK
 stderr 'not in a city directory'
 
 ! exec gc events
-stderr 'not in a city directory'
+stderr 'could not auto-discover the supervisor API'
 
 ! exec gc convoy list
 stderr 'not in a city directory'

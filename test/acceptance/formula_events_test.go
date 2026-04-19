@@ -9,6 +9,7 @@
 package acceptance_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,18 +144,23 @@ func TestEventCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("JSONFormat_OutputsParseable", func(t *testing.T) {
+	t.Run("DefaultOutput_OutputsJSONL", func(t *testing.T) {
 		// Emit an event so there's something to show.
 		c.GC("event", "emit", "test.json", "--message", "json test")
 
-		out, err := c.GC("events", "--json")
+		out, err := c.GC("events")
 		if err != nil {
-			t.Fatalf("gc events --json failed: %v\n%s", err, out)
+			t.Fatalf("gc events failed: %v\n%s", err, out)
 		}
-		// JSON output should start with [ (array) or contain {.
 		trimmed := strings.TrimSpace(out)
-		if trimmed != "" && !strings.Contains(trimmed, "{") {
-			t.Errorf("expected JSON-like output, got:\n%s", out)
+		if trimmed == "" {
+			t.Fatal("expected JSONL output, got empty output")
+		}
+		for _, line := range strings.Split(trimmed, "\n") {
+			var item map[string]any
+			if err := json.Unmarshal([]byte(line), &item); err != nil {
+				t.Fatalf("gc events line is not valid JSON: %v\nline: %s", err, line)
+			}
 		}
 	})
 

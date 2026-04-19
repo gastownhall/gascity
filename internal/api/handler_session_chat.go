@@ -4,75 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 var errSessionTemplateNotFound = errors.New("session template not found")
-
-type sessionCreateRequest struct {
-	// Kind discriminates the session target: "agent" or "provider".
-	Kind              string            `json:"kind,omitempty"`
-	Name              string            `json:"name,omitempty"`
-	Alias             string            `json:"alias,omitempty"`
-	LegacySessionName *string           `json:"session_name,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	Async             bool              `json:"async,omitempty"`
-	Options           map[string]string `json:"options,omitempty"`
-	// ProjectID is an opaque identifier for the MC project context.
-	// Stored in bead metadata for session-to-project association.
-	ProjectID string `json:"project_id,omitempty"`
-	Title     string `json:"title,omitempty"`
-}
-
-type sessionMessageRequest struct {
-	Message string `json:"message"`
-}
-
-type sessionSubmitRequest struct {
-	Message string               `json:"message"`
-	Intent  session.SubmitIntent `json:"intent,omitempty"`
-}
 
 type sessionPendingResponse struct {
 	Supported bool                        `json:"supported"`
 	Pending   *runtime.PendingInteraction `json:"pending,omitempty"`
 }
 
-type sessionRespondRequest struct {
-	RequestID string            `json:"request_id,omitempty"`
-	Action    string            `json:"action"`
-	Text      string            `json:"text,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
-}
-
-type sessionTranscriptResponse struct {
+// SessionStreamMessageEvent carries normalized conversation turns on the
+// session SSE stream.
+type SessionStreamMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.)."`
 	Format     string                     `json:"format"`
 	Turns      []outputTurn               `json:"turns"`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
-type sessionRawTranscriptResponse struct {
+// SessionStreamRawMessageEvent carries provider-native transcript frames on
+// the session SSE stream.
+type SessionStreamRawMessageEvent struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
 	Format     string                     `json:"format"`
-	Messages   []json.RawMessage          `json:"messages"`
+	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames, emitted verbatim as the provider wrote them."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
@@ -133,6 +105,25 @@ func (s *Server) resolveSessionWorkDir(agentCfg config.Agent, qualifiedName stri
 		workDir = s.state.CityPath()
 	}
 	return workDir, nil
+}
+
+// resolveSessionTemplateWithBareNameFallback resolves a session template
+// by name, retrying with the qualified name when the input is a bare
+// agent name that matches exactly one configured agent. Keeps the
+// two-phase lookup out of the handler.
+func (s *Server) resolveSessionTemplateWithBareNameFallback(name string) (*config.ResolvedProvider, string, string, string, error) {
+	resolved, workDir, transport, template, err := s.resolveSessionTemplate(name)
+	if err == nil {
+		return resolved, workDir, transport, template, nil
+	}
+	if !errors.Is(err, errSessionTemplateNotFound) || strings.Contains(name, "/") {
+		return nil, "", "", "", err
+	}
+	agentCfg, ok := findUniqueAgentTemplateByBareName(s.state.Config(), name)
+	if !ok {
+		return nil, "", "", "", err
+	}
+	return s.resolveSessionTemplate(agentCfg.QualifiedName())
 }
 
 func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvider, string, string, string, error) {
@@ -224,434 +215,14 @@ func (s *Server) resolveBareProvider(providerName string) (*config.ResolvedProvi
 	)
 }
 
-func writeSessionManagerError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, session.ErrInvalidSessionName):
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	case errors.Is(err, session.ErrSessionNameExists):
-		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case errors.Is(err, session.ErrInvalidSessionAlias):
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	case errors.Is(err, session.ErrSessionAliasExists):
-		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case errors.Is(err, session.ErrInteractionUnsupported):
-		writeError(w, http.StatusNotImplemented, "unsupported", err.Error())
-	case errors.Is(err, session.ErrPendingInteraction):
-		writeError(w, http.StatusConflict, "pending_interaction", err.Error())
-	case errors.Is(err, session.ErrNoPendingInteraction):
-		writeError(w, http.StatusConflict, "no_pending", err.Error())
-	case errors.Is(err, session.ErrInteractionMismatch):
-		writeError(w, http.StatusConflict, "invalid_interaction", err.Error())
-	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
-		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case errors.Is(err, session.ErrNotSession):
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	default:
-		writeStoreError(w, err)
-	}
-}
-
-func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	var body sessionCreateRequest
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.LegacySessionName != nil {
-		writeError(w, http.StatusBadRequest, "invalid", "session_name is no longer accepted; use alias")
-		return
-	}
-
-	kind := body.Kind
-	name := body.Name
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "name is required")
-		return
-	}
-	if kind != "agent" && kind != "provider" {
-		writeError(w, http.StatusBadRequest, "invalid_kind", "kind must be 'agent' or 'provider'")
-		return
-	}
-
-	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
-	var bodyHash string
-	if idemKey != "" {
-		bodyHash = hashBody(body)
-		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
-			return
-		}
-	}
-
-	var resolved *config.ResolvedProvider
-	var agentCfg config.Agent
-	var workDir, transport, template string
-	var optMeta map[string]string
-	var err error
-
-	switch kind {
-	case "agent":
-		cfg := s.state.Config()
-		if cfg == nil {
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusInternalServerError, "internal", "no city config loaded")
-			return
-		}
-		var ok bool
-		agentCfg, ok = resolveSessionTemplateAgent(cfg, name)
-		if !ok {
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusNotFound, "agent_not_found", "agent '"+name+"' not found")
-			return
-		}
-		resolved, err = config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
-		if err != nil {
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-		transport = agentCfg.Session
-		template = agentCfg.QualifiedName()
-		// Agent track: command comes from the agent config as-is.
-		// Do NOT inject OptionsSchema defaults — agents encode their own CLI flags.
-		// Options are stored as template_overrides and applied at start time
-		// by the session lifecycle via ResolveExplicitOptions.
-		if len(body.Options) > 0 {
-			if len(resolved.OptionsSchema) == 0 {
-				s.idem.unreserve(idemKey)
-				writeError(w, http.StatusBadRequest, "unknown_option", "agent '"+name+"' does not accept options")
-				return
-			}
-			// Validate options against the schema without applying defaults.
-			if _, err := config.ResolveExplicitOptions(resolved.OptionsSchema, body.Options); err != nil {
-				s.idem.unreserve(idemKey)
-				if errors.Is(err, config.ErrUnknownOption) {
-					writeError(w, http.StatusBadRequest, "unknown_option", err.Error())
-					return
-				}
-				writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
-				return
-			}
-		}
-
-	case "provider":
-		s.createProviderSession(w, r, store, body, name, idemKey, bodyHash)
-		return
-	}
-
-	title := body.Title
-	if title == "" {
-		title = template
-	}
-
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
-	alias, err := session.ValidateAlias(body.Alias)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-	if kind == "agent" && alias != "" && agentCfg.SupportsMultipleSessions() {
-		alias = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, s.state.Config().Rigs, alias, "")
-	}
-	explicitName := ""
-	workDirQualifiedName := ""
-	if kind == "agent" {
-		var explicitErr error
-		explicitName, explicitErr = sessionExplicitNameForCreate(agentCfg, alias)
-		if explicitErr != nil {
-			s.idem.unreserve(idemKey)
-			writeSessionManagerError(w, explicitErr)
-			return
-		}
-		workDirQualifiedName = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, s.state.Config().Rigs, alias, explicitName)
-		workDir, err = s.resolveSessionWorkDir(agentCfg, workDirQualifiedName)
-		if err != nil {
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-	}
-
-	// Merge explicit options with provider effective defaults.
-	// User-specified options override defaults; unspecified options get the
-	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
-	command := resolved.CommandString()
-	if len(resolved.OptionsSchema) > 0 {
-		mergedOptions := make(map[string]string)
-		for k, v := range resolved.EffectiveDefaults {
-			mergedOptions[k] = v
-		}
-		for k, v := range body.Options {
-			mergedOptions[k] = v
-		}
-		if mergedArgs, err := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); err == nil && len(mergedArgs) > 0 {
-			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
-		}
-	}
-
-	// Build template_overrides metadata. Includes schema overrides AND
-	// the initial message (as "initial_message" key). The reconciler
-	// handles both: schema overrides map to CLI flags, initial_message
-	// is appended to the prompt on first start only.
-	allOverrides := make(map[string]string)
-	for k, v := range body.Options {
-		allOverrides[k] = v
-	}
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		allOverrides["initial_message"] = msg
-	}
-	var extraMeta map[string]string
-	if len(allOverrides) > 0 {
-		if overridesJSON, jsonErr := json.Marshal(allOverrides); jsonErr == nil {
-			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
-		}
-	}
-
-	// Agent sessions always use async (bead-only) creation. The reconciler
-	// starts the agent process on the next tick. This avoids blocking the
-	// HTTP response for 10-30s while the agent boots in tmux, and lets MC
-	// show the session in the sidebar immediately via optimistic UI.
-	mgr := s.sessionManager(store)
-	var info session.Info
-	reservationIDs := []string{alias, explicitName}
-	reserveConcreteIdentity := kind == "agent" && agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
-	if reserveConcreteIdentity {
-		reservationIDs = append(reservationIDs, workDirQualifiedName)
-	}
-	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
-			return err
-		}
-		if reserveConcreteIdentity && workDirQualifiedName != alias {
-			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); err != nil {
-				return err
-			}
-		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); err != nil {
-			return err
-		}
-		if kind == "agent" {
-			if extraMeta == nil {
-				extraMeta = make(map[string]string)
-			}
-			extraMeta["agent_name"] = workDirQualifiedName
-			extraMeta["session_origin"] = "manual"
-		}
-		var createErr error
-		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-			alias,
-			explicitName,
-			template,
-			title,
-			command,
-			workDir,
-			resolved.Name,
-			transport,
-			resume,
-			extraMeta,
-		)
-		return createErr
-	})
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	// Persist kind, option metadata, and project_id on the bead.
-	// NOTE: template_overrides (options + initial_message) is already set via
-	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
-	// overwrite it here — the old code clobbered initial_message by writing
-	// only the options portion.
-	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
-	s.state.Poke() // wake reconciler to start the agent
-
-	// Auto-generate a title from the user's message if no explicit title was provided.
-	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
-	})
-
-	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "agent"
-	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
-		resp.SubmissionCapabilities = caps
-	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
-	statusCode := http.StatusAccepted // always async for agent sessions
-	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
-	writeJSON(w, statusCode, resp)
-}
-
-// createProviderSession handles the "provider" kind session creation.
-// Resolves a bare provider (not an agent template) and creates a session.
-func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, store beads.Store, body sessionCreateRequest, providerName, idemKey, bodyHash string) {
-	cfg := s.state.Config()
-	if cfg == nil {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "city config not loaded yet")
-		return
-	}
-	resolved, err := config.ResolveProvider(
-		&config.Agent{Provider: providerName},
-		&cfg.Workspace,
-		cfg.Providers,
-		exec.LookPath,
-	)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		if errors.Is(err, config.ErrProviderNotInPATH) {
-			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", err.Error())
-			return
-		}
-		if errors.Is(err, config.ErrProviderNotFound) {
-			writeError(w, http.StatusNotFound, "provider_not_found", "provider '"+providerName+"' not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-
-	// Resolve options against the provider's schema.
-	var extraArgs []string
-	var optMeta map[string]string
-	if len(body.Options) > 0 && len(resolved.OptionsSchema) == 0 {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusBadRequest, "unknown_option", "provider '"+providerName+"' does not accept options")
-		return
-	}
-	if len(resolved.OptionsSchema) > 0 {
-		var optErr error
-		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
-		if optErr != nil {
-			s.idem.unreserve(idemKey)
-			if errors.Is(optErr, config.ErrUnknownOption) {
-				writeError(w, http.StatusBadRequest, "unknown_option", optErr.Error())
-				return
-			}
-			writeError(w, http.StatusBadRequest, "invalid_option_value", optErr.Error())
-			return
-		}
-	}
-
-	template := providerName
-	title := body.Title
-	if title == "" {
-		title = resolved.Name
-	}
-	if body.Async && strings.TrimSpace(body.Message) != "" {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusBadRequest, "invalid", "message is not supported with async session creation; create the session, then POST /v0/session/{id}/messages")
-		return
-	}
-	if body.Async {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusBadRequest, "invalid", "async session creation is only supported for configured agent templates")
-		return
-	}
-
-	workDir := s.state.CityPath()
-
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
-	alias, err := session.ValidateAlias(body.Alias)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	command := resolved.CommandString()
-	if len(extraArgs) > 0 {
-		command = command + " " + shellquote.Join(extraArgs)
-	}
-
-	mgr := s.sessionManager(store)
-	hints := sessionCreateHints(resolved)
-	var info session.Info
-	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
-			return err
-		}
-		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransport(
-			r.Context(),
-			alias,
-			"",
-			template,
-			title,
-			command,
-			workDir,
-			resolved.Name,
-			"",
-			resolved.Env,
-			resume,
-			hints,
-		)
-		return createErr
-	})
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	// Persist kind, option metadata, and project_id on the bead.
-	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
-	if body.Async {
-		s.state.Poke()
-	}
-
-	// Auto-generate a title from the user's message if no explicit title was provided.
-	titleProvider := s.resolveTitleProvider()
-	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
-	})
-
-	// Deliver initial message if provided.
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
-			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusInternalServerError, "message_delivery_failed",
-				fmt.Sprintf("session created but initial message failed: %v", sendErr))
-			return
-		}
-	}
-
-	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "provider"
-	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
-		resp.SubmissionCapabilities = caps
-	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
-	statusCode := http.StatusCreated
-	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
-	writeJSON(w, statusCode, resp)
-}
-
-// persistSessionMeta writes option metadata and project_id to the session bead.
 func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
 		batch[k] = v
 	}
-	_ = kind
+	if kind != "" && kind != "provider" {
+		batch["mc_session_kind"] = kind
+	}
 	if projectID != "" {
 		batch["mc_project_id"] = projectID
 	}
@@ -662,443 +233,7 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 	}
 }
 
-func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	wantRaw := r.URL.Query().Get("format") == "raw"
-
-	if path != "" {
-		tail := 0
-		if v := r.URL.Query().Get("tail"); v != "" {
-			if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
-				tail = n
-			}
-		}
-		before := r.URL.Query().Get("before")
-
-		if wantRaw {
-			// Raw format uses ReadFileRaw (no display-type filtering) so
-			// all entry types are returned — consistent with the raw
-			// stream and snapshot paths.
-			var rawSess *sessionlog.Session
-			if before != "" {
-				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			} else {
-				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
-			}
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
-				return
-			}
-			msgs := make([]json.RawMessage, 0, len(rawSess.Messages))
-			for _, entry := range rawSess.Messages {
-				if len(entry.Raw) > 0 {
-					msgs = append(msgs, entry.Raw)
-				}
-			}
-			writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
-				ID:         info.ID,
-				Template:   info.Template,
-				Format:     "raw",
-				Messages:   msgs,
-				Pagination: rawSess.Pagination,
-			})
-			return
-		}
-
-		var sess *sessionlog.Session
-		if before != "" {
-			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		} else {
-			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
-			return
-		}
-
-		turns := make([]outputTurn, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			turn := entryToTurn(entry)
-			if turn.Text == "" {
-				continue
-			}
-			turns = append(turns, turn)
-		}
-		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
-			ID:         info.ID,
-			Template:   info.Template,
-			Format:     "conversation",
-			Turns:      turns,
-			Pagination: sess.Pagination,
-		})
-		return
-	}
-
-	if wantRaw {
-		writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "raw",
-			Messages: []json.RawMessage{},
-		})
-		return
-	}
-
-	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
-		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
-		if peekErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", peekErr.Error())
-			return
-		}
-		turns := []outputTurn{}
-		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
-		}
-		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "text",
-			Turns:    turns,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, sessionTranscriptResponse{
-		ID:       info.ID,
-		Template: info.Template,
-		Format:   "conversation",
-		Turns:    []outputTurn{},
-	})
-}
-
-func (s *Server) handleSessionSubmit(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	var body sessionSubmitRequest
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if strings.TrimSpace(body.Message) == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "message is required")
-		return
-	}
-	if body.Intent == "" {
-		body.Intent = session.SubmitIntentDefault
-	}
-	switch body.Intent {
-	case session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow:
-	default:
-		writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("intent must be one of %q, %q, or %q", session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow))
-		return
-	}
-
-	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
-	var bodyHash string
-	if idemKey != "" {
-		bodyHash = hashBody(body)
-		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
-			return
-		}
-	}
-
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeResolveError(w, err)
-		return
-	}
-
-	outcome, err := s.submitMessageToSession(r.Context(), store, id, body.Message, body.Intent)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	resp := map[string]any{
-		"status": "accepted",
-		"id":     id,
-		"queued": outcome.Queued,
-		"intent": string(body.Intent),
-	}
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
-	writeJSON(w, http.StatusAccepted, resp)
-}
-
-func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	var body sessionMessageRequest
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if strings.TrimSpace(body.Message) == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "message is required")
-		return
-	}
-
-	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
-	var bodyHash string
-	if idemKey != "" {
-		bodyHash = hashBody(body)
-		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
-			return
-		}
-	}
-
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeResolveError(w, err)
-		return
-	}
-
-	if err := s.sendUserMessageToSession(r.Context(), store, id, body.Message); err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	resp := map[string]string{"status": "accepted", "id": id}
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
-	writeJSON(w, http.StatusAccepted, resp)
-}
-
-func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	if err := mgr.Kill(id); err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
-}
-
-func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	if err := mgr.StopTurn(id); err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
-}
-
-func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	pending, supported, err := mgr.Pending(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, sessionPendingResponse{
-		Supported: supported,
-		Pending:   pending,
-	})
-}
-
-func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	var body sessionRespondRequest
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.Action == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "action is required")
-		return
-	}
-
-	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
-	var bodyHash string
-	if idemKey != "" {
-		bodyHash = hashBody(body)
-		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
-			return
-		}
-	}
-
-	mgr := s.sessionManager(store)
-	if err := mgr.Respond(id, runtime.InteractionResponse{
-		RequestID: body.RequestID,
-		Action:    body.Action,
-		Text:      body.Text,
-		Metadata:  body.Metadata,
-	}); err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	resp := map[string]string{"status": "accepted", "id": id}
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
-	writeJSON(w, http.StatusAccepted, resp)
-}
-
-func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	sp := s.state.SessionProvider()
-	running := info.State == session.StateActive && sp.IsRunning(info.SessionName)
-	if path == "" && !running {
-		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if info.State != "" {
-		w.Header().Set("GC-Session-State", string(info.State))
-	}
-	if !running {
-		w.Header().Set("GC-Session-Status", "stopped")
-	}
-	w.WriteHeader(http.StatusOK)
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-
-	ctx := r.Context()
-	format := r.URL.Query().Get("format")
-	if info.Closed {
-		if format == "raw" {
-			s.emitClosedSessionSnapshotRaw(w, info, path)
-		} else {
-			s.emitClosedSessionSnapshot(w, info, path)
-		}
-		return
-	}
-	switch {
-	case path != "":
-		if format == "raw" {
-			s.streamSessionTranscriptLogRaw(ctx, w, info, path)
-		} else {
-			s.streamSessionTranscriptLog(ctx, w, info, path)
-		}
-	case format == "raw":
-		// No log file yet. If the session is running, poll tmux pane content
-		// and wrap it as a fake raw JSONL assistant message so MC's existing
-		// rendering pipeline shows terminal output (e.g. OAuth prompts).
-		if running {
-			s.streamSessionPeekRaw(ctx, w, info)
-		} else {
-			data, _ := json.Marshal(sessionRawTranscriptResponse{
-				ID:       info.ID,
-				Template: info.Template,
-				Format:   "raw",
-				Messages: []json.RawMessage{},
-			})
-			writeSSE(w, "message", 1, data)
-		}
-		return
-	default:
-		s.streamSessionPeek(ctx, w, info)
-	}
-}
-
-func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) emitClosedSessionSnapshot(send sse.Sender, info session.Info, logPath string) {
 	if logPath == "" {
 		return
 	}
@@ -1119,22 +254,20 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 		return
 	}
 
-	data, err := json.Marshal(sessionTranscriptResponse{
+	if err := send(sse.Message{ID: 1, Data: SessionStreamMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
+		Provider: info.Provider,
 		Format:   "conversation",
 		Turns:    turns,
-	})
-	if err != nil {
+	}}); err != nil {
 		return
 	}
-	writeSSE(w, "turn", 1, data)
 	// Closed session is definitionally idle.
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	writeSSE(w, "activity", 2, actData)
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }
 
-func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) emitClosedSessionSnapshotRaw(send sse.Sender, info session.Info, logPath string) {
 	if logPath == "" {
 		return
 	}
@@ -1143,39 +276,38 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 		return
 	}
 
-	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
-	for _, entry := range sess.Messages {
-		if len(entry.Raw) == 0 {
-			continue
-		}
-		rawMessages = append(rawMessages, entry.Raw)
-	}
-	if len(rawMessages) == 0 {
+	rawMessageBytes := sess.RawPayloadBytes()
+	if len(rawMessageBytes) == 0 {
 		return
 	}
 
-	data, err := json.Marshal(sessionRawTranscriptResponse{
+	// Closed-session snapshot: emit raw bytes end-to-end so int64
+	// tool-call IDs and nanosecond timestamps are byte-faithful to what
+	// the provider wrote. The streaming path (streamSessionTranscriptLogRaw)
+	// already uses wrapRawFrameBytes; the snapshot path now matches.
+	if err := send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
+		Provider: info.Provider,
 		Format:   "raw",
-		Messages: rawMessages,
-	})
-	if err != nil {
+		Messages: wrapRawFrameBytes(rawMessageBytes),
+	}}); err != nil {
 		return
 	}
-	writeSSE(w, "message", 1, data)
-	// Closed session is definitionally idle.
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	writeSSE(w, "activity", 2, actData)
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }
 
-func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
 	var lastSize int64
 	var lastSentUUID string
-	var seq uint64
+	var seq int
 	var lastActivity string
 	sentUUIDs := make(map[string]struct{})
 	lw.onReset = func() { lastSize = 0; lastActivity = "" }
@@ -1200,28 +332,39 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		// Compute activity early (used after message emission).
 		activity := sessionlog.InferActivityFromEntries(sess.Messages)
 
-		rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
+		// Keep raw bytes end-to-end. Previously we Unmarshaled entry.Raw
+		// into `any` and remarshaled in wrapRawFrames — that round-trip
+		// loses int64 precision above 2^53 (tool-call IDs, nanosecond
+		// timestamps) and does not preserve map-key order. Provider-native
+		// frames must ship byte-faithful; we use json.RawMessage so the
+		// wire output matches what the provider wrote verbatim.
+		rawBytes := make([]json.RawMessage, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
 			if len(entry.Raw) == 0 {
 				continue
 			}
-			rawMessages = append(rawMessages, entry.Raw)
+			// Validate that the bytes are well-formed JSON; skip malformed
+			// frames the same way the previous Unmarshal branch did.
+			if !json.Valid(entry.Raw) {
+				continue
+			}
+			rawBytes = append(rawBytes, entry.Raw)
 			uuids = append(uuids, entry.UUID)
 		}
 
 		// Emit messages if there are new ones.
-		if len(rawMessages) > 0 {
+		if len(rawBytes) > 0 {
 			var toSend []json.RawMessage
 
 			if lastSentUUID == "" {
 				// First emission: send everything.
-				toSend = rawMessages
+				toSend = rawBytes
 			} else {
 				found := false
 				for i, uuid := range uuids {
 					if uuid == lastSentUUID {
-						toSend = rawMessages[i+1:]
+						toSend = rawBytes[i+1:]
 						found = true
 						break
 					}
@@ -1234,7 +377,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentUUID)
 					for i, uuid := range uuids {
 						if _, seen := sentUUIDs[uuid]; !seen {
-							toSend = append(toSend, rawMessages[i])
+							toSend = append(toSend, rawBytes[i])
 						}
 					}
 				}
@@ -1242,15 +385,13 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionRawTranscriptResponse{
+				_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "raw",
-					Messages: toSend,
-				})
-				if err == nil {
-					writeSSE(w, "message", seq, data)
-				}
+					Messages: wrapRawFrameBytes(toSend),
+				}})
 			}
 
 			// Track all current UUIDs so cursor-lost can filter correctly.
@@ -1264,8 +405,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
 		}
 	}
 
@@ -1285,8 +425,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 				// Approval cleared — emit activity update.
 				lastPendingID = ""
 				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": "in-turn"})
-				writeSSE(w, "activity", seq, actData)
+				_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: "in-turn"}})
 			}
 			return
 		}
@@ -1295,23 +434,30 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		}
 		lastPendingID = pending.RequestID
 		seq++
-		pendingData, _ := json.Marshal(pending)
-		writeSSE(w, "pending", seq, pendingData)
+		_ = send(sse.Message{ID: seq, Data: *pending})
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{
+	keepaliveTicker := time.NewTicker(sseKeepalive)
+	defer keepaliveTicker.Stop()
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	}, RunOpts{
 		OnStall:      onStall,
 		StallTimeout: 5 * time.Second,
 	})
 }
 
-func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
 	var lastSize int64
 	var lastSentUUID string
-	var seq uint64
+	var seq int
 	var lastActivity string
 	sentUUIDs := make(map[string]struct{})
 	lw.onReset = func() { lastSize = 0; lastActivity = "" }
@@ -1377,15 +523,13 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionTranscriptResponse{
+				_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "conversation",
 					Turns:    toSend,
-				})
-				if err == nil {
-					writeSSE(w, "turn", seq, data)
-				}
+				}})
 			}
 
 			// Track all current UUIDs so cursor-lost can filter correctly.
@@ -1399,18 +543,23 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
 		}
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	})
 }
 
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
 // messages so MC's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
-func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info) {
+func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	sp := s.state.SessionProvider()
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
@@ -1418,7 +567,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 	defer keepalive.Stop()
 
 	var lastOutput string
-	var seq uint64
+	var seq int
 
 	var lastPeekPendingID string
 
@@ -1439,22 +588,19 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 
 		// Wrap as a fake assistant message in raw JSONL format so MC's
 		// translate_transcript_response handles it like a normal transcript.
-		fakeMsg, _ := json.Marshal(map[string]interface{}{
+		fakeMsg := map[string]any{
 			"role": "assistant",
 			"content": []map[string]string{
 				{"type": "text", "text": output},
 			},
-		})
-		data, err := json.Marshal(sessionRawTranscriptResponse{
+		}
+		_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
+			Provider: info.Provider,
 			Format:   "raw",
-			Messages: []json.RawMessage{fakeMsg},
-		})
-		if err != nil {
-			return
-		}
-		writeSSE(w, "message", seq, data)
+			Messages: wrapRawFrames([]any{fakeMsg}),
+		}})
 
 		// Check for approval prompts in the pane output we already have.
 		if ip, ok := sp.(runtime.InteractionProvider); ok {
@@ -1462,8 +608,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
 				lastPeekPendingID = pending.RequestID
 				seq++
-				pendingData, _ := json.Marshal(pending)
-				writeSSE(w, "pending", seq, pendingData)
+				_ = send(sse.Message{ID: seq, Data: *pending})
 			} else if pending == nil && lastPeekPendingID != "" {
 				lastPeekPendingID = ""
 			}
@@ -1479,12 +624,16 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 		case <-poll.C:
 			emitPeek()
 		case <-keepalive.C:
-			writeSSEComment(w)
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }
 
-func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info) {
+func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	sp := s.state.SessionProvider()
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
@@ -1492,7 +641,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 	defer keepalive.Stop()
 
 	var lastOutput string
-	var seq uint64
+	var seq int
 
 	emitPeek := func() {
 		if !sp.IsRunning(info.SessionName) {
@@ -1509,16 +658,13 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		data, err := json.Marshal(sessionTranscriptResponse{
+		_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
+			Provider: info.Provider,
 			Format:   "text",
 			Turns:    turns,
-		})
-		if err != nil {
-			return
-		}
-		writeSSE(w, "turn", seq, data)
+		}})
 	}
 
 	emitPeek()
@@ -1530,7 +676,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 		case <-poll.C:
 			emitPeek()
 		case <-keepalive.C:
-			writeSSEComment(w)
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }

@@ -1,13 +1,17 @@
 package api
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
 )
+
+// idempotencyCacheMaxEntries caps the live entry count. Once reached,
+// reserve evicts expired entries first and then the entry with the
+// soonest-expiring deadline. Without this cap a client posting unique
+// Idempotency-Key values grows the cache unbounded between TTL
+// cleanups (ttl/4). The ceiling mirrors responseCacheMaxEntries.
+const idempotencyCacheMaxEntries = 1024
 
 // idempotencyCache stores responses keyed by Idempotency-Key header values.
 // Used on create endpoints so clients can safely retry after network failures.
@@ -18,6 +22,11 @@ import (
 //
 // Concurrent requests with the same key: the first reserves, others see the
 // pending entry and get a 409 Conflict response.
+//
+// Phase 3 Fix 3l: entries store the typed response value (not serialized
+// bytes). The request-body hash (bodyHash) stays as its own hex string
+// because it IS a hash, not a response. Huma re-serializes the typed value
+// on each replay at the handler boundary.
 type idempotencyCache struct {
 	mu      sync.Mutex
 	entries map[string]cachedEntry
@@ -25,11 +34,10 @@ type idempotencyCache struct {
 }
 
 type cachedEntry struct {
-	pending    bool // true while the create is in-flight
-	statusCode int
-	body       []byte
-	bodyHash   string
-	expiresAt  time.Time
+	pending   bool // true while the create is in-flight
+	value     any  // typed response value, populated when complete() is called
+	bodyHash  string
+	expiresAt time.Time
 }
 
 func newIdempotencyCache(ttl time.Duration) *idempotencyCache {
@@ -60,28 +68,59 @@ func (c *idempotencyCache) reserve(key, bodyHash string) (cachedEntry, bool) {
 		bodyHash:  bodyHash,
 		expiresAt: time.Now().Add(c.ttl),
 	}
-	// Lazy cleanup when cache grows large.
-	if len(c.entries) > 1000 {
-		now := time.Now()
-		for k, v := range c.entries {
-			if now.After(v.expiresAt) {
-				delete(c.entries, k)
-			}
-		}
-	}
+	c.enforceCapLocked()
 	return cachedEntry{}, false
 }
 
+// enforceCapLocked evicts expired entries and, if still over cap,
+// evicts the completed entry with the soonest expiry. Must be called
+// with c.mu held.
+//
+// Pending entries are NEVER evicted. Evicting a pending reservation
+// would let a concurrent retry with the same Idempotency-Key re-execute
+// the create, defeating the whole purpose of the cache. If the cache
+// fills with pending reservations (pathological client behavior), new
+// reserves still proceed — the cap only constrains completed entries.
+func (c *idempotencyCache) enforceCapLocked() {
+	if len(c.entries) <= idempotencyCacheMaxEntries {
+		return
+	}
+	now := time.Now()
+	for k, v := range c.entries {
+		if !v.pending && now.After(v.expiresAt) {
+			delete(c.entries, k)
+		}
+	}
+	// If still over cap, evict the soonest-expiring NON-PENDING entry.
+	// Loop bails out when there are no eligible victims left.
+	for len(c.entries) > idempotencyCacheMaxEntries {
+		var oldestKey string
+		var oldestExpiry time.Time
+		for k, v := range c.entries {
+			if v.pending {
+				continue
+			}
+			if oldestKey == "" || v.expiresAt.Before(oldestExpiry) {
+				oldestKey = k
+				oldestExpiry = v.expiresAt
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(c.entries, oldestKey)
+	}
+}
+
 // complete fills in the response for a previously reserved key.
-func (c *idempotencyCache) complete(key string, statusCode int, body []byte, bodyHash string) {
+func (c *idempotencyCache) complete(key string, value any, bodyHash string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[key] = cachedEntry{
-		pending:    false,
-		statusCode: statusCode,
-		body:       body,
-		bodyHash:   bodyHash,
-		expiresAt:  time.Now().Add(c.ttl),
+		pending:   false,
+		value:     value,
+		bodyHash:  bodyHash,
+		expiresAt: time.Now().Add(c.ttl),
 	}
 }
 
@@ -94,53 +133,26 @@ func (c *idempotencyCache) unreserve(key string) {
 	}
 }
 
-// handleIdempotent checks for a cached or in-flight entry matching the given
-// Idempotency-Key and body hash. Returns true if it handled the response
-// (replayed cached, wrote 409 for in-flight, or wrote 422 for mismatch).
-// Returns false if the caller should proceed with normal processing (key
-// was atomically reserved for this caller).
-func (c *idempotencyCache) handleIdempotent(w http.ResponseWriter, key, bodyHash string) bool {
+// storeResponse caches the typed response value for later replay.
+// No serialization happens here; Huma re-serializes on each replay at the
+// handler boundary.
+func (c *idempotencyCache) storeResponse(key, bodyHash string, v any) {
 	if key == "" {
-		return false
+		return
 	}
-	existing, found := c.reserve(key, bodyHash)
-	if !found {
-		// Key reserved for us — proceed with create.
-		return false
-	}
-	// Key already exists.
-	if existing.bodyHash != bodyHash {
-		writeError(w, http.StatusUnprocessableEntity, "idempotency_mismatch",
-			"Idempotency-Key reused with different request body")
-		return true
-	}
-	if existing.pending {
-		// Another request is still processing this key.
-		writeError(w, http.StatusConflict, "in_flight",
-			"request with this Idempotency-Key is already in progress")
-		return true
-	}
-	// Replay cached response.
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(existing.statusCode)
-	w.Write(existing.body) //nolint:errcheck // best-effort
-	return true
+	c.complete(key, v, bodyHash)
 }
 
-// storeResponse caches the JSON-serialized response for later replay.
-//
-//nolint:unparam // statusCode is 201 today but the cache is status-agnostic by design
-func (c *idempotencyCache) storeResponse(key, bodyHash string, statusCode int, v any) {
-	if key == "" {
-		return
+// replayAs is a generic helper: look up an existing entry and type-assert
+// its cached value to T. Returns (zero, false) if absent, pending, or
+// type-asserted fails.
+func replayAs[T any](entry cachedEntry) (T, bool) {
+	var zero T
+	if entry.pending || entry.value == nil {
+		return zero, false
 	}
-	data, err := json.Marshal(v)
-	if err != nil {
-		return
-	}
-	// Append newline to match json.Encoder.Encode behavior.
-	data = append(data, '\n')
-	c.complete(key, statusCode, data, bodyHash)
+	t, ok := entry.value.(T)
+	return t, ok
 }
 
 // scopedIdemKey returns an idempotency cache key namespaced by HTTP method
@@ -151,14 +163,4 @@ func scopedIdemKey(r *http.Request, key string) string {
 		return ""
 	}
 	return r.Method + ":" + r.URL.Path + ":" + key
-}
-
-// hashBody returns a hex-encoded SHA-256 hash of the JSON-marshaled body.
-func hashBody(v any) string {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
 }

@@ -34,11 +34,11 @@ func createBeadWithMeta(t *testing.T, store beads.Store, title string, meta map[
 	return b
 }
 
-func getGraph(t *testing.T, srv http.Handler, rootID string) (*httptest.ResponseRecorder, beadGraphResponse) {
+func getGraph(t *testing.T, h http.Handler, fs *fakeState, rootID string) (*httptest.ResponseRecorder, beadGraphResponse) {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/v0/beads/graph/"+rootID, nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/beads/graph/"+rootID), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	var resp beadGraphResponse
 	if rec.Code == http.StatusOK {
 		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
@@ -51,7 +51,7 @@ func getGraph(t *testing.T, srv http.Handler, rootID string) (*httptest.Response
 func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Workflow Root", map[string]string{
 		"gc.kind": "workflow",
@@ -69,7 +69,7 @@ func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 		"gc.kind":         "scope",
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -95,7 +95,7 @@ func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 func TestBeadGraphReturnsDeps(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -112,7 +112,7 @@ func TestBeadGraphReturnsDeps(t *testing.T) {
 		t.Fatalf("dep add: %v", err)
 	}
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -134,7 +134,7 @@ func TestBeadGraphReturnsDeps(t *testing.T) {
 func TestBeadGraphReturnsRawStatus(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -148,7 +148,7 @@ func TestBeadGraphReturnsRawStatus(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -169,7 +169,7 @@ func TestBeadGraphReturnsRawStatus(t *testing.T) {
 func TestBeadGraphReturnsRawMetadata(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -183,7 +183,7 @@ func TestBeadGraphReturnsRawMetadata(t *testing.T) {
 		"gc.logical_bead_id": "logical-1",
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -217,9 +217,9 @@ func TestBeadGraphReturnsRawMetadata(t *testing.T) {
 
 func TestBeadGraphRootNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	rec, _ := getGraph(t, srv, "nonexistent-id")
+	rec, _ := getGraph(t, h, state, "nonexistent-id")
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d, body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -228,12 +228,12 @@ func TestBeadGraphRootNotFound(t *testing.T) {
 
 func TestBeadGraphEmptyRootID(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Request with empty rootID path segment
-	req := httptest.NewRequest("GET", "/v0/beads/graph/", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/beads/graph/"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	// Should get 400 or 404, not 200
 	if rec.Code == http.StatusOK {
@@ -244,13 +244,13 @@ func TestBeadGraphEmptyRootID(t *testing.T) {
 func TestBeadGraphNoChildren(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Lonely Root", map[string]string{
 		"gc.kind": "workflow",
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -270,7 +270,7 @@ func TestBeadGraphNoChildren(t *testing.T) {
 func TestBeadGraphExcludesUnrelatedBeads(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -285,7 +285,7 @@ func TestBeadGraphExcludesUnrelatedBeads(t *testing.T) {
 	// Unrelated bead — no root at all
 	createBeadWithMeta(t, store, "Standalone", nil)
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -308,7 +308,7 @@ func TestBeadGraphExcludesUnrelatedBeads(t *testing.T) {
 func TestBeadGraphDepsFilteredToGraphBeads(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -323,7 +323,7 @@ func TestBeadGraphDepsFilteredToGraphBeads(t *testing.T) {
 	// Dep pointing outside graph — should be excluded
 	store.DepAdd(child.ID, outsider.ID, "relates-to") //nolint:errcheck
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -345,7 +345,7 @@ func TestBeadGraphMultipleStores(t *testing.T) {
 	store1 := state.stores["myrig"]
 	store2 := beads.NewMemStore()
 	state.stores["otherrig"] = store2
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Root in store1
 	root := createBeadWithMeta(t, store1, "Root", map[string]string{
@@ -356,7 +356,7 @@ func TestBeadGraphMultipleStores(t *testing.T) {
 		"gc.root_bead_id": root.ID,
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -372,7 +372,7 @@ func TestBeadGraphMultipleStores(t *testing.T) {
 func TestBeadGraphDedupsDeps(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -385,7 +385,7 @@ func TestBeadGraphDedupsDeps(t *testing.T) {
 	store.DepAdd(child.ID, root.ID, "blocks") //nolint:errcheck
 	store.DepAdd(child.ID, root.ID, "blocks") //nolint:errcheck
 
-	rec, resp := getGraph(t, srv, root.ID)
+	rec, resp := getGraph(t, h, state, root.ID)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)

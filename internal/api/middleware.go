@@ -12,16 +12,51 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-type dataSourceKey struct{}
-
-// setDataSource annotates the request context with the data source used to
-// fulfill it (e.g., "memory", "cache", "bd_subprocess", "sql"). Handlers
-// call this so the logging middleware can include it in metrics.
-func setDataSource(r *http.Request, source string) {
-	if p, ok := r.Context().Value(dataSourceKey{}).(*string); ok {
-		*p = source
-	}
+// problemBody is a pre-serialized RFC 9457 Problem Details response emitted
+// by mux-level gates that run before Huma takes over (withRecovery, the
+// supervisor's service-proxy dispatcher, handler_services' /svc/* gates).
+// Pre-serialization satisfies Principle 8: no runtime json.Marshal on
+// error paths. Huma handlers do not use these — they return typed
+// huma.StatusError values that Huma serializes.
+type problemBody struct {
+	status int
+	body   []byte
 }
+
+func (p problemBody) writeTo(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
+	w.WriteHeader(p.status)
+	_, _ = w.Write(p.body)
+}
+
+var (
+	problemInternalServerError = problemBody{
+		status: http.StatusInternalServerError,
+		body:   []byte(`{"status":500,"title":"Internal Server Error","detail":"internal server error"}`),
+	}
+	problemCityNameRequired = problemBody{
+		status: http.StatusBadRequest,
+		body:   []byte(`{"status":400,"title":"Bad Request","detail":"bad_request: city name required in URL"}`),
+	}
+	problemCityNotFound = problemBody{
+		status: http.StatusNotFound,
+		body:   []byte(`{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`),
+	}
+	problemServiceRouteNotFound = problemBody{
+		status: http.StatusNotFound,
+		body:   []byte(`{"status":404,"title":"Not Found","detail":"not_found: service route not found"}`),
+	}
+	problemServiceReadOnly = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"read_only: service mutations are disabled for unpublished services"}`),
+	}
+	problemServiceCSRFRequired = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"csrf: X-GC-Request header required on private service mutation endpoints"}`),
+	}
+)
+
+type dataSourceKey struct{}
 
 // withLogging wraps a handler with request logging and OTel metrics.
 func withLogging(next http.Handler) http.Handler {
@@ -46,13 +81,15 @@ func withLogging(next http.Handler) http.Handler {
 	})
 }
 
-// withRecovery catches panics and returns 500.
+// withRecovery catches panics and returns an RFC 9457 Problem Details 500.
+// Stays outermost at the mux level so it covers non-Huma routes (e.g.
+// /svc/* service proxy) that Huma's own recovery wouldn't reach.
 func withRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
 				log.Printf("api: panic: %v\n%s", err, debug.Stack())
-				writeError(w, http.StatusInternalServerError, "internal", "internal server error")
+				problemInternalServerError.writeTo(w)
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -85,30 +122,6 @@ func isMutationMethod(method string) bool {
 		return true
 	}
 	return false
-}
-
-// withReadOnly rejects all mutation requests. Used when the API server binds
-// to a non-localhost address where mutations would be unauthenticated.
-func withReadOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMutationMethod(r.Method) {
-			writeError(w, http.StatusForbidden, "read_only", "mutations disabled: server bound to non-localhost address")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// withCSRFCheck requires a custom X-GC-Request header on mutation requests.
-// Custom headers trigger CORS preflight, preventing simple cross-origin form submissions.
-func withCSRFCheck(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMutationMethod(r.Method) && r.Header.Get("X-GC-Request") == "" {
-			writeError(w, http.StatusForbidden, "csrf", "X-GC-Request header required on mutation endpoints")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // isLocalhostOrigin checks if an origin is from localhost/127.0.0.1.

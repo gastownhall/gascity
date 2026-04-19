@@ -27,10 +27,10 @@ gc [flags]
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
-| [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
+| [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
 | [gc event](#gc-event) | Event operations |
-| [gc events](#gc-events) | Show the event log |
+| [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
@@ -670,7 +670,11 @@ gc convoy target <convoy-id> <branch>
 
 ## gc dashboard
 
-Web dashboard for monitoring the city
+Open the static GC dashboard against the machine-wide supervisor API.
+
+Without a city in scope, the dashboard shows supervisor-level state and managed
+city tabs. From a city directory or with --city, city-specific panels and action
+forms are enabled for that city.
 
 ```
 gc dashboard [flags]
@@ -687,7 +691,11 @@ gc dashboard [flags]
 
 ## gc dashboard serve
 
-Start the web dashboard
+Start the static GC dashboard against the machine-wide supervisor API.
+
+Without a city in scope, the dashboard shows supervisor-level state and managed
+city tabs. From a city directory or with --city, city-specific panels and action
+forms are enabled for that city.
 
 ```
 gc dashboard serve [flags]
@@ -756,12 +764,15 @@ gc event emit <type> [flags]
 
 ## gc events
 
-Show the city event log with optional filtering.
+Show events from the GC API with optional filtering.
 
-Events are recorded to .gc/events.jsonl by the controller, agent
-lifecycle operations, and bead mutations. Use --type and --since to
-filter. Use --watch to block until matching events arrive (useful for
-scripting and automation).
+The API is the source of truth for both city-scoped and supervisor-scoped
+events. In a city directory (or with --city), this command reflects the
+city's /v0/city/&#123;cityName&#125;/events and /stream endpoints. Without a city in
+scope, it reflects the supervisor's /v0/events and /stream endpoints.
+
+List, watch, and follow output are always JSON Lines. Each line is one API
+DTO or SSE envelope.
 
 ```
 gc events [flags]
@@ -775,19 +786,21 @@ gc events
   gc events --watch --type convoy.closed --timeout 5m
   gc events --follow
   gc events --seq
+  gc events --follow --after-cursor city-a:12,city-b:9
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--after` | uint64 |  | Resume watching from this sequence number (0 = current head) |
+| `--after` | uint64 |  | Resume from this city event sequence number (city scope only) |
+| `--after-cursor` | string |  | Resume from this supervisor event cursor (supervisor scope only) |
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--follow` | bool |  | Continuously stream events as they arrive |
-| `--json` | bool |  | Output in JSON format (list mode only) |
 | `--payload-match` | stringArray |  | Filter by payload field (key=value, repeatable) |
-| `--seq` | bool |  | Print the current head sequence number and exit |
+| `--seq` | bool |  | Print the current head cursor and exit |
 | `--since` | string |  | Show events since duration ago (e.g. 1h, 30m) |
 | `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
-| `--watch` | bool |  | Block until matching events arrive (exits after first match) |
+| `--watch` | bool |  | Block until matching events arrive (exits after first match or buffered replay) |
 
 ## gc formula
 
@@ -1304,7 +1317,7 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a gate
+Orders live in flat orders/*.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.

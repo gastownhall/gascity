@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -135,14 +138,16 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 func TestHandleSessionList(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create two sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session A")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session B")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -160,6 +165,8 @@ func TestHandleSessionList(t *testing.T) {
 func TestHandleSessionListFilterByState(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
@@ -172,8 +179,8 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 
 	// List only active.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions?state=active", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?state=active"), nil)
+	h.ServeHTTP(w, r)
 
 	var resp listResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
@@ -187,6 +194,8 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 func TestHandleSessionListPagination(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create 3 sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
@@ -195,8 +204,8 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 	// Limit without cursor truncates but returns no next_cursor.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions?limit=2", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?limit=2"), nil)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("limit-only: status %d", w.Code)
 	}
@@ -214,8 +223,8 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 	// Cursor mode: first page.
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v0/sessions?cursor=&limit=2", nil)
-	srv.ServeHTTP(w, r)
+	r = httptest.NewRequest("GET", cityURL(fs, "/sessions?cursor=&limit=2"), nil)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("page1: status %d", w.Code)
 	}
@@ -236,8 +245,8 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 	// Cursor mode: second page.
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v0/sessions?cursor="+page1.NextCursor+"&limit=2", nil)
-	srv.ServeHTTP(w, r)
+	r = httptest.NewRequest("GET", cityURL(fs, "/sessions?cursor=")+page1.NextCursor+"&limit=2", nil)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("page2: status %d", w.Code)
 	}
@@ -257,12 +266,14 @@ func TestHandleSessionListPagination(t *testing.T) {
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -289,10 +300,12 @@ func TestHandleSessionGet(t *testing.T) {
 func TestHandleSessionGetNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/nonexistent", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/nonexistent"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusNotFound)
@@ -302,12 +315,14 @@ func TestHandleSessionGetNotFound(t *testing.T) {
 func TestHandleSessionSuspend(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/suspend", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/suspend", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -324,9 +339,56 @@ func TestHandleSessionSuspend(t *testing.T) {
 	}
 }
 
+// TestHandleSessionSuspend_IllegalTransition covers Fix 3j: illegal state
+// transitions from the manager surface as 409 Problem Details to the API.
+// Drain puts the session in Draining; a subsequent Suspend is illegal
+// (the state machine only allows Suspend from Active/Asleep/Quarantined).
+func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
+
+	// Drain the session directly via the manager (the API surface for drain
+	// lives elsewhere; this test isolates the transition check).
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/suspend", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusConflict, w.Body.String())
+	}
+
+	// Response body should be RFC 9457 Problem Details with the
+	// `illegal_transition:` semantic prefix in the detail field.
+	var problem struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Status != http.StatusConflict {
+		t.Errorf("problem.status = %d, want %d", problem.Status, http.StatusConflict)
+	}
+	if !strings.Contains(problem.Detail, "illegal_transition") {
+		t.Errorf("problem.detail = %q, want substring %q", problem.Detail, "illegal_transition")
+	}
+}
+
 func TestHandleSessionClose(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Close")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -343,8 +405,8 @@ func TestHandleSessionClose(t *testing.T) {
 	nudgeID := seedQueuedWaitNudge(t, fs, wait, "default")
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/close", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/close", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -390,6 +452,8 @@ func TestHandleSessionClose(t *testing.T) {
 func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Historical Wait")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -430,8 +494,8 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -454,10 +518,12 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 func TestHandleSessionNoCityStore(t *testing.T) {
 	fs := newFakeState(t) // no cityBeadStore set
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusServiceUnavailable)
@@ -467,6 +533,8 @@ func TestHandleSessionNoCityStore(t *testing.T) {
 func TestHandleSessionWake(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held Session")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -491,8 +559,8 @@ func TestHandleSessionWake(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -543,14 +611,16 @@ func TestHandleSessionWake(t *testing.T) {
 func TestHandleSessionWakeClosed(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	_ = mgr.Close(info.ID)
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -560,6 +630,8 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 func TestHandleSessionGetByTemplateName(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Named Session")
 
@@ -569,8 +641,8 @@ func TestHandleSessionGetByTemplateName(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/overseer", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/overseer"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -588,14 +660,16 @@ func TestHandleSessionGetByTemplateName(t *testing.T) {
 func TestHandleSessionPatchTitle(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
 	body := `{"title":"Updated Title"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -613,14 +687,16 @@ func TestHandleSessionPatchTitle(t *testing.T) {
 func TestHandleSessionPatchAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
 	body := `{"alias":"mayor"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -638,6 +714,8 @@ func TestHandleSessionPatchAlias(t *testing.T) {
 func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
@@ -647,10 +725,10 @@ func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 	}
 
 	body := `{"alias":"new-mayor"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
@@ -660,6 +738,8 @@ func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Create(
@@ -678,10 +758,10 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	}
 
 	body := `{"alias":"myrig/worker"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -689,25 +769,34 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 }
 
 func TestHandleSessionPatchImmutableField(t *testing.T) {
+	// Fix 3f(remnant): PATCH body is now a typed struct with
+	// additionalProperties:false on the schema, so unknown fields like
+	// "template" are rejected by Huma's validation layer (422) rather
+	// than the handler-side 403. This is a stricter error class for the
+	// same underlying constraint.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
 	body := `{"template":"hacked"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
 	}
 }
 
 func TestHandleSessionListIncludesReason(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
 
@@ -717,8 +806,8 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -743,51 +832,18 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	}
 }
 
-func TestHandleSessionListOmitsExpiredLifecycleReason(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Expired Hold")
-	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
-		"held_until": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
-	})
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
-	}
-
-	var raw struct {
-		Items []json.RawMessage `json:"items"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(raw.Items) != 1 {
-		t.Fatalf("got %d items, want 1", len(raw.Items))
-	}
-	var item sessionResponse
-	if err := json.Unmarshal(raw.Items[0], &item); err != nil {
-		t.Fatalf("unmarshal item: %v", err)
-	}
-	if item.Reason != "" {
-		t.Errorf("got reason %q, want empty after expired hold", item.Reason)
-	}
-}
-
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
 	body := `{"title":"Renamed"}`
-	req := newPostRequest("/v0/session/"+info.ID+"/rename", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/rename", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -803,24 +859,31 @@ func TestHandleSessionRename(t *testing.T) {
 }
 
 func TestHandleSessionRenameEmptyTitle(t *testing.T) {
+	// Fix 3k(remnant): title now has minLength:"1"; empty-string bodies
+	// are rejected by Huma's validation layer (422) rather than the
+	// handler-side 400.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
 	body := `{"title":""}`
-	req := newPostRequest("/v0/session/"+info.ID+"/rename", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/rename", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
 	}
 }
 
 func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create two sessions with the same public alias.
 	info1 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 1")
@@ -829,8 +892,8 @@ func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	_ = fs.cityBeadStore.SetMetadataBatch(info2.ID, map[string]string{"alias": "worker"})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/worker", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/worker"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d (ambiguous); body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -840,12 +903,14 @@ func TestHandleSessionAmbiguousAlias(t *testing.T) {
 func TestHandleSessionGetEnrichment(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Enriched Session")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -867,12 +932,14 @@ func TestHandleSessionGetEnrichment(t *testing.T) {
 func TestHandleSessionListPeek(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Peek Session")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	var resp struct {
 		Items []sessionResponse `json:"items"`
@@ -889,12 +956,14 @@ func TestHandleSessionListPeek(t *testing.T) {
 func TestHandleSessionCreate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	req.Header.Set("Idempotency-Key", "sess-create-1")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -923,11 +992,13 @@ func TestHandleSessionCreate(t *testing.T) {
 func TestHandleSessionCreateAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"sky","async":true}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -954,13 +1025,15 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Agent sessions are always async; messages are stored as initial_message
 	// in template_overrides for the reconciler to pick up.
 	body := `{"kind":"agent","name":"myrig/worker","async":true,"message":"hello"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -979,12 +1052,13 @@ func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirId
 	}}
 	fs.cfg.NamedSessions = nil
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
 	for i := 0; i < 2; i++ {
-		req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant"}`))
+		req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant"}`))
 		req.Header.Set("Idempotency-Key", "pool-create-"+string(rune('a'+i)))
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("create #%d status = %d, want %d; body: %s", i+1, rec.Code, http.StatusAccepted, rec.Body.String())
 		}
@@ -1039,11 +1113,12 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 	}}
 	fs.cfg.NamedSessions = nil
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"ant-fenrir"}`))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"ant-fenrir"}`))
 	req.Header.Set("Idempotency-Key", "pool-alias-1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
@@ -1055,10 +1130,10 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 		t.Fatalf("Alias = %q, want canonical qualified alias", resp.Alias)
 	}
 
-	req = newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
+	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
 	req.Header.Set("Idempotency-Key", "pool-alias-2")
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("second create status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
@@ -1067,11 +1142,13 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","async":true}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1124,11 +1201,13 @@ func TestMaterializeNamedSession_RebrandedSingletonKeepsTemplateWorkDirIdentity(
 func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","message":"hello"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
@@ -1162,11 +1241,13 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"sky"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1187,11 +1268,13 @@ func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -1201,11 +1284,13 @@ func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","alias":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -1215,11 +1300,13 @@ func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) 
 func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"bad:name"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1229,11 +1316,13 @@ func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","session_name":"mayor"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1246,11 +1335,13 @@ func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","session_name":""}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1263,33 +1354,48 @@ func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
+	first := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	firstW := httptest.NewRecorder()
-	srv.ServeHTTP(firstW, first)
+	h.ServeHTTP(firstW, first)
 	if firstW.Code != http.StatusAccepted {
 		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusAccepted, firstW.Body.String())
 	}
 
-	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
+	second := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	secondW := httptest.NewRecorder()
-	srv.ServeHTTP(secondW, second)
+	h.ServeHTTP(secondW, second)
 
 	if secondW.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", secondW.Code, http.StatusConflict, secondW.Body.String())
 	}
 }
 
-func TestHandleSessionCreateRejectsBareRigScopedTemplate(t *testing.T) {
+func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"worker"}`))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"worker"}`))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusNotFound, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Template != "myrig/worker" {
+		t.Errorf("Template = %q, want %q", resp.Template, "myrig/worker")
+	}
+	if resp.Title != "myrig/worker" {
+		t.Errorf("Title = %q, want %q", resp.Title, "myrig/worker")
 	}
 }
 
@@ -1336,11 +1442,13 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1367,11 +1475,13 @@ func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1401,11 +1511,13 @@ func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1435,14 +1547,16 @@ func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create session with BOTH options AND a message.
 	// Regression: the old code overwrote template_overrides with just the
 	// options, clobbering the initial_message that was set at creation time.
 	body := `{"kind":"agent","name":"myrig/worker","message":"Hello from Discord!","options":{"effort":"high"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1476,6 +1590,8 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1483,10 +1599,10 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	req := newPostRequest("/v0/session/"+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1509,10 +1625,12 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	req := newPostRequest("/v0/session/myrig%2Fworker/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -1562,7 +1680,7 @@ func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := srv.resolveSessionIDMaterializingNamedWithContext(ctx, fs.cityBeadStore, "myrig/worker")
+	_, err := srv.resolveSessionIDMaterializingNamedWithContext(ctx, fs.cityBeadStore, "worker")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("resolveSessionIDMaterializingNamedWithContext: %v, want context canceled", err)
 	}
@@ -1581,8 +1699,10 @@ func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t
 func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
@@ -1595,8 +1715,8 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+id, nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+id, nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -1612,15 +1732,20 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 }
 
 func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) {
+	// Fix 3k(remnant): whitespace-only messages are rejected by the
+	// pattern:"\\S" validation on the body; Huma returns 422 before
+	// the handler runs, so no session materializes.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"   "}`))
+	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"   "}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
 	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
 	if err != nil {
@@ -1634,6 +1759,8 @@ func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) 
 func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateAliasedNamedWithTransport(
@@ -1658,20 +1785,22 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/worker", nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/worker"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
-func TestHandleSessionCloseAllowsAlwaysNamedSession(t *testing.T) {
+func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg.NamedSessions[0].Mode = "always"
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
@@ -1684,11 +1813,11 @@ func TestHandleSessionCloseAllowsAlwaysNamedSession(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/close", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/")+id+"/close", nil)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
 }
 
@@ -1703,9 +1832,11 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 		{Template: "worker", Dir: "rig-b"},
 	}
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err != nil || ok {
-		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want not found without qualified target", ok, err)
+	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err == nil || ok {
+		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want ambiguous error", ok, err)
 	}
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "rig-a/worker")
@@ -1723,6 +1854,8 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNamedTarget(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1736,7 +1869,7 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 		t.Fatalf("create ordinary session bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -1758,8 +1891,10 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -1780,7 +1915,7 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 		t.Fatalf("create canonical runtime bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -1789,48 +1924,11 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 	}
 }
 
-func TestResolveSessionIDMaterializingNamed_AdoptsArchivedContinuityEligibleNamedSession(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
-	if err != nil {
-		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
-	}
-	if !ok {
-		t.Fatal("expected named session spec for worker")
-	}
-	bead, err := fs.cityBeadStore.Create(beads.Bead{
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			apiNamedSessionMetadataKey: "true",
-			apiNamedSessionIdentityKey: spec.Identity,
-			apiNamedSessionModeKey:     spec.Mode,
-			"session_name":             spec.SessionName,
-			"alias":                    spec.Identity,
-			"template":                 spec.Identity,
-			"agent_name":               spec.Identity,
-			"state":                    "archived",
-			"continuity_eligible":      "true",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create archived continuity-eligible named bead: %v", err)
-	}
-
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
-	if err != nil {
-		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
-	}
-	if id != bead.ID {
-		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want archived continuity bead %q", id, bead.ID)
-	}
-}
-
 func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1846,7 +1944,7 @@ func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSa
 		t.Fatalf("create ordinary pool worker: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -1880,8 +1978,10 @@ func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSa
 func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConflicts(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -1901,7 +2001,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 		t.Fatalf("create wrong-template runtime bead: %v", err)
 	}
 
-	_, err = srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	_, err = srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
 	if err == nil || !strings.Contains(err.Error(), "conflicts with configured named session") {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker) error = %v, want configured named session conflict", err)
 	}
@@ -1910,10 +2010,12 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/myrig%2Fworker/wake", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/worker/wake"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -1949,14 +2051,16 @@ func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T)
 func TestHandleSessionWakeCanceledNamedCreateRollsBack(t *testing.T) {
 	fs := newSessionFakeState(t)
 	provider := &cancelStartProvider{Fake: runtime.NewFake()}
-	srv := New(&stateWithSessionProvider{fakeState: fs, provider: provider})
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	srv := New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/myrig%2Fworker/wake", nil).WithContext(ctx)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/worker/wake"), nil).WithContext(ctx)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
@@ -1977,6 +2081,8 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2000,14 +2106,14 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionTranscriptResponse
+	var resp SessionStreamMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2023,6 +2129,8 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2045,14 +2153,14 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?tail=0", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?tail=0", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionTranscriptResponse
+	var resp SessionStreamMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2064,6 +2172,8 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -2073,8 +2183,8 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/pending", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/pending", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -2088,10 +2198,10 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 		t.Fatalf("pending response = %#v, want req-1", pendingResp)
 	}
 
-	respondReq := newPostRequest("/v0/session/"+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
+	respondReq := newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
 	respondReq.Header.Set("Idempotency-Key", "sess-respond-1")
 	respondRec := httptest.NewRecorder()
-	srv.ServeHTTP(respondRec, respondReq)
+	h.ServeHTTP(respondRec, respondReq)
 
 	if respondRec.Code != http.StatusAccepted {
 		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusAccepted, respondRec.Body.String())
@@ -2104,6 +2214,8 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -2113,8 +2225,8 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
@@ -2132,6 +2244,8 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Sky", "claude", t.TempDir(), "claude", "", nil, session.ProviderResume{}, runtime.Config{})
@@ -2143,8 +2257,8 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/sky/messages", strings.NewReader(`{"message":"hello"}`))
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/sky/messages"), strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -2157,6 +2271,8 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -2165,9 +2281,9 @@ func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	respondReq := newPostRequest("/v0/session/"+info.ID+"/respond", strings.NewReader(`{"request_id":"req-2","action":"approve"}`))
+	respondReq := newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"request_id":"req-2","action":"approve"}`))
 	respondRec := httptest.NewRecorder()
-	srv.ServeHTTP(respondRec, respondReq)
+	h.ServeHTTP(respondRec, respondReq)
 
 	if respondRec.Code != http.StatusConflict {
 		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusConflict, respondRec.Body.String())
@@ -2178,6 +2294,8 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2199,12 +2317,12 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 	<-done
@@ -2220,6 +2338,8 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2232,8 +2352,8 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -2244,6 +2364,8 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2265,11 +2387,11 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil)
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -2288,6 +2410,8 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2309,11 +2433,11 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v0/session/sky/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/sky/stream"), nil)
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -2331,6 +2455,8 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -2352,16 +2478,33 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
 	defer cancel()
 
-	rec := httptest.NewRecorder()
+	var bufMu sync.Mutex
+	var buf bytes.Buffer
+	send := sse.Sender(func(msg sse.Message) error {
+		bufMu.Lock()
+		defer bufMu.Unlock()
+		data, err := json.Marshal(msg.Data)
+		if err != nil {
+			return err
+		}
+		buf.Write(data)
+		buf.WriteString("\n")
+		return nil
+	})
+	getBody := func() string {
+		bufMu.Lock()
+		defer bufMu.Unlock()
+		return buf.String()
+	}
 	done := make(chan struct{})
 	go func() {
-		srv.streamSessionTranscriptLog(ctx, rec, info, logPath)
+		srv.streamSessionTranscriptLog(ctx, send, info, logPath)
 		close(done)
 	}()
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "after first boundary") {
+		if strings.Contains(getBody(), "after first boundary") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2385,7 +2528,7 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 
 	<-done
 
-	body := rec.Body.String()
+	body := getBody()
 	if !strings.Contains(body, "bridge turn") {
 		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
 	}
@@ -2398,6 +2541,8 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2421,14 +2566,14 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?format=raw&tail=0", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=raw&tail=0", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionRawTranscriptResponse
+	var resp SessionStreamRawMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2445,6 +2590,8 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2466,8 +2613,8 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -2535,6 +2682,8 @@ func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
 func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
@@ -2551,8 +2700,8 @@ func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())

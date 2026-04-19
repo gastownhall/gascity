@@ -12,6 +12,13 @@ prerequisites. If you haven't, start with the
 You will need `gc`, `tmux`, `git`, `jq`, and a beads provider (`bd` + `dolt`
 by default, or set `GC_BEADS=file` to skip them).
 
+<Tip>
+Oh My Zsh's `git` plugin defines a `gc` alias for `git commit --verbose`. If
+`gc version` or `gc init` opens git commit instead of Gas City, use
+`command gc ...` temporarily and remove the alias after Oh My Zsh loads.
+See [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc).
+</Tip>
+
 ## 1. Create a City
 
 ```bash

@@ -1512,8 +1512,8 @@ func TestDoInitAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("doInit = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("doInit = %d, want %d (initExitAlreadyInitialized)", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -1550,8 +1550,12 @@ func TestDoInitBootstrapsExistingCityToml(t *testing.T) {
 	if !f.Dirs[filepath.Join("/city", ".gc")] {
 		t.Error(".gc/ should be created during bootstrap")
 	}
-	if _, ok := f.Files[filepath.Join("/city", "hooks", "claude.json")]; !ok {
-		t.Error("hooks/claude.json should be created during bootstrap")
+	// Post stale-mirror fix (V1 adoption): hooks/claude.json is only
+	// written when the user explicitly selects it as the Claude settings
+	// source or when upgrading a known-stale gc-generated pattern. Fresh
+	// bootstraps produce only the gc-managed .gc/settings.json.
+	if _, ok := f.Files[filepath.Join("/city", ".gc", "settings.json")]; !ok {
+		t.Error(".gc/settings.json should be created during bootstrap")
 	}
 }
 
@@ -1614,16 +1618,17 @@ func TestDoInitCreatesSettings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	settingsPath := filepath.Join("/bright-lights", "hooks", "claude.json")
-	data, ok := f.Files[settingsPath]
+	// Post stale-mirror fix: the gc-managed .gc/settings.json is the
+	// Claude settings file `gc` passes via --settings. hooks/claude.json
+	// is only written for legacy-hook-source installs; fresh bootstraps
+	// (like this one) leave it untouched.
+	runtimePath := filepath.Join("/bright-lights", ".gc", "settings.json")
+	data, ok := f.Files[runtimePath]
 	if !ok {
-		t.Fatal("hooks/claude.json not created")
-	}
-	if _, ok := f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]; !ok {
 		t.Fatal(".gc/settings.json not created")
 	}
 	if len(data) == 0 {
-		t.Fatal("hooks/claude.json is empty")
+		t.Fatal(".gc/settings.json is empty")
 	}
 }
 
@@ -1634,10 +1639,12 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	settingsPath := filepath.Join("/bright-lights", "hooks", "claude.json")
-	data := f.Files[settingsPath]
-	if got := string(f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]); got != string(data) {
-		t.Fatalf(".gc/settings.json = %q, want mirror of hooks/claude.json", got)
+	// Post stale-mirror fix: validate the gc-managed runtime settings
+	// (the file Claude is actually invoked with) rather than the legacy
+	// hook mirror, which is no longer seeded on fresh installs.
+	data := f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]
+	if len(data) == 0 {
+		t.Fatal(".gc/settings.json not created or empty")
 	}
 
 	var parsed map[string]any
@@ -2402,8 +2409,8 @@ func TestCmdInitFromTOMLFileAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2422,8 +2429,8 @@ func TestCmdInitFromTOMLFileAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2802,8 +2809,8 @@ func TestDoInitFromDirAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2833,8 +2840,8 @@ func TestDoInitFromDirAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())

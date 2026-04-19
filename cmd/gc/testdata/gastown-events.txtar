@@ -1,7 +1,8 @@
 # Gas Town events — verify event recording across all command types.
 #
 # Tests that bead, mail, convoy, and custom operations emit events
-# and that event filtering works correctly.
+# locally. `gc events` itself is API-backed and is covered by unit tests
+# with a fake supervisor API.
 
 env GC_BEADS=file
 env GC_DOLT=skip
@@ -15,38 +16,35 @@ cd $WORK/bright-lights
 
 exec bd create 'Fix authentication'
 exec bd close gc-1
-exec gc events --type bead.created
-stdout 'gc-1'
-exec gc events --type bead.closed
-stdout 'gc-1'
+exec grep 'bead.created' .gc/events.jsonl
+exec grep 'bead.closed' .gc/events.jsonl
+exec grep 'gc-1' .gc/events.jsonl
 
 # --- 2. Mail operations emit events ---
 
 exec gc mail send mayor 'Deploy status?'
 exec gc mail read gc-3
 
-exec gc events --type mail.sent
-stdout 'gc-3'
-exec gc events --type mail.read
-stdout 'gc-3'
+exec grep 'mail.sent' .gc/events.jsonl
+exec grep 'mail.read' .gc/events.jsonl
+exec grep 'gc-3' .gc/events.jsonl
 
 # --- 3. Convoy operations emit events ---
 
 exec bd create 'Task A'
 exec gc convoy create 'Sprint' gc-4
-exec gc events --type convoy.created
-stdout 'gc-5'
+exec grep 'convoy.created' .gc/events.jsonl
+exec grep 'gc-5' .gc/events.jsonl
 
 exec gc convoy close gc-5
-exec gc events --type convoy.closed
-stdout 'gc-5'
+exec grep 'convoy.closed' .gc/events.jsonl
+exec grep 'gc-5' .gc/events.jsonl
 
 # --- 4. Custom events via gc event emit ---
 
 exec gc event emit agent.crashed --subject mayor --actor controller --message 'Session timeout'
-exec gc events --type agent.crashed
-stdout 'agent.crashed'
-stdout 'mayor'
+exec grep 'agent.crashed' .gc/events.jsonl
+exec grep 'mayor' .gc/events.jsonl
 
 # --- 5. Event ordering is monotonic ---
 
@@ -54,26 +52,24 @@ exec gc event emit test.first --message 'one'
 exec gc event emit test.second --message 'two'
 exec gc event emit test.third --message 'three'
 
-exec gc events
-stdout 'test.first'
-stdout 'test.second'
-stdout 'test.third'
+exec grep 'test.first' .gc/events.jsonl
+exec grep 'test.second' .gc/events.jsonl
+exec grep 'test.third' .gc/events.jsonl
 
-# --- 6. Filter by --since (events within last hour) ---
+# --- 6. gc events requires the supervisor API, not the local log file ---
 
-exec gc events --since 1h
-stdout 'bead.created'
-stdout 'mail.sent'
+! exec gc events --since 1h
+stderr 'could not auto-discover the supervisor API'
 
-# --- 7. No events for unknown type ---
+# --- 7. Type filtering is forwarded to the supervisor API ---
 
-exec gc events --type does.not.exist
-stdout 'No events.'
+! exec gc events --type does.not.exist
+stderr 'could not auto-discover the supervisor API'
 
-# --- 8. Watch mode with short timeout exits cleanly ---
+# --- 8. Watch mode also requires the supervisor API ---
 
-exec gc events --watch --type=nonexistent.event --timeout=100ms
-! stdout '.'
+! exec gc events --watch --type=nonexistent.event --timeout=100ms
+stderr 'could not auto-discover the supervisor API'
 
 # --- 9. --payload-match filtering (standard mode) ---
 
@@ -81,14 +77,12 @@ exec gc event emit deploy.started --payload '{"version":"2.1","env":"staging"}'
 exec gc event emit deploy.finished --payload '{"version":"3.0","env":"prod"}'
 
 # Filter by payload key=value in standard (non-watch) mode.
-exec gc events --type deploy.finished --payload-match version=3.0
-stdout 'deploy.finished'
-! stdout 'deploy.started'
+! exec gc events --type deploy.finished --payload-match version=3.0
+stderr 'could not auto-discover the supervisor API'
 
 # Filter by different payload key.
-exec gc events --payload-match env=staging
-stdout 'deploy.started'
-! stdout 'deploy.finished'
+! exec gc events --payload-match env=staging
+stderr 'could not auto-discover the supervisor API'
 
 -- bright-lights/city.toml --
 [workspace]

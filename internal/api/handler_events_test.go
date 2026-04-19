@@ -18,11 +18,11 @@ func TestEventList(t *testing.T) {
 	ep := state.eventProv.(*events.Fake)
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker"})
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker", Subject: "gc-1"})
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/events", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/events"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -43,11 +43,11 @@ func TestEventListFilterByType(t *testing.T) {
 	ep := state.eventProv.(*events.Fake)
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker"})
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/events?type=bead.created", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/events?type=bead.created"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []events.Event `json:"items"`
@@ -59,22 +59,38 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
+func TestEventListRejectsInvalidSince(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?since=notaduration"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid since duration") {
+		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
 func TestEventStream(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Create a context with timeout to avoid hanging.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	// Run the handler in a goroutine since it blocks.
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -90,8 +106,13 @@ func TestEventStream(t *testing.T) {
 	<-done
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "event: session.woke") {
-		t.Errorf("SSE body missing event type, got: %s", body)
+	// Event name is now "event" (documented in OpenAPI spec via sse.Register).
+	// The actual event type is in the JSON body's "type" field.
+	if !strings.Contains(body, "event: event") {
+		t.Errorf("SSE body missing event: event line, got: %s", body)
+	}
+	if !strings.Contains(body, `"type":"session.woke"`) {
+		t.Errorf("SSE body missing event type in JSON body, got: %s", body)
 	}
 	if !strings.Contains(body, "id: 1") {
 		t.Errorf("SSE body missing event id, got: %s", body)
@@ -125,16 +146,16 @@ func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
 		t.Fatalf("marshal root: %v", err)
 	}
 
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -196,11 +217,11 @@ func TestWatcherCloseUnblocksNext(t *testing.T) {
 func TestEventStreamNoEvents(t *testing.T) {
 	state := newFakeState(t)
 	state.eventProv = nil
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
@@ -209,12 +230,12 @@ func TestEventStreamNoEvents(t *testing.T) {
 
 func TestHandleEventEmit(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"type":"deploy.completed","actor":"ci","subject":"myapp","message":"v2.3.1"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -238,41 +259,41 @@ func TestHandleEventEmit(t *testing.T) {
 
 func TestHandleEventEmit_MissingType(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"actor":"ci"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleEventEmit_MissingActor(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"type":"test.event"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleEventEmit_NoEventsProvider(t *testing.T) {
 	state := newFakeState(t)
 	state.eventProv = nil
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"type":"test.event","actor":"ci"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)

@@ -11,11 +11,11 @@ func TestHandleCityGet(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Workspace.Provider = "claude"
 	fs.cfg.Workspace.SessionTemplate = "{{.City}}--{{.Agent}}"
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/city", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, ""), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -48,11 +48,11 @@ func TestHandleCityGet(t *testing.T) {
 func TestHandleCityGet_Suspended(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Workspace.Suspended = true
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/city", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, ""), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)

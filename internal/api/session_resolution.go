@@ -58,7 +58,38 @@ func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (ap
 		return apiNamedSessionSpec{}, false, nil
 	}
 	cityName := apiCityName(cfg, s.state.CityPath())
-	return session.FindNamedSessionSpecForTarget(cfg, cityName, target, "")
+	spec, ok, err := session.FindNamedSessionSpecForTarget(cfg, cityName, target, "")
+	if err != nil || ok || strings.Contains(target, "/") {
+		return spec, ok, err
+	}
+
+	rigMatches := map[string]bool{}
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns == nil {
+			continue
+		}
+		name := strings.TrimSpace(ns.Name)
+		if name == "" {
+			name = strings.TrimSpace(ns.Template)
+		}
+		if name != target {
+			continue
+		}
+		rigMatches[strings.TrimSpace(ns.Dir)] = true
+	}
+	switch len(rigMatches) {
+	case 0:
+		return apiNamedSessionSpec{}, false, nil
+	case 1:
+		var rigContext string
+		for rig := range rigMatches {
+			rigContext = rig
+		}
+		return session.FindNamedSessionSpecForTarget(cfg, cityName, target, rigContext)
+	default:
+		return apiNamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
+	}
 }
 
 func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessionSpec) (beads.Bead, bool, error) {

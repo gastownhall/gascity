@@ -40,6 +40,42 @@ gc version
 If you use a non-standard shell (fish, nushell), check that shell's PATH
 configuration rather than `~/.bashrc` or `~/.zshrc`.
 
+## Oh My Zsh Git Plugin Hides `gc`
+
+Oh My Zsh's `git` plugin defines `gc` as an alias for
+`git commit --verbose`. When that alias is active, commands like `gc version`,
+`gc init`, or `gc start` run git instead of the Gas City binary.
+
+Temporary workaround:
+
+```bash
+command gc version
+command gc init ~/my-city
+```
+
+`command` bypasses shell aliases for that invocation.
+
+Persistent fix in `~/.zshrc`:
+
+```bash
+source "$ZSH/oh-my-zsh.sh"
+unalias gc 2>/dev/null
+```
+
+The `unalias` line must come **after** Oh My Zsh loads. If it appears before
+`source "$ZSH/oh-my-zsh.sh"`, the `git` plugin recreates the alias later.
+
+Oh My Zsh also loads files in `$ZSH_CUSTOM` after built-in plugins, so this is
+a good alternative:
+
+```bash
+mkdir -p ~/.oh-my-zsh/custom
+printf '%s\n' 'unalias gc 2>/dev/null' > ~/.oh-my-zsh/custom/gascity.zsh
+```
+
+If you do not use Oh My Zsh git aliases, you can also remove `git` from the
+`plugins=(...)` list.
+
 ## Missing Prerequisites
 
 `gc init` and `gc start` check for required tools and report any that are

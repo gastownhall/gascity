@@ -16,11 +16,11 @@ func TestHandleProviderList(t *testing.T) {
 		"custom": {DisplayName: "Custom Agent", Command: "custom-cli"},
 		"claude": {DisplayName: "My Claude", Command: "my-claude"}, // overrides builtin
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/providers", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/providers"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -56,11 +56,11 @@ func TestHandleProviderGet_CityLevel(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {DisplayName: "Custom Agent", Command: "custom-cli"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/provider/custom", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/provider/custom"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -81,11 +81,11 @@ func TestHandleProviderGet_CityLevel(t *testing.T) {
 
 func TestHandleProviderGet_Builtin(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/provider/claude", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/provider/claude"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -106,11 +106,11 @@ func TestHandleProviderGet_Builtin(t *testing.T) {
 
 func TestHandleProviderGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/provider/nonexistent", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/provider/nonexistent"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -119,12 +119,12 @@ func TestHandleProviderGet_NotFound(t *testing.T) {
 
 func TestHandleProviderCreate(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"myagent","command":"myagent-cli","display_name":"My Agent"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/providers"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
@@ -145,29 +145,29 @@ func TestHandleProviderCreate(t *testing.T) {
 
 func TestHandleProviderCreate_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"command":"myagent-cli"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/providers"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleProviderCreate_MissingCommand(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"myagent"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/providers"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 
@@ -176,12 +176,12 @@ func TestHandleProviderCreate_Duplicate(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"existing": {Command: "existing-cli"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"name":"existing","command":"other-cli"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/providers"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusConflict)
@@ -193,13 +193,13 @@ func TestHandleProviderUpdate(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {Command: "old-cli", DisplayName: "Old Name"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"command":"new-cli","display_name":"New Name"}`
-	req := httptest.NewRequest("PATCH", "/v0/provider/custom", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/provider/custom"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -216,13 +216,13 @@ func TestHandleProviderUpdate(t *testing.T) {
 
 func TestHandleProviderUpdate_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"command":"new-cli"}`
-	req := httptest.NewRequest("PATCH", "/v0/provider/nonexistent", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/provider/nonexistent"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -234,12 +234,12 @@ func TestHandleProviderDelete(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {Command: "custom-cli"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/provider/custom", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/provider/custom"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -252,12 +252,12 @@ func TestHandleProviderDelete(t *testing.T) {
 
 func TestHandleProviderDelete_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/provider/nonexistent", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/provider/nonexistent"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -267,13 +267,13 @@ func TestHandleProviderDelete_NotFound(t *testing.T) {
 func TestHandleProviderUpdate_BuiltinConflict(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	// No city-level "claude" — it's only a builtin.
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	body := `{"command":"new-claude"}`
-	req := httptest.NewRequest("PATCH", "/v0/provider/claude", strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/provider/claude"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
@@ -283,12 +283,12 @@ func TestHandleProviderUpdate_BuiltinConflict(t *testing.T) {
 func TestHandleProviderDelete_BuiltinConflict(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	// No city-level "claude" — it's only a builtin.
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("DELETE", "/v0/provider/claude", nil)
+	req := httptest.NewRequest("DELETE", cityURL(fs, "/provider/claude"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())

@@ -16,7 +16,7 @@ import (
 
 func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -24,9 +24,9 @@ func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	req := newPostRequest("/v0/session/"+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -58,7 +58,7 @@ func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 
 func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Create(context.Background(), "helper", "Codex Submit", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
@@ -69,9 +69,9 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	req := newPostRequest("/v0/session/"+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -90,13 +90,13 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 
 func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Queue Me")
 
-	req := newPostRequest("/v0/session/"+info.ID+"/submit", strings.NewReader(`{"message":"later please","intent":"follow_up"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"later please","intent":"follow_up"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -126,7 +126,7 @@ func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 
 func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Capabilities")
 	if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{
@@ -139,8 +139,8 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -159,7 +159,7 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 
 func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Create(context.Background(), "helper", "Codex", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
@@ -173,8 +173,8 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+info.ID+"/stop", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())

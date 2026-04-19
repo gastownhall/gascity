@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -193,6 +194,38 @@ func TestConformance_ArchivedReactivation(t *testing.T) {
 	}
 	if b.Metadata["archived_at"] != "" {
 		t.Error("archived_at should be cleared on reactivation")
+	}
+}
+
+func TestConformance_IllegalTransitionDraining(t *testing.T) {
+	// Fix 3j: manager mutations now validate against the state machine.
+	// Drain puts a session in Draining; Suspend from Draining is illegal.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManager(store, sp)
+
+	id := createTestSession(t, m, "worker")
+
+	if err := m.BeginDrain(id, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
+	}
+
+	err := m.Suspend(id)
+	if err == nil {
+		t.Fatal("Suspend from Draining should return ErrIllegalTransition")
+	}
+	if !errors.Is(err, ErrIllegalTransition) {
+		t.Errorf("err = %v, want wrapping ErrIllegalTransition", err)
+	}
+	var ite *IllegalTransitionError
+	if !errors.As(err, &ite) {
+		t.Fatalf("err should unwrap to *IllegalTransitionError; got %T", err)
+	}
+	if ite.From != StateDraining {
+		t.Errorf("ite.From = %q, want %q", ite.From, StateDraining)
+	}
+	if ite.Command != CmdSuspend {
+		t.Errorf("ite.Command = %q, want %q", ite.Command, CmdSuspend)
 	}
 }
 

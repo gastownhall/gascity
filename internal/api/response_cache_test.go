@@ -49,17 +49,17 @@ func TestHandleStatusCachesUntilIndexChanges(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodGet, "/v0/status", nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", rec.Code)
 	}
 
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second status = %d, want 200", rec.Code)
 	}
@@ -70,7 +70,7 @@ func TestHandleStatusCachesUntilIndexChanges(t *testing.T) {
 
 	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("third status = %d, want 200", rec.Code)
 	}
@@ -83,17 +83,17 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodGet, "/v0/agents", nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
 
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
@@ -104,7 +104,7 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("third agents = %d, want 200", rec.Code)
 	}
@@ -135,10 +135,10 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 		t.Fatalf("create workflow root: %v", err)
 	}
 
-	srv := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first feed = %d, want 200", rec.Code)
 	}
@@ -148,7 +148,7 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second feed = %d, want 200", rec.Code)
 	}
@@ -161,7 +161,7 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 
 	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("third feed = %d, want 200", rec.Code)
 	}

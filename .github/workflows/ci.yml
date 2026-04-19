@@ -69,6 +69,9 @@ jobs:
       # Pinned dependency versions — keep in sync with deps.env.
       DOLT_VERSION: "1.86.1"
       BD_VERSION: "v1.0.0"
+      # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
+      # spec→client drift check can never silently skip in CI.
+      GC_REQUIRE_OAPI_CODEGEN: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -121,6 +124,12 @@ jobs:
 
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
+
+      - name: Dashboard bundle drift check
+        run: make dashboard-ci
+
+      - name: OpenAPI spec + client drift check
+        run: make spec-ci
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
@@ -287,6 +296,41 @@ jobs:
     env:
       DOLT_VERSION: "1.86.1"
       BD_VERSION: "v1.0.0"
+
+  # Dashboard SPA typecheck + tests + build. Runs on every push/PR
+  # so TS drift against the spec (e.g. a query param tightening from
+  # string to boolean) fails CI instead of shipping as a silent
+  # runtime bug. Vite's build transpiles TS to JS and does not fail
+  # on type errors; `tsc --noEmit` via `npm run typecheck` is the
+  # load-bearing discipline step.
+  dashboard:
+    name: Dashboard SPA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install SPA dependencies
+        run: npm install --silent
+        working-directory: cmd/gc/dashboard/web
+      - name: Verify generated TS schema is in sync
+        run: |
+          npm run gen --silent
+          if ! git diff --exit-code src/generated/schema.d.ts; then
+            echo "::error::Generated TS schema drifted. Regenerate via 'npm run gen' in cmd/gc/dashboard/web."
+            exit 1
+          fi
+        working-directory: cmd/gc/dashboard/web
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+        working-directory: cmd/gc/dashboard/web
+      - name: Vitest
+        run: npm test
+        working-directory: cmd/gc/dashboard/web
+      - name: Build
+        run: npm run build --silent
+        working-directory: cmd/gc/dashboard/web
 
   # Runs when mail-related source paths change.
   mcp-mail:

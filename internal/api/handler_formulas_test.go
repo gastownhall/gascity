@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,10 +37,10 @@ id = "review"
 title = "Review PR"
 `)
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas?scope_kind=city&scope_ref=test-city&target=worker"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -88,10 +90,10 @@ id = "review"
 title = "Review PR"
 `)
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas?scope_kind=city&scope_ref=test-city&target=worker"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -184,10 +186,10 @@ title = "Review PR"
 		t.Fatalf("set workflow status: %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=2", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=2"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -252,10 +254,10 @@ title = "Review PR"
 		t.Fatalf("set workflow status: %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -289,10 +291,10 @@ id = "review"
 title = "Review PR"
 `)
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=rig&scope_ref=missing", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-adopt-pr-v2/runs?scope_kind=rig&scope_ref=missing"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
@@ -334,10 +336,10 @@ func TestFormulaFeedReturnsWorkflowRunsOnly(t *testing.T) {
 		t.Fatalf("create order tracking bead: %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/feed?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/feed?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -395,10 +397,10 @@ title = "Review PR"
 		}
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=9999", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=9999"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -450,10 +452,10 @@ title = "Review PR"
 		t.Fatalf("set workflow status: %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -503,10 +505,10 @@ func TestFormulaFeedUsesRootOnlyProjectionWithoutChildLookup(t *testing.T) {
 		t.Fatalf("set workflow status: %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/feed?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/feed?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -548,7 +550,7 @@ func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 	return s.Store.List(query)
 }
 
-func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {
+func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
 	prev := formula.IsFormulaV2Enabled()
 	formula.SetFormulaV2Enabled(true)
 	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
@@ -583,10 +585,13 @@ needs = ["prep"]
 metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 `)
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-preview?scope_kind=city&scope_ref=test-city&target=worker&var.issue=BD-123", nil)
+	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker","vars":{"issue":"BD-123"}}`)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/mol-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -605,8 +610,8 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	if len(detail.Steps) != 2 {
 		t.Fatalf("steps = %+v, want 2 non-root steps", detail.Steps)
 	}
-	if detail.Steps[0]["title"] != "Prep BD-123" {
-		t.Fatalf("step[0].title = %v, want substituted title", detail.Steps[0]["title"])
+	if detail.Steps[0].Title != "Prep BD-123" {
+		t.Fatalf("step[0].title = %v, want substituted title", detail.Steps[0].Title)
 	}
 	if len(detail.Deps) != 1 || detail.Deps[0].From != "mol-preview.prep" || detail.Deps[0].To != "mol-preview.review" {
 		t.Fatalf("deps = %+v, want prep -> review", detail.Deps)
@@ -616,6 +621,49 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	}
 	if detail.Preview.Nodes[1].Kind != "run" || detail.Preview.Nodes[1].ScopeRef != "body" {
 		t.Fatalf("preview node = %+v, want run node with scope_ref", detail.Preview.Nodes[1])
+	}
+}
+
+// TestFormulaDetailRejectsLegacyVarQueryParams pins the §3.5.1 migration
+// behavior: undeclared var.* query parameters on the GET detail endpoint
+// are now rejected with a 4xx + migration hint pointing at POST /preview.
+// Silent-ignore was worse than either accept-or-reject because bookmarked
+// curl scripts rendered the default-substituted preview the user thought
+// was customized.
+func TestFormulaDetailRejectsLegacyVarQueryParams(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	state := newFakeState(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-preview", `
+description = "Preview {{issue}}"
+formula = "mol-preview"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+default = "DEFAULT"
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-preview?scope_kind=city&scope_ref=test-city&target=worker&var.issue=BD-123"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Fatalf("status = %d, want 4xx rejecting var.* params: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "var.") {
+		t.Fatalf("response body does not mention var.* migration: %s", rec.Body.String())
 	}
 }
 
@@ -634,13 +682,15 @@ id = "prep"
 title = "Prep"
 `)
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-preview?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/mol-preview?scope_kind=city&scope_ref=test-city"), nil)
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	// target is declared required:"true" on FormulaDetailInput, so Huma
+	// fails validation with 422 before the handler runs.
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
 	}
 }
 

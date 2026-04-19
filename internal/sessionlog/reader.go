@@ -39,6 +39,52 @@ type PaginationInfo struct {
 	TotalCompactions       int    `json:"total_compactions"`
 }
 
+// RawPayloads decodes each non-empty Entry.Raw into a generic JSON value
+// (map[string]any for objects, []any for arrays, etc.) and returns the
+// slice. Used by API response builders so handlers can emit the
+// provider-native transcript frames as typed `any` fields without
+// touching json.RawMessage in the API layer.
+//
+// Deprecated: prefer RawPayloadBytes when the downstream consumer will
+// marshal-and-ship the result. The Unmarshal→`any`→Marshal round-trip
+// loses int64 precision above 2^53 (tool-call IDs, nanosecond
+// timestamps) and does not preserve map-key order. Kept for the small
+// number of callers that actually consume the decoded form.
+func (s *Session) RawPayloads() []any {
+	out := make([]any, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(entry.Raw, &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// RawPayloadBytes returns the raw JSON bytes for each non-empty
+// Entry.Raw. Each returned slice is a defensive copy — callers can
+// append/modify freely without corrupting the underlying Session.
+// Prefer this over RawPayloads when the data is about to be emitted
+// on the wire (SSE streams, API responses), because it preserves
+// byte-identity, int64 precision, and map-key order.
+func (s *Session) RawPayloadBytes() []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		if !json.Valid(entry.Raw) {
+			continue
+		}
+		out = append(out, append(json.RawMessage(nil), entry.Raw...))
+	}
+	return out
+}
+
 // displayTypes are entry types included in the display output.
 var displayTypes = map[string]bool{
 	"user":      true,

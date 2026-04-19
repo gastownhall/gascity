@@ -1,6 +1,6 @@
 # Gas City Configuration
 
-Schema for city.toml — the top-level configuration file for a Gas City instance.
+Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.
 

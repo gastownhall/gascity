@@ -77,12 +77,12 @@ func TestGastown_EventsFiltering(t *testing.T) {
 		t.Errorf("filtered output should not contain mail.sent:\n%s", out)
 	}
 
-	// No events for unknown type.
+	// Unknown type should produce empty JSONL output.
 	out, err = gc(cityDir, "events", "--type", "does.not.exist")
 	if err != nil {
 		t.Fatalf("gc events for unknown type failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "No events.") {
-		t.Errorf("expected 'No events.' for unknown type:\n%s", out)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected empty output for unknown type:\n%s", out)
 	}
 }

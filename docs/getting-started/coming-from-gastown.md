@@ -31,7 +31,9 @@ In Gas Town, it is normal to think in terms of:
 
 In Gas City, the default mental model should be:
 
-- everything is configured in `city.toml` plus packs
+- reusable behavior lives in `pack.toml` plus pack directories
+- deployment choices live in `city.toml`
+- machine-local bindings and runtime state live in `.gc/`
 - every durable work item is a bead
 - agents are generic; roles come from prompts, formulas, orders, and config
 - the controller owns SDK infrastructure behavior
@@ -45,7 +47,7 @@ can be expressed in.
 
 | Gas Town concept | Gas City concept | What changes for you |
 |---|---|---|
-| Town config + rig config + role homes | `city.toml` plus packs and overrides | Most behavior is configured declaratively in one place instead of being spread across role-specific directories and managers. |
+| Town config + rig config + role homes | PackV2: `pack.toml`, `city.toml`, `agents/`, and `.gc/` | Definition, deployment, and machine-local state are separated instead of being spread across role-specific directories and managers. |
 | Mayor, deacon, witness, refinery, polecat, crew, dog | Configured agents | Gas City has no baked-in role names in Go. These are pack conventions, not SDK primitives. |
 | Plugin | Order | An exec order runs shell directly with no agent session. A formula order instantiates agent work. If you were thinking "plugin that runs a command", start with an exec order. |
 | Convoy | Convoy bead plus sling/formulas | Convoys are still bead-backed work grouping, but there is no special convoy runtime layer you have to use to get orchestration. |
@@ -74,19 +76,17 @@ That keeps role behavior in configuration instead of hardcoding more role
 semantics into the SDK, while still making the common day-one workflow feel
 local and incremental.
 
-### Start In `city.toml`
+### Start With The City Pack And `city.toml`
 
 This is the main day-one habit to adopt.
 
-Most Gas Town users should begin in their local `city.toml`, not by editing a
-pack. Packs are for reusable defaults. Your local city config is for:
+Most Gas Town users should begin with the root city pack plus `city.toml`, not
+by editing an imported shared pack. The split is:
 
-- registering rigs
-- including the Gastown pack
-- adding named crew agents
-- changing providers
-- overriding session scale sizes
-- tweaking prompts, hooks, overlays, and timeouts for your own city
+- `pack.toml` imports reusable packs and defines city-specific behavior
+- `agents/<name>/` defines city-owned named agents
+- `city.toml` declares deployment choices such as rigs, substrates, and scale
+- `.gc/` stores site bindings such as local rig paths
 
 Reach for a pack edit when the change should become the new reusable default
 for every consumer of that pack.
@@ -232,19 +232,36 @@ Use an exec order before inventing a plugin, helper role, or hidden session.
 
 That is the direct Gas City answer to many old Town automation tasks.
 
-## Common Gastown Overrides In `city.toml`
+## Common Gastown Overrides In PackV2
 
 If you are using the Gastown pack, these are the most common local changes.
 
 ### Register a rig
 
-This activates the rig-scoped Gastown agents for one repo:
+Import the Gastown pack in the root pack, then bind rigs in `city.toml` and
+with `gc rig add`:
 
 ```toml
+# pack.toml
+[pack]
+name = "my-city"
+schema = 2
+
+[imports.gastown]
+source = "./assets/gastown"
+```
+
+```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
+
+[rigs.imports.gastown]
+source = "./assets/gastown"
+```
+
+```bash
+gc rig add /path/to/myproject --name myproject
 ```
 
 ### Increase or shrink scalable polecat sessions
@@ -252,28 +269,32 @@ includes = ["packs/gastown"]
 This is the cleanest answer to "I want more or fewer polecats for this rig."
 
 ```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
 
-[[rigs.overrides]]
-agent = "polecat"
+[rigs.imports.gastown]
+source = "./assets/gastown"
 
-[rigs.overrides.pool]
+[[rigs.patches]]
+agent = "gastown.polecat"
+
+[rigs.patches.pool]
 max = 10
 ```
 
 ### Change the provider for one rig's polecats
 
 ```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
 
-[[rigs.overrides]]
-agent = "polecat"
+[rigs.imports.gastown]
+source = "./assets/gastown"
+
+[[rigs.patches]]
+agent = "gastown.polecat"
 provider = "codex"
 ```
 
@@ -287,25 +308,28 @@ with patches:
 
 ```toml
 [[patches.agent]]
-dir = ""
-name = "mayor"
+name = "gastown.mayor"
 provider = "codex"
 idle_timeout = "2h"
 ```
 
 Use patches when the target is already a concrete city-scoped agent. Use
-`[[rigs.overrides]]` when the target is a pack agent stamped per rig.
+`[[rigs.patches]]` when the target is a pack agent stamped per rig.
 
 ### Add a named crew agent
 
-Crew is usually city-specific, so it often belongs directly in `city.toml`
-rather than in the shared Gastown pack:
+Crew is usually city-specific, so it often belongs in the root city pack rather
+than in the shared Gastown pack:
+
+```text
+agents/wolf/
+├── agent.toml
+└── prompt.template.md
+```
 
 ```toml
-[[agent]]
-name = "wolf"
-dir = "myproject"
-prompt_template = "packs/gastown/prompts/crew.md.tmpl"
+# agents/wolf/agent.toml
+scope = "rig"
 nudge = "Check your hook and mail, then act accordingly."
 work_dir = ".gc/worktrees/myproject/crew/wolf"
 idle_timeout = "4h"
@@ -319,17 +343,20 @@ long-lived workers.
 This is what rig overrides are for:
 
 ```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
 
-[[rigs.overrides]]
-agent = "refinery"
-prompt_template = "local/prompts/refinery.md.tmpl"
-overlay_dir = "local/overlays/refinery"
+[rigs.imports.gastown]
+source = "./assets/gastown"
+
+[[rigs.patches]]
+agent = "gastown.refinery"
 idle_timeout = "4h"
 ```
+
+For prompt or overlay replacement, patch the imported agent from your root city
+pack rather than editing the shared pack in place.
 
 If that change turns out to be broadly useful across cities, that is when it
 should move into the pack.
