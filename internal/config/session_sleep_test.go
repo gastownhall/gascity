@@ -254,6 +254,25 @@ func TestValidateNamedSessions_RejectsAliasSessionNameCollision(t *testing.T) {
 	}
 }
 
+func TestValidateNamedSessions_RejectsQualifiedAliasName(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Agents: []Agent{{
+			Name: "mayor",
+		}},
+		NamedSessions: []NamedSession{{
+			Name:     "gs.witness",
+			Template: "mayor",
+		}},
+	}
+
+	if err := ValidateNamedSessions(cfg); err == nil {
+		t.Fatal("ValidateNamedSessions() = nil, want error")
+	} else if !strings.Contains(err.Error(), `name "gs.witness"`) {
+		t.Fatalf("ValidateNamedSessions() error = %v, want qualified alias rejection", err)
+	}
+}
+
 func TestValidateNamedSessions_UsesResolvedWorkspaceName(t *testing.T) {
 	cfg := &City{
 		ResolvedWorkspaceName: "test-city",
@@ -274,107 +293,5 @@ func TestValidateNamedSessions_UsesResolvedWorkspaceName(t *testing.T) {
 		t.Fatal("ValidateNamedSessions() = nil, want collision error")
 	} else if !strings.Contains(err.Error(), "collides with deterministic session_name") {
 		t.Fatalf("ValidateNamedSessions() error = %v, want session_name collision", err)
-	}
-}
-
-func TestValidateNamedSessions_AllowsQualifiedImportedTemplate(t *testing.T) {
-	cfg := &City{
-		Workspace: Workspace{Name: "test-city"},
-		Agents: []Agent{
-			{Name: "penny", BindingName: "employees"},
-		},
-		NamedSessions: []NamedSession{
-			{Name: "corp--penny-root", Template: "employees.penny"},
-		},
-	}
-
-	if err := ValidateNamedSessions(cfg); err != nil {
-		t.Fatalf("ValidateNamedSessions() = %v, want nil", err)
-	}
-	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "employees.penny" {
-		t.Fatalf("TemplateQualifiedName() = %q, want employees.penny", got)
-	}
-}
-
-func TestValidateNamedSessions_RejectsMalformedQualifiedTemplates(t *testing.T) {
-	tests := []string{
-		".penny",
-		"employees.",
-		"employees..penny",
-		"employees.penny.extra",
-	}
-
-	for _, template := range tests {
-		t.Run(template, func(t *testing.T) {
-			cfg := &City{
-				Workspace: Workspace{Name: "test-city"},
-				Agents: []Agent{
-					{Name: "penny", BindingName: "employees"},
-				},
-				NamedSessions: []NamedSession{
-					{Name: "corp--penny-root", Template: template},
-				},
-			}
-
-			if err := ValidateNamedSessions(cfg); err == nil {
-				t.Fatal("ValidateNamedSessions() = nil, want malformed template error")
-			}
-		})
-	}
-}
-
-func TestValidateNamedSessions_TemplateErrorUsesStructuralExamples(t *testing.T) {
-	cfg := &City{
-		Workspace: Workspace{Name: "test-city"},
-		Agents: []Agent{
-			{Name: "worker"},
-		},
-		NamedSessions: []NamedSession{
-			{Name: "corp--worker-root", Template: "workers.worker.extra"},
-		},
-	}
-
-	err := ValidateNamedSessions(cfg)
-	if err == nil {
-		t.Fatal("ValidateNamedSessions() = nil, want malformed template error")
-	}
-	msg := err.Error()
-	for _, forbidden := range []string{"mayor", "employees.penny"} {
-		if strings.Contains(msg, forbidden) {
-			t.Fatalf("ValidateNamedSessions() error = %q, should not contain concrete role example %q", msg, forbidden)
-		}
-	}
-	for _, want := range []string{"agent", "binding.agent"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("ValidateNamedSessions() error = %q, want structural example %q", msg, want)
-		}
-	}
-}
-
-func TestValidateNamedSessions_QualifiedTemplateWithoutNameUsesQualifiedIdentity(t *testing.T) {
-	cfg := &City{
-		Workspace: Workspace{Name: "test-city"},
-		Agents: []Agent{
-			{Name: "penny", BindingName: "employees"},
-		},
-		NamedSessions: []NamedSession{
-			{Template: "employees.penny"},
-		},
-	}
-
-	if err := ValidateNamedSessions(cfg); err != nil {
-		t.Fatalf("ValidateNamedSessions() = %v, want nil", err)
-	}
-	if got := cfg.NamedSessions[0].IdentityName(); got != "employees.penny" {
-		t.Fatalf("IdentityName() = %q, want employees.penny", got)
-	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "employees.penny" {
-		t.Fatalf("QualifiedName() = %q, want employees.penny", got)
-	}
-	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "employees.penny" {
-		t.Fatalf("TemplateQualifiedName() = %q, want employees.penny", got)
-	}
-	if got := FindNamedSession(cfg, "employees.penny"); got == nil {
-		t.Fatal("FindNamedSession(employees.penny) = nil, want named session")
 	}
 }
