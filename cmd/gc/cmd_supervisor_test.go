@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -245,6 +246,59 @@ func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
 	}
 	if data.XDGRuntimeDir != "/tmp/gc-run" {
 		t.Fatalf("buildSupervisorServiceData XDGRuntimeDir = %q, want /tmp/gc-run", data.XDGRuntimeDir)
+	}
+}
+
+func TestReconcileRigIndexSuppressesMigrationWarnings(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "city")
+	rigPath := filepath.Join(t.TempDir(), "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(city): %v", err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "alpha"
+
+[agents]
+append_fragments = ["legacy.md"]
+
+[[rigs]]
+name = "alpha-rig"
+path = %q
+`, rigPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "alpha"); err != nil {
+		t.Fatalf("Register(city): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	reconcileRigIndex(reg, &stderr)
+
+	if strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias") {
+		t.Fatalf("stderr = %q, want migration warnings suppressed during rig reconcile", stderr.String())
+	}
+
+	rigs, err := reg.ListRigs()
+	if err != nil {
+		t.Fatalf("ListRigs(): %v", err)
+	}
+	if len(rigs) != 1 {
+		t.Fatalf("ListRigs() len = %d, want 1", len(rigs))
+	}
+	if rigs[0].Name != "alpha-rig" {
+		t.Fatalf("rig name = %q, want %q", rigs[0].Name, "alpha-rig")
+	}
+	if rigs[0].DefaultCity == "" {
+		t.Fatal("default city = empty, want reconciled default city")
 	}
 }
 
