@@ -87,6 +87,20 @@ func shouldEmitLoadCityConfigWarning(warning string) bool {
 	return strings.Contains(warning, `"agent_defaults.`) || strings.Contains(warning, `"agents.`)
 }
 
+func strictFatalLoadConfigWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	var fatal []string
+	for _, warning := range warnings {
+		if shouldEmitLoadCityConfigWarning(warning) {
+			continue
+		}
+		fatal = append(fatal, warning)
+	}
+	return fatal
+}
+
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
 // expansion. Use for commands that modify city.toml and write it back —
 // preserves include directives, pack references, and patches.

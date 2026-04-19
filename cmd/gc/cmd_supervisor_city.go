@@ -64,11 +64,10 @@ func fetchCityPacksIfNeeded(cityPath string) error {
 func effectiveCityName(cityPath string) (string, error) {
 	name := filepath.Base(cityPath)
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		return "", err
 	}
-	emitLoadCityConfigWarnings(io.Discard, prov)
 	if cfg.Workspace.Name != "" {
 		name = cfg.Workspace.Name
 	}

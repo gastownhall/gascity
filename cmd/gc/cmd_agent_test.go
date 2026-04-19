@@ -216,12 +216,28 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 }
 
+func TestStrictFatalLoadConfigWarningsExcludesMigrationWarnings(t *testing.T) {
+	warnings := []string{
+		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+		`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+		`workspace.name redefined by "/city/defaults.toml"`,
+	}
+
+	got := strictFatalLoadConfigWarnings(warnings)
+	if len(got) != 1 {
+		t.Fatalf("strictFatalLoadConfigWarnings len = %d, want 1; got=%q", len(got), got)
+	}
+	if got[0] != `workspace.name redefined by "/city/defaults.toml"` {
+		t.Fatalf("strictFatalLoadConfigWarnings = %q, want non-migration warning only", got)
+	}
+}
+
 func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("Glob(*.go): %v", err)
 	}
-	bareCall := regexp.MustCompile(`\bloadCityConfig\([^,\n)]*\)`)
+	bareCall := regexp.MustCompile(`\bloadCityConfig(FS)?\([^,\n)]*\)`)
 	var offenders []string
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") || file == "cmd_agent.go" {
