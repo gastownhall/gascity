@@ -512,6 +512,9 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	if jsonOutput {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
+		if sessions == nil {
+			sessions = []session.Info{}
+		}
 		_ = enc.Encode(sessions) //nolint:errcheck // best-effort stdout
 		return 0
 	}

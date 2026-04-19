@@ -67,6 +67,13 @@ func preWakeCommit(
 		"sleep_intent":               "",
 		"generation":                 strconv.Itoa(newGen),
 	}
+	// Rotate session_key for wake_mode=fresh so each wake gets a new
+	// provider conversation. Without this, a crashed fresh session would
+	// resume with the old key instead of starting a clean conversation.
+	if session.Metadata["wake_mode"] == "fresh" {
+		batch["session_key"] = ""
+		batch["started_config_hash"] = ""
+	}
 	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}

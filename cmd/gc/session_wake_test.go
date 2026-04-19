@@ -983,3 +983,55 @@ func TestDrainTracker_FinishIdleProbeIgnoresStaleProbe(t *testing.T) {
 		t.Fatalf("replacement probe should complete successfully, got ok=%v probe=%+v", ok, probe)
 	}
 }
+
+func TestPreWakeCommit_FreshModeClearsSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)}
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":        "test-fresh",
+			"wake_mode":           "fresh",
+			"session_key":         "old-stale-key",
+			"started_config_hash": "old-hash",
+			"generation":          "1",
+		},
+	})
+	_, _, err := preWakeCommit(&b, store, clk)
+	if err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	got, _ := store.Get(b.ID)
+	if got.Metadata["session_key"] != "" {
+		t.Errorf("session_key = %q, want cleared for wake_mode=fresh", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash = %q, want cleared for wake_mode=fresh", got.Metadata["started_config_hash"])
+	}
+}
+
+func TestPreWakeCommit_ResumeModePreservesSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)}
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":        "test-resume",
+			"wake_mode":           "resume",
+			"session_key":         "resume-key",
+			"started_config_hash": "resume-hash",
+			"generation":          "1",
+		},
+	})
+	_, _, err := preWakeCommit(&b, store, clk)
+	if err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	got, _ := store.Get(b.ID)
+	if got.Metadata["session_key"] != "resume-key" {
+		t.Errorf("session_key = %q, want preserved for wake_mode=resume", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "resume-hash" {
+		t.Errorf("started_config_hash = %q, want preserved for wake_mode=resume", got.Metadata["started_config_hash"])
+	}
+}
