@@ -180,8 +180,8 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
 	return cityDir

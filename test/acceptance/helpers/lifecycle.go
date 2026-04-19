@@ -15,9 +15,11 @@ import (
 // previous test first (tests share XDG_RUNTIME_DIR within a suite).
 func (c *City) StartWithSupervisor() {
 	c.t.Helper()
-	// Stop stale supervisor/controller from a previous test.
-	RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
-	RunGC(c.Env, c.Dir, "stop", c.Dir)     //nolint:errcheck
+	// Stop stale supervisor/controller from a previous test. --wait blocks
+	// until the supervisor has finished shutting down its managed cities
+	// so the start below doesn't race the prior shutdown.
+	RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck
+	RunGC(c.Env, c.Dir, "stop", c.Dir)               //nolint:errcheck
 	time.Sleep(2 * time.Second)
 
 	out, err := RunGC(c.Env, c.Dir, "start", c.Dir)
@@ -28,7 +30,7 @@ func (c *City) StartWithSupervisor() {
 	c.usedSupervisor = true
 	c.t.Cleanup(func() {
 		c.Stop()
-		RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
+		RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	})
 }
 

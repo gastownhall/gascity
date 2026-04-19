@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// Best-effort supervisor stop.
-	helpers.RunGC(testEnv, "", "supervisor", "stop") //nolint:errcheck
+	helpers.RunGC(testEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	os.Exit(code)
 }
 

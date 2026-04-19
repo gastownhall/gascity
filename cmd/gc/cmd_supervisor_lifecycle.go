@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -179,12 +180,22 @@ func waitForSupervisorReady(stderr io.Writer) int {
 }
 
 // unloadSupervisorService stops the platform service without removing
-// the unit file, so gc start can reload it later.
+// the unit file, so gc start can reload it later. It is a no-op when
+// the platform unit/plist is not installed — this keeps unit tests that
+// invoke the stop helper hermetic on machines where the service has
+// never been registered.
 func unloadSupervisorService() {
 	switch goruntime.GOOS {
 	case "darwin":
-		exec.Command("launchctl", "unload", supervisorLaunchdPlistPath()).Run() //nolint:errcheck // best-effort
+		path := supervisorLaunchdPlistPath()
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		exec.Command("launchctl", "unload", path).Run() //nolint:errcheck // best-effort
 	case "linux":
+		if _, err := os.Stat(supervisorSystemdServicePath()); errors.Is(err, os.ErrNotExist) {
+			return
+		}
 		exec.Command("systemctl", "--user", "stop", "gascity-supervisor.service").Run() //nolint:errcheck // best-effort
 	}
 }

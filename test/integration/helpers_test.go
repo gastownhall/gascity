@@ -81,8 +81,8 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 	// Register cleanup: gc stop on test end.
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
 	// Give sessions a moment to register.

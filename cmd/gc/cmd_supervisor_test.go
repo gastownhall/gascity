@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -839,9 +841,15 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	stopManagedCity(mc, cityPath, &stderr)
+	err := stopManagedCity(mc, cityPath, &stderr)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
+	}
+	if err == nil {
+		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
+	}
+	if !strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("stopManagedCity err = %q, want 'did not exit' detail", err.Error())
 	}
 	if !strings.Contains(stderr.String(), "did not exit within") {
 		t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
@@ -888,9 +896,12 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	stopManagedCity(mc, cityPath, &stderr)
+	err := stopManagedCity(mc, cityPath, &stderr)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
+	}
+	if err == nil {
+		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
 	}
 	if !strings.Contains(stderr.String(), "20ms") {
 		t.Fatalf("stderr = %q, want shutdown-timeout warning", stderr.String())
@@ -933,9 +944,15 @@ func TestStopSupervisorWithWaitBlocksUntilSocketStops(t *testing.T) {
 	})
 
 	stopDelay := 200 * time.Millisecond
+	// stopRequested/stopAt are touched by the "stop" handler goroutine and
+	// read concurrently by every "ping" handler goroutine. Guard with a
+	// mutex so `go test -race` doesn't flag this fake server.
+	var (
+		mu            sync.Mutex
+		stopRequested bool
+		stopAt        time.Time
+	)
 	go func() {
-		stopRequested := false
-		var stopAt time.Time
 		for {
 			conn, err := lis.Accept()
 			if err != nil {
@@ -951,15 +968,26 @@ func TestStopSupervisorWithWaitBlocksUntilSocketStops(t *testing.T) {
 				cmd := strings.TrimSpace(string(buf[:n]))
 				switch cmd {
 				case "ping":
-					if stopRequested && time.Now().After(stopAt) {
+					mu.Lock()
+					finished := stopRequested && time.Now().After(stopAt)
+					mu.Unlock()
+					if finished {
 						// Stop answering ping so the waiter sees us as gone.
 						return
 					}
 					io.WriteString(conn, "4242\n") //nolint:errcheck
 				case "stop":
+					mu.Lock()
 					stopRequested = true
 					stopAt = time.Now().Add(stopDelay)
+					mu.Unlock()
 					io.WriteString(conn, "ok\n") //nolint:errcheck
+					// New protocol: --wait clients also read a final
+					// status line. Emit done:ok after the stop delay so
+					// this test exercises the happy path of the new
+					// protocol in addition to the socket-close fallback.
+					time.Sleep(stopDelay)
+					io.WriteString(conn, "done:ok\n") //nolint:errcheck
 				}
 			}(conn)
 		}
@@ -1018,6 +1046,69 @@ func TestStopSupervisorWithoutWaitReturnsAfterAck(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Supervisor stopped.") {
 		t.Fatalf("stdout unexpectedly contains 'Supervisor stopped.' — wait flag was false")
+	}
+}
+
+// TestStopSupervisorWithWaitPropagatesDoneErr exercises the new
+// post-shutdown status protocol: the server sends "ok\n" to ack the
+// stop request, then "done:err:<detail>\n" when shutdown finished with
+// errors (e.g., a managed city failed to quiesce). --wait must surface
+// the error to stderr and exit non-zero so test cleanup sees the flake
+// instead of believing shutdown was clean.
+func TestStopSupervisorWithWaitPropagatesDoneErr(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close() //nolint:errcheck
+				r := bufio.NewReader(conn)
+				line, err := r.ReadString('\n')
+				if err != nil {
+					return
+				}
+				switch strings.TrimSpace(line) {
+				case "ping":
+					io.WriteString(conn, "4242\n") //nolint:errcheck
+				case "stop":
+					io.WriteString(conn, "ok\n")                                                //nolint:errcheck
+					io.WriteString(conn, "done:err:city \"alpha\" did not exit within 5s\n") //nolint:errcheck
+				}
+			}(conn)
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 2*time.Second)
+
+	if code != 1 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 1 (propagated done:err); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "alpha") || !strings.Contains(stderr.String(), "did not exit") {
+		t.Fatalf("stderr = %q, want it to include the server's done:err detail", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout unexpectedly contains 'Supervisor stopped.' — shutdown reported errors")
 	}
 }
 

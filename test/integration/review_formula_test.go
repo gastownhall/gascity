@@ -369,8 +369,8 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck
-		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck
+		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
+		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			_ = os.RemoveAll(cityDir)

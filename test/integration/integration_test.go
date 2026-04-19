@@ -179,8 +179,11 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// Best-effort: stop any isolated supervisor that survived test cleanup.
+	// Use --wait so the sweep blocks until the supervisor and its managed
+	// cities have actually shut down, avoiding a race with process-table
+	// cleanup below.
 	if gcBinary != "" {
-		stopCmd := exec.Command(gcBinary, "supervisor", "stop")
+		stopCmd := exec.Command(gcBinary, "supervisor", "stop", "--wait")
 		stopCmd.Env = integrationEnv()
 		_ = stopCmd.Run()
 	}
@@ -945,7 +948,9 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status")
 		if err == nil && strings.Contains(out, "Supervisor is running") {
 			t.Cleanup(func() {
-				_, _ = runCommand("", env, 5*time.Second, gcBinary, "supervisor", "stop")
+				// --wait so runCommand blocks until the supervisor fully
+				// shut down, aligning with the cmd.Wait() synchronization below.
+				_, _ = runCommand("", env, 15*time.Second, gcBinary, "supervisor", "stop", "--wait")
 				select {
 				case <-done:
 				case <-time.After(10 * time.Second):

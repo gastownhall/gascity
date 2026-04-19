@@ -150,8 +150,9 @@ func TestAgentSuspendResume(t *testing.T) {
 	t.Run("ThenResume", func(t *testing.T) {
 		// Stop the supervisor so agent suspend/resume falls through to
 		// direct city.toml mutation (the API would reject an agent it
-		// doesn't know about from config reload).
-		c.GC("supervisor", "stop")
+		// doesn't know about from config reload). --wait so subsequent
+		// config edits don't race the supervisor's shutdown path.
+		c.GC("supervisor", "stop", "--wait")
 
 		// Write config with a known agent.
 		c.WriteConfig(`[workspace]
