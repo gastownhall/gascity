@@ -767,11 +767,12 @@ func reloadWarningsFromError(err error) []string {
 }
 
 // tryReloadConfig attempts to reload city.toml with includes and patches.
-// Returns the new config, provenance, revision, and non-fatal warnings on
-// success, or an error on failure (parse error, validation error, workspace
-// name changed). Some failures after composition also return warning metadata
-// via the result and error; callers should report those details while keeping
-// the old config. Strict mode (default) makes composition warnings fatal.
+// Returns the new config, provenance, revision, and load warnings on success,
+// or an error on failure. Some failures after composition also return warning
+// metadata via the result and error. Alias-only, unsupported-key, and
+// deprecation warnings stay soft; composition collisions and mixed
+// canonical/compat default tables stay strict-fatal unless --no-strict
+// disables the gate.
 func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
 	// Auto-fetch remote packs before full config load (mirrors cmd_start).
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
