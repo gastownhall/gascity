@@ -12,9 +12,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 var errTemplateTargetNotFound = errors.New("template target not found")
@@ -126,7 +126,6 @@ func materializeSessionForTemplateWithOptions(
 		}
 
 		sp := newSessionProvider()
-		mgr := newSessionManager(store, sp)
 		title := spec.Identity
 		templateIdentity := namedSessionBackingTemplate(spec)
 		extraMeta := map[string]string{
@@ -141,11 +140,28 @@ func materializeSessionForTemplateWithOptions(
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind
 		}
-		resume := session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
+		providerName := ""
+		if spec.Agent != nil {
+			providerName = spec.Agent.Provider
+		}
+		handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+			cityPath,
+			store,
+			sp,
+			cfg,
+			spec.Identity,
+			spec.SessionName,
+			templateIdentity,
+			title,
+			resolved.CommandString(),
+			providerName,
+			workDir,
+			spec.Agent.Session,
+			resolved,
+			extraMeta,
+		)
+		if err != nil {
+			return "", err
 		}
 
 		if cityUsesManagedReconciler(cityPath) {
@@ -158,20 +174,9 @@ func materializeSessionForTemplateWithOptions(
 					if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
 						return err
 					}
-					var err error
-					info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-						spec.Identity,
-						spec.SessionName,
-						templateIdentity,
-						title,
-						resolved.CommandString(),
-						workDir,
-						resolved.Name,
-						spec.Agent.Session,
-						resume,
-						extraMeta,
-					)
-					return err
+					var createErr error
+					info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+					return createErr
 				})
 				if createErr == nil {
 					_ = pokeController(cityPath)
@@ -190,12 +195,6 @@ func materializeSessionForTemplateWithOptions(
 			}
 		}
 
-		hints := runtime.Config{
-			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-			ReadyDelayMs:           resolved.ReadyDelayMs,
-			ProcessNames:           resolved.ProcessNames,
-			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		}
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
 			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
@@ -205,21 +204,7 @@ func materializeSessionForTemplateWithOptions(
 				return err
 			}
 			var createErr error
-			info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-				context.Background(),
-				spec.Identity,
-				spec.SessionName,
-				templateIdentity,
-				title,
-				resolved.CommandString(),
-				workDir,
-				resolved.Name,
-				spec.Agent.Session,
-				resolved.Env,
-				resume,
-				hints,
-				extraMeta,
-			)
+			info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
 			return createErr
 		})
 		if err == nil {
@@ -290,13 +275,32 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 	title := agentCfg.QualifiedName()
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
+	extraMeta := map[string]string{
+		"agent_name":     sessionQualifiedName,
+		"session_origin": "manual",
+	}
+	if resolved.Kind != "" && resolved.Kind != resolved.Name {
+		extraMeta["provider_kind"] = resolved.Kind
+	}
+	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		"",
+		explicitName,
+		agentCfg.QualifiedName(),
+		title,
+		resolved.CommandString(),
+		agentCfg.Provider,
+		workDir,
+		agentCfg.Session,
+		resolved,
+		extraMeta,
+	)
+	if err != nil {
+		return "", err
 	}
 	reservationIDs := []string{explicitName, sessionQualifiedName}
 
@@ -310,23 +314,9 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
 					return err
 				}
-				var err error
-				info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-					"",
-					explicitName,
-					agentCfg.QualifiedName(),
-					title,
-					resolved.CommandString(),
-					workDir,
-					resolved.Name,
-					agentCfg.Session,
-					resume,
-					map[string]string{
-						"agent_name":     sessionQualifiedName,
-						"session_origin": "manual",
-					},
-				)
-				return err
+				var createErr error
+				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+				return createErr
 			})
 			if createErr == nil {
 				_ = pokeController(cityPath)
@@ -336,12 +326,6 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		}
 	}
 
-	hints := runtime.Config{
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
@@ -351,24 +335,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-			context.Background(),
-			"",
-			explicitName,
-			agentCfg.QualifiedName(),
-			title,
-			resolved.CommandString(),
-			workDir,
-			resolved.Name,
-			agentCfg.Session,
-			resolved.Env,
-			resume,
-			hints,
-			map[string]string{
-				"agent_name":     sessionQualifiedName,
-				"session_origin": "manual",
-			},
-		)
+		info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
 		return createErr
 	})
 	if err == nil {

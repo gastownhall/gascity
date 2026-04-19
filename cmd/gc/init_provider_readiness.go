@@ -520,8 +520,13 @@ func checkHardDependencies(cityPath string) []missingDep {
 		condition   func() bool // if non-nil, only checked when true
 	}
 
-	beadsProvider := rawBeadsProvider(cityPath)
-	needsBd := providerUsesBdStoreContract(beadsProvider)
+	needsBd := false
+	if cfg, err := loadCityConfig(cityPath); err == nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		needsBd = workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+	} else {
+		needsBd = cityUsesBdStoreContract(cityPath)
+	}
 
 	deps := []dep{
 		{

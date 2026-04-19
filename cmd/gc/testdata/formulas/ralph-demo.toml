@@ -1,17 +1,17 @@
 formula = "ralph-demo"
-description = "Minimal inline Ralph demo"
+description = "Minimal inline Check demo"
 
 [[steps]]
 id = "implement"
 title = "Write demo output"
 description = """
-Create the Ralph demo output artifact.
+Create the Check demo output artifact.
 """
 
-[steps.ralph]
+[steps.check]
 max_attempts = 2
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gc/scripts/ralph-check.sh"
 timeout = "30s"

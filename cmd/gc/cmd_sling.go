@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -256,19 +257,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		return 1
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
-	storeEnv := map[string]string{}
-	switch provider := rawBeadsProvider(cityPath); {
-	case provider == "file":
-		// Built-in routing now goes through beads.Store; custom queries own any
-		// provider-specific shell environment when they opt out of that path.
-	case strings.HasPrefix(provider, "exec:"):
-		// Explicit custom sling_query commands own their env for exec providers.
-	default:
-		storeEnv = bdRuntimeEnv(cityPath)
-		if !samePath(storeDir, cityPath) {
-			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
-		}
-	}
+	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
 
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
@@ -346,6 +335,23 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
+}
+
+func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
+	storeEnv := map[string]string{}
+	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
+	case provider == "file":
+		// Built-in routing now goes through beads.Store; custom queries own any
+		// provider-specific shell environment when they opt out of that path.
+	case strings.HasPrefix(provider, "exec:"):
+		// Explicit custom sling_query commands own their env for exec providers.
+	default:
+		storeEnv = bdRuntimeEnv(cityPath)
+		if !samePath(storeDir, cityPath) {
+			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+		}
+	}
+	return storeEnv
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).
@@ -1256,7 +1262,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		sp0 := scaleParamsFor(a)
 		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
 			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
-			if sp.IsRunning(sn) {
+			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
+			if err == nil && running {
 				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
 				if !ok {
 					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
@@ -1341,12 +1348,24 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 
 func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
-	running := sp.IsRunning(target.sessionName)
+	obs, err := workerObserveNudgeTarget(target, store, sp)
+	running := err == nil && obs.Running
 	now := time.Now()
-	if running && tryDeliverWaitIdleNudge(target, sp, "sling", msg) {
-		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-		fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
-		return
+	if running {
+		handle, err := workerHandleForNudgeTarget(target, store, sp)
+		if err == nil {
+			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+				Text:     msg,
+				Delivery: worker.NudgeDeliveryWaitIdle,
+				Source:   "sling",
+				Wake:     worker.NudgeWakeLiveOnly,
+			})
+			if nudgeErr == nil && result.Delivered {
+				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
+				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+				return
+			}
+		}
 	}
 
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, store, newQueuedNudge(target.agent.QualifiedName(), msg, "sling", now)); err != nil {
@@ -1630,7 +1649,8 @@ func printNudgePreview(w func(string), a config.Agent, cityName string,
 	st := cfg.Workspace.SessionTemplate
 	w("Nudge:")
 	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
-	if sp.IsRunning(sn) {
+	running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+	if err == nil && running {
 		w("  Would nudge " + a.QualifiedName() + " (session " + sn + ").")
 		w("  Currently: running ✓")
 	} else {

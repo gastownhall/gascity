@@ -145,6 +145,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
+		newReloadCmd(stdout, stderr),
 		newStopCmd(stdout, stderr),
 		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),
@@ -572,7 +573,7 @@ func rigCityEntries(reg *supervisor.Registry, rigPath string) []supervisor.CityE
 	}
 	var matched []supervisor.CityEntry
 	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path)
+		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path)
 		if err != nil {
 			continue
 		}
@@ -703,6 +704,10 @@ func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error)
 }
 
 func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
+		return openExistingScopeLocalFileStore(scopeRoot)
+	}
 	if fileStoreUsesScopedRoots(cityPath) {
 		return openExistingScopeLocalFileStore(scopeRoot)
 	}
@@ -715,7 +720,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
-	provider := rawBeadsProvider(runtimeCityPath)
+	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		target, err := resolveConfiguredExecStoreTarget(runtimeCityPath, scopeRoot)
 		if err != nil {

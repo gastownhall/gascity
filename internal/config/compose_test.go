@@ -45,6 +45,34 @@ name = "mayor"
 	}
 }
 
+func TestLoadWithIncludes_RootPackDefaultRigImportsPreserveOrder(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[defaults.rig.imports.z-pack]
+source = "packs/z-pack"
+
+[defaults.rig.imports.a-pack]
+source = "packs/a-pack"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	want := []string{"packs/z-pack", "packs/a-pack"}
+	if !reflect.DeepEqual(cfg.Workspace.DefaultRigIncludes, want) {
+		t.Fatalf("DefaultRigIncludes = %v, want %v", cfg.Workspace.DefaultRigIncludes, want)
+	}
+}
+
 func TestLoadWithIncludes_SkipsSystemPackWhenReachableFromRootImport(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel, data string) {

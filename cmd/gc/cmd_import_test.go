@@ -87,6 +87,9 @@ includes = ["./packs/base"]
 default_sling_formula = "mol-pack-default"
 append_fragments = ["pack-fragment"]
 
+[defaults.rig.imports.default-pack]
+source = "./packs/default"
+
 [[agent]]
 name = "mayor"
 scope = "city"
@@ -142,6 +145,8 @@ session_live = ["echo hi"]
 		`[agent_defaults]`,
 		`default_sling_formula = "mol-pack-default"`,
 		`append_fragments = ["pack-fragment"]`,
+		`[defaults.rig.imports.default-pack]`,
+		`source = "./packs/default"`,
 		`name = "mayor"`,
 		`[providers.default]`,
 		`[[commands]]`,

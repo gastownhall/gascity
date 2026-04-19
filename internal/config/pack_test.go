@@ -382,6 +382,55 @@ version = "1.0.0"
 	}
 }
 
+func TestExpandPacks_RejectsUnknownPackTomlFields(t *testing.T) { //nolint:misspell // intentional typo in test data
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/bad/pack.toml", `
+[pack]
+name = "bad"
+schema = 2
+schemla = 2
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hello-world", Path: "/home/user/hello-world", Includes: []string{"packs/bad"}},
+		},
+	}
+
+	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown pack.toml field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "pack.schemla"`) {
+		t.Fatalf("error = %v, want unknown field detail for pack.schemla", err)
+	}
+	if !strings.Contains(err.Error(), `did you mean "schema"`) {
+		t.Fatalf("error = %v, want schema suggestion", err)
+	}
+}
+
+func TestLoadWithIncludes_RejectsUnknownRootPackTomlFields(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeFile(t, dir, "pack.toml", `
+[pack]
+name = "test"
+schema = 2
+description = "silently accepted before issue 783"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected error for unknown root pack.toml field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "pack.description"`) {
+		t.Fatalf("error = %v, want unknown field detail for pack.description", err)
+	}
+}
+
 func TestExpandPacks_PromptPathResolution(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `

@@ -21,10 +21,13 @@ const defaultPaginationLimit = 50
 // parsePagination extracts cursor and limit from query parameters.
 // The cursor is an opaque string that encodes an offset into the result set.
 // Limit is capped at maxPaginationLimit regardless of the requested value.
-func parsePagination(r *http.Request) pageParams {
+func parsePagination(r *http.Request, defaultLimit ...int) pageParams {
 	q := r.URL.Query()
 	isPaging := q.Has("cursor")
 	limit := defaultPaginationLimit
+	if len(defaultLimit) > 0 && defaultLimit[0] > 0 {
+		limit = defaultLimit[0]
+	}
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			if n == 0 {

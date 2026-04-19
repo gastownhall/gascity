@@ -65,6 +65,9 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 	if !ok || len(cfg.Workspace.DefaultRigIncludes) == 0 {
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
+	if len(cfg.Workspace.Includes) == 0 && len(legacyAgentFiles(ctx.CityPath)) == 0 {
+		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes preserved for ordered rig defaults")
+	}
 	return warnCheck("v2-default-rig-import-format",
 		"workspace.default_rig_includes is deprecated; migrate to [rig_defaults] imports = [...]",
 		v2MigrationHint(),

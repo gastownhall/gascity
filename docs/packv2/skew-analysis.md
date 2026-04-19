@@ -86,7 +86,7 @@
 
 | Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|-----------------------|
-| 🟡 | `name` | Required string | **Optional.** Transitional runtime identity field in this wave. Fresh `gc init` keeps it aligned with `pack.name`; `gc register` keeps it aligned with the registered city name and backfills it from `pack.name` when absent. Soft warning: full site-binding cutover remains later. | `.gc/` site binding (#600) |
+| 🟡 | `name` | Required string | **Optional.** Transitional runtime identity field in this wave. Fresh `gc init` keeps it aligned with `pack.name`; `gc register` reads it when present but stores registration aliases in the machine-local supervisor registry without backfilling `city.toml`. Soft warning: full site-binding cutover remains later. | `.gc/` site binding (#600) |
 | 🟡 | `prefix` | String | **Optional.** Same treatment as `name`. Soft warning. | `.gc/` site binding (#600) |
 | 🟡 | `provider` | String | **Soft warning.** "Use `[agent_defaults] provider = ...` instead." | `[agent_defaults]` in pack.toml |
 | 🟡 | `start_command` | String | **Soft warning.** "Use per-agent `start_command` in `agent.toml` instead." | Per-agent `agent.toml` |
@@ -252,7 +252,7 @@ All Import fields match spec. No changes needed.
 | 🟢 | `orders/` top-level discovery | doc-directory-conventions | `discoverFlatFiles` in orders/discovery.go |
 | 🟢 | `commands/` convention discovery | doc-commands | `DiscoverPackCommands` in command_discovery.go |
 | 🔴 | `[defaults.rig.imports]` loader support | doc-pack-v2 | Migrate tool writes it, loader ignores it |
-| 🟢 | `gc register --name` flag | doc-pack-v2 | Implemented. The current rollout persists the chosen registration name into `workspace.name`; no-flag registration uses `workspace.name` first, then `pack.name` and backfills `workspace.name`. |
+| 🟢 | `gc register --name` flag | doc-pack-v2 | Implemented. The current rollout stores the chosen registration name in the machine-local supervisor registry without rewriting `city.toml`; no-flag registration uses `workspace.name` first, then `pack.name`, and stores the selected name only in the registry. |
 | 🔴 | `patches/` directory convention | doc-agent-v2 | Not implemented |
 | 🔴 | `skills/` pack discovery | doc-agent-v2 | First slice is current-city-pack only with list-only visibility; imported-pack catalogs are later |
 | 🔴 | `mcp/` TOML abstraction | doc-agent-v2 | First slice is current-city-pack only with list-only visibility; provider projection is later |

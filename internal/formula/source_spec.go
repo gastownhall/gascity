@@ -11,6 +11,8 @@ func newSourceSpecStep(step *Step) (*Step, error) {
 	if step == nil {
 		return nil, fmt.Errorf("serializing step spec: missing step")
 	}
+	// Stored step snapshots intentionally preserve legacy JSON field names so
+	// in-flight beads remain readable across mixed-version rollouts.
 	specJSON, err := json.Marshal(step)
 	if err != nil {
 		return nil, fmt.Errorf("serializing step spec for %q: %w", step.ID, err)

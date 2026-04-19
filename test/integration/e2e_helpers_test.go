@@ -410,12 +410,9 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
-			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
-		}
-		// --wait blocks until the supervisor socket stops answering so
-		// cleanupTestCityDir and t.TempDir() don't race against lingering
-		// supervisor/controller subprocesses.
+		// Each E2E helper gets its own isolated GC_HOME, so stopping that
+		// supervisor is enough to tear down the city and any lingering
+		// controllers or sessions.
 		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
 			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
 		}
@@ -458,12 +455,9 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
-			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
-		}
-		// --wait blocks until the supervisor socket stops answering so
-		// cleanupTestCityDir and t.TempDir() don't race against lingering
-		// supervisor/controller subprocesses.
+		// Each E2E helper gets its own isolated GC_HOME, so stopping that
+		// supervisor is enough to tear down the city and any lingering
+		// controllers or sessions.
 		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
 			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
 		}

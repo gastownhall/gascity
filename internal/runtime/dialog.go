@@ -30,25 +30,36 @@ func AcceptStartupDialogs(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	if err := acceptWorkspaceTrustDialog(ctx, peek, sendKeys); err != nil {
+	return AcceptStartupDialogsWithTimeout(ctx, dialogPollTimeout, peek, sendKeys)
+}
+
+// AcceptStartupDialogsWithTimeout dismisses known startup dialogs using the
+// provided timeout budget for each dialog class.
+func AcceptStartupDialogsWithTimeout(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	if err := acceptWorkspaceTrustDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("workspace trust dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptBypassPermissionsWarning(ctx, peek, sendKeys); err != nil {
+	if err := acceptBypassPermissionsWarning(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("bypass permissions warning: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptCustomAPIKeyDialog(ctx, peek, sendKeys); err != nil {
+	if err := acceptCustomAPIKeyDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("custom API key dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := dismissRateLimitDialog(ctx, peek, sendKeys); err != nil {
+	if err := dismissRateLimitDialog(ctx, timeout, peek, sendKeys); err != nil {
 		return fmt.Errorf("rate limit dialog: %w", err)
 	}
 	return nil
@@ -60,10 +71,11 @@ func AcceptStartupDialogs(
 // continue option is pre-selected, so Enter accepts.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
+	timeout time.Duration,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(dialogPollTimeout)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -108,10 +120,11 @@ func containsWorkspaceTrustDialog(content string) bool {
 // warning requiring Down arrow to select "Yes, I accept" and then Enter.
 func acceptBypassPermissionsWarning(
 	ctx context.Context,
+	timeout time.Duration,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(dialogPollTimeout)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -145,10 +158,11 @@ func acceptBypassPermissionsWarning(
 // Enter to choose "Yes" and proceed with the configured provider.
 func acceptCustomAPIKeyDialog(
 	ctx context.Context,
+	timeout time.Duration,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(dialogPollTimeout)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -187,10 +201,11 @@ func containsCustomAPIKeyDialog(content string) bool {
 // retries later when the rate limit resets.
 func dismissRateLimitDialog(
 	ctx context.Context,
+	timeout time.Duration,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(dialogPollTimeout)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err

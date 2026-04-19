@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const maxIdleSleepProbesPerTick = 3
@@ -47,6 +48,40 @@ func buildDepsMap(cfg *config.City) map[string][]string {
 		}
 	}
 	return deps
+}
+
+func freshRestartSessionKey(tp TemplateParams, meta map[string]string) (string, bool) {
+	if tp.ResolvedProvider != nil {
+		if strings.TrimSpace(tp.ResolvedProvider.SessionIDFlag) != "" {
+			newKey, err := sessionpkg.GenerateSessionKey()
+			if err != nil {
+				return "", false
+			}
+			return newKey, true
+		}
+		if strings.TrimSpace(tp.ResolvedProvider.ResumeFlag) != "" ||
+			strings.TrimSpace(tp.ResolvedProvider.ResumeCommand) != "" ||
+			strings.TrimSpace(tp.ResolvedProvider.ResumeStyle) != "" {
+			return "", true
+		}
+	}
+	if strings.TrimSpace(meta["session_id_flag"]) != "" {
+		newKey, err := sessionpkg.GenerateSessionKey()
+		if err != nil {
+			return "", false
+		}
+		return newKey, true
+	}
+	if strings.TrimSpace(meta["resume_flag"]) != "" ||
+		strings.TrimSpace(meta["resume_command"]) != "" ||
+		strings.TrimSpace(meta["resume_style"]) != "" {
+		return "", true
+	}
+	newKey, err := sessionpkg.GenerateSessionKey()
+	if err != nil {
+		return "", false
+	}
+	return newKey, true
 }
 
 // allDependenciesAliveForTemplate checks that all template dependencies of a
@@ -88,6 +123,18 @@ func allDependenciesAlive(
 	store beads.Store,
 ) bool {
 	return allDependenciesAliveForTemplate(normalizedSessionTemplate(session, cfg), cfg, desiredState, sp, cityName, store)
+}
+
+func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk clock.Clock) bool {
+	if !sessionStartRequested(session, clk) {
+		return false
+	}
+	template := normalizedSessionTemplate(session, cfg)
+	if template == "" {
+		template = session.Metadata["template"]
+	}
+	agent := findAgentByTemplate(cfg, template)
+	return agent != nil && !agent.Suspended
 }
 
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
@@ -268,18 +315,23 @@ func reconcileSessionBeadsTraced(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
-			providerAlive := sp.IsRunning(name)
+			providerAlive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
+			if err != nil {
+				providerAlive = false
+			}
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
-			if preserveConfiguredNamedSessionBead(*session, cfg, cityName) {
+			switch {
+			case preserveConfiguredNamedSessionBead(*session, cfg, cityName):
 				template := normalizedSessionTemplate(*session, cfg)
 				if template == "" {
 					template = session.Metadata["template"]
 				}
 				preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
-				if err != nil {
+				switch {
+				case err != nil:
 					fmt.Fprintf(stderr, "session reconciler: resolve preserved named session %s: %v\n", name, err) //nolint:errcheck
-				} else {
+				default:
 					tp = preservedTP
 					desired = true
 				}
@@ -292,7 +344,20 @@ func reconcileSessionBeadsTraced(
 						"degraded":       err != nil,
 					}, nil, "")
 				}
-			} else {
+			case pendingCreateSessionStillLeased(*session, cfg, clk):
+				template := normalizedSessionTemplate(*session, cfg)
+				if template == "" {
+					template = session.Metadata["template"]
+				}
+				if trace != nil {
+					trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
+						"pending_create_claim": strings.TrimSpace(session.Metadata["pending_create_claim"]),
+						"provider_alive":       providerAlive,
+						"state":                session.Metadata["state"],
+					}, nil, "")
+				}
+				continue
+			default:
 				if providerAlive {
 					// When a store query failed (partial results),
 					// skip drain — the session may have work that we
@@ -343,12 +408,16 @@ func reconcileSessionBeadsTraced(
 
 		// Liveness includes zombie detection: tmux session exists AND
 		// the expected child process is alive (when ProcessNames configured).
-		running := sp.IsRunning(name)
-		alive := running && sp.ProcessAlive(name, tp.Hints.ProcessNames)
+		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
+		if err != nil {
+			obs = worker.LiveObservation{}
+		}
+		running := obs.Running
+		alive := obs.Alive
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		if running && !alive {
-			if output, err := sp.Peek(name, 50); err == nil && output != "" {
+			if output, err := workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, session.ID, 50, tp.Hints.ProcessNames); err == nil && output != "" {
 				rec.Record(events.Event{
 					Type:    events.SessionCrashed,
 					Actor:   "gc",
@@ -393,7 +462,7 @@ func reconcileSessionBeadsTraced(
 					}
 					stopped := !alive // already dead = effectively stopped
 					if alive {
-						if err := sp.Stop(name); err != nil {
+						if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 							fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
 							if !reconcilerOwnedAck && dt != nil {
 								dt.clearIdleProbe(session.ID)
@@ -507,16 +576,19 @@ func reconcileSessionBeadsTraced(
 				if tmuxRequested && dops != nil {
 					_ = dops.clearRestartRequested(name)
 				}
-				// Rotate session_key so the next start gets a fresh
-				// conversation. Clearing started_config_hash forces
-				// firstStart=true in resolveSessionCommand. Clearing
-				// last_woke_at masks the intentional death from crash
-				// and churn trackers (both check last_woke_at first).
-				newSessionKey := ""
-				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-					newSessionKey = newKey
-				}
+				// Providers that can inject a fresh session ID get a
+				// rotated key here so the next wake starts a brand-new
+				// conversation. Providers without SessionIDFlag must
+				// clear any stored key and wake fresh without resume.
+				// Clearing started_config_hash forces firstStart=true in
+				// resolveSessionCommand. Clearing last_woke_at masks the
+				// intentional death from crash and churn trackers (both
+				// check last_woke_at first).
+				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
 				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				if hasCapability && newSessionKey == "" {
+					batch["session_key"] = ""
+				}
 				_ = store.SetMetadataBatch(session.ID, batch)
 				if session.Metadata == nil {
 					session.Metadata = make(map[string]string, len(batch))
@@ -525,7 +597,7 @@ func reconcileSessionBeadsTraced(
 					session.Metadata[key] = value
 				}
 				if alive {
-					if err := sp.Stop(name); err != nil {
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 					} else {
 						fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
@@ -616,6 +688,35 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
+						attached, err := workerSessionTargetAttachedWithConfig(cityPath, store, sp, cfg, session.ID)
+						if err == nil && attached {
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							continue
+						}
+						if isNamedSessionBead(*session) {
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							rec.Record(events.Event{
+								Type:    events.SessionDraining,
+								Actor:   "gc",
+								Subject: tp.DisplayName(),
+								Message: "config drift detected",
+							})
+							continue
+						}
+						// Defer ordinary-session config-drift drain while a
+						// user is attached. Named-session config drift is
+						// non-deferrable and is handled above.
 						if sp.IsAttached(name) {
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
@@ -723,7 +824,7 @@ func reconcileSessionBeadsTraced(
 			if trace != nil {
 				trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
 			}
-			if err := sp.Stop(name); err != nil {
+			if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			} else {
 				_ = sp.ClearScrollback(name)
@@ -1045,7 +1146,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 		nextState = "asleep"
 	}
 	if alive && sp != nil && sessionName != "" {
-		if err := sp.Stop(sessionName); err != nil {
+		if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
 		}
 	}
@@ -1089,7 +1190,7 @@ func shouldBeginIdleDrain(
 	if !probe.success {
 		return false
 	}
-	lastActivity, err := sp.GetLastActivity(session.Metadata["session_name"])
+	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, session.Metadata["session_name"])
 	if err != nil {
 		return false
 	}

@@ -457,6 +457,19 @@ func TestDoStartSession_CreateFails(t *testing.T) {
 	assertCallSequence(t, ops, []string{"createSession"})
 }
 
+func TestDoStartSession_CreateRetriesNoServer(t *testing.T) {
+	ops := &fakeStartOps{
+		createErrs: []error{ErrNoServer, nil},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", runtime.Config{Command: "sleep 300"}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"createSession", "createSession", "setRemainOnExit"})
+}
+
 func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: false, // session died

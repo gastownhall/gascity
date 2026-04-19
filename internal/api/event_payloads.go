@@ -1,6 +1,8 @@
 package api
 
 import (
+	"time"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -36,6 +38,28 @@ type BeadEventPayload struct {
 
 // IsEventPayload marks BeadEventPayload as an events.Payload variant.
 func (BeadEventPayload) IsEventPayload() {}
+
+// WorkerOperationEventPayload is the typed payload projected for
+// worker.operation events on the supervisor event stream.
+type WorkerOperationEventPayload struct {
+	OpID        string    `json:"op_id"`
+	Operation   string    `json:"operation"`
+	Result      string    `json:"result"`
+	SessionID   string    `json:"session_id,omitempty"`
+	SessionName string    `json:"session_name,omitempty"`
+	Provider    string    `json:"provider,omitempty"`
+	Transport   string    `json:"transport,omitempty"`
+	Template    string    `json:"template,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	FinishedAt  time.Time `json:"finished_at"`
+	DurationMs  int64     `json:"duration_ms"`
+	Queued      *bool     `json:"queued,omitempty"`
+	Delivered   *bool     `json:"delivered,omitempty"`
+	Error       string    `json:"error,omitempty"`
+}
+
+// IsEventPayload marks WorkerOperationEventPayload as an events.Payload variant.
+func (WorkerOperationEventPayload) IsEventPayload() {}
 
 func init() {
 	// mail.* — all seven types share one payload shape.
@@ -77,4 +101,5 @@ func init() {
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
+	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
 }

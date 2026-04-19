@@ -7,11 +7,15 @@
 package configedit
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -37,6 +41,15 @@ var (
 	// config (duplicate names, missing required fields, etc.). Maps to
 	// HTTP 400.
 	ErrValidation = errors.New("validation failed")
+
+	// ErrUnmodified signals that an [Editor.EditExpanded] callback
+	// completed successfully without mutating the raw config, and the
+	// writeback should be skipped. The Editor still releases its lock
+	// and returns nil to the caller. Use this when a mutation lives
+	// entirely outside city.toml (e.g., a write to
+	// agents/<name>/agent.toml) so that we don't churn city.toml's
+	// mtime or risk losing comments on a no-op rewrite.
+	ErrUnmodified = errors.New("configedit: raw config unmodified")
 )
 
 // Origin describes where an agent or rig is defined in the config.
@@ -127,6 +140,9 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	}
 
 	if err := fn(raw, expanded); err != nil {
+		if errors.Is(err, ErrUnmodified) {
+			return nil
+		}
 		return err
 	}
 
@@ -279,39 +295,234 @@ func AddOrUpdateRigPatch(cfg *config.City, name string, fn func(p *config.RigPat
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool { return &b }
 
-// SuspendAgent suspends an agent, using inline edit or patch depending
-// on provenance. This is the correct implementation that writes desired
-// state to city.toml (not ephemeral session metadata).
+// SuspendAgent suspends an agent, using inline edit, agent.toml write,
+// or [[patches.agent]] depending on provenance. Writes desired state
+// to durable config (not ephemeral session metadata).
 func (e *Editor) SuspendAgent(name string) error {
 	return e.EditExpanded(func(raw, expanded *config.City) error {
-		switch AgentOrigin(raw, expanded, name) {
-		case OriginInline:
-			return SetAgentSuspended(raw, name, true)
-		case OriginDerived:
-			return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
-				p.Suspended = boolPtr(true)
-			})
-		default:
-			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
-		}
+		return mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, true)
 	})
 }
 
-// ResumeAgent resumes a suspended agent, using inline edit or patch
-// depending on provenance.
+// ResumeAgent resumes a suspended agent, mirroring [Editor.SuspendAgent].
 func (e *Editor) ResumeAgent(name string) error {
 	return e.EditExpanded(func(raw, expanded *config.City) error {
-		switch AgentOrigin(raw, expanded, name) {
-		case OriginInline:
-			return SetAgentSuspended(raw, name, false)
-		case OriginDerived:
-			return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
-				p.Suspended = boolPtr(false)
-			})
-		default:
-			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
-		}
+		return mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, false)
 	})
+}
+
+// mutateAgentSuspended is the shared dispatch for SuspendAgent and
+// ResumeAgent. Branches on agent provenance:
+//   - OriginInline (city.toml [[agent]]): edit the raw struct.
+//   - OriginDerived + convention-discovered (agents/<name>/): write
+//     agents/<name>/agent.toml; also strip any legacy [[patches.agent]]
+//     suspended override so it can't shadow the new value.
+//   - OriginDerived + pack-declared: add or update [[patches.agent]].
+//
+// Returns [ErrUnmodified] when the change lives entirely in agent.toml
+// and raw was not touched, so EditExpanded skips the city.toml writeback.
+func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.City, name string, suspended bool) error {
+	switch AgentOrigin(raw, expanded, name) {
+	case OriginInline:
+		return SetAgentSuspended(raw, name, suspended)
+	case OriginDerived:
+		if agent, ok := findLocalDiscoveredAgent(fs, expanded, cityRoot, name); ok {
+			if err := WriteLocalDiscoveredAgentSuspended(fs, cityRoot, agent, suspended); err != nil {
+				return err
+			}
+			// A pre-existing [[patches.agent]] suspended override would
+			// silently shadow the agent.toml write (patch precedence).
+			// Strip it here so the durable agent.toml value wins. Use
+			// the discovered agent's full (Dir, Name) identity so we
+			// only strip the matching patch, not a same-named entry
+			// targeting a different rig.
+			if StripAgentPatchSuspended(raw, agent.QualifiedName()) {
+				return nil
+			}
+			return ErrUnmodified
+		}
+		return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
+			p.Suspended = boolPtr(suspended)
+		})
+	case OriginNotFound:
+		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
+	}
+	return fmt.Errorf("agent %q: unknown origin", name)
+}
+
+func findLocalDiscoveredAgent(fs fsys.FS, expanded *config.City, cityRoot, name string) (config.Agent, bool) {
+	cityRoot = filepath.Clean(cityRoot)
+	for _, a := range expanded.Agents {
+		if !config.AgentMatchesIdentity(&a, name) {
+			continue
+		}
+		if !LocalDiscoveredAgent(fs, cityRoot, a) {
+			continue
+		}
+		return a, true
+	}
+	return config.Agent{}, false
+}
+
+// LocalDiscoveredAgent reports whether an agent's durable configuration
+// lives in agents/<name>/agent.toml. Such agents are scaffolded purely by
+// the convention layout (a prompt file under agents/<name>/) and are not
+// declared in either city.toml [[agent]] or the city's pack.toml [[agent]].
+//
+// Pack-declared [[agent]] entries that happen to point at a conventional
+// prompt template are intentionally excluded — for those, [[patches.agent]]
+// is the correct mutation surface, since pack.toml [[agent]] takes
+// precedence over agent.toml during composition. The pack-declared check
+// matches on the agent's full (Dir, Name) identity so that a city-scoped
+// discovered agent and a pack rig-scoped agent that happen to share a
+// bare Name remain distinct.
+func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) bool {
+	if agent.BindingName != "" {
+		return false
+	}
+	// Convention discovery scans <cityRoot>/agents/<Name>/, which is
+	// strictly city-scoped (Agent.Dir == ""). A rig-scoped agent that
+	// happens to point its prompt_template at the city's agents/<name>/
+	// prompt template is a different identity and must NOT be classified
+	// as local-discovered — writing agent.toml there would corrupt the
+	// city agent's durable state.
+	if agent.Dir != "" {
+		return false
+	}
+	cityRoot = filepath.Clean(cityRoot)
+	agentDir := filepath.Join(cityRoot, "agents", agent.Name)
+	switch filepath.Clean(agent.PromptTemplate) {
+	case filepath.Join(agentDir, "prompt.template.md"),
+		filepath.Join(agentDir, "prompt.md.tmpl"),
+		filepath.Join(agentDir, "prompt.md"):
+		// Conventional layout — eligible unless explicitly declared.
+	default:
+		return false
+	}
+	return !agentDeclaredInCityPack(fs, cityRoot, agent.Dir, agent.Name)
+}
+
+// agentDeclaredInCityPack reports whether (dir, name) appears as an
+// explicit [[agent]] entry in <cityRoot>/pack.toml. Convention-discovered
+// agents from agents/<name>/ are not [[agent]] entries and return false.
+// Matching uses the full (Dir, Name) identity so that, for example, a
+// rig-scoped pack agent (dir="rig", name="worker") does not shadow a
+// city-scoped discovered agent of the same bare name.
+func agentDeclaredInCityPack(fs fsys.FS, cityRoot, dir, name string) bool {
+	packPath := filepath.Join(cityRoot, "pack.toml")
+	data, err := fs.ReadFile(packPath)
+	if err != nil {
+		return false
+	}
+	var pc struct {
+		Agents []struct {
+			Dir  string `toml:"dir"`
+			Name string `toml:"name"`
+		} `toml:"agent"`
+	}
+	if _, err := toml.Decode(string(data), &pc); err != nil {
+		return false
+	}
+	for _, a := range pc.Agents {
+		if a.Dir == dir && a.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// StripAgentPatchSuspended clears the Suspended override from any
+// matching [[patches.agent]] entry so it can't shadow a durable
+// agent.toml write. If a patch had only Suspended set (the shape produced
+// by older suspend/resume code), the entire entry is dropped to avoid
+// leaving an identity-only [[patches.agent]] block in city.toml.
+// Returns true if any patch was modified.
+func StripAgentPatchSuspended(cfg *config.City, name string) bool {
+	dir, base := config.ParseQualifiedName(name)
+	modified := false
+	kept := cfg.Patches.Agents[:0:0]
+	for _, p := range cfg.Patches.Agents {
+		if p.Dir == dir && p.Name == base && p.Suspended != nil {
+			p.Suspended = nil
+			modified = true
+			if isAgentPatchOnlyIdentity(p) {
+				continue
+			}
+		}
+		kept = append(kept, p)
+	}
+	if modified {
+		cfg.Patches.Agents = kept
+	}
+	return modified
+}
+
+// isAgentPatchOnlyIdentity reports whether every field of p other than
+// Dir and Name is the zero value — i.e., the patch carries no overrides.
+// Reflection avoids drift as new fields are added to AgentPatch.
+func isAgentPatchOnlyIdentity(p config.AgentPatch) bool {
+	v := reflect.ValueOf(p)
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		switch t.Field(i).Name {
+		case "Dir", "Name":
+			continue
+		}
+		if !v.Field(i).IsZero() {
+			return false
+		}
+	}
+	return true
+}
+
+// WriteLocalDiscoveredAgentSuspended writes the suspended state to
+// agents/<name>/agent.toml using an atomic temp-file rename. When
+// suspended is false and the file would become empty (no other fields),
+// it is removed instead.
+//
+// Decoding into map[string]any (rather than a typed struct) preserves
+// any user-set fields the caller didn't ask about. TOML comments and
+// key ordering are not preserved — that is a limitation of the
+// underlying decode/encode round trip, not this helper.
+func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent config.Agent, suspended bool) error {
+	agentTomlPath := filepath.Join(cityRoot, "agents", agent.Name, "agent.toml")
+
+	values := make(map[string]any)
+	data, err := fs.ReadFile(agentTomlPath)
+	switch {
+	case err == nil:
+		if len(bytes.TrimSpace(data)) > 0 {
+			if _, decodeErr := toml.Decode(string(data), &values); decodeErr != nil {
+				return fmt.Errorf("reading agents/%s/agent.toml: %w", agent.Name, decodeErr)
+			}
+		}
+	case os.IsNotExist(err):
+		// Start from an empty config; suspend=true may create the file.
+	default:
+		return fmt.Errorf("reading agents/%s/agent.toml: %w", agent.Name, err)
+	}
+
+	if suspended {
+		values["suspended"] = true
+	} else {
+		delete(values, "suspended")
+	}
+
+	if len(values) == 0 {
+		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
+		}
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
+		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
+	}
+	if err := fsys.WriteFileAtomic(fs, agentTomlPath, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
+	}
+	return nil
 }
 
 // SuspendRig suspends a rig by setting suspended=true in city.toml.

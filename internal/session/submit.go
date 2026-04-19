@@ -19,7 +19,12 @@ import (
 )
 
 const (
-	defaultQueuedSubmitTTL = 24 * time.Hour
+	defaultQueuedSubmitTTL    = 24 * time.Hour
+	interruptClearDelay       = 100 * time.Millisecond
+	interruptBoundaryWait     = 10 * time.Second
+	codexDeferredDialogDelay  = 2 * time.Second
+	softInterruptFallbackWait = 2 * time.Second
+	startupDialogVerifiedKey  = "startup_dialog_verified"
 )
 
 // SubmitIntent is the semantic delivery choice for a user message.
@@ -104,7 +109,8 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		case SubmitIntentInterruptNow:
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
-			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b))
+			resuming := State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName)
+			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
 		}
 	})
 	return outcome, err
@@ -122,19 +128,30 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
+	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
 		return err
 	}
-	if waitsForIdleAfterInterrupt(b) {
-		if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
-			if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-				// Idle wait failed (e.g. timeout). Fall back to hard
-				// restart so the session isn't left in limbo.
-				if stopErr := m.sp.Stop(sessName); stopErr != nil {
-					return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
-				}
-				return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
-			}
+	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
+		// Idle wait failed (e.g. timeout). Fall back to hard
+		// restart so the session isn't left in limbo.
+		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
+		}
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+	}
+	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
+		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
+		}
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+	}
+	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
+		return err
+	}
+	if shouldClearInterruptedInputBeforeSubmit(b) {
+		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
+			return err
 		}
 	}
 	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
@@ -189,6 +206,52 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	return nil
 }
 
+func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if !waitsForIdleAfterInterrupt(b) {
+		return nil
+	}
+	waiter, ok := m.sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return nil
+	}
+	waitForIdle := func(timeout time.Duration) error {
+		err := waiter.WaitForIdle(ctx, sessName, timeout)
+		if errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return nil
+		}
+		return err
+	}
+	if usesSoftEscapeInterrupt(b) {
+		if requiresImmediateInterruptConfirm(b) {
+			if err := m.sp.Interrupt(sessName); err != nil {
+				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
+			}
+			return waitForIdle(15 * time.Second)
+		}
+		if err := waitForIdle(softInterruptFallbackWait); err == nil {
+			return nil
+		}
+		if err := m.sp.Interrupt(sessName); err != nil {
+			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
+		}
+	}
+	return waitForIdle(15 * time.Second)
+}
+
+func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Bead, sessName string, since time.Time) error {
+	if !requiresInterruptBoundaryWait(b) {
+		return nil
+	}
+	waiter, ok := m.sp.(runtime.InterruptBoundaryWaitProvider)
+	if !ok {
+		return nil
+	}
+	if err := waiter.WaitForInterruptBoundary(ctx, sessName, since, interruptBoundaryWait); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return fmt.Errorf("waiting for interrupt boundary: %w", err)
+	}
+	return nil
+}
+
 // providerKind returns the canonical provider kind for a session bead.
 // It checks provider_kind metadata first (set for custom aliases that derive
 // from a builtin), then falls back to the raw provider metadata value.
@@ -204,7 +267,7 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 		return false
 	}
 	switch providerKind(b) {
-	case "codex", "gemini":
+	case "codex":
 		return true
 	default:
 		return false
@@ -215,19 +278,98 @@ func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	return providerKind(b) == "claude"
+	switch providerKind(b) {
+	case "claude", "codex", "gemini":
+		return true
+	default:
+		return false
+	}
 }
 
-func usesImmediateDefaultSubmit(b beads.Bead) bool {
+func shouldClearInterruptedInputBeforeSubmit(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	switch providerKind(b) {
+	case "claude", "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if !requiresInterruptedTurnReset(b) {
+		return nil
+	}
+	resetter, ok := m.sp.(runtime.InterruptedTurnResetProvider)
+	if !ok {
+		return nil
+	}
+	if err := resetter.ResetInterruptedTurn(ctx, sessName); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return fmt.Errorf("discarding interrupted turn: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
+	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
+		return fmt.Errorf("clearing interrupted input: %w", err)
+	}
+	if err := sleepWithContext(ctx, interruptClearDelay); err != nil {
+		return err
+	}
+	return nil
+}
+
+func requiresImmediateInterruptConfirm(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	switch providerKind(b) {
+	case "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresInterruptedTurnReset(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "gemini"
+}
+
+func requiresInterruptBoundaryWait(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "codex"
+}
+
+func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
 	switch providerKind(b) {
 	case "codex":
 		return true
+	case "gemini":
+		return resuming
 	default:
 		return false
 	}
+}
+
+func needsDeferredStartupDialogVerification(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	if providerKind(b) != "codex" {
+		return false
+	}
+	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {

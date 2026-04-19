@@ -859,26 +859,40 @@ func enforceCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase st
 }
 
 func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City) error {
-	if cfg == nil || !cityUsesBdStoreContract(cityPath) {
+	if cfg == nil {
 		return nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
-		return fmt.Errorf("canonicalizing city metadata: %w", err)
+	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
+			return fmt.Errorf("canonicalizing city metadata: %w", err)
+		}
 	}
 	for i := range cfg.Rigs {
+		if !rigUsesManagedBdStoreContract(cityPath, cfg.Rigs[i]) {
+			continue
+		}
 		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())); err != nil {
 			return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
 		}
 	}
-	if err := syncConfiguredDoltPortFiles(cityPath, rawBeadsProvider(cityPath), cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs); err != nil {
+	if err := syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs); err != nil {
 		return fmt.Errorf("syncing canonical dolt config: %w", err)
 	}
 	return nil
 }
 
-func syncConfiguredDoltPortFiles(cityPath, provider string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) error {
-	if !providerUsesBdStoreContract(provider) {
+func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) error {
+	resolveRigPaths(cityPath, rigs)
+	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
+	anyRigUsesBd := false
+	for _, rig := range rigs {
+		if rigUsesManagedBdStoreContract(cityPath, rig) {
+			anyRigUsesBd = true
+			break
+		}
+	}
+	if !cityUsesBd && !anyRigUsesBd {
 		return nil
 	}
 	// .beads/config.yaml is a bd compatibility mirror, not the canonical
@@ -895,11 +909,15 @@ func syncConfiguredDoltPortFiles(cityPath, provider string, cityDolt config.Dolt
 	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
 		managedPort = currentDoltPort(cityPath)
 	}
-	if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
-		return err
-	}
-	if managedPort != "" {
-		writeDoltPortFile(cityPath, managedPort)
+	if cityUsesBd {
+		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
+			return err
+		}
+		if managedPort != "" {
+			writeDoltPortFile(cityPath, managedPort)
+		} else {
+			removeDoltPortFile(cityPath)
+		}
 	} else {
 		removeDoltPortFile(cityPath)
 	}
@@ -907,6 +925,10 @@ func syncConfiguredDoltPortFiles(cityPath, provider string, cityDolt config.Dolt
 	for i := range rigs {
 		rig := normalizedRigConfig(cityPath, rigs[i])
 		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			removeDoltPortFile(rig.Path)
 			continue
 		}
 		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)
@@ -1021,7 +1043,7 @@ func wrapInvalidEndpointStateError(scope string, err error) error {
 }
 
 func validateCanonicalCompatDoltDrift(cityPath string, cfg *config.City) error {
-	if cfg == nil || !cityUsesBdStoreContract(cityPath) {
+	if cfg == nil || !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 		return nil
 	}
 	cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, config.EffectiveHQPrefix(cfg))

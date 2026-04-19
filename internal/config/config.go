@@ -23,6 +23,12 @@ import (
 // or underscores. Slashes, spaces, and dots are not allowed.
 var validAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
+// validNamedSessionTemplate matches a named_session template reference.
+// Root-authored named sessions may target imported PackV2 templates by
+// binding-qualified name ("binding.agent"), while rig scope is carried
+// separately by NamedSession.Dir during pack expansion.
+var validNamedSessionTemplate = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*(\.[a-zA-Z0-9][a-zA-Z0-9_-]*)?$`)
+
 const (
 	// ControlDispatcherAgentName is the built-in deterministic control lane for
 	// graph.v2 workflow control beads.
@@ -192,10 +198,32 @@ type City struct {
 	//   formulas/        — formula definitions
 	// Populated during pack expansion. Not from TOML.
 	PackDirs []string `toml:"-" json:"-"`
+	// PackGraphOnlyDirs is the city pack closure rooted at workspace.includes,
+	// including nested pack.includes and nested imports reached from those
+	// packs, ordered low→high precedence for MCP resolution.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackGraphOnlyDirs []string `toml:"-" json:"-"`
+	// ExplicitImportPackDirs is the ordered low→high city-level explicit-import
+	// pack closure used by MCP resolution. Runtime-only.
+	ExplicitImportPackDirs []string `toml:"-" json:"-"`
+	// ImplicitImportPackDirs is the ordered low→high city-level non-bootstrap
+	// implicit-import closure used by MCP resolution. Runtime-only.
+	ImplicitImportPackDirs []string `toml:"-" json:"-"`
+	// BootstrapImportPackDirs is the ordered low→high bootstrap implicit-import
+	// closure used by MCP resolution. Runtime-only.
+	BootstrapImportPackDirs []string `toml:"-" json:"-"`
 	// RigPackDirs maps rig name to its ordered pack directories.
 	// Used when rig packs differ from city packs.
 	// Populated during pack expansion. Not from TOML.
 	RigPackDirs map[string][]string `toml:"-" json:"-"`
+	// RigPackGraphOnlyDirs maps rig name to the rig's pack closure rooted at
+	// rig.includes, including nested pack.includes and nested imports reached
+	// from those packs, ordered low→high precedence for MCP resolution.
+	// Runtime-only.
+	RigPackGraphOnlyDirs map[string][]string `toml:"-" json:"-"`
+	// RigImportPackDirs maps rig name to the rig's explicit-import closure,
+	// ordered low→high precedence for MCP resolution. Runtime-only.
+	RigImportPackDirs map[string][]string `toml:"-" json:"-"`
 	// PackOverlayDirs is the ordered list of overlay/ directories
 	// from all loaded city packs. Contents are copied to each agent's
 	// workdir during startup (before the agent's own OverlayDir).
@@ -235,6 +263,28 @@ type City struct {
 	// RigPackSkills maps rig name to the binding-qualified shared skill
 	// catalogs composed from that rig's imports. Runtime-only.
 	RigPackSkills map[string][]DiscoveredSkillCatalog `toml:"-" json:"-"`
+	// ImplicitImportBindings records which city-level import bindings were
+	// injected from ~/.gc/implicit-import.toml. Runtime-only.
+	ImplicitImportBindings map[string]bool `toml:"-" json:"-"`
+	// BootstrapImportBindings records which implicit-import bindings are
+	// bootstrap-managed. Runtime-only.
+	BootstrapImportBindings map[string]bool `toml:"-" json:"-"`
+	// ExplicitImportMCPBindings records the city-level explicit-import binding
+	// that currently owns each MCP pack dir after precedence flattening.
+	// Runtime-only.
+	ExplicitImportMCPBindings map[string]string `toml:"-" json:"-"`
+	// ImplicitImportMCPBindings records the city-level non-bootstrap implicit
+	// binding that currently owns each MCP pack dir after precedence
+	// flattening. Runtime-only.
+	ImplicitImportMCPBindings map[string]string `toml:"-" json:"-"`
+	// BootstrapImportMCPBindings records the bootstrap implicit-import binding
+	// that currently owns each MCP pack dir after precedence flattening.
+	// Runtime-only.
+	BootstrapImportMCPBindings map[string]string `toml:"-" json:"-"`
+	// RigImportMCPBindings records, per rig, the rig-import binding that
+	// currently owns each MCP pack dir after precedence flattening.
+	// Runtime-only.
+	RigImportMCPBindings map[string]map[string]string `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -2335,8 +2385,11 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		if s.Template == "" {
 			return fmt.Errorf("named_session[%d]: template is required", i)
 		}
-		if !validAgentName.MatchString(s.Template) {
-			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Template)
+		if !validNamedSessionTemplate.MatchString(s.Template) {
+			return fmt.Errorf(
+				"named_session[%d]: template %q must be an agent template name like %q or a binding-qualified name like %q",
+				i, s.Template, "agent", "binding.agent",
+			)
 		}
 		if s.Name != "" && !validAgentName.MatchString(s.Name) {
 			return fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)

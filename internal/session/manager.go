@@ -77,6 +77,16 @@ type Info struct {
 	Attached      bool
 }
 
+// RuntimeObservation reports the provider-backed live runtime state for a
+// persisted session.
+type RuntimeObservation struct {
+	Running     bool
+	Alive       bool
+	Attached    bool
+	LastActive  time.Time
+	SessionName string
+}
+
 func normalizeInfoState(state State) State {
 	switch state {
 	case "awake":
@@ -651,6 +661,20 @@ func (m *Manager) Suspend(id string) error {
 	})
 }
 
+// RequestFreshRestart marks a session for a controller-owned fresh restart
+// without closing its bead or clearing resume metadata immediately.
+func (m *Manager) RequestFreshRestart(id string) error {
+	return withSessionMutationLock(id, func() error {
+		if _, _, err := m.sessionBead(id); err != nil {
+			return err
+		}
+		return m.store.SetMetadataBatch(id, map[string]string{
+			"restart_requested":          "true",
+			"continuation_reset_pending": "true",
+		})
+	})
+}
+
 // Close ends a conversation permanently.
 func (m *Manager) Close(id string) error {
 	return withSessionMutationLock(id, func() error {
@@ -998,6 +1022,28 @@ func (m *Manager) Get(id string) (Info, error) {
 	return m.infoFromBead(b), nil
 }
 
+// ObserveRuntime reports live provider state for the current session runtime.
+func (m *Manager) ObserveRuntime(id string, processNames []string) (RuntimeObservation, error) {
+	info, err := m.Get(id)
+	if err != nil {
+		return RuntimeObservation{}, err
+	}
+	obs := RuntimeObservation{SessionName: info.SessionName}
+	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
+		return obs, nil
+	}
+	obs.Running = m.sp.IsRunning(info.SessionName)
+	if !obs.Running {
+		return obs, nil
+	}
+	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
+	obs.Attached = m.sp.IsAttached(info.SessionName)
+	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
+		obs.LastActive = lastActive
+	}
+	return obs, nil
+}
+
 // ListResult holds the results of a ListFull call, including the raw beads
 // to avoid redundant store queries.
 type ListResult struct {
@@ -1137,6 +1183,29 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	return info
 }
 
+// PersistSessionKey stores a provider resume key on an existing session when
+// the key is learned after creation (for example from transcript evidence).
+// Existing non-empty keys are preserved.
+func (m *Manager) PersistSessionKey(id, sessionKey string) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if id == "" || sessionKey == "" {
+		return nil
+	}
+	return withSessionMutationLock(id, func() error {
+		b, _, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(b.Metadata["session_key"]) != "" {
+			return nil
+		}
+		if err := m.store.SetMetadata(id, "session_key", sessionKey); err != nil {
+			return fmt.Errorf("storing session key: %w", err)
+		}
+		return nil
+	})
+}
+
 // sessionNameFor derives the tmux session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {
@@ -1186,7 +1255,7 @@ func mergeEnv(base, override map[string]string) map[string]string {
 	if len(base) == 0 && len(override) == 0 {
 		return nil
 	}
-	merged := make(map[string]string, len(base)+len(override))
+	merged := make(map[string]string)
 	for k, v := range base {
 		merged[k] = v
 	}

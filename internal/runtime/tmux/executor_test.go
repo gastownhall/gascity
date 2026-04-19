@@ -128,6 +128,24 @@ func TestRunNoSocketFlagWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestHiddenAttachedKeyBytesSupportsArrowNavigation(t *testing.T) {
+	tests := map[string]string{
+		"Up":    "\x1b[A",
+		"Down":  "\x1b[B",
+		"Right": "\x1b[C",
+		"Left":  "\x1b[D",
+	}
+	for key, want := range tests {
+		got, ok := hiddenAttachedKeyBytes(key)
+		if !ok {
+			t.Fatalf("hiddenAttachedKeyBytes(%q) not supported", key)
+		}
+		if string(got) != want {
+			t.Fatalf("hiddenAttachedKeyBytes(%q) = %q, want %q", key, string(got), want)
+		}
+	}
+}
+
 func TestRunAlwaysPrependsUTF8Flag(t *testing.T) {
 	fe := &fakeExecutor{}
 	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}

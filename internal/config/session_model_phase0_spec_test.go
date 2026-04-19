@@ -14,6 +14,8 @@ import (
 // - Default work_query contract
 // - Default on_boot / on_death hooks
 // - Cap Accounting for mode=always named sessions
+// Keep these cases unique; a prior rebase duplicated the trailing block and
+// broke CI typechecking.
 
 func TestPhase0NamedSessionConfig_ExplicitNameCreatesDistinctIdentityFromTemplate(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city.toml")

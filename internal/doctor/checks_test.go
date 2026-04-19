@@ -803,6 +803,370 @@ func TestBeadsStoreCheck_FileProviderSkipsDoltPreflight(t *testing.T) {
 	}
 }
 
+// --- BDSplitStoreCheck ---
+
+func TestBDSplitStoreCheck_ServerActiveWarnsWhenEmbeddedStoreHasRepos(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	for _, want := range []string{"legacy split store", ".beads/embeddeddolt", "1 Dolt repo"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("message = %q, want %q", r.Message, want)
+		}
+	}
+	if !strings.Contains(r.FixHint, "bd import --dry-run") {
+		t.Fatalf("fix hint = %q, want import dry-run guidance", r.FixHint)
+	}
+}
+
+func TestBDSplitStoreCheck_EmbeddedActiveWarnsWhenServerStoreHasRepos(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"legacy"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "legacy"))
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	for _, want := range []string{"legacy split store", ".beads/dolt", "metadata.json dolt_mode=embedded"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("message = %q, want %q", r.Message, want)
+		}
+	}
+}
+
+func TestBDSplitStoreCheck_BothDirsButInactiveEmptyIsOK(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	if err := os.MkdirAll(filepath.Join(dir, ".beads", "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestBDSplitStoreCheck_ExternalCityTreatsLocalReposAsLegacy(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "3307",
+	})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	if err := os.MkdirAll(filepath.Join(dir, ".beads", "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no active local store") {
+		t.Fatalf("message = %q, want no active local store warning", r.Message)
+	}
+}
+
+func TestBDSplitStoreCheck_InvalidExternalCityConfigUsesNeutralGuidance(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "db.example.com",
+	})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no active local store") {
+		t.Fatalf("message = %q, want no active local store warning", r.Message)
+	}
+	if strings.Contains(r.Message, "active .beads/dolt") {
+		t.Fatalf("message = %q, should not trust metadata when canonical external config is invalid", r.Message)
+	}
+	if strings.Contains(r.FixHint, "inactive store") {
+		t.Fatalf("fix hint = %q, should not reference inactive store when active local store is unknown", r.FixHint)
+	}
+}
+
+func TestBDSplitStoreCheck_FileProviderUsesNeutralRecoveryGuidance(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no active local store") {
+		t.Fatalf("message = %q, want no active local store warning", r.Message)
+	}
+	if strings.Contains(r.FixHint, "inactive store") {
+		t.Fatalf("fix hint = %q, should not reference inactive store under file provider", r.FixHint)
+	}
+}
+
+func TestBDSplitStoreCheck_ManagedCityUsesCanonicalSourceInMessage(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if strings.Contains(r.Message, "metadata.json dolt_mode=managed_city") {
+		t.Fatalf("message = %q, should not label endpoint origin as metadata dolt_mode", r.Message)
+	}
+	if !strings.Contains(r.Message, "canonical endpoint_origin=managed_city") {
+		t.Fatalf("message = %q, want canonical endpoint source", r.Message)
+	}
+}
+
+func TestRigBDSplitStoreCheck_InheritedRigTreatsLocalReposAsLegacy(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	writeDoltRepoMarker(t, filepath.Join(rigDir, ".beads", "dolt", "de"))
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads", "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewRigBDSplitStoreCheck(cityDir, config.Rig{Name: "demo", Path: rigDir})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no active local store") {
+		t.Fatalf("message = %q, want no active local store warning", r.Message)
+	}
+}
+
+func TestRigBDSplitStoreCheck_BDBackedRigUnderFileCityUsesRigMetadata(t *testing.T) {
+	cityDir := setupCity(t, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`)
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	writeDoltRepoMarker(t, filepath.Join(rigDir, ".beads", "dolt", "de"))
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads", "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewRigBDSplitStoreCheck(cityDir, config.Rig{Name: "demo", Path: rigDir})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+	if !strings.Contains(r.Message, "inactive store is empty") {
+		t.Fatalf("message = %q, want inactive-store-empty OK", r.Message)
+	}
+}
+
+func TestRigBDSplitStoreCheck_ManagedExecProviderScriptUsesBDStore(t *testing.T) {
+	cityDir := setupCity(t, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`)
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "packs", "bd", "assets", "scripts", "gc-beads-bd.sh"))
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	writeDoltRepoMarker(t, filepath.Join(rigDir, ".beads", "dolt", "de"))
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads", "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewRigBDSplitStoreCheck(cityDir, config.Rig{Name: "demo", Path: rigDir})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+	if !strings.Contains(r.Message, "inactive store is empty") {
+		t.Fatalf("message = %q, want inactive-store-empty OK", r.Message)
+	}
+}
+
+func TestRigBDSplitStoreCheck_InvalidExternalCityConfigUsesNeutralGuidance(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "db.example.com",
+	})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	writeDoltRepoMarker(t, filepath.Join(rigDir, ".beads", "dolt", "de"))
+	writeDoltRepoMarker(t, filepath.Join(rigDir, ".beads", "embeddeddolt", "legacy"))
+
+	c := NewRigBDSplitStoreCheck(cityDir, config.Rig{Name: "demo", Path: rigDir})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no active local store") {
+		t.Fatalf("message = %q, want no active local store warning", r.Message)
+	}
+	if strings.Contains(r.Message, "active .beads/dolt") {
+		t.Fatalf("message = %q, should not trust rig metadata when city external config is invalid", r.Message)
+	}
+	if strings.Contains(r.FixHint, "inactive store") {
+		t.Fatalf("fix hint = %q, should not reference inactive store when active local store is unknown", r.FixHint)
+	}
+}
+
+func TestBDSplitStoreCheck_UnknownActiveUsesNeutralRecoveryGuidance(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if strings.Contains(r.FixHint, "inactive store") {
+		t.Fatalf("fix hint = %q, should not reference an inactive store when active store is unknown", r.FixHint)
+	}
+	if !strings.Contains(r.FixHint, "current or intended active store") {
+		t.Fatalf("fix hint = %q, want neutral active-store guidance", r.FixHint)
+	}
+}
+
+func TestBDSplitStoreCheck_NonDoltLocalModeUsesNeutralRecoveryGuidance(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"sqlite","backend":"sqlite","dolt_mode":"local"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if strings.Contains(r.Message, "active .beads/embeddeddolt") {
+		t.Fatalf("message = %q, should not treat non-Dolt local mode as active embeddeddolt", r.Message)
+	}
+	if strings.Contains(r.FixHint, "inactive store") {
+		t.Fatalf("fix hint = %q, should not reference inactive store for non-Dolt local mode", r.FixHint)
+	}
+}
+
+func TestDoltReposUnderSkipsDetectedRepoWorktree(t *testing.T) {
+	root := t.TempDir()
+	writeDoltRepoMarker(t, filepath.Join(root, "hq"))
+	writeDoltRepoMarker(t, filepath.Join(root, "hq", "nested"))
+
+	repos, err := doltReposUnder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(repos, ","), "hq"; got != want {
+		t.Fatalf("repos = %q, want %q", got, want)
+	}
+}
+
+func writeDoltRepoMarker(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".dolt", "noms"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // spyPingStore is a minimal Store that records Ping calls.
 type spyPingStore struct {
 	beads.MemStore
