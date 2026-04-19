@@ -56,11 +56,10 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 
 			resolved, err := config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
 			if err != nil {
-				cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
 				// A provider-resolution failure only blocks projection when this
 				// agent actually has effective MCP to project. Empty catalogs are a
 				// no-op so unsupported/absent providers can be ignored there.
-				catalog, lerr := loadEffectiveMCPForAgent(cityPath, cityName, cfg, &agent, identity, absWorkdir)
+				catalog, lerr := loadEffectiveMCPForAgent(cityPath, cfg, &agent, identity, absWorkdir)
 				if lerr != nil {
 					fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", lerr) //nolint:errcheck // best-effort stderr
 					return errExit
@@ -72,8 +71,7 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
-			cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
-			catalog, projection, err := resolveAgentMCPProjection(cityPath, cityName, cfg, &agent, identity, absWorkdir, resolved.Kind)
+			catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolved.Kind)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit

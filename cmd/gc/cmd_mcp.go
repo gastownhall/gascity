@@ -125,7 +125,7 @@ func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProject
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tTRANSPORT\tCOMMAND/URL\tSOURCE\tENV\tHEADERS") //nolint:errcheck // best-effort
 	for _, server := range view.Catalog.Servers {
-		fmt.Fprintf(
+		_, _ = fmt.Fprintf(
 			tw,
 			"%s\t%s\t%s\t%s\t%s\t%s\n",
 			server.Name,
@@ -134,7 +134,7 @@ func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProject
 			displayMCPSourcePath(cityPath, server.SourceFile),
 			formatMCPKeyNames(server.Env),
 			formatMCPKeyNames(server.Headers),
-		) //nolint:errcheck // best-effort
+		)
 	}
 	_ = tw.Flush()
 }

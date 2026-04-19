@@ -17,11 +17,15 @@ import (
 )
 
 const (
+	// MCPProviderClaude projects to Claude Code's project-native MCP file.
 	MCPProviderClaude = "claude"
-	MCPProviderCodex  = "codex"
+	// MCPProviderCodex projects to Codex's project-native TOML config.
+	MCPProviderCodex = "codex"
+	// MCPProviderGemini projects to Gemini CLI's project-native settings file.
 	MCPProviderGemini = "gemini"
 )
 
+// MCPProjection is one provider-native MCP payload for a single target file.
 type MCPProjection struct {
 	Provider string
 	Root     string

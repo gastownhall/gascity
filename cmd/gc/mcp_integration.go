@@ -37,7 +37,7 @@ type resolvedMCPProjection struct {
 	Projection   materialize.MCPProjection
 }
 
-func buildMCPTemplateData(cityPath, cityName, qualifiedName, workDir string, agent *config.Agent, rigs []config.Rig) map[string]string {
+func buildMCPTemplateData(cityPath, qualifiedName, workDir string, agent *config.Agent, rigs []config.Rig) map[string]string {
 	rigName := configuredRigName(cityPath, agent, rigs)
 	rigRoot := rigRootForName(rigName, rigs)
 	return buildTemplateData(PromptContext{
@@ -65,12 +65,12 @@ func supportsMCPProviderKind(kind string) bool {
 }
 
 func loadEffectiveMCPForAgent(
-	cityPath, cityName string,
+	cityPath string,
 	cfg *config.City,
 	agent *config.Agent,
 	qualifiedName, workDir string,
 ) (materialize.MCPCatalog, error) {
-	templateData := buildMCPTemplateData(cityPath, cityName, qualifiedName, workDir, agent, cfg.Rigs)
+	templateData := buildMCPTemplateData(cityPath, qualifiedName, workDir, agent, cfg.Rigs)
 	catalog, err := materialize.EffectiveMCPForAgent(cfg, agent, templateData)
 	if err != nil {
 		return materialize.MCPCatalog{}, fmt.Errorf("loading effective MCP: %w", err)
@@ -79,13 +79,13 @@ func loadEffectiveMCPForAgent(
 }
 
 func resolveAgentMCPProjection(
-	cityPath, cityName string,
+	cityPath string,
 	cfg *config.City,
 	agent *config.Agent,
 	qualifiedName, workDir string,
 	providerKind string,
 ) (materialize.MCPCatalog, materialize.MCPProjection, error) {
-	catalog, err := loadEffectiveMCPForAgent(cityPath, cityName, cfg, agent, qualifiedName, workDir)
+	catalog, err := loadEffectiveMCPForAgent(cityPath, cfg, agent, qualifiedName, workDir)
 	if err != nil {
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
 	}
@@ -240,11 +240,10 @@ func resolveConfiguredAgentMCPProjection(
 	if cfg == nil || agent == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
-	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
 	identity := agent.QualifiedName()
 	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
 	if err != nil {
-		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cityName, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
+		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
 		if catErr != nil {
 			return resolvedMCPProjection{}, fmt.Errorf("loading effective MCP: %w", catErr)
 		}
@@ -314,7 +313,6 @@ func resolveProjectedMCPForTarget(
 	if cfg == nil || agent == nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
-	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
 	if strings.TrimSpace(identity) == "" {
 		identity = agent.QualifiedName()
 	}
@@ -322,7 +320,7 @@ func resolveProjectedMCPForTarget(
 	if strings.TrimSpace(providerKind) == "" {
 		resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, lookPath)
 		if err != nil {
-			catalog, catErr := loadEffectiveMCPForAgent(cityPath, cityName, cfg, agent, identity, workDir)
+			catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, workDir)
 			if catErr != nil {
 				return resolvedMCPProjection{}, catErr
 			}
@@ -333,7 +331,7 @@ func resolveProjectedMCPForTarget(
 		}
 		providerKind = strings.TrimSpace(resolved.Kind)
 	}
-	catalog, projection, err := resolveAgentMCPProjection(cityPath, cityName, cfg, agent, identity, workDir, providerKind)
+	catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, agent, identity, workDir, providerKind)
 	if err != nil {
 		return resolvedMCPProjection{}, err
 	}
