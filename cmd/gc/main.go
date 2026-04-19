@@ -128,10 +128,15 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 			if tryPackCommandFallback(args, stdout, stderr) {
 				return nil
 			}
-			fmt.Fprintf(stderr, "gc: unknown command %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc: unknown command %q\n\n", args[0]) //nolint:errcheck // best-effort stderr
+			printCommandUsage(stderr, cmd)
 			return errExit
 		},
 	}
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		printCommandUsageError(stderr, cmd, err)
+		return errExit
+	})
 	root.PersistentFlags().StringVar(&cityFlag, "city", "",
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
@@ -193,7 +198,43 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	// Best-effort: discover pack CLI commands if we're inside a city.
 	registerPackCommands(root, stdout, stderr)
 
+	installArgUsageErrors(root, stderr)
+
 	return root
+}
+
+func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
+	if cmd.Args != nil {
+		argsValidator := cmd.Args
+		cmd.Args = func(cmd *cobra.Command, args []string) error {
+			if err := argsValidator(cmd, args); err != nil {
+				printCommandUsageError(stderr, cmd, err)
+				return errExit
+			}
+			return nil
+		}
+	}
+	for _, child := range cmd.Commands() {
+		installArgUsageErrors(child, stderr)
+	}
+}
+
+func printCommandUsageError(stderr io.Writer, cmd *cobra.Command, err error) {
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: %v\n\n", err) //nolint:errcheck // best-effort stderr
+	}
+	printCommandUsage(stderr, cmd)
+}
+
+func printCommandUsage(stderr io.Writer, cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	usage := strings.TrimRight(cmd.UsageString(), "\n")
+	if usage == "" {
+		return
+	}
+	fmt.Fprintln(stderr, usage) //nolint:errcheck // best-effort stderr
 }
 
 // sessionName returns the session name for a city agent.

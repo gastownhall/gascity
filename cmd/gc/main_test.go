@@ -216,6 +216,78 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+func TestRootInvalidTopLevelFlagPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--version"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([--version]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "gc: unknown flag: --version") {
+		t.Fatalf("stderr missing unknown flag message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc [flags]") {
+		t.Fatalf("stderr missing root usage, got:\n%s", errOut)
+	}
+}
+
+func TestRootUnknownCommandPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"bogus"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([bogus]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, `gc: unknown command "bogus"`) {
+		t.Fatalf("stderr missing unknown command message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc [flags]") {
+		t.Fatalf("stderr missing root usage, got:\n%s", errOut)
+	}
+}
+
+func TestSubcommandInvalidFlagPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "--bogus"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([version --bogus]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "gc: unknown flag: --bogus") {
+		t.Fatalf("stderr missing unknown flag message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc version [flags]") {
+		t.Fatalf("stderr missing version usage, got:\n%s", errOut)
+	}
+}
+
+func TestSubcommandInvalidArgsPrintsErrorAndUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "extra"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run([version extra]) = 0, want non-zero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, `gc: unknown command "extra" for "gc version"`) {
+		t.Fatalf("stderr missing invalid argument message, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "Usage:") || !strings.Contains(errOut, "gc version [flags]") {
+		t.Fatalf("stderr missing version usage, got:\n%s", errOut)
+	}
+}
+
 func TestConfigureTestscriptEnvDefaultsSetsMissingValues(t *testing.T) {
 	t.Setenv("GC_SESSION", "")
 	t.Setenv("GC_BEADS", "")
