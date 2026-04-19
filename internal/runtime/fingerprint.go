@@ -63,7 +63,6 @@ func LiveFingerprint(cfg Config) string {
 //	  GC_CITY / GC_CITY_PATH — city identity and location
 //	  GC_RIG*         — which rig the agent operates on
 //	  GC_TEMPLATE     — agent template identity
-//	  GC_ALIAS        — agent display identity
 //	  GC_DOLT_PORT    — how to reach dolt (ephemeral port)
 //	  GC_SKILLS_DIR   — skill discovery path
 //	  GC_BLESSED_BIN_DIR — trusted binary path
@@ -72,6 +71,7 @@ func LiveFingerprint(cfg Config) string {
 //	Excluded (runtime/transport, changes don't require restart):
 //	  GC_SESSION_*    — per-session identity
 //	  GC_AGENT        — pool instance name
+//	  GC_ALIAS        — public routing/display alias, synced live where possible
 //	  GC_INSTANCE_TOKEN — restart nonce
 //	  GC_*_EPOCH      — restart counters
 //	  GC_HOME/GC_DIR  — derived paths
@@ -91,7 +91,6 @@ var envFingerprintAllow = map[string]bool{
 
 	// Agent identity
 	"GC_TEMPLATE": true,
-	"GC_ALIAS":    true,
 
 	// Service connectivity — GC_DOLT_PORT intentionally excluded.
 	// The dolt port is ephemeral (changes on every supervisor restart)

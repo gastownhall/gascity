@@ -117,6 +117,21 @@ func TestConfigFingerprintIgnoresGCDir(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIgnoresGCAlias(t *testing.T) {
+	base := Config{Command: "claude", Env: map[string]string{
+		"GC_CITY":     "/gc",
+		"GC_TEMPLATE": "repo/coder",
+	}}
+	withAlias := Config{Command: "claude", Env: map[string]string{
+		"GC_CITY":     "/gc",
+		"GC_TEMPLATE": "repo/coder",
+		"GC_ALIAS":    "repo/coder-1",
+	}}
+	if ConfigFingerprint(base) != ConfigFingerprint(withAlias) {
+		t.Error("GC_ALIAS should not affect config fingerprint")
+	}
+}
+
 func TestConfigFingerprintIgnoresNonAllowedGCVars(t *testing.T) {
 	// GC_* vars not on the allow list should not affect the hash.
 	// This is the core invariant: new env vars are safe by default.
