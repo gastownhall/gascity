@@ -893,7 +893,13 @@ func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing
 	}
 }
 
-func TestReconcileSessionBeads_DrainedPoolSessionPartialOwnershipSnapshotStaysOpen(t *testing.T) {
+// TestReconcileSessionBeads_DrainedPoolSessionStoreQueryPartialStaysOpen
+// verifies that when storeQueryPartial is set (a transient bead-store
+// failure produced an incomplete assignedWorkBeads snapshot), the
+// drained pool session bead is NOT closed. Close decisions must fail
+// closed whenever the tick's store visibility is compromised, even if
+// the live ownership check itself returns cleanly.
+func TestReconcileSessionBeads_DrainedPoolSessionStoreQueryPartialStaysOpen(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
@@ -923,7 +929,7 @@ func TestReconcileSessionBeads_DrainedPoolSessionPartialOwnershipSnapshotStaysOp
 		nil,
 		env.dt,
 		map[string]int{},
-		true,
+		true, // storeQueryPartial
 		nil,
 		"",
 		nil,
@@ -943,7 +949,7 @@ func TestReconcileSessionBeads_DrainedPoolSessionPartialOwnershipSnapshotStaysOp
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
 	if got.Status == "closed" {
-		t.Fatalf("session bead closed unexpectedly under partial ownership snapshot: metadata=%v", got.Metadata)
+		t.Fatalf("session bead closed unexpectedly under storeQueryPartial: metadata=%v", got.Metadata)
 	}
 }
 

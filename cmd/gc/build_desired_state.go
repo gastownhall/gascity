@@ -484,16 +484,6 @@ func collectAssignedWorkBeads(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) ([]beads.Bead, bool) {
-	return collectAssignedWorkSnapshot(cfg, cityStore, rigStores, suspendedRigPaths, false)
-}
-
-func collectAssignedWorkSnapshot(
-	cfg *config.City,
-	cityStore beads.Store,
-	rigStores map[string]beads.Store,
-	suspendedRigPaths map[string]bool,
-	includeBlockedOpen bool,
-) ([]beads.Bead, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
 	stores := []beads.Store{cityStore}
@@ -517,23 +507,13 @@ func collectAssignedWorkSnapshot(
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
 		}
-		if includeBlockedOpen {
-			// Open assigned beads preserve ownership even when blocked.
-			if open, err := s.List(beads.ListQuery{Status: "open"}); err == nil {
-				appendAssignedUnique(&result, open, seen)
-			} else {
-				log.Printf("collectOwnershipWorkBeads: List(open) failed: %v", err)
-				partial = true
-			}
+		// Ready beads with an assignee (queued direct handoff work that is
+		// actually runnable, not merely open).
+		if ready, err := s.Ready(); err == nil {
+			appendAssignedUnique(&result, ready, seen)
 		} else {
-			// Ready beads with an assignee (queued direct handoff work that is
-			// actually runnable, not merely open).
-			if ready, err := s.Ready(); err == nil {
-				appendAssignedUnique(&result, ready, seen)
-			} else {
-				log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
-				partial = true
-			}
+			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
+			partial = true
 		}
 	}
 	return result, partial
