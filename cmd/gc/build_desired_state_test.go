@@ -2532,3 +2532,106 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 		t.Errorf("realize FPExtra still contains pool.check — fix incomplete: %v", realizeTP.FPExtra)
 	}
 }
+
+// TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate verifies that
+// {{.Rig}} in a pool agent's scale_check is substituted with the configured
+// rig name before the shell command runs — regression test for #793.
+//
+// The scale_check grep-counts the expanded rig name. Literal "{{.Rig}}"
+// never matches the target rig name, so the broken (pre-fix) behavior
+// returns 0; the fixed behavior returns 1 for the rig whose name matches
+// and 0 for the other, proving per-rig substitution is happening.
+func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigAlpha := filepath.Join(cityPath, "alpha")
+	rigBeta := filepath.Join(cityPath, "beta")
+	if err := os.MkdirAll(rigAlpha, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigBeta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: rigAlpha},
+			{Name: "beta", Path: rigBeta},
+		},
+		Agents: []config.Agent{
+			{
+				Name:              "ant",
+				Dir:               "alpha",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				ScaleCheck:        "echo {{.Rig}} | grep -c alpha",
+			},
+			{
+				Name:              "ant",
+				Dir:               "beta",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+				ScaleCheck:        "echo {{.Rig}} | grep -c alpha",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	alphaCount, ok := dsResult.ScaleCheckCounts["alpha/ant"]
+	if !ok {
+		t.Fatalf("ScaleCheckCounts missing alpha/ant; got %#v", dsResult.ScaleCheckCounts)
+	}
+	if alphaCount != 1 {
+		t.Errorf("alpha/ant scale_check count = %d, want 1 (expansion of {{.Rig}} -> alpha makes grep match)", alphaCount)
+	}
+
+	betaCount, ok := dsResult.ScaleCheckCounts["beta/ant"]
+	if !ok {
+		t.Fatalf("ScaleCheckCounts missing beta/ant; got %#v", dsResult.ScaleCheckCounts)
+	}
+	if betaCount != 0 {
+		t.Errorf("beta/ant scale_check count = %d, want 0 (expansion of {{.Rig}} -> beta makes grep miss 'alpha')", betaCount)
+	}
+}
+
+// TestBuildDesiredState_NamedSessionWorkQueryExpandsRigTemplate verifies that
+// {{.Rig}} in a named-session agent's work_query is substituted before the
+// controller's work-readiness probe runs — regression test for #793, named
+// session path at build_desired_state.go:341.
+func TestBuildDesiredState_NamedSessionWorkQueryExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(cityPath, "alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			Dir:               "alpha",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+			// work_query must produce non-empty output for on_demand demand.
+			// When {{.Rig}} is expanded the echo yields "alpha", which is
+			// treated as ready work. Unexpanded, the literal "{{.Rig}}" is
+			// still non-empty — so to discriminate, use a grep filter.
+			WorkQuery: "echo {{.Rig}} | grep alpha",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "alpha/dog",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	if !dsResult.NamedSessionDemand["alpha/dog"] {
+		t.Errorf("NamedSessionDemand[alpha/dog] = false, want true (work_query {{.Rig}} should expand to alpha and grep match)")
+	}
+}

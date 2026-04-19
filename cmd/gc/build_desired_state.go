@@ -198,6 +198,11 @@ func buildDesiredStateWithSessionBeads(
 		}
 
 		sp := scaleParamsFor(&cfg.Agents[i])
+		// Expand {{.Rig}}/{{.AgentBase}} in scale_check here — before the
+		// command reaches the semaphored scale_check goroutine pool — so
+		// rig-scoped pool agents probe their own rig instead of the literal
+		// template string. #793.
+		sp.Check = expandProbeCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, sp.Check, stderr)
 
 		if !cfg.Agents[i].SupportsGenericEphemeralSessions() {
 			continue
@@ -343,6 +348,9 @@ func buildDesiredStateWithSessionBeads(
 		if wq == "" {
 			continue
 		}
+		// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped named sessions probe
+		// with rig-specific metadata. #793.
+		wq = expandProbeCommandTemplate(cityPath, cityName, spec.Agent, cfg.Rigs, wq, stderr)
 		dir := agentCommandDir(cityPath, spec.Agent, cfg.Rigs)
 		probeEnv := controllerQueryRuntimeEnv(cityPath, cfg, spec.Agent)
 		out, err := shellScaleCheck(prefixShellEnv(controllerQueryPrefixEnv(probeEnv), wq), dir, probeEnv)

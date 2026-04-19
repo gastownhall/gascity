@@ -164,18 +164,22 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	}
 	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
 	workEnv := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
+	// rig-scoped command instead of passing the literal template to the shell
+	// on every iteration. #793.
+	workQuery := expandProbeCommandTemplate(cityPath, cfg.Workspace.Name, &agentCfg, cfg.Rigs, agentCfg.EffectiveWorkQuery(), stderr)
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		return drainWorkflowServeWork(agentCfg, workDir, workEnv, stderr)
+		return drainWorkflowServeWork(agentCfg, workQuery, workDir, workEnv, stderr)
 	}
-	return runWorkflowServeFollow(agentCfg, workDir, workEnv, stderr)
+	return runWorkflowServeFollow(agentCfg, workQuery, workDir, workEnv, stderr)
 }
 
-func drainWorkflowServeWork(agentCfg config.Agent, workDir string, workEnv map[string]string, stderr io.Writer) error {
+func drainWorkflowServeWork(agentCfg config.Agent, workQuery string, workDir string, workEnv map[string]string, stderr io.Writer) error {
 	processedAny := false
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeQuery(agentCfg.EffectiveWorkQuery()), workDir, workEnv)
+		queue, err := workflowServeList(workflowServeQuery(workQuery), workDir, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			return fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
@@ -225,7 +229,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, workDir string, workEnv map[s
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, workDir string, workEnv map[string]string, stderr io.Writer) error {
+func runWorkflowServeFollow(agentCfg config.Agent, workQuery string, workDir string, workEnv map[string]string, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -248,7 +252,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, workDir string, workEnv map[s
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
 	for {
-		if err := drainWorkflowServeWork(agentCfg, workDir, workEnv, stderr); err != nil {
+		if err := drainWorkflowServeWork(agentCfg, workQuery, workDir, workEnv, stderr); err != nil {
 			return err
 		}
 		if err := waitForRelevantWorkflowWake(eventCh); err != nil {
