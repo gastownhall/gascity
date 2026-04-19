@@ -1209,6 +1209,50 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadAllowsRegistryAliasDifferentFromWorkspaceName(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "machine-alias",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "machine-alias", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fail")
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	if lastProviderName != "fail" {
+		t.Fatalf("lastProviderName = %q, want fail; stderr=%q", lastProviderName, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "workspace.name changed") {
+		t.Fatalf("reload treated registry alias as workspace drift: %s", stderr.String())
+	}
+}
+
 func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1222,11 +1266,12 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cr := newCityRuntime(CityRuntimeParams{
-		CityPath: cityPath,
-		CityName: "test-city",
-		TomlPath: tomlPath,
-		Cfg:      cfg,
-		SP:       sp,
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -1254,10 +1299,19 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 		cityRuntimeStartBeadsLifecycle = prev
 	})
 
-	writeCityRuntimeConfig(t, tomlPath, "fail")
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	lastProviderName := "fake"
-	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
 
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
+	}
+	if !strings.Contains(reply.Error, "config reload: boom") {
+		t.Fatalf("reply.Error = %q, want lifecycle error", reply.Error)
+	}
 	if cr.cfg != oldCfg {
 		t.Fatal("cfg changed after lifecycle reload failure")
 	}
@@ -1273,11 +1327,221 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	if lastProviderName != "fake" {
 		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
 	}
-	if !strings.Contains(stderr.String(), "keeping old config") {
-		t.Fatalf("stderr = %q, want keeping old config message", stderr.String())
+	if !strings.Contains(stderr.String(), "config reload: boom (keeping old config)") {
+		t.Fatalf("stderr = %q, want lifecycle failure", stderr.String())
 	}
 	if strings.Contains(stdout.String(), "Session provider swapped") {
 		t.Fatalf("stdout = %q, want no provider swap message", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Config reloaded:") {
+		t.Fatalf("stdout = %q, want no reload success message", stdout.String())
+	}
+}
+
+func TestCityRuntimeReloadStrictWarningsReturnedOnFailure(t *testing.T) {
+	oldStrict := strictMode
+	strictMode = true
+	t.Cleanup(func() { strictMode = oldStrict })
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	if err := os.WriteFile(tomlPath, []byte(`include = ["override.toml"]
+
+[workspace]
+name = "test-city"
+install_agent_hooks = ["claude"]
+
+[session]
+provider = "fake"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "override.toml"), []byte(`[workspace]
+install_agent_hooks = ["codex"]
+`), 0o644); err != nil {
+		t.Fatalf("write override.toml: %v", err)
+	}
+
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
+	}
+	if !strings.Contains(reply.Error, "strict mode: 1 collision warning(s)") {
+		t.Fatalf("reply.Error = %q", reply.Error)
+	}
+	if !warningsContain(reply.Warnings, "workspace.install_agent_hooks redefined") {
+		t.Fatalf("reply.Warnings = %v, want collision warning", reply.Warnings)
+	}
+	if !warningsContain(reply.Warnings, reloadStrictWarningHint) {
+		t.Fatalf("reply.Warnings = %v, want strict recovery hint", reply.Warnings)
+	}
+	if !strings.Contains(stderr.String(), "gc reload: warning: workspace.install_agent_hooks redefined") {
+		t.Fatalf("stderr = %q, want warning details", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc reload: warning: "+reloadStrictWarningHint) {
+		t.Fatalf("stderr = %q, want strict recovery hint", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start:") {
+		t.Fatalf("stderr = %q, want reload-specific prefix without gc start", stderr.String())
+	}
+}
+
+func TestCityRuntimeReloadNonStrictWarningsReturnedOnValidationFailure(t *testing.T) {
+	oldStrict := strictMode
+	strictMode = false
+	t.Cleanup(func() { strictMode = oldStrict })
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: &stderr,
+	})
+	oldCfg := cr.cfg
+
+	if err := os.WriteFile(tomlPath, []byte(`include = ["override.toml"]
+
+[workspace]
+name = "test-city"
+install_agent_hooks = ["claude"]
+
+[session]
+provider = "fake"
+
+[[agent]]
+name = "bad name"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "override.toml"), []byte(`[workspace]
+install_agent_hooks = ["codex"]
+`), 0o644); err != nil {
+		t.Fatalf("write override.toml: %v", err)
+	}
+
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
+	}
+	if !strings.Contains(reply.Error, "validating agents") {
+		t.Fatalf("reply.Error = %q, want validation failure", reply.Error)
+	}
+	if !warningsContain(reply.Warnings, "workspace.install_agent_hooks redefined") {
+		t.Fatalf("reply.Warnings = %v, want composition warning", reply.Warnings)
+	}
+	if !strings.Contains(stderr.String(), "gc reload: warning: workspace.install_agent_hooks redefined") {
+		t.Fatalf("stderr = %q, want warning details", stderr.String())
+	}
+	if cr.cfg != oldCfg {
+		t.Fatal("cfg changed after validation reload failure")
+	}
+}
+
+func TestCityRuntimeFailActiveReloadRepliesAndClears(t *testing.T) {
+	doneCh := make(chan reloadControlReply, 1)
+	cr := &CityRuntime{
+		activeReload: &reloadRequest{doneCh: doneCh},
+	}
+
+	cr.failActiveReload("Reload canceled because the controller is shutting down.")
+
+	if cr.activeReload != nil {
+		t.Fatal("activeReload was not cleared")
+	}
+	select {
+	case reply := <-doneCh:
+		if reply.Outcome != reloadOutcomeFailed {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
+		}
+		if !strings.Contains(reply.Error, "shutting down") {
+			t.Fatalf("reply.Error = %q, want shutdown reason", reply.Error)
+		}
+	default:
+		t.Fatal("active reload did not receive cancellation reply")
+	}
+}
+
+func TestCityRuntimeHandleReloadRequestInitializesConfigDirty(t *testing.T) {
+	acceptedCh := make(chan reloadControlReply, 1)
+	req := &reloadRequest{
+		acceptedCh: acceptedCh,
+		doneCh:     make(chan reloadControlReply, 1),
+	}
+	cr := &CityRuntime{
+		pokeCh: make(chan struct{}, 1),
+	}
+
+	cr.handleReloadRequest(req)
+
+	if cr.configDirty == nil {
+		t.Fatal("configDirty was not initialized")
+	}
+	if !cr.configDirty.Load() {
+		t.Fatal("configDirty = false, want reload request to mark dirty")
+	}
+	if cr.activeReload != req {
+		t.Fatal("activeReload was not recorded")
+	}
+	select {
+	case <-cr.pokeCh:
+	default:
+		t.Fatal("reload request did not enqueue poke")
+	}
+	select {
+	case reply := <-acceptedCh:
+		if reply.Outcome != reloadOutcomeAccepted {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+		}
+	default:
+		t.Fatal("reload request did not receive accepted reply")
 	}
 }
 
@@ -1328,6 +1592,62 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	doneCh := make(chan reloadControlReply, 1)
+	dirty := &atomic.Bool{}
+	dirty.Store(true)
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:    cityPath,
+		CityName:    "test-city",
+		TomlPath:    tomlPath,
+		ConfigRev:   configRev,
+		ConfigDirty: dirty,
+		Cfg:         cfg,
+		SP:          sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			select {
+			case reply := <-doneCh:
+				t.Fatalf("manual reload replied before desired-state rebuild: %+v", reply)
+			default:
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+	cr.activeReload = &reloadRequest{doneCh: doneCh}
+	lastProviderName := "fake"
+	var prevPoolRunning map[string]bool
+
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+
+	select {
+	case reply := <-doneCh:
+		if reply.Outcome != reloadOutcomeNoChange {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeNoChange)
+		}
+	default:
+		t.Fatal("manual reload did not reply after tick completion")
+	}
+	if cr.activeReload != nil {
+		t.Fatal("activeReload was not cleared")
+	}
+}
+
 func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1373,10 +1693,82 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	}
 }
 
+func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Daemon.ShutdownTimeout = "20ms"
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "probe-session", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			cancel()
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if sp.IsRunning("probe-session") {
+		t.Fatal("probe-session still running after runtime cancellation")
+	}
+
+	var stopCalls int
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "probe-session" {
+			stopCalls++
+		}
+	}
+	if stopCalls == 0 {
+		t.Fatalf("expected forced stop during shutdown, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Stopped agent 'probe-session'") {
+		t.Fatalf("stdout = %q, want shutdown stop message", stdout.String())
+	}
+}
+
 func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
-	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
+	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
+	t.Helper()
+	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+}
+
+func warningsContain(warnings []string, substr string) bool {
+	for _, warning := range warnings {
+		if strings.Contains(warning, substr) {
+			return true
+		}
+	}
+	return false
 }

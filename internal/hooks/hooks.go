@@ -1,7 +1,7 @@
-// Package hooks installs the Claude city-level settings file that gc passes
-// via --settings on session start. All other provider hook files ship from
-// the core bootstrap pack's overlay/per-provider/<provider>/ tree and flow
-// through the normal overlay copy+merge pipeline.
+// Package hooks installs provider hook files needed before runtime startup.
+// Claude still uses a city-level settings file, while the other providers use
+// files sourced from the embedded core pack overlay/per-provider tree and
+// materialized into the session workdir.
 package hooks
 
 import (
@@ -9,10 +9,13 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	iofs "io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
@@ -21,8 +24,7 @@ import (
 //go:embed config/claude.json
 var configFS embed.FS
 
-// supported lists provider names that Install recognizes. Only Claude has a
-// city-level file; every other provider's hooks arrive via overlay copy.
+// supported lists provider names that Install recognizes.
 var supported = []string{"claude"}
 
 // overlayManaged lists provider names whose hooks ship via the core pack
@@ -74,12 +76,11 @@ func Validate(providers []string) error {
 	return nil
 }
 
-// Install writes hook files that require Go-side wiring. Currently that is
-// only Claude's city-level settings file — other providers flow through the
-// core pack's overlay/per-provider/<provider>/ tree at session start.
-// Entries for overlay-managed providers are accepted and silently no-op.
+// Install writes hook files for the requested providers. Claude still uses a
+// city-level file; the overlay-managed providers are copied from the embedded
+// core pack overlay into the target workdir so desired-state fingerprinting
+// and direct runtimes see the same files before startup.
 func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
-	_ = workDir // reserved for future per-workdir installs
 	for _, p := range providers {
 		switch p {
 		case "claude":
@@ -87,7 +88,9 @@ func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
 				return fmt.Errorf("installing %s hooks: %w", p, err)
 			}
 		case "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp":
-			// Shipped via core pack overlay — no Go-side work needed.
+			if err := installOverlayManaged(fs, workDir, p); err != nil {
+				return fmt.Errorf("installing %s hooks: %w", p, err)
+			}
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)
 		}
@@ -95,13 +98,36 @@ func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
 	return nil
 }
 
-// installClaude writes the runtime settings file (.gc/settings.json) that gc
-// passes to Claude via --settings. The legacy hooks/claude.json file is
-// treated as user-owned whenever it contains content gc cannot recognize as
-// its own: present and not matching a known stale auto-generated pattern.
-// That file is rewritten only when it IS the selected source (legacy-hook
-// migration), when it doesn't exist (fresh install seed), or when it matches
-// a known stale pattern (safe auto-upgrade).
+func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
+	if strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	base := path.Join("overlay", "per-provider", provider)
+	if _, err := iofs.Stat(core.PackFS, base); err != nil {
+		return fmt.Errorf("provider overlay %q: %w", provider, err)
+	}
+	return iofs.WalkDir(core.PackFS, base, func(name string, d iofs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if name == base || d.IsDir() {
+			return nil
+		}
+		rel := strings.TrimPrefix(name, base+"/")
+		data, err := iofs.ReadFile(core.PackFS, name)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", name, err)
+		}
+		dst := filepath.Join(workDir, filepath.FromSlash(rel))
+		return writeEmbeddedManaged(fs, dst, data, nil)
+	})
+}
+
+// installClaude writes both the source hook file (hooks/claude.json) and the
+// runtime settings file (.gc/settings.json) in the city directory. The
+// runtime file is the path gc passes to Claude via --settings, while the
+// legacy hooks/claude.json file remains user-owned unless gc can prove it is
+// safe to seed or rewrite during migration/upgrade.
 //
 // Source precedence for user-authored Claude settings:
 //  1. <city>/.claude/settings.json
@@ -184,6 +210,27 @@ func readEmbedded() ([]byte, error) {
 		return nil, fmt.Errorf("reading embedded %s: %w", embedPath, err)
 	}
 	return data, nil
+}
+
+func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func([]byte) bool) error {
+	if existing, err := fs.ReadFile(dst); err == nil {
+		if needsUpgrade == nil || !needsUpgrade(existing) {
+			return nil
+		}
+	} else if _, statErr := fs.Stat(dst); statErr == nil {
+		// File exists but isn't readable. Preserve it rather than clobbering it.
+		return nil
+	}
+
+	dir := filepath.Dir(dst)
+	if err := fs.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+
+	if err := fs.WriteFile(dst, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return nil
 }
 
 type claudeSettingsSourceKind int

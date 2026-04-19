@@ -1,0 +1,1 @@
+{"sessionId":"gemini-phase1","messages":[{"id":"g-u1","timestamp":"2026-04-04T09:00:00Z","type":"user","content":[{"text":"Inspect the continuation fixture."}]},{"id":"g-a1","timestamp":"2026-04-04T09:00:08Z","type":"gemini","content":"The fixture models normalized transcript history."}]}

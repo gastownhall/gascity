@@ -137,17 +137,58 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 	}
 
 	startOut, startErr := runGCDoltWithEnv(env, "", "start", cityDir)
-	if startErr == nil || isGCStartAlreadyRunning(startOut) {
-		t.Log("recovered partially initialized city with gc start after transient managed Dolt startup failure")
-		return
+	if startErr != nil && !isGCStartAlreadyRunning(startOut) && !isTransientManagedDoltInitFailure(startOut) {
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s", err, out, startErr, startOut)
 	}
-	t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s", err, out, startErr, startOut)
+	if readyOut, readyErr := waitForManagedDoltCityReady(env, cityDir, 20*time.Second); readyErr == nil {
+		t.Log("recovered partially initialized city after transient managed Dolt startup failure")
+		return
+	} else {
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s\ncity never became ready: %v\nlast bd output: %s", err, out, startErr, startOut, readyErr, readyOut)
+	}
+}
+
+func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var (
+		lastOut string
+		lastErr error
+	)
+	for time.Now().Before(deadline) {
+		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			probeEnv := filterEnvMany(env,
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_PORT",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+				"GC_DOLT_PORT="+port,
+			)
+			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+			if lastErr == nil {
+				return lastOut, nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out after %s waiting for managed Dolt city readiness", timeout)
+	}
+	return lastOut, lastErr
 }
 
 func isTransientManagedDoltInitFailure(out string) bool {
 	msg := strings.ToLower(out)
 	return strings.Contains(msg, "dolt server exited during startup") ||
-		strings.Contains(msg, "did not become query-ready after 30s")
+		strings.Contains(msg, "did not become query-ready after 30s") ||
+		strings.Contains(msg, "supervisor did not become ready") ||
+		strings.Contains(msg, "supervisor did not start") ||
+		strings.Contains(msg, "supervisor stopped before city became ready")
 }
 
 func isAlreadyInitializedGCInitFailure(out string) bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -257,11 +258,15 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 
 	store := beads.NewMemStore()
 	startBead, err := store.Create(beads.Bead{
-		Title: "worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":       "worker-1",
 			"template":           "repo/worker",
 			"agent_name":         "worker",
+			"provider":           "claude",
+			"work_dir":           filepath.Join(cityDir, "repos", "worker"),
 			"state":              "asleep",
 			"generation":         "1",
 			"continuation_epoch": "1",
@@ -271,11 +276,15 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		t.Fatalf("Create start bead: %v", err)
 	}
 	drainBead, err := store.Create(beads.Bead{
-		Title: "db",
+		Title:  "db",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":       "db-1",
 			"template":           "repo/db",
 			"agent_name":         "db",
+			"provider":           "claude",
+			"work_dir":           filepath.Join(cityDir, "repos", "db"),
 			"state":              "active",
 			"generation":         "1",
 			"continuation_epoch": "1",
@@ -323,6 +332,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 			TemplateName: "repo/worker",
 			SessionName:  "worker-1",
 			InstanceName: "worker-1",
+			Command:      "trace-worker --resume",
 		},
 	}
 	wakeCount := executePlannedStartsTraced(

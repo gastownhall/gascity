@@ -62,7 +62,7 @@ molecule.
 | `condition` | string | Equality expression (`{{var}} == value` or `!=`) — step is excluded when false |
 | `children` | []step | Nested sub-steps; parent acts as a container dependency |
 | `loop` | object | Static loop expansion: `count` iterations at compile time |
-| `ralph` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
+| `check` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
 
 ## Variable Substitution
 

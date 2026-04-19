@@ -34,10 +34,11 @@ type idempotencyCache struct {
 }
 
 type cachedEntry struct {
-	pending   bool // true while the create is in-flight
-	value     any  // typed response value, populated when complete() is called
-	bodyHash  string
-	expiresAt time.Time
+	pending    bool // true while the create is in-flight
+	statusCode int
+	value      any // typed response value, populated when complete() is called
+	bodyHash   string
+	expiresAt  time.Time
 }
 
 func newIdempotencyCache(ttl time.Duration) *idempotencyCache {
@@ -113,14 +114,15 @@ func (c *idempotencyCache) enforceCapLocked() {
 }
 
 // complete fills in the response for a previously reserved key.
-func (c *idempotencyCache) complete(key string, value any, bodyHash string) {
+func (c *idempotencyCache) complete(key string, statusCode int, value any, bodyHash string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[key] = cachedEntry{
-		pending:   false,
-		value:     value,
-		bodyHash:  bodyHash,
-		expiresAt: time.Now().Add(c.ttl),
+		pending:    false,
+		statusCode: statusCode,
+		value:      value,
+		bodyHash:   bodyHash,
+		expiresAt:  time.Now().Add(c.ttl),
 	}
 }
 
@@ -133,14 +135,49 @@ func (c *idempotencyCache) unreserve(key string) {
 	}
 }
 
+// handleIdempotent replays or rejects a duplicate request for the scoped key.
+// Returns true when the response has already been written.
+func (c *idempotencyCache) handleIdempotent(w http.ResponseWriter, key, bodyHash string) bool {
+	if key == "" {
+		return false
+	}
+	existing, found := c.reserve(key, bodyHash)
+	if !found {
+		return false
+	}
+	if existing.bodyHash != bodyHash {
+		writeError(w, http.StatusUnprocessableEntity, "idempotency_mismatch",
+			"Idempotency-Key reused with different request body")
+		return true
+	}
+	if existing.pending {
+		writeError(w, http.StatusConflict, "in_flight",
+			"request with this Idempotency-Key is already in progress")
+		return true
+	}
+	statusCode := existing.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusCreated
+	}
+	writeJSON(w, statusCode, existing.value)
+	return true
+}
+
 // storeResponse caches the typed response value for later replay.
-// No serialization happens here; Huma re-serializes on each replay at the
-// handler boundary.
-func (c *idempotencyCache) storeResponse(key, bodyHash string, v any) {
+// Callers may pass either `(key, hash, value)` or `(key, hash, status, value)`.
+func (c *idempotencyCache) storeResponse(key, bodyHash string, statusOrValue any, maybeValue ...any) {
 	if key == "" {
 		return
 	}
-	c.complete(key, v, bodyHash)
+	statusCode := http.StatusCreated
+	value := statusOrValue
+	if len(maybeValue) > 0 {
+		if code, ok := statusOrValue.(int); ok {
+			statusCode = code
+			value = maybeValue[0]
+		}
+	}
+	c.complete(key, statusCode, value, bodyHash)
 }
 
 // replayAs is a generic helper: look up an existing entry and type-assert

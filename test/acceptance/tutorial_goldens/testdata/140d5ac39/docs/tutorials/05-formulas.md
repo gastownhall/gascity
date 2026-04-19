@@ -376,23 +376,23 @@ Steps (4):
   └── retry-deploy.retries.iter3.attempt: Try to deploy [needs: retry-deploy.retries.iter2.attempt]
 ```
 
-Each iteration is materialized as its own step. There's no way to break out early — all iterations are baked into the recipe up front. If you need "try until it works" behavior, that's what Ralph is for.
+Each iteration is materialized as its own step. There's no way to break out early — all iterations are baked into the recipe up front.
 
-### Ralph
+### Check
 
 Once a formula is cooked, conditions have been evaluated and loops have been expanded — all of that is decided up front. But sometimes you need a decision at runtime: did this step actually work?
 
-That's what Ralph does. After the agent finishes a step, Gas City runs a check script. If the check passes, the step is done. If not, the agent tries again. The check runs after each attempt, while the formula is still executing — it's a runtime feedback loop, not a compile-time expansion.
+Check runs a validation script after the agent finishes a step. If the script passes, the step is done. If not, the agent tries again. The check runs after each attempt, while the formula is still executing — it's a runtime feedback loop, not a compile-time expansion.
 
 ```toml
 [[steps]]
 id = "implement"
 title = "Implement the feature"
 
-[steps.ralph]
+[steps.check]
 max_attempts = 2
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = "scripts/verify.sh"
 timeout = "30s"
@@ -402,7 +402,7 @@ Here's what happens: the agent works on "implement." When it finishes, Gas City 
 
 ---
 
-That covers the core of formulas — defining steps, wiring dependencies, parameterizing with variables, and controlling execution with conditions, loops, and Ralph.
+That covers the core of formulas — defining steps, wiring dependencies, parameterizing with variables, and controlling execution with conditions, loops, and Check.
 
 ## What's next
 
@@ -535,7 +535,7 @@ When you run `gc formula show` or `gc formula cook`, the formula passes through 
 8. Filter steps by condition
 9. Materialize expansion formulas
 10. Expand retry specifications
-11. Expand Ralph patterns
+11. Expand Check patterns
 12. Convert to recipe (flatten, namespace, order)
 
 The output is a **recipe** — a flattened, ordered list of steps with fully resolved dependency edges and namespaced IDs. Variables are still placeholders at this point; they get substituted when the recipe is instantiated into beads.

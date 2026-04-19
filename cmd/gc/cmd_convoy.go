@@ -261,8 +261,23 @@ func cmdConvoyList(stdout, stderr io.Writer) int {
 }
 
 func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
-	if rawBeadsProvider(cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
-		return []string{cityPath}
+	if rawBeadsProviderForScope(cityPath, cityPath) == "file" && !fileStoreUsesScopedRoots(cityPath) {
+		legacyCityOnly := true
+		if cfg != nil {
+			for _, rig := range cfg.Rigs {
+				if strings.TrimSpace(rig.Path) == "" {
+					continue
+				}
+				scopeRoot := resolveStoreScopeRoot(cityPath, rig.Path)
+				if rawBeadsProviderForScope(scopeRoot, cityPath) != "file" || (!samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot)) {
+					legacyCityOnly = false
+					break
+				}
+			}
+		}
+		if legacyCityOnly {
+			return []string{cityPath}
+		}
 	}
 	capacity := 2
 	if cfg != nil {

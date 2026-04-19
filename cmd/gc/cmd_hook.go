@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inject bool
+	var hookFormat string
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Check for available work (use --inject for Stop hook output)",
@@ -23,16 +26,21 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
 With --inject: wraps output in <system-reminder> for hook injection, always exits 0.
 
-The agent is determined from $GC_AGENT or a positional argument.`,
+		The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdHook(args, inject, stdout, stderr) != 0 {
+			code := cmdHook(args, inject, stdout, stderr)
+			if hookFormat != "" {
+				code = cmdHookWithFormat(args, inject, hookFormat, stdout, stderr)
+			}
+			if code != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "output <system-reminder> block for hook injection")
+	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	return cmd
 }
 
@@ -40,22 +48,19 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 // $GC_AGENT or a positional argument, loads the city config, and runs
 // the agent's work query.
 func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
-	originalAlias := os.Getenv("GC_ALIAS")
-	originalAgent := os.Getenv("GC_AGENT")
-	originalSessionName := os.Getenv("GC_SESSION_NAME")
-	originalSessionID := os.Getenv("GC_SESSION_ID")
-	originalSessionOrigin := os.Getenv("GC_SESSION_ORIGIN")
-	originalTemplate := os.Getenv("GC_TEMPLATE")
+	return cmdHookWithFormat(args, inject, "", stdout, stderr)
+}
 
-	agentName := originalAlias
+func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
-		agentName = originalAgent
+		agentName = os.Getenv("GC_AGENT")
 	}
 	sessionTemplateContext := false
 	if len(args) == 0 {
-		template := strings.TrimSpace(originalTemplate)
-		hasSessionContext := strings.TrimSpace(originalSessionName) != "" ||
-			strings.TrimSpace(originalSessionID) != ""
+		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
 		if template != "" && hasSessionContext {
 			agentName = template
 			sessionTemplateContext = true
@@ -88,6 +93,10 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Normalize relative rig paths to absolute so downstream rig-matching
+	// (agentCommandDir, bdRuntimeEnvForRig) compares apples to apples.
+	// Other CLI entry points (cmd_sling, cmd_start, cmd_rig, cmd_supervisor)
+	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {
@@ -115,41 +124,12 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Many built-in/default work queries key off resolved session identity.
-	// When hook is invoked as `gc hook <agent>`, export the fully resolved
-	// agent/session names so the query sees the same identity that resolution
-	// used instead of the caller's raw input string.
-	resolvedAgentName := a.QualifiedName()
-	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
-	restoreAgent := os.Getenv("GC_AGENT")
-	restoreSession := os.Getenv("GC_SESSION_NAME")
-	_ = os.Setenv("GC_AGENT", resolvedAgentName)
-	defer func() {
-		if restoreAgent == "" {
-			_ = os.Unsetenv("GC_AGENT")
-		} else {
-			_ = os.Setenv("GC_AGENT", restoreAgent)
-		}
-	}()
-	_ = os.Setenv("GC_SESSION_NAME", resolvedSessionName)
-	defer func() {
-		if restoreSession == "" {
-			_ = os.Unsetenv("GC_SESSION_NAME")
-		} else {
-			_ = os.Setenv("GC_SESSION_NAME", restoreSession)
-		}
-	}()
-
 	workQuery := a.EffectiveWorkQuery()
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
 	workQuery = expandAgentCommandTemplate(cityPath, cfg.Workspace.Name, &a, cfg.Rigs, "work_query", workQuery, stderr)
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
-	workEnv := controllerWorkQueryEnv(cityPath, cfg, &a)
-	if workEnv == nil {
-		workEnv = map[string]string{}
-	}
 
 	// Build the work query subprocess environment. Rig-backed agents get
 	// rig-scoped BEADS_DIR / GC_RIG_ROOT / Dolt coordinates so the query
@@ -158,37 +138,58 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	// also key off session identity. Explicit hook targets get resolved
 	// names; named-session context preserves the runtime-supplied owner
 	// env while selecting the backing config through GC_TEMPLATE.
+	resolvedAgentName := a.QualifiedName()
+	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	agentForQuery := resolvedAgentName
 	sessionForQuery := resolvedSessionName
 	if sessionTemplateContext {
-		agentForQuery = originalAlias
+		agentForQuery = os.Getenv("GC_ALIAS")
 		if agentForQuery == "" {
-			agentForQuery = originalAgent
+			agentForQuery = os.Getenv("GC_SESSION_NAME")
 		}
 		if agentForQuery == "" {
-			agentForQuery = originalSessionName
+			agentForQuery = os.Getenv("GC_AGENT")
 		}
-		sessionForQuery = originalSessionName
+		sessionForQuery = os.Getenv("GC_SESSION_NAME")
 	}
-	workEnv["GC_AGENT"] = agentForQuery
-	workEnv["GC_SESSION_NAME"] = sessionForQuery
+	overrides := hookQueryEnv(cityPath, cfg, &a)
+	overrides["GC_AGENT"] = agentForQuery
+	overrides["GC_SESSION_NAME"] = sessionForQuery
 	if sessionTemplateContext {
-		workEnv["GC_ALIAS"] = originalAlias
-		workEnv["GC_SESSION_ID"] = originalSessionID
-		workEnv["GC_SESSION_ORIGIN"] = originalSessionOrigin
-		workEnv["GC_TEMPLATE"] = originalTemplate
+		overrides["GC_ALIAS"] = os.Getenv("GC_ALIAS")
+		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
+		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
+		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
 	}
+	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	runner := func(command, dir string) (string, error) {
-		return shellWorkQueryWithEnv(command, dir, workEnv)
+		return shellWorkQueryWithEnv(command, dir, queryEnv)
 	}
-	return doHook(workQuery, workDir, inject, runner, stdout, stderr)
+	return doHookWithFormat(workQuery, workDir, inject, hookFormat, runner, stdout, stderr)
+}
+
+// hookQueryEnv returns the full work-query environment for a hook subprocess.
+// It includes scope metadata (store root/scope/prefix) plus any rig-scoped
+// runtime overrides so hook queries observe the same routing contract as the
+// controller probes.
+func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string]string {
+	env := controllerWorkQueryEnv(cityPath, cfg, a)
+	if env == nil {
+		env = map[string]string{}
+	}
+	return env
 }
 
 // WorkQueryRunner runs a work query command and returns its stdout.
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
-func shellWorkQueryWithEnv(command, dir string, env map[string]string) (string, error) {
+// shellWorkQueryWithEnv runs a work query command via sh -c and returns
+// stdout. If env is non-nil it is used as the subprocess environment
+// (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
+// the child inherits the parent process environment. Times out after 30
+// seconds.
+func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -196,8 +197,8 @@ func shellWorkQueryWithEnv(command, dir string, env map[string]string) (string, 
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if len(env) > 0 {
-		cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	if env != nil {
+		cmd.Env = workQueryEnvForDir(env, dir)
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -226,6 +227,10 @@ func workQueryEnvForDir(env []string, dir string) []string {
 // results based on mode. Without inject: prints raw output, returns 0 if
 // work, 1 if empty. With inject: wraps in <system-reminder>, always returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
+	return doHookWithFormat(workQuery, dir, inject, "", runner, stdout, stderr)
+}
+
+func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, runner WorkQueryRunner, stdout, stderr io.Writer) int {
 	output, err := runner(workQuery, dir)
 	if err != nil {
 		if inject {
@@ -241,7 +246,8 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	if inject {
 		if hasWork {
-			fmt.Fprintf(stdout, "<system-reminder>\nYou have pending work. Pick up the next item:\n\n<work-items>\n%s\n</work-items>\n\nClaim it and start working. Run 'gc hook' to see the full queue.\n</system-reminder>\n", normalized) //nolint:errcheck // best-effort stdout
+			content := formatHookInjectReminder(normalized)
+			_ = writeProviderHookContext(stdout, hookFormat, content)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -255,6 +261,23 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	}
 	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func formatHookInjectReminder(normalizedWork string) string {
+	return fmt.Sprintf(`<system-reminder>
+You have pending work. Pick up the next item:
+
+<work-items>
+%s
+</work-items>
+
+Use the bead id from the work item:
+- If the item is not assigned to you yet, run `+"`bd update <id> --claim`"+`.
+- Do the requested work.
+- When done, run `+"`bd close <id>`"+`.
+Run `+"`gc hook`"+` to see the full queue.
+</system-reminder>
+`, normalizedWork)
 }
 
 func workQueryHasReadyWork(output string) bool {

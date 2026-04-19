@@ -1499,6 +1499,15 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			wantStartedHashCleared: false,
 		},
 		{
+			name:                   "city stop — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            sleepReasonCityStop,
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
 			name:                   "drained with wake_mode=fresh — resume metadata preserved (identity cleared at drain-ack/completeDrain)",
 			prevState:              "active",
 			sleepReason:            "drained",
@@ -1913,6 +1922,37 @@ func TestCheckChurn_SubprocessProviderSkipped(t *testing.T) {
 
 	if checkChurn(&session, cfg, false, dt, store, clk) {
 		t.Error("subprocess sessions should not trigger churn")
+	}
+}
+
+func TestCheckChurn_CityStopSleepReasonSkipped(t *testing.T) {
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":               now.Add(-90 * time.Second).Format(time.RFC3339),
+		"sleep_reason":               sleepReasonCityStop,
+		"churn_count":                "0",
+		"session_key":                "resume-key",
+		"continuation_reset_pending": "",
+	})
+
+	if checkChurn(&session, &config.City{}, false, dt, store, clk) {
+		t.Fatal("city-stop sessions should not trigger churn")
+	}
+	if got := session.Metadata["session_key"]; got != "resume-key" {
+		t.Fatalf("session_key = %q, want preserved", got)
+	}
+	if got := session.Metadata["churn_count"]; got != "0" {
+		t.Fatalf("churn_count = %q, want unchanged", got)
+	}
+	if got := session.Metadata["continuation_reset_pending"]; got != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got)
+	}
+	if got := session.Metadata["last_woke_at"]; got == "" {
+		t.Fatal("last_woke_at should remain edge-trigger state when churn is skipped")
 	}
 }
 

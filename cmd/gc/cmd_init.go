@@ -37,6 +37,14 @@ type initPackMeta struct {
 	Requires   []config.PackRequirement `toml:"requires,omitempty"`
 }
 
+type packDefaults struct {
+	Rig packRigDefaults `toml:"rig,omitempty"`
+}
+
+type packRigDefaults struct {
+	Imports map[string]config.Import `toml:"imports,omitempty"`
+}
+
 type initPackConfig struct {
 	// Keep this layout in lockstep with internal/config.packConfig so
 	// pack.toml write paths in cmd/gc can round-trip the canonical root
@@ -44,6 +52,7 @@ type initPackConfig struct {
 	Pack          initPackMeta                   `toml:"pack"`
 	Imports       map[string]config.Import       `toml:"imports,omitempty"`
 	AgentDefaults config.AgentDefaults           `toml:"agent_defaults,omitempty"`
+	Defaults      packDefaults                   `toml:"defaults,omitempty"`
 	Agents        []config.Agent                 `toml:"agent"`
 	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 	Services      []config.Service               `toml:"service,omitempty"`
@@ -451,6 +460,7 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 		Pack          initPackMeta                   `toml:"pack"`
 		Imports       map[string]config.Import       `toml:"imports,omitempty"`
 		AgentDefaults *config.AgentDefaults          `toml:"agent_defaults,omitempty"`
+		Defaults      packDefaults                   `toml:"defaults,omitempty"`
 		Agents        []config.Agent                 `toml:"agent"`
 		NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 		Services      []config.Service               `toml:"service,omitempty"`
@@ -465,6 +475,7 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 	encCfg := encodedInitPackConfig{
 		Pack:          cfg.Pack,
 		Imports:       cfg.Imports,
+		Defaults:      cfg.Defaults,
 		Agents:        cfg.Agents,
 		NamedSessions: cfg.NamedSessions,
 		Services:      cfg.Services,

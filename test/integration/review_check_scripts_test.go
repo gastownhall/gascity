@@ -206,10 +206,16 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 	}
 	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
 	registerCityCommandEnv(cityDir, env)
+	if _, ok := ensureManagedDoltPortForTest(cityDir); !ok {
+		configData, _ := os.ReadFile(filepath.Join(cityDir, ".beads", "config.yaml"))
+		portData, _ := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port"))
+		t.Fatalf("managed Dolt port never became ready for review-check-script city\nconfig:\n%s\nport file:\n%s", string(configData), string(portData))
+	}
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
 		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
+		cleanupTestCityDir(cityDir)
 	})
 
 	return cityDir

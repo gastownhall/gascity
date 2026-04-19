@@ -1090,14 +1090,14 @@ depends_on = ["implement"]
 	}
 }
 
-func TestCookEndToEndRalph(t *testing.T) {
+func TestCookEndToEndCheckSyntax(t *testing.T) {
 	prev := formula.IsFormulaV2Enabled()
 	formula.SetFormulaV2Enabled(true)
 	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 	dir := t.TempDir()
 	toml := `
 formula = "ralph-demo"
-description = "Ralph cook test"
+description = "Check cook test"
 
 [[steps]]
 id = "design"
@@ -1111,10 +1111,10 @@ needs = ["design"]
 [steps.metadata]
 custom = "value"
 
-[steps.ralph]
+[steps.check]
 max_attempts = 3
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "2m"

@@ -65,20 +65,23 @@ func waitForActiveSessionTargets(t *testing.T, cityDir string, targets []string,
 }
 
 // setupMultiRigCity creates a city scaffold with the given number of rig
-// directories. Returns the city directory and a slice of rig directory paths.
+// directories under an isolated integration GC_HOME. Returns the city
+// directory and a slice of rig directory paths.
 //
-// gc init starts a standalone controller immediately. Callers overwrite
-// city.toml and wait for the controller to reload the updated config; they
-// should not call gc start until after an explicit gc stop.
+// The city starts with the default tutorial scaffold. Callers overwrite
+// city.toml afterward and use gc restart/start against the isolated
+// supervisor-managed city registered for this path.
 func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []string) {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 	cityName := uniqueCityName()
 	cityDir = filepath.Join(t.TempDir(), cityName)
 
-	// Create the city scaffold and standalone controller. Tests overwrite
-	// city.toml afterward and rely on config reload instead of a second start.
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
+	// Create the city scaffold inside an isolated supervisor env so
+	// multi-rig tests do not contend with the suite-global supervisor.
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", cityDir)
 	require.NoError(t, err, "gc init: %s", out)
+	registerCityCommandEnv(cityDir, env)
 
 	rigDirs = make([]string, rigCount)
 	for i := 0; i < rigCount; i++ {
@@ -87,7 +90,16 @@ func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []st
 	}
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if err := os.RemoveAll(cityDir); err == nil || time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	})
 
 	return cityDir, rigDirs

@@ -2477,6 +2477,24 @@ type WireTaggedEvent struct {
 	Type    string        `json:"type"`
 }
 
+// WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
+type WorkerOperationEventPayload struct {
+	Delivered   *bool     `json:"delivered,omitempty"`
+	DurationMs  int64     `json:"duration_ms"`
+	Error       *string   `json:"error,omitempty"`
+	FinishedAt  time.Time `json:"finished_at"`
+	OpId        string    `json:"op_id"`
+	Operation   string    `json:"operation"`
+	Provider    *string   `json:"provider,omitempty"`
+	Queued      *bool     `json:"queued,omitempty"`
+	Result      string    `json:"result"`
+	SessionId   *string   `json:"session_id,omitempty"`
+	SessionName *string   `json:"session_name,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	Template    *string   `json:"template,omitempty"`
+	Transport   *string   `json:"transport,omitempty"`
+}
+
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
 type WorkflowAttemptSummary struct {
 	ActiveAttempt int64  `json:"active_attempt"`
@@ -3418,6 +3436,32 @@ func (t *EventPayload) FromUnboundEventPayload(v UnboundEventPayload) error {
 
 // MergeUnboundEventPayload performs a merge with any union data inside the EventPayload, using the provided UnboundEventPayload
 func (t *EventPayload) MergeUnboundEventPayload(v UnboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWorkerOperationEventPayload returns the union data inside the EventPayload as a WorkerOperationEventPayload
+func (t EventPayload) AsWorkerOperationEventPayload() (WorkerOperationEventPayload, error) {
+	var body WorkerOperationEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWorkerOperationEventPayload overwrites any union data inside the EventPayload as the provided WorkerOperationEventPayload
+func (t *EventPayload) FromWorkerOperationEventPayload(v WorkerOperationEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWorkerOperationEventPayload performs a merge with any union data inside the EventPayload, using the provided WorkerOperationEventPayload
+func (t *EventPayload) MergeWorkerOperationEventPayload(v WorkerOperationEventPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

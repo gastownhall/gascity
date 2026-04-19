@@ -120,7 +120,7 @@ func evaluateWakeReasons(
 	}
 
 	if !waitHold && sp != nil {
-		if name != "" && sp.IsAttached(name) {
+		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
 			reasons = append(reasons, WakeAttached)
 		}
 	}
@@ -604,6 +604,9 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	if dt != nil && dt.get(session.ID) != nil {
 		return false
 	}
+	if isDeliberateSleepReason(session.Metadata["sleep_reason"]) {
+		return false
+	}
 	lastWoke := session.Metadata["last_woke_at"]
 	if lastWoke == "" {
 		return false
@@ -632,6 +635,16 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	_ = store.SetMetadata(session.ID, "last_woke_at", "")
 	session.Metadata["last_woke_at"] = ""
 	return true
+}
+
+func isDeliberateSleepReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
+		sleepReasonCityStop, "user-hold", "wait-hold":
+		return true
+	default:
+		return false
+	}
 }
 
 // recordChurn increments the churn counter and clears session_key on

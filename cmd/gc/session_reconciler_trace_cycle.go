@@ -107,7 +107,7 @@ func (c *SessionReconcilerTraceCycle) recordMutation(siteCode, template, _ strin
 	if c == nil {
 		return
 	}
-	fields := make(map[string]any, len(data))
+	fields := make(map[string]any)
 	for k, v := range data {
 		fields[k] = v
 	}
