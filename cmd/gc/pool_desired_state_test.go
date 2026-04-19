@@ -637,3 +637,80 @@ func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 		t.Fatalf("total requests = %d, want 0", total)
 	}
 }
+
+// Regression for gastownhall/gascity#909: when a template is claimed by a
+// [[named_session]] with mode="always", the pool reconciler must not produce
+// pool requests for that template. The named_session reconciler owns the
+// template's lifecycle; duplicating it through the pool path causes the
+// failed-create loop described in the issue.
+func TestComputePoolDesiredStates_SuppressPoolForModeAlwaysNamedSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("mayor", "", intPtr(1), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	// scale_check reports 1 — as it does on a fresh repro city that has a
+	// named mayor plus a [[agent]] mayor block.
+	scaleCheck := map[string]int{"mayor": 1}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+
+	total := 0
+	for _, ds := range result {
+		if ds.Template == "mayor" {
+			total += len(ds.Requests)
+		}
+	}
+	if total != 0 {
+		t.Fatalf("pool requests for 'mayor' = %d, want 0 (reserved by mode=always named_session)", total)
+	}
+}
+
+// Regression for gastownhall/gascity#909: min_active_sessions must also be
+// suppressed for a template owned by a mode="always" named_session. Otherwise
+// min_fill re-introduces the collision that scale_check suppression prevents.
+func TestComputePoolDesiredStates_SuppressMinFillForModeAlwaysNamedSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("mayor", "", intPtr(2), 1)},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, nil)
+
+	total := 0
+	for _, ds := range result {
+		if ds.Template == "mayor" {
+			total += len(ds.Requests)
+		}
+	}
+	if total != 0 {
+		t.Fatalf("pool requests for 'mayor' = %d, want 0 (min_fill must defer to named_session)", total)
+	}
+}
+
+// on_demand named sessions do NOT reserve the template — pool scaling is
+// still allowed. This guards against over-suppression.
+func TestComputePoolDesiredStates_OnDemandNamedSessionDoesNotSuppressPool(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("mayor", "", intPtr(2), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "on_demand"},
+		},
+	}
+	scaleCheck := map[string]int{"mayor": 1}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+
+	total := 0
+	for _, ds := range result {
+		if ds.Template == "mayor" {
+			total += len(ds.Requests)
+		}
+	}
+	if total != 1 {
+		t.Fatalf("pool requests for 'mayor' = %d, want 1 (on_demand does not reserve template)", total)
+	}
+}

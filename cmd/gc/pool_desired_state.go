@@ -103,6 +103,11 @@ func computePoolDesiredStates(
 		}
 	}
 
+	// Templates claimed by a mode="always" named_session are owned by the
+	// named-session reconciler; the pool path must skip them entirely to
+	// avoid the duplicate-session collision in gastownhall/gascity#909.
+	reservedByNamedSession := templatesReservedByAlwaysNamedSession(cfg)
+
 	// Collect uncapped requests per agent template.
 	var allRequests []SessionRequest
 
@@ -115,6 +120,9 @@ func computePoolDesiredStates(
 			continue
 		}
 		template := agent.QualifiedName()
+		if reservedByNamedSession[template] {
+			continue
+		}
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
@@ -166,6 +174,9 @@ func computePoolDesiredStates(
 				continue
 			}
 			template := agent.QualifiedName()
+			if reservedByNamedSession[template] {
+				continue
+			}
 			scaleCount, ok := scaleCheckCounts[template]
 			if !ok {
 				continue
@@ -180,12 +191,32 @@ func computePoolDesiredStates(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, trace)
+	return applyNestedCaps(cfg, allRequests, trace, reservedByNamedSession)
+}
+
+// templatesReservedByAlwaysNamedSession returns the set of agent template
+// qualified identities that are claimed by at least one [[named_session]]
+// with mode="always". Such templates are managed exclusively by the
+// named-session reconciler; pool scaling for them must be suppressed to
+// avoid the session collision in gastownhall/gascity#909.
+func templatesReservedByAlwaysNamedSession(cfg *config.City) map[string]bool {
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return nil
+	}
+	reserved := make(map[string]bool, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns.ModeOrDefault() != "always" {
+			continue
+		}
+		reserved[ns.TemplateQualifiedName()] = true
+	}
+	return reserved
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
-func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
+func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *sessionReconcilerTraceCycle, reservedByNamedSession map[string]bool) []PoolDesiredState {
 	// Sort by priority DESC, resume tier first within same priority.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
@@ -312,6 +343,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 			continue
 		}
 		template := agent.QualifiedName()
+		if reservedByNamedSession[template] {
+			continue
+		}
 		minSess := agent.EffectiveMinActiveSessions()
 		for agentCount[template] < minSess {
 			rig := agentRigMap[template]
