@@ -576,26 +576,20 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 		_ = code
 		return resolvedMailTarget{}, false
 	}
-	var firstErr error
 	for _, c := range candidates {
 		target, err := resolveMailTargets(store, c)
 		if err == nil {
 			return target, true
-		}
-		if firstErr == nil {
-			firstErr = err
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return resolvedMailTarget{}, false
 		}
 	}
-	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v): %v\n", cmdName, candidates, firstErr) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
 	return resolvedMailTarget{}, false
 }
 
-// resolveInboxTarget dispatches to the explicit-identifier or default-
-// identity resolver based on whether the caller passed an argument.
 func resolveInboxTarget(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	if len(args) > 0 {
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
@@ -1205,8 +1199,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	sender := defaultMailIdentity()
 	var hasStore bool
 	if sender != "human" {
-		v := mailProviderName()
-		if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+		if !isStorelessMailProvider() {
 			hasStore = true
 			store, storeCode := openCityStore(stderr, "gc mail reply")
 			if store == nil {
