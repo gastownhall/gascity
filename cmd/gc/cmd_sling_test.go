@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -949,6 +950,45 @@ dir = "frontend"
 	}
 	if len(cityBeads) != 0 {
 		t.Fatalf("city store bead count = %d, want 0: %#v", len(cityBeads), cityBeads)
+	}
+}
+
+func TestSlingStoreEnvUsesRigBdRuntimeForMixedProviderRig(t *testing.T) {
+	cityDir := t.TempDir()
+	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+	rigDir := filepath.Join(cityDir, "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"repo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+
+	env := slingStoreEnv(cfg, cityDir, rigDir)
+	if got := env["GC_DOLT_PORT"]; got != wantPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	}
+	if got := env["GC_RIG"]; got != "repo" {
+		t.Fatalf("GC_RIG = %q, want %q", got, "repo")
 	}
 }
 

@@ -117,7 +117,7 @@ func buildAwakeInputFromReconciler(
 		if target.alive {
 			input.RunningSessions[name] = true
 		}
-		if sp != nil && sp.IsAttached(name) {
+		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
 			input.AttachedSessions[name] = true
 		}
 		if pendingInteractionReady(sp, name) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ are scoped to rigs via their "dir" field.`,
 }
 
 func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
-	var include string
+	var includes []string
 	var startSuspended bool
 	var nameFlag string
 	var prefixFlag string
@@ -73,7 +74,8 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration.
+to apply a pack directory that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -87,17 +89,18 @@ Skips beads init; the git repo check remains informational.`,
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRigAdd(args, include, nameFlag, prefixFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&include, "include", "", "pack directory for rig agents")
+	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack directory for rig agents (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
@@ -127,7 +130,7 @@ displays its bead ID prefix and whether its beads database is initialized.`,
 }
 
 // cmdRigAdd registers an external project directory as a rig in the city.
-func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
 		return 1
@@ -144,7 +147,7 @@ func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, star
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, include, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
+	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
 }
 
 func resolveRigAddPath(cityPath, rigArg string) (string, error) {
@@ -169,13 +172,24 @@ func resolveRigAddPath(cityPath, rigArg string) (string, error) {
 // city.toml is written last — if any earlier step fails, config is unchanged.
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
-func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	// Validate prefix format: hyphens break beadPrefix() which splits on
 	// the first '-' to extract the rig prefix from a bead ID.
 	if prefixOverride != "" && strings.Contains(prefixOverride, "-") {
 		fmt.Fprintf(stderr, "gc rig add: --prefix %q must not contain hyphens (conflicts with bead ID format)\n", prefixOverride) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// Trim and drop empty --include entries so `--include=` or `--include " "`
+	// doesn't persist a blank pack path that downstream resolution reads
+	// as the city root.
+	cleaned := includes[:0:0]
+	for _, inc := range includes {
+		if trimmed := strings.TrimSpace(inc); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	includes = cleaned
 
 	fi, err := fs.Stat(rigPath)
 	if err != nil {
@@ -222,6 +236,12 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		cityDoltConfigs.Store(cityPath, cfg.Dolt)
 		defer cityDoltConfigs.Delete(cityPath)
 	}
+	rootDefaultRigIncludes, err := config.LoadRootPackDefaultRigIncludes(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defaultRigIncludes := append(append([]string{}, rootDefaultRigIncludes...), cfg.Workspace.DefaultRigIncludes...)
 
 	var reAdd bool
 	existingRigIdx := -1
@@ -275,8 +295,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		if startSuspended && startSuspended != existingRig.Suspended {
 			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended=%v); edit city.toml to change\n", existingRig.Suspended) //nolint:errcheck // best-effort stderr
 		}
-		if include != "" && (len(existingRig.Includes) == 0 || existingRig.Includes[0] != include) {
-			fmt.Fprintf(stderr, "gc rig add: warning: --include=%s ignored (existing: %v); edit city.toml to change\n", include, existingRig.Includes) //nolint:errcheck // best-effort stderr
+		if len(includes) > 0 && !slices.Equal(existingRig.Includes, includes) {
+			fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored (existing: %v); edit city.toml to change\n", includes, existingRig.Includes) //nolint:errcheck // best-effort stderr
 		}
 		if prefixOverride != "" && strings.ToLower(prefixOverride) != existingRig.EffectivePrefix() {
 			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", prefixOverride, existingRig.EffectivePrefix()) //nolint:errcheck // best-effort stderr
@@ -290,10 +310,10 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	w(fmt.Sprintf("  Prefix: %s", prefix))
 	if !reAdd {
 		switch {
-		case include != "":
-			w(fmt.Sprintf("  Include: %s", include))
-		case len(cfg.Workspace.DefaultRigIncludes) > 0:
-			w(fmt.Sprintf("  Include: %s (default)", strings.Join(cfg.Workspace.DefaultRigIncludes, ", ")))
+		case len(includes) > 0:
+			w(fmt.Sprintf("  Include: %s", strings.Join(includes, ", ")))
+		case len(defaultRigIncludes) > 0:
+			w(fmt.Sprintf("  Include: %s (default)", strings.Join(defaultRigIncludes, ", ")))
 		}
 	}
 
@@ -343,10 +363,10 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 			Suspended: startSuspended,
 		}
 		switch {
-		case include != "":
-			rig.Includes = []string{include}
-		case len(cfg.Workspace.DefaultRigIncludes) > 0:
-			rig.Includes = append([]string{}, cfg.Workspace.DefaultRigIncludes...)
+		case len(includes) > 0:
+			rig.Includes = slices.Clone(includes)
+		case len(defaultRigIncludes) > 0:
+			rig.Includes = slices.Clone(defaultRigIncludes)
 		}
 		next := *cfg
 		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
@@ -915,7 +935,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 			// Update .beads/.env and routes for the rig's new default city.
 			if newDefault != "" {
 				_ = writeBeadsEnvGTRoot(fsys.OSFS{}, removedPath, newDefault)
-				if newCfg, err := loadCityConfig(newDefault); err == nil {
+				if newCfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(newDefault); err == nil {
 					resolveRigPaths(newDefault, newCfg.Rigs)
 					newRigs := collectRigRoutes(newDefault, newCfg)
 					_ = writeAllRoutes(newRigs)

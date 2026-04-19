@@ -23,10 +23,10 @@ func newRegisterCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
-Use --name to set the registration name; this also persists workspace.name
-in city.toml so later registrations stay aligned. When --name is omitted,
-workspace.name is used if present, otherwise [pack].name is used and
-backfilled into workspace.name.
+Use --name to set the machine-local registration alias. The alias is stored
+in the machine-local supervisor registry and never written back to city.toml.
+When --name is omitted, workspace.name is used if present, otherwise
+[pack].name is used — in either case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.`,
 		Args: cobra.MaximumNArgs(1),
@@ -63,38 +63,31 @@ func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io
 		fmt.Fprintf(stderr, "gc register: %s is not a city directory (no city.toml found)\n", cityPath) //nolint:errcheck
 		return 1
 	}
-	registerName, persistName, err := resolveRegistrationName(cityPath, nameOverride)
+	registerName, err := resolveRegistrationName(cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc register: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if persistName {
-		if code := overrideCityName(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), registerName, stderr); code != 0 {
-			return code
-		}
-	}
 	return registerCityWithSupervisorNamed(cityPath, registerName, stdout, stderr, "gc register", true)
 }
 
-func resolveRegistrationName(cityPath, nameOverride string) (string, bool, error) {
+// resolveRegistrationName returns the machine-local alias to store in the
+// supervisor registry. The alias is never written back to city.toml — the
+// registry is the sole source of truth for registration identity
+// (gastownhall/gascity#602).
+func resolveRegistrationName(cityPath, nameOverride string) (string, error) {
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		return "", false, err
+		return "", fmt.Errorf("loading city.toml: %w", err)
 	}
-
-	current := strings.TrimSpace(cfg.Workspace.Name)
 	if alias := strings.TrimSpace(nameOverride); alias != "" {
-		return alias, current != alias, nil
+		return alias, nil
 	}
-	if current != "" {
-		return current, false, nil
+	if current := strings.TrimSpace(cfg.Workspace.Name); current != "" {
+		return current, nil
 	}
 
-	packName, err := readPackName(filepath.Join(cityPath, "pack.toml"))
-	if err != nil {
-		return "", false, err
-	}
-	return packName, true, nil
+	return readPackName(filepath.Join(cityPath, "pack.toml"))
 }
 
 func readPackName(packTomlPath string) (string, error) {

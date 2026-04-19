@@ -35,6 +35,7 @@ type cityPackManifest struct {
 	Pack          config.PackMeta                `toml:"pack"`
 	Imports       map[string]config.Import       `toml:"imports,omitempty"`
 	AgentDefaults config.AgentDefaults           `toml:"agent_defaults,omitempty"`
+	Defaults      packDefaults                   `toml:"defaults,omitempty"`
 	Agents        []config.Agent                 `toml:"agent,omitempty"`
 	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 	Services      []config.Service               `toml:"service,omitempty"`

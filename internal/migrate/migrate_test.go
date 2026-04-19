@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestMigrateCityCommonCase(t *testing.T) {
@@ -18,7 +19,7 @@ func TestMigrateCityCommonCase(t *testing.T) {
 [workspace]
 name = "legacy-city"
 includes = ["../packs/gastown", "../packs/qa-team"]
-default_rig_includes = ["../packs/default rig"]
+default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
 
 [[agent]]
 name = "mayor"
@@ -60,19 +61,19 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(packToml, "source = \"../packs/gastown\"") {
 		t.Fatalf("pack.toml missing gastown source:\n%s", packToml)
 	}
-	if !strings.Contains(packToml, "[defaults.rig.imports.default-rig]") {
-		t.Fatalf("pack.toml missing default rig import:\n%s", packToml)
+	if strings.Contains(packToml, "[defaults.rig.imports") {
+		t.Fatalf("pack.toml should not move ordered default_rig_includes into map-shaped defaults:\n%s", packToml)
 	}
 
 	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
 	if strings.Contains(cityToml, "[[agent]]") {
 		t.Fatalf("city.toml still contains [[agent]]:\n%s", cityToml)
 	}
-	if strings.Contains(cityToml, "includes =") {
+	if strings.Contains(cityToml, "\nincludes =") {
 		t.Fatalf("city.toml still contains workspace.includes:\n%s", cityToml)
 	}
-	if strings.Contains(cityToml, "default_rig_includes") {
-		t.Fatalf("city.toml still contains workspace.default_rig_includes:\n%s", cityToml)
+	if !strings.Contains(cityToml, `default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]`) {
+		t.Fatalf("city.toml should preserve ordered workspace.default_rig_includes:\n%s", cityToml)
 	}
 
 	mayorAgentToml := readFile(t, filepath.Join(cityDir, "agents", "mayor", "agent.toml"))
@@ -116,6 +117,139 @@ prompt_template = "prompts/worker.md"
 	}
 	if _, err := os.Stat(filepath.Join(cityDir, "namepools", "mayor.txt")); !os.IsNotExist(err) {
 		t.Fatalf("expected namepool source to be removed, err=%v", err)
+	}
+}
+
+func TestMigrateDefaultRigIncludesLoadAfterMigration(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	if len(cfg.Workspace.DefaultRigIncludes) != 2 {
+		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.DefaultRigIncludes))
+	}
+	if cfg.Workspace.DefaultRigIncludes[0] != "../packs/z-pack" {
+		t.Fatalf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.DefaultRigIncludes[0], "../packs/z-pack")
+	}
+	if cfg.Workspace.DefaultRigIncludes[1] != "../packs/a-pack" {
+		t.Fatalf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.DefaultRigIncludes[1], "../packs/a-pack")
+	}
+}
+
+func TestMigrateRejectsUnknownExistingPackTomlFields(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+description = "silently dropped before strict migration validation"
+`)
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+	beforePack := readFile(t, filepath.Join(cityDir, "pack.toml"))
+
+	_, err := Apply(cityDir, Options{})
+	if err == nil {
+		t.Fatal("expected Apply to reject unknown pack.toml field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "pack.description"`) {
+		t.Fatalf("error = %v, want unknown field detail for pack.description", err)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed after validation failure:\n%s", got)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "pack.toml")); got != beforePack {
+		t.Fatalf("pack.toml changed after validation failure:\n%s", got)
+	}
+}
+
+func TestMigratePreservesExistingRootDefaultRigImportOrder(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/new-pack"]
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[defaults.rig.imports.z-pack]
+source = "../packs/z-pack"
+
+[defaults.rig.imports.a-pack]
+source = "../packs/a-pack"
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if !strings.Contains(packToml, "[imports.new-pack]") {
+		t.Fatalf("pack.toml missing migrated workspace include:\n%s", packToml)
+	}
+	zIndex := strings.Index(packToml, "[defaults.rig.imports.z-pack]")
+	aIndex := strings.Index(packToml, "[defaults.rig.imports.a-pack]")
+	if zIndex < 0 || aIndex < 0 {
+		t.Fatalf("pack.toml missing root default rig imports:\n%s", packToml)
+	}
+	if zIndex > aIndex {
+		t.Fatalf("pack.toml reordered default rig imports:\n%s", packToml)
+	}
+}
+
+func TestMigrateDoesNotRewriteExistingPackWithoutPackChanges(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
+`)
+	writeFile(t, cityDir, "pack.toml", `
+# existing formatting must survive no-op pack migration
+[pack]
+name = "legacy-city"
+schema = 2
+
+[defaults.rig.imports.z-pack]
+source = "../packs/z-pack"
+
+[defaults.rig.imports.a-pack]
+source = "../packs/a-pack"
+`)
+
+	beforePack := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "pack.toml")); got != beforePack {
+		t.Fatalf("pack.toml changed without pack migration changes:\n%s", got)
 	}
 }
 

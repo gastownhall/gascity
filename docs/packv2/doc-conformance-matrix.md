@@ -69,7 +69,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Commands discovery | The default `commands/<name>/run.sh` discovery path works; final manifest shape remains non-gating | Unit + testscript | `internal/config/command_discovery.go` |
 | Doctor discovery | The default `doctor/<name>/run.sh` discovery path works | Unit + testscript | `internal/config/doctor_discovery.go` |
 | Legacy migration rewrite | `gc doctor` inventories legacy Pack/City v1 usage and `gc doctor --fix` performs the safe mechanical rewrites for agent directories, prompt/overlay/namepool moves, and import-oriented composition. Legacy remote `workspace.includes` is a hard-break migration issue, not a runtime compatibility target. | Testscript | `cmd/gc/doctor_v2_checks.go`, migration fix path TBD |
-| Registration naming | `gc register --name` persists `workspace.name` to the chosen registration name before registering; plain `gc register` uses `workspace.name` if present, otherwise `pack.name`, and backfills `workspace.name` before registering | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
+| Registration naming | `gc register --name` stores the chosen machine-local alias in the supervisor registry without mutating `city.toml`; plain `gc register` uses `workspace.name` if present, otherwise `pack.name`, and stores that value in the registry without backfilling `workspace.name` | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
 
 ## Add To CI When Warning Plumbing Lands
 

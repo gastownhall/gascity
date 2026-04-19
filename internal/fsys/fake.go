@@ -9,13 +9,14 @@ import (
 )
 
 // Fake is an in-memory [FS] for testing. It records all calls (spy) and
-// simulates filesystem state (fake). Pre-populate Dirs, Files, and Errors
-// before calling methods.
+// simulates filesystem state (fake). Pre-populate Dirs, Files, Symlinks,
+// and Errors before calling methods.
 type Fake struct {
-	Dirs   map[string]bool   // pre-populated directories
-	Files  map[string][]byte // pre-populated files
-	Errors map[string]error  // path → injected error (checked first)
-	Calls  []Call            // spy log
+	Dirs     map[string]bool   // pre-populated directories
+	Files    map[string][]byte // pre-populated files
+	Symlinks map[string]string // pre-populated symlinks (path -> target)
+	Errors   map[string]error  // path → injected error (checked first)
+	Calls    []Call            // spy log
 }
 
 // Call records a single method invocation on [Fake].
@@ -27,9 +28,10 @@ type Call struct {
 // NewFake returns a ready-to-use [Fake] with empty maps.
 func NewFake() *Fake {
 	return &Fake{
-		Dirs:   make(map[string]bool),
-		Files:  make(map[string][]byte),
-		Errors: make(map[string]error),
+		Dirs:     make(map[string]bool),
+		Files:    make(map[string][]byte),
+		Symlinks: make(map[string]string),
+		Errors:   make(map[string]error),
 	}
 }
 
@@ -73,10 +75,20 @@ func (f *Fake) ReadFile(name string) ([]byte, error) {
 }
 
 // Stat records the call and returns info based on Dirs/Files maps.
+// Symlinks are followed — use Lstat to detect them without following.
 func (f *Fake) Stat(name string) (os.FileInfo, error) {
 	f.Calls = append(f.Calls, Call{Method: "Stat", Path: name})
 	if err, ok := f.Errors[name]; ok {
 		return nil, err
+	}
+	if target, ok := f.Symlinks[name]; ok {
+		if f.Dirs[target] {
+			return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
+		}
+		if data, ok := f.Files[target]; ok {
+			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+		}
+		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 	}
 	if f.Dirs[name] {
 		return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
@@ -85,6 +97,25 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
 	}
 	return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
+}
+
+// Lstat records the call and reports the entry itself without following
+// symlinks. Tests populate Symlinks to exercise the symlink-rejection path.
+func (f *Fake) Lstat(name string) (os.FileInfo, error) {
+	f.Calls = append(f.Calls, Call{Method: "Lstat", Path: name})
+	if err, ok := f.Errors[name]; ok {
+		return nil, err
+	}
+	if _, ok := f.Symlinks[name]; ok {
+		return fakeFileInfo{name: filepath.Base(name), symlink: true}, nil
+	}
+	if f.Dirs[name] {
+		return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
+	}
+	if data, ok := f.Files[name]; ok {
+		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+	}
+	return nil, &os.PathError{Op: "lstat", Path: name, Err: os.ErrNotExist}
 }
 
 // ReadDir records the call and returns entries from direct children.
@@ -175,14 +206,20 @@ func (f *Fake) Chmod(name string, _ os.FileMode) error {
 // --- fake os.FileInfo ---
 
 type fakeFileInfo struct {
-	name string
-	size int64
-	dir  bool
+	name    string
+	size    int64
+	dir     bool
+	symlink bool
 }
 
-func (fi fakeFileInfo) Name() string       { return fi.name }
-func (fi fakeFileInfo) Size() int64        { return fi.size }
-func (fi fakeFileInfo) Mode() os.FileMode  { return 0o755 }
+func (fi fakeFileInfo) Name() string { return fi.name }
+func (fi fakeFileInfo) Size() int64  { return fi.size }
+func (fi fakeFileInfo) Mode() os.FileMode {
+	if fi.symlink {
+		return 0o777 | os.ModeSymlink
+	}
+	return 0o755
+}
 func (fi fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (fi fakeFileInfo) IsDir() bool        { return fi.dir }
 func (fi fakeFileInfo) Sys() any           { return nil }
@@ -205,7 +242,7 @@ func (de fakeDirEntry) Type() fs.FileMode {
 }
 
 func (de fakeDirEntry) Info() (fs.FileInfo, error) {
-	return fakeFileInfo(de), nil
+	return fakeFileInfo{name: de.name, size: de.size, dir: de.dir}, nil
 }
 
 var (

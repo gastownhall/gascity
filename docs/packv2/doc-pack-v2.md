@@ -137,7 +137,7 @@ Everything else — agents, named sessions, providers, formulas, prompts, script
 
 `gc init` and `gc rig add` generate names and prefixes by default. Users can override with `--name` and `--prefix` (typically to resolve conflicts). In this rollout, `gc init --name` keeps definition and runtime identity aligned by writing the chosen name to both `pack.toml` and `city.toml`.
 
-`gc register` accepts `--name` to set the city's registration name explicitly. In the current rollout, that name is persisted into `workspace.name` before registration so the runtime and registry stay aligned. When `--name` is omitted, `gc register` uses `workspace.name` if present; otherwise it falls back to `pack.name`, writes that into `city.toml`, and registers the city under that name. `gc register` does not rewrite `pack.toml`. ([#602](https://github.com/gastownhall/gascity/issues/602))
+`gc register` accepts `--name` to set the city's registration name explicitly. The chosen name is stored in the machine-local supervisor registry and is not written back to `city.toml`. When `--name` is omitted, `gc register` uses `workspace.name` if present; otherwise it falls back to `pack.name` and stores that value in the registry. `gc register` does not rewrite `city.toml` or `pack.toml`. ([#602](https://github.com/gastownhall/gascity/issues/602))
 
 Names and prefixes are both managed by `gc`, but the current Phase A rollout only moves the machine-local rig path into `.gc/`. Rig names, prefixes, and suspended flags still live in `city.toml` for now. Names are human-facing labels; prefixes are derived from names and baked into bead IDs. Neither should be casually changed after creation.
 
@@ -151,7 +151,7 @@ If `gc` detects a mismatch between a rig name in city.toml and its managed state
 
 `pack.name` is the identity of the definition — "this pack is called gastown." It lives in `pack.toml`, is portable, and travels with the pack when imported.
 
-`workspace.name` is still a transitional runtime identity surface in this rollout. `gc init` keeps fresh cities stable by writing the same chosen name to both `pack.toml` and `city.toml`. `gc register` keeps registration and runtime identity aligned by updating `workspace.name` to the chosen registration name, or by backfilling it from `pack.name` when needed.
+`workspace.name` is still a transitional runtime identity surface in this rollout. `gc init` keeps fresh cities stable by writing the same chosen name to both `pack.toml` and `city.toml`. `gc register` now treats the supervisor registry as the machine-local source of truth for registration identity: an explicit `--name` alias can differ from committed `workspace.name`, and fallback from `pack.name` is stored only in the registry.
 
 The long-term direction remains the same: remove `workspace.name` from `city.toml`, derive portable identity from `pack.name`, and keep machine-local naming in site binding. This PR does not complete that cutover.
 

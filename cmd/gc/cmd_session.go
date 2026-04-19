@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -192,7 +193,6 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 
 	// Build the work directory.
 	sessionQualifiedName := workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, explicitName)
@@ -224,6 +224,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	if err != nil {
 		titleProvider = nil
 	}
+	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
@@ -231,8 +236,35 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — create bead only, let reconciler start it.
+			kindMeta := map[string]string{
+				"agent_name":     sessionQualifiedName,
+				"session_origin": "manual",
+			}
+			if resolved.Kind != "" && resolved.Kind != resolved.Name {
+				kindMeta["provider_kind"] = resolved.Kind
+			}
+			handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+				cityPath,
+				store,
+				sp,
+				cfg,
+				alias,
+				explicitName,
+				canonicalTemplate,
+				title,
+				sessionCommand,
+				found.Provider,
+				workDir,
+				found.Session,
+				resolved,
+				kindMeta,
+			)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			var info session.Info
-			err := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+			err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 					return err
 				}
@@ -245,19 +277,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 					return err
 				}
 				var createErr error
-				kindMeta := map[string]string{
-					"agent_name":     sessionQualifiedName,
-					"session_origin": "manual",
-				}
-				if resolved.Kind != "" && resolved.Kind != resolved.Name {
-					kindMeta["provider_kind"] = resolved.Kind
-				}
-				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, explicitName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
-					ResumeFlag:    resolved.ResumeFlag,
-					ResumeStyle:   resolved.ResumeStyle,
-					ResumeCommand: resolved.ResumeCommand,
-					SessionIDFlag: resolved.SessionIDFlag,
-				}, kindMeta)
+				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
 				return createErr
 			})
 			if err != nil {
@@ -287,7 +307,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				return 1
 			}
 			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-			if err := sp.Attach(info.SessionName); err != nil {
+			if err := handle.Attach(context.Background()); err != nil {
 				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -296,25 +316,32 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 
 	// Fallback: controller not running — direct start via session manager.
-	hints := runtime.Config{
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-	}
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
-
 	kindMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
 		"session_origin": "manual",
 	}
 	if resolved.Kind != "" && resolved.Kind != resolved.Name {
 		kindMeta["provider_kind"] = resolved.Kind
+	}
+	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		alias,
+		explicitName,
+		canonicalTemplate,
+		title,
+		sessionCommand,
+		found.Provider,
+		workDir,
+		found.Session,
+		resolved,
+		kindMeta,
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
@@ -330,7 +357,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, explicitName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
+		info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
 		return createErr
 	})
 	if err != nil {
@@ -351,7 +378,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 
 	fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-	if err := sp.Attach(info.SessionName); err != nil {
+	if err := handle.Attach(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -367,6 +394,34 @@ func maybeAutoTitle(store beads.Store, beadID, userTitle, titleHint string, prov
 	return api.MaybeGenerateTitleAsync(store, beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "session %s: "+format+"\n", append([]any{beadID}, args...)...) //nolint:errcheck // best-effort stderr
 	})
+}
+
+func resolvedSessionCommand(cityPath string, resolved *config.ResolvedProvider, optionOverrides map[string]string) (string, error) {
+	if resolved == nil {
+		return "", fmt.Errorf("resolved provider is nil")
+	}
+	command := resolved.CommandString()
+	if len(resolved.OptionsSchema) > 0 {
+		fullOptions := make(map[string]string, len(resolved.EffectiveDefaults)+len(optionOverrides))
+		for k, v := range resolved.EffectiveDefaults {
+			fullOptions[k] = v
+		}
+		for k, v := range optionOverrides {
+			if k == "initial_message" {
+				continue
+			}
+			fullOptions[k] = v
+		}
+		if args, err := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions); err != nil {
+			return "", fmt.Errorf("resolving provider defaults: %w", err)
+		} else if len(args) > 0 {
+			command = replaceSchemaFlags(command, resolved.OptionsSchema, args)
+		}
+	}
+	if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
+		command = command + " " + sa
+	}
+	return command, nil
 }
 
 func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
@@ -425,7 +480,12 @@ func waitForSession(sp runtime.Provider, sessionName string, timeout time.Durati
 	deadline := time.Now().Add(timeout)
 	lastProgress := time.Now()
 	for time.Now().Before(deadline) {
-		if sp.IsRunning(sessionName) {
+		target := sessionName
+		if store != nil && beadID != "" {
+			target = beadID
+		}
+		running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, target)
+		if err == nil && running {
 			return nil
 		}
 		// Check for early failure: bead closed or stuck in creating.
@@ -505,8 +565,12 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 
 	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
 	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
-	mgr := newSessionManager(store, sp)
-	listResult := mgr.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
+	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
 	sessions := listResult.Sessions
 
 	if jsonOutput {
@@ -526,9 +590,11 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
-	// Build attachment cache from Attached already populated by ListFull,
-	// avoiding redundant tmux subprocess calls in wakeReasons.
-	attachedSet := buildAttachmentCache(sessions)
+	// Build attachment cache from worker observations so reason evaluation
+	// does not bypass the worker boundary for attachment checks.
+	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
+		return workerSessionTargetAttachedWithConfig("", store, sp, cfg, info.ID)
+	})
 
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No sessions found.") //nolint:errcheck // best-effort stdout
@@ -581,19 +647,26 @@ func sessionListTitle(s session.Info) string {
 	return title
 }
 
-// attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
-// results to avoid redundant tmux subprocess calls. wakeReasons calls
-// IsAttached per session, but cmdSessionList already queried it.
+// attachmentCachingProvider wraps a runtime.Provider and serves attachment
+// state from a worker-populated cache so session list reason evaluation does
+// not fall back to raw runtime attachment checks.
 type attachmentCachingProvider struct {
 	runtime.Provider
 	cache map[string]bool
+}
+
+func (p *attachmentCachingProvider) GetMeta(name, key string) (string, error) {
+	if p.Provider == nil {
+		return "", nil
+	}
+	return p.Provider.GetMeta(name, key)
 }
 
 func (p *attachmentCachingProvider) IsAttached(name string) bool {
 	if v, ok := p.cache[name]; ok {
 		return v
 	}
-	return p.Provider.IsAttached(name)
+	return false
 }
 
 func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
@@ -603,29 +676,19 @@ func (p *attachmentCachingProvider) SleepCapability(name string) runtime.Session
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
-	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
-		return ip.Pending(name)
-	}
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-func (p *attachmentCachingProvider) Respond(name string, response runtime.InteractionResponse) error {
-	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
-		return ip.Respond(name, response)
-	}
-	return runtime.ErrInteractionUnsupported
-}
-
-func buildAttachmentCache(sessions []session.Info) map[string]bool {
+func buildAttachmentCache(sessions []session.Info, observe func(session.Info) (bool, error)) map[string]bool {
 	cache := make(map[string]bool)
 	for _, s := range sessions {
-		// ListFull only populates Attached for active sessions. Leave other
-		// states uncached so reason evaluation can fall through to the provider.
-		if s.State != session.StateActive || s.SessionName == "" {
+		if s.State == "" || s.SessionName == "" {
 			continue
 		}
-		cache[s.SessionName] = s.Attached
+		attached := s.Attached
+		if observe != nil {
+			if observed, err := observe(s); err == nil {
+				attached = observed
+			}
+		}
+		cache[s.SessionName] = attached
 	}
 	return cache
 }
@@ -791,20 +854,26 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	// Get the session to find its template.
-	info, err := mgr.Get(sessionID)
+	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	// Build the resume command from the template's provider.
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID), stderr)
+	// Get the session to find its template.
+	info, err := catalog.Get(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
-	if err := mgr.Attach(context.Background(), sessionID, resumeCmd, hints); err != nil {
+	if err := handle.Attach(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -900,19 +969,6 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 	return cmd, runtime.Config{WorkDir: info.WorkDir}
 }
 
-// beadSessionKind reads the mc_session_kind metadata from a session bead.
-// Returns "" if the store is nil or the bead cannot be read.
-func beadSessionKind(store beads.Store, sessionID string) string {
-	if store == nil {
-		return ""
-	}
-	b, err := store.Get(sessionID)
-	if err != nil {
-		return ""
-	}
-	return b.Metadata["mc_session_kind"]
-}
-
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
 func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
@@ -977,11 +1033,15 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Fallback: controller not running — direct suspend via session manager.
+	// Fallback: controller not running — direct suspend via worker handle.
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	if err := mgr.Suspend(sessionID); err != nil {
+	if err := handle.Stop(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1027,14 +1087,17 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 	nudgeIDs, err := waitNudgeIDsForSession(store, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	if err := mgr.Close(sessionID); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Close(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1084,9 +1147,12 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	if err := mgr.Rename(sessionID, title); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Rename(context.Background(), title); err != nil {
 		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1131,10 +1197,14 @@ func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
+	catalog, err := workerSessionCatalogWithConfig("", store, sp, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cutoff := time.Now().Add(-dur)
-	result, err := mgr.PruneDetailed(cutoff)
+	result, err := catalog.PruneBefore(cutoff)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1218,9 +1288,12 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	output, err := mgr.Peek(sessionID, lines)
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	output, err := handle.Peek(context.Background(), lines)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1274,9 +1347,12 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	if err := mgr.Kill(sessionID); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Kill(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1378,19 +1454,20 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
-	info, err := mgr.Get(sessionID)
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID), stderr)
-	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
+	result, err := handle.Message(context.Background(), worker.MessageRequest{
+		Text:     message,
+		Delivery: workerDeliveryIntentForSubmitIntent(intent),
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitSessionSubmitResult(stdout, target, intent, outcome.Queued)
+	emitSessionSubmitResult(stdout, target, intent, result.Queued)
 	return 0
 }
 

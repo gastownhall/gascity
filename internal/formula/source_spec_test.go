@@ -76,6 +76,16 @@ func TestApplyRalphEmitsSpecBeadInsteadOfInlineSourceSpec(t *testing.T) {
 	if got := control.Metadata["gc.source_step_spec"]; got != "" {
 		t.Fatalf("control gc.source_step_spec = %q, want empty; source spec must live in spec bead", got)
 	}
+	var frozenRaw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(spec.Description), &frozenRaw); err != nil {
+		t.Fatalf("unmarshal frozen raw spec: %v", err)
+	}
+	if _, ok := frozenRaw["ralph"]; !ok {
+		t.Fatalf("frozen raw spec = %v, want legacy ralph key for compatibility", frozenRaw)
+	}
+	if _, ok := frozenRaw["check"]; ok {
+		t.Fatalf("frozen raw spec unexpectedly wrote canonical check key")
+	}
 	assertFrozenSpecStep(t, spec, "converge", func(frozen Step) {
 		if frozen.Ralph == nil || frozen.Ralph.MaxAttempts != 5 {
 			t.Fatalf("frozen ralph = %+v, want max_attempts=5", frozen.Ralph)
@@ -183,10 +193,10 @@ title = "Converge"
 type = "task"
 needs = ["review"]
 
-[steps.ralph]
+[steps.check]
 max_attempts = 2
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = "check.sh"
 `

@@ -1339,6 +1339,479 @@ func TestParse_GateInChildStep(t *testing.T) {
 	}
 }
 
+func TestParseTOML_CheckCanonicalAlias(t *testing.T) {
+	tomlData := `
+formula = "mol-check"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+
+[steps.check]
+max_attempts = 2
+
+[steps.check.check]
+mode = "exec"
+path = "scripts/verify.sh"
+timeout = "30s"
+`
+
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	step := formula.Steps[0]
+	if step.Ralph == nil {
+		t.Fatal("Steps[0].Ralph is nil")
+	}
+	if step.Ralph.MaxAttempts != 2 {
+		t.Fatalf("Steps[0].Ralph.MaxAttempts = %d, want 2", step.Ralph.MaxAttempts)
+	}
+	if step.Ralph.Check == nil {
+		t.Fatal("Steps[0].Ralph.Check is nil")
+	}
+	if step.Ralph.Check.Mode != "exec" {
+		t.Fatalf("Steps[0].Ralph.Check.Mode = %q, want exec", step.Ralph.Check.Mode)
+	}
+	if step.Ralph.Check.Path != "scripts/verify.sh" {
+		t.Fatalf("Steps[0].Ralph.Check.Path = %q, want scripts/verify.sh", step.Ralph.Check.Path)
+	}
+	if step.Ralph.Check.Timeout != "30s" {
+		t.Fatalf("Steps[0].Ralph.Check.Timeout = %q, want 30s", step.Ralph.Check.Timeout)
+	}
+}
+
+func TestParseJSON_CheckCanonicalAlias(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-check",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "implement",
+      "title": "Implement",
+      "check": {
+        "max_attempts": 2,
+        "check": {
+          "mode": "exec",
+          "path": "scripts/verify.sh",
+          "timeout": "30s"
+        }
+      }
+    }
+  ]
+}`
+
+	p := NewParser()
+	formula, err := p.Parse([]byte(jsonData))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	step := formula.Steps[0]
+	if step.Ralph == nil || step.Ralph.Check == nil {
+		t.Fatalf("parsed check alias = %+v, want populated Ralph spec", step.Ralph)
+	}
+	if step.Ralph.MaxAttempts != 2 {
+		t.Fatalf("Steps[0].Ralph.MaxAttempts = %d, want 2", step.Ralph.MaxAttempts)
+	}
+	if step.Ralph.Check.Path != "scripts/verify.sh" {
+		t.Fatalf("Steps[0].Ralph.Check.Path = %q, want scripts/verify.sh", step.Ralph.Check.Path)
+	}
+}
+
+func TestParseJSON_CheckNullBehavesLikeOmittedAlias(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-check-null",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "implement",
+      "title": "Implement",
+      "check": null
+    }
+  ]
+}`
+
+	p := NewParser()
+	formula, err := p.Parse([]byte(jsonData))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+	if formula.Steps[0].Ralph != nil {
+		t.Fatalf("Steps[0].Ralph = %+v, want nil for check:null", formula.Steps[0].Ralph)
+	}
+}
+
+func TestParseTOML_RalphLegacyAliasStillWorks(t *testing.T) {
+	tomlData := `
+formula = "mol-legacy-ralph"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+
+[steps.ralph]
+max_attempts = 2
+comment = "ignored by legacy alias"
+
+[steps.ralph.check]
+mode = "exec"
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	step := formula.Steps[0]
+	if step.Ralph == nil || step.Ralph.Check == nil {
+		t.Fatalf("parsed legacy alias = %+v, want populated Ralph spec", step.Ralph)
+	}
+	if step.Ralph.MaxAttempts != 2 {
+		t.Fatalf("Steps[0].Ralph.MaxAttempts = %d, want 2", step.Ralph.MaxAttempts)
+	}
+	if step.Ralph.Check.Mode != "exec" {
+		t.Fatalf("Steps[0].Ralph.Check.Mode = %q, want exec", step.Ralph.Check.Mode)
+	}
+}
+
+func TestParseTOML_ChildTagsSurviveCustomStepDecoding(t *testing.T) {
+	tomlData := `
+formula = "mol-child-tags"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "parent"
+title = "Parent"
+tags = ["root-tag"]
+
+[[steps.children]]
+id = "child"
+title = "Child"
+tags = ["child-tag"]
+`
+
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+
+	parent := formula.Steps[0]
+	if len(parent.Labels) != 1 || parent.Labels[0] != "root-tag" {
+		t.Fatalf("parent labels = %v, want [root-tag]", parent.Labels)
+	}
+	if len(parent.Children) != 1 {
+		t.Fatalf("len(parent.Children) = %d, want 1", len(parent.Children))
+	}
+	child := parent.Children[0]
+	if len(child.Labels) != 1 || child.Labels[0] != "child-tag" {
+		t.Fatalf("child labels = %v, want [child-tag]", child.Labels)
+	}
+}
+
+func TestParseTOML_ChildCheckAliasParses(t *testing.T) {
+	tomlData := `
+formula = "mol-child-check"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "parent"
+title = "Parent"
+
+[[steps.children]]
+id = "child"
+title = "Child"
+
+[steps.children.check]
+max_attempts = 2
+
+[steps.children.check.check]
+mode = "exec"
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	child := formula.Steps[0].Children[0]
+	if child.Ralph == nil || child.Ralph.Check == nil {
+		t.Fatalf("child check alias = %+v, want populated Ralph spec", child.Ralph)
+	}
+	if child.Ralph.MaxAttempts != 2 {
+		t.Fatalf("child max_attempts = %d, want 2", child.Ralph.MaxAttempts)
+	}
+	if child.Ralph.Check.Path != "scripts/verify.sh" {
+		t.Fatalf("child check path = %q, want scripts/verify.sh", child.Ralph.Check.Path)
+	}
+}
+
+func TestParseJSON_RalphLegacyAliasStillWorks(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-legacy-ralph",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "implement",
+      "title": "Implement",
+      "ralph": {
+        "max_attempts": 2,
+        "check": {
+          "mode": "exec",
+          "path": "scripts/verify.sh"
+        }
+      }
+    }
+  ]
+}`
+
+	p := NewParser()
+	formula, err := p.Parse([]byte(jsonData))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	step := formula.Steps[0]
+	if step.Ralph == nil || step.Ralph.Check == nil {
+		t.Fatalf("parsed legacy alias = %+v, want populated Ralph spec", step.Ralph)
+	}
+	if step.Ralph.Check.Path != "scripts/verify.sh" {
+		t.Fatalf("Steps[0].Ralph.Check.Path = %q, want scripts/verify.sh", step.Ralph.Check.Path)
+	}
+}
+
+func TestParseTOML_CheckAndRalphMixedRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-check-mixed"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+
+[steps.check]
+max_attempts = 2
+
+[steps.ralph.check]
+mode = "exec"
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want mixed check/ralph rejection")
+	}
+	if !strings.Contains(err.Error(), "step.check: cannot be specified more than once") {
+		t.Fatalf("ParseTOML error = %v, want duplicate check spelling rejection", err)
+	}
+}
+
+func TestParseJSON_CheckAndRalphMixedRejected(t *testing.T) {
+	jsonData := `{
+  "formula": "mol-check-mixed",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "implement",
+      "title": "Implement",
+      "check": {
+        "max_attempts": 2,
+        "check": {
+          "mode": "exec",
+          "path": "scripts/verify.sh"
+        }
+      },
+      "ralph": {
+        "max_attempts": 2,
+        "check": {
+          "mode": "exec",
+          "path": "scripts/verify.sh"
+        }
+      }
+    }
+  ]
+}`
+
+	p := NewParser()
+	_, err := p.Parse([]byte(jsonData))
+	if err == nil {
+		t.Fatal("Parse succeeded, want mixed check/ralph rejection")
+	}
+	if !strings.Contains(err.Error(), "step.check: cannot be specified more than once") {
+		t.Fatalf("Parse error = %v, want duplicate check spelling rejection", err)
+	}
+}
+
+func TestParseTOML_CheckHybridExecTableRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-check-hybrid"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+
+[steps.check]
+max_attempts = 2
+
+[steps.check.exec]
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want hybrid exec table rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "exec"`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported exec table rejection", err)
+	}
+}
+
+func TestParseTOML_ChildCheckHybridExecTableRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-child-check-hybrid"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "parent"
+title = "Parent"
+
+[[steps.children]]
+id = "child"
+title = "Child"
+
+[steps.children.check]
+max_attempts = 2
+
+[steps.children.check.exec]
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want nested hybrid exec table rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "exec"`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported exec table rejection", err)
+	}
+}
+
+func TestParseTOML_LoopBodyCheckHybridExecTableRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-loop-check-hybrid"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "attempt"
+title = "Attempt"
+
+[steps.loop.body.check]
+max_attempts = 2
+
+[steps.loop.body.check.exec]
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want loop body hybrid exec table rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "exec"`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported exec table rejection", err)
+	}
+}
+
+func TestValidateRalphUsesCheckTerminology(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-bad-check",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "implement",
+				Title: "Implement",
+				Ralph: &RalphSpec{
+					MaxAttempts: 0,
+					Check: &RalphCheckSpec{
+						Mode: "invalid",
+					},
+				},
+				Retry: &RetrySpec{MaxAttempts: 2},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate succeeded, want check validation errors")
+	}
+	if !strings.Contains(err.Error(), "steps[0] (implement).check: max_attempts must be >= 1") {
+		t.Fatalf("Validate error = %v, want check max_attempts wording", err)
+	}
+	if !strings.Contains(err.Error(), `steps[0] (implement).check.check: unsupported mode "invalid" (only exec is supported)`) {
+		t.Fatalf("Validate error = %v, want check.check mode wording", err)
+	}
+	if !strings.Contains(err.Error(), "steps[0] (implement).check.check: path is required") {
+		t.Fatalf("Validate error = %v, want check.check path wording", err)
+	}
+	if !strings.Contains(err.Error(), "steps[0] (implement): check cannot be combined with retry") {
+		t.Fatalf("Validate error = %v, want check incompatibility wording", err)
+	}
+	if strings.Contains(err.Error(), ".ralph") || strings.Contains(err.Error(), " ralph ") {
+		t.Fatalf("Validate error = %v, want user-facing check terminology only", err)
+	}
+}
+
 // TestParseTOML_SnakeCaseFields verifies that snake_case fields like depends_on
 // are correctly parsed from TOML. This tests the fix for GitHub issue #1449.
 func TestParseTOML_SnakeCaseFields(t *testing.T) {

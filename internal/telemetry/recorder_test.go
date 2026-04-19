@@ -139,8 +139,8 @@ func TestRecordConfigReload(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
-	RecordConfigReload(ctx, "abc123", nil)
-	RecordConfigReload(ctx, "", errors.New("parse error"))
+	RecordConfigReload(ctx, "abc123", "manual", "applied", 0, nil)
+	RecordConfigReload(ctx, "", "watch", "failed", 1, errors.New("parse error"))
 }
 
 func TestRecordControllerLifecycle(t *testing.T) {

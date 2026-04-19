@@ -614,6 +614,85 @@ provider = "file"
 	}
 }
 
+func TestGcBdAllowsRigPassthroughForBdBackedRigUnderFileCity(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "gc-bd-mixed-provider.txt")
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+{
+  printf 'pwd=%s\n' "$PWD"
+  printf 'args=%s\n' "$*"
+  printf 'BEADS_DIR=%s\n' "${BEADS_DIR:-}"
+} > "${CAPTURE_PATH}"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"--rig", "frontend", "list"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd() = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "only supported for bd-backed beads providers") {
+		t.Fatalf("stderr = %q, want rig passthrough instead of provider gate", stderr.String())
+	}
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["pwd"] != rigDir {
+		t.Fatalf("pwd = %q, want %q", got["pwd"], rigDir)
+	}
+	if got["args"] != "list" {
+		t.Fatalf("args = %q, want %q", got["args"], "list")
+	}
+	if got["BEADS_DIR"] != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(rigDir, ".beads"))
+	}
+}
+
 func runRawBDFromDir(t *testing.T, bdPath, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(bdPath, args...)

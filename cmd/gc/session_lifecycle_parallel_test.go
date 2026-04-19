@@ -289,6 +289,35 @@ func (p *interruptExitProvider) Interrupt(name string) error {
 	return p.Stop(name)
 }
 
+type staleIsRunningAfterInterruptProvider struct {
+	*runtime.Fake
+	mu          sync.Mutex
+	interrupted map[string]bool
+}
+
+func newStaleIsRunningAfterInterruptProvider() *staleIsRunningAfterInterruptProvider {
+	return &staleIsRunningAfterInterruptProvider{
+		Fake:        runtime.NewFake(),
+		interrupted: make(map[string]bool),
+	}
+}
+
+func (p *staleIsRunningAfterInterruptProvider) Interrupt(name string) error {
+	p.mu.Lock()
+	p.interrupted[name] = true
+	p.mu.Unlock()
+	return p.Fake.Interrupt(name)
+}
+
+func (p *staleIsRunningAfterInterruptProvider) IsRunning(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.interrupted[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
 type dropDependencyAfterNStartsProvider struct {
 	*runtime.Fake
 	mu        sync.Mutex
@@ -1505,6 +1534,31 @@ func TestGracefulStopAll_UsesLegacyAgentLabelForPoolSubject(t *testing.T) {
 	}
 }
 
+func TestGracefulStopAll_UsesListRunningToStopLingeringSessions(t *testing.T) {
+	sp := newStaleIsRunningAfterInterruptProvider()
+	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+
+	var stopCalls int
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "custom-worker" {
+			stopCalls++
+		}
+	}
+	if stopCalls == 0 {
+		t.Fatalf("expected gracefulStopAll to force-stop lingering session, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Stopped agent 'custom-worker'") {
+		t.Fatalf("stdout = %q, want forced stop message", stdout.String())
+	}
+}
+
 func TestStopWaveOrder_HandlesUnknownTemplateWithoutSerialFallback(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -1548,7 +1602,7 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 			{name: "db", template: "db", subject: "db", order: 0, resolved: true},
 			{name: "worker", template: "worker", subject: "worker", order: 1, resolved: true},
 			{name: "custom", template: "custom-session", subject: "custom", order: 2, resolved: false},
-		}, cfg, sp, rec, "gc", &stdout, &stderr)
+		}, cfg, nil, sp, rec, "gc", &stdout, &stderr)
 	}()
 
 	first := sp.waitForStops(t, 1)
@@ -1609,7 +1663,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 			{name: "orphan-b", subject: "orphan-b", order: 1},
 			{name: "orphan-c", subject: "orphan-c", order: 2},
 			{name: "orphan-d", subject: "orphan-d", order: 3},
-		}, cfg, sp, rec, "gc", &stdout, &stderr)
+		}, cfg, nil, sp, rec, "gc", &stdout, &stderr)
 	}()
 
 	first := sp.waitForStops(t, 1)
@@ -1722,7 +1776,7 @@ func TestInterruptTargetsBounded_LogsSuccessOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	sent := interruptTargetsBounded([]stopTarget{{name: "worker", template: "worker", resolved: true}}, sp, &stderr)
+	sent := interruptTargetsBounded([]stopTarget{{name: "worker", template: "worker", resolved: true}}, nil, nil, sp, &stderr)
 	if sent != 1 {
 		t.Fatalf("sent = %d, want 1", sent)
 	}
@@ -1747,7 +1801,7 @@ func TestInterruptTargetsBounded_BroadcastsAllTargetsConcurrently(t *testing.T) 
 
 	done := make(chan int, 1)
 	go func() {
-		done <- interruptTargetsBounded(targets, sp, ioDiscard{})
+		done <- interruptTargetsBounded(targets, nil, nil, sp, ioDiscard{})
 	}()
 
 	first := sp.waitForInterrupts(t, len(targets))
@@ -1782,7 +1836,7 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- interruptTargetsBounded(targets, sp, ioDiscard{})
+		done <- interruptTargetsBounded(targets, nil, nil, sp, ioDiscard{})
 	}()
 
 	first := sp.waitForInterrupts(t, defaultMaxParallelInterrupts)
@@ -1806,7 +1860,6 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 
 func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 	sp := runtime.NewFake()
-	// Start both sessions.
 	for _, name := range []string{"human-worker", "pool-worker"} {
 		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatal(err)
@@ -1817,7 +1870,7 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 		{name: "pool-worker", template: "pool", resolved: true, poolManaged: true},
 	}
 	var stderr bytes.Buffer
-	sent := interruptTargetsBounded(targets, sp, &stderr)
+	sent := interruptTargetsBounded(targets, nil, nil, sp, &stderr)
 	if sent != 1 {
 		t.Fatalf("sent = %d, want 1 (only human-worker)", sent)
 	}
@@ -1837,8 +1890,13 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 	results := executePreparedStartWave(
 		context.Background(),
-		[]preparedStart{{candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}}}},
+		[]preparedStart{{
+			candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}},
+			cfg:       runtime.Config{Command: "panic-provider"},
+		}},
 		&panicStartProvider{Fake: runtime.NewFake()},
+		nil,
+		nil,
 		time.Second,
 		1,
 	)
@@ -1877,7 +1935,7 @@ func TestStopTargetsBounded_SanitizesMultilineStopError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stopped := stopTargetsBounded([]stopTarget{{name: "worker", template: "worker", subject: "worker", resolved: true}}, &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
-	}, sp, rec, "gc", &stdout, &stderr)
+	}, nil, sp, rec, "gc", &stdout, &stderr)
 	if stopped != 0 {
 		t.Fatalf("stopped = %d, want 0", stopped)
 	}
@@ -2057,6 +2115,10 @@ func (p *dieAfterStartProvider) Start(ctx context.Context, name string, cfg runt
 	return nil
 }
 
+func (p *dieAfterStartProvider) IsRunning(name string) bool {
+	return p.Fake.IsRunning(name)
+}
+
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
@@ -2082,6 +2144,8 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		context.Background(),
 		[]preparedStart{item},
 		sp,
+		nil,
+		nil,
 		10*time.Second,
 		1,
 	)
@@ -2124,6 +2188,8 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		context.Background(),
 		[]preparedStart{item},
 		sp,
+		nil,
+		nil,
 		10*time.Second,
 		1,
 	)

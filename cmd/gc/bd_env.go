@@ -249,7 +249,7 @@ func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string)
 }
 
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
-	if err == nil || !cityUsesBdStoreContract(cityPath) || !managedBDRecoveryAllowed(cityPath, scopeRoot, env) {
+	if err == nil || !providerUsesBdStoreContract(rawBeadsProviderForScope(scopeRoot, cityPath)) || !managedBDRecoveryAllowed(cityPath, scopeRoot, env) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

@@ -16,17 +16,23 @@ func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *conf
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
 		return nil
 	}
-	if !cityUsesBdStoreContract(cityPath) {
-		return nil
-	}
 	var source map[string]string
 	if rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
+			if !scopeUsesManagedBdStoreContract(cityPath, rigRoot) {
+				return nil
+			}
 			source = bdRuntimeEnvForRig(cityPath, cfg, rigRoot)
 		} else {
+			if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+				return nil
+			}
 			source = bdRuntimeEnv(cityPath)
 		}
 	} else {
+		if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+			return nil
+		}
 		source = bdRuntimeEnv(cityPath)
 	}
 	if len(source) == 0 {

@@ -35,7 +35,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 	}
 
-	// Hash rig pack directory contents (all pack sources).
+	// Hash rig pack directory contents (v1 Includes-based refs).
 	rigs := cfg.Rigs
 	for _, r := range rigs {
 		for _, ref := range r.Includes {
@@ -48,7 +48,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		}
 	}
 
-	// Hash city-level pack directory contents.
+	// Hash city-level pack directory contents (v1 Includes-based refs).
 	for _, ref := range cfg.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 		topoHash := PackContentHashRecursive(fs, topoDir)
@@ -56,6 +56,32 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
 		h.Write([]byte(topoHash))           //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
+	}
+
+	// Hash v2-resolved pack directories (populated by ExpandPacks from
+	// [imports.X] and [rigs.imports.X]). Without this, editing a file in
+	// an imported pack does not change the revision, so the reconciler
+	// never notices. Regression guard: gastownhall/gascity#779.
+	for _, dir := range cfg.PackDirs {
+		topoHash := PackContentHashRecursive(fs, dir)
+		h.Write([]byte("city-packdir:" + dir)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                     //nolint:errcheck // hash.Write never errors
+		h.Write([]byte(topoHash))              //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                     //nolint:errcheck // hash.Write never errors
+	}
+	rigPackDirNames := make([]string, 0, len(cfg.RigPackDirs))
+	for name := range cfg.RigPackDirs {
+		rigPackDirNames = append(rigPackDirNames, name)
+	}
+	sort.Strings(rigPackDirNames)
+	for _, rigName := range rigPackDirNames {
+		for _, dir := range cfg.RigPackDirs[rigName] {
+			topoHash := PackContentHashRecursive(fs, dir)
+			h.Write([]byte("rig-packdir:" + rigName + ":" + dir)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})                                    //nolint:errcheck // hash.Write never errors
+			h.Write([]byte(topoHash))                             //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})                                    //nolint:errcheck // hash.Write never errors
+		}
 	}
 
 	// Hash convention-discovered city-pack trees so adding or editing
@@ -93,7 +119,7 @@ func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
 		}
 	}
 
-	// Rig pack directories (all pack sources).
+	// Rig pack directories (v1 Includes-based refs).
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
 			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
@@ -101,10 +127,24 @@ func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
 		}
 	}
 
-	// City-level pack directories.
+	// City-level pack directories (v1 Includes-based refs).
 	for _, ref := range cfg.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 		addDir(topoDir)
+	}
+
+	// v2-resolved pack directories (populated by ExpandPacks from
+	// [imports.X] and [rigs.imports.X]). Without these, cities composing
+	// packs via v2 imports get zero fsnotify coverage for the imported
+	// pack tree — hot-reload silently breaks.
+	// Regression guard: gastownhall/gascity#779.
+	for _, dir := range cfg.PackDirs {
+		addDir(dir)
+	}
+	for _, rigDirs := range cfg.RigPackDirs {
+		for _, dir := range rigDirs {
+			addDir(dir)
+		}
 	}
 
 	// Convention-discovered city-pack trees are loaded directly from the city

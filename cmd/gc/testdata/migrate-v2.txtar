@@ -29,10 +29,10 @@ exists $WORK/legacy-city/agents/mayor/namepool.txt
 ! exists $WORK/legacy-city/overlays/mayor
 ! exists $WORK/legacy-city/namepools/mayor.txt
 exec grep '\[imports.gastown\]' $WORK/legacy-city/pack.toml
-exec grep '\[defaults.rig.imports.default-rig\]' $WORK/legacy-city/pack.toml
+! exec grep '\[defaults.rig.imports' $WORK/legacy-city/pack.toml
 ! exec grep '\[\[agent\]\]' $WORK/legacy-city/city.toml
-! exec grep 'includes =' $WORK/legacy-city/city.toml
-! exec grep 'default_rig_includes' $WORK/legacy-city/city.toml
+! exec grep '^includes =' $WORK/legacy-city/city.toml
+exec grep 'default_rig_includes = \["../packs/default rig"\]' $WORK/legacy-city/city.toml
 
 -- legacy-city/city.toml --
 [workspace]
