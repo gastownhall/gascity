@@ -139,7 +139,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if err != nil {
 		return err
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		return err
 	}
