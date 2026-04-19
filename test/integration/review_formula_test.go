@@ -17,9 +17,12 @@ import (
 
 // reviewWorkflowTimeout bounds waits for review-formula workflow beads to
 // close. Successful runs on CI average ~5 min per test, but runner variance
-// pushes individual runs past 8 min; keep the budget at 12 min so slow
-// runners don't flake the lane.
-const reviewWorkflowTimeout = 12 * time.Minute
+// is high: the transient-retry test (soft-fail after 3 attempts) runs 3
+// full polecat cycles back-to-back, each ~3 min on a busy runner, plus
+// synthesis. The earlier 12-minute budget left no headroom and produced
+// intermittent timeout flakes; 18 min keeps a healthy margin for runner
+// contention without letting a genuinely stuck workflow loiter.
+const reviewWorkflowTimeout = 18 * time.Minute
 
 const testAdoptPRReviewCheck = `#!/usr/bin/env bash
 set -euo pipefail

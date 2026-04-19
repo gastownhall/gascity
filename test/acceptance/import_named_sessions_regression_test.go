@@ -4,6 +4,7 @@ package acceptance_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,10 +38,18 @@ start_command = "sleep 300"
 
 [[rigs]]
 name = "repo"
-path = "./repo"
 
 [rigs.imports.gs]
 source = "./assets/sidecar"
+`)
+	// PR #850 moved machine-local rig paths from city.toml into
+	// .gc/site.toml under strict mode. gc start --foreground is strict
+	// by default, so the rig path goes here. The TOML key is "[[rig]]"
+	// (singular — see config.SiteBinding struct tag), NOT "[[rigs]]".
+	mustWriteTestFile(t, filepath.Join(c.Dir, ".gc", "site.toml"), `
+[[rig]]
+name = "repo"
+path = "./repo"
 `)
 	mustWriteTestFile(t, filepath.Join(c.Dir, "assets", "sidecar", "pack.toml"), `
 [pack]
@@ -86,11 +95,26 @@ mode = "always"
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	// On failure, dump the session list AND the supervisor log so future
+	// regressions point at the real cause (e.g., strict-mode rejection)
+	// instead of generic "sessions never appeared". The original flake
+	// was actually deterministic: PR #850 introduced strict rig-path
+	// checks and the test's old [[rigs]] path format was rejected,
+	// preventing imports from loading.
 	out, err := c.GC("session", "list", "--json")
 	if err != nil {
 		t.Fatalf("gc session list --json: %v\n%s", err, out)
 	}
-	t.Fatalf("imported named sessions never reached safe runtime names:\n%s", out)
+	tableView, tableErr := c.GC("session", "list")
+	if tableErr != nil {
+		tableView = fmt.Sprintf("(table-view failed: %v)", tableErr)
+	}
+	logPath := filepath.Join(c.Dir, ".gc", "acceptance-controller.log")
+	controllerLog, logErr := os.ReadFile(logPath)
+	if logErr != nil {
+		controllerLog = []byte(fmt.Sprintf("(reading %s: %v)", logPath, logErr))
+	}
+	t.Fatalf("imported named sessions never reached safe runtime names.\nexpected: gs.captain/gs__captain and repo/gs.watcher/repo--gs__watcher\n\nsession list --json:\n%s\n\nsession list (table):\n%s\n\ncontroller log:\n%s", out, tableView, string(controllerLog))
 }
 
 func hasNamedSession(sessions []namedSessionListEntry, template, sessionName string) bool {

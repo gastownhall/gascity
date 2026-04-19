@@ -1666,10 +1666,26 @@ dolt.user: stale-user
 	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
 		t.Fatalf("GC_DOLT_USER = %q, want inherited canonical user", got)
 	}
-	for _, forbidden := range []string{"compat-rig-db.example.com", "6608", "stale-db.example.com", "5507", "stale-user"} {
-		for key, value := range env {
-			if strings.Contains(value, forbidden) {
-				t.Fatalf("%s should ignore non-canonical inherited value %q, env = %#v", key, forbidden, env)
+	// Check dolt-related keys directly for the forbidden values.
+	// Scoping by key (rather than a substring scan across every value
+	// including path-shaped ones like GC_RIG_ROOT) avoids false
+	// positives when Go's t.TempDir random suffix happens to embed one
+	// of the forbidden digit sequences — e.g. tempdir
+	// ".../Test..2266660824/002/repo" contains "6608" and caused this
+	// test to flake in CI.
+	forbiddenByKey := map[string][]string{
+		"GC_DOLT_HOST":           {"compat-rig-db.example.com", "stale-db.example.com"},
+		"GC_DOLT_PORT":           {"6608", "5507"},
+		"GC_DOLT_USER":           {"stale-user"},
+		"BEADS_DOLT_SERVER_HOST": {"compat-rig-db.example.com", "stale-db.example.com"},
+		"BEADS_DOLT_SERVER_PORT": {"6608", "5507"},
+		"BEADS_DOLT_SERVER_USER": {"stale-user"},
+	}
+	for key, bad := range forbiddenByKey {
+		value := env[key]
+		for _, forbidden := range bad {
+			if value == forbidden {
+				t.Fatalf("%s = %q is a non-canonical inherited value; env = %#v", key, forbidden, env)
 			}
 		}
 	}

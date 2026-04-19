@@ -26,11 +26,20 @@ json_payload() {
 load_verdict() {
     local apply_ref="$1"
     local root_id="$2"
-    local verdict=""
+    local current=""
+    local previous=""
+    local stable_run=0
     local attempt=0
-
-    while [ "$attempt" -lt 5 ]; do
-        verdict=$(
+    # Total budget: 10 * 200ms = 2s. Keep sampling until two consecutive
+    # reads return the same verdict (stable), which guarantees we've
+    # observed everything the store will make visible within the budget.
+    # Returning early on the first non-empty verdict (the old behavior)
+    # created a race against the bead store when the "newest verdict
+    # wins" invariant mattered — see
+    # TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep. If no
+    # verdict ever materializes, return "iterate" as the safe default.
+    while [ "$attempt" -lt 10 ]; do
+        current=$(
             bd list --all --json --limit=0 2>/dev/null |
                 json_payload |
                 jq -r --arg ref "$apply_ref" --arg root "$root_id" '
@@ -47,15 +56,25 @@ load_verdict() {
                     | sort_by(.timestamp, .id)
                     | .[-1].verdict // ""
                 ' 2>/dev/null
-        ) || verdict=""
-        if [ -n "$verdict" ]; then
-            printf '%s\n' "$verdict"
-            return 0
+        ) || current=""
+        if [ -n "$current" ] && [ "$current" = "$previous" ]; then
+            stable_run=$((stable_run + 1))
+            if [ "$stable_run" -ge 1 ]; then
+                printf '%s\n' "$current"
+                return 0
+            fi
+        else
+            stable_run=0
         fi
+        previous="$current"
         attempt=$((attempt + 1))
         sleep 0.2
     done
 
+    if [ -n "$current" ]; then
+        printf '%s\n' "$current"
+        return 0
+    fi
     printf 'iterate\n'
 }
 

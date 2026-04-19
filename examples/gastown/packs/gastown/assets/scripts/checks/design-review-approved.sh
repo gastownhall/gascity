@@ -22,11 +22,16 @@ json_payload() {
 load_verdict() {
     local apply_ref="$1"
     local root_id="$2"
-    local verdict=""
+    local current=""
+    local previous=""
+    local stable_run=0
     local attempt=0
-
-    while [ "$attempt" -lt 5 ]; do
-        verdict=$(
+    # See adopt-pr-review-approved.sh load_verdict for rationale: sample
+    # until two consecutive reads agree, then return. Guards against a
+    # race with the bead store observed in
+    # TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep.
+    while [ "$attempt" -lt 10 ]; do
+        current=$(
             bd list --all --json --limit=0 2>/dev/null |
                 json_payload |
                 jq -r --arg ref "$apply_ref" --arg root "$root_id" '
@@ -43,15 +48,25 @@ load_verdict() {
                     | sort_by(.timestamp, .id)
                     | .[-1].verdict // ""
                 ' 2>/dev/null
-        ) || verdict=""
-        if [ -n "$verdict" ]; then
-            printf '%s\n' "$verdict"
-            return 0
+        ) || current=""
+        if [ -n "$current" ] && [ "$current" = "$previous" ]; then
+            stable_run=$((stable_run + 1))
+            if [ "$stable_run" -ge 1 ]; then
+                printf '%s\n' "$current"
+                return 0
+            fi
+        else
+            stable_run=0
         fi
+        previous="$current"
         attempt=$((attempt + 1))
         sleep 0.2
     done
 
+    if [ -n "$current" ]; then
+        printf '%s\n' "$current"
+        return 0
+    fi
     printf 'iterate\n'
 }
 
