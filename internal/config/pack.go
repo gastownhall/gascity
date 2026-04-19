@@ -65,6 +65,8 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		var rigAgents []Agent
 		var rigNamedSessions []NamedSession
 		var rigTopoDirs []string
+		var rigPackGraphOnlyDirs []string
+		var rigImportPackDirs []string
 		var rigGlobals []ResolvedPackGlobal
 		for _, ref := range topoRefs {
 			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
@@ -110,6 +112,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 			// Accumulate pack dirs for this rig.
 			rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
+			rigPackGraphOnlyDirs = appendUniqueLastWins(rigPackGraphOnlyDirs, topoDirs...)
 
 			// Keep only rig-scoped and unscoped agents for rig expansion.
 			agents = filterAgentsByScope(agents, false)
@@ -168,6 +171,15 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 				rigGlobals = append(rigGlobals, globals...)
 				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, impDir)...)
+				mcpTopoDirs := topoDirs
+
+				if !imp.ImportIsTransitive() {
+					mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
+				}
+				if cfg.RigImportMCPBindings == nil {
+					cfg.RigImportMCPBindings = make(map[string]map[string]string)
+				}
+				cfg.RigImportMCPBindings[rig.Name] = stampMCPDirBindings(cfg.RigImportMCPBindings[rig.Name], mcpTopoDirs, bindingName)
 
 				// Stamp binding name on agents and named sessions.
 				// At the rig level, ALL agents from an import get the rig's
@@ -233,6 +245,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 
 				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
+				rigImportPackDirs = prependUniqueBlock(rigImportPackDirs, mcpTopoDirs...)
 
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
@@ -268,6 +281,18 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		}
 		if len(rigTopoDirs) > 0 {
 			cfg.RigPackDirs[rig.Name] = rigTopoDirs
+		}
+		if len(rigPackGraphOnlyDirs) > 0 {
+			if cfg.RigPackGraphOnlyDirs == nil {
+				cfg.RigPackGraphOnlyDirs = make(map[string][]string)
+			}
+			cfg.RigPackGraphOnlyDirs[rig.Name] = rigPackGraphOnlyDirs
+		}
+		if len(rigImportPackDirs) > 0 {
+			if cfg.RigImportPackDirs == nil {
+				cfg.RigImportPackDirs = make(map[string][]string)
+			}
+			cfg.RigImportPackDirs[rig.Name] = rigImportPackDirs
 		}
 
 		// Collect overlay/ dirs from rig pack dirs.
@@ -351,6 +376,10 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	var allNamedSessions []NamedSession
 	var formulaDirs []string
 	var allPackDirs []string
+	var packGraphOnlyDirs []string
+	var explicitImportPackDirs []string
+	var implicitImportPackDirs []string
+	var bootstrapImportPackDirs []string
 	var allRequires []PackRequirement
 	var allGlobals []ResolvedPackGlobal
 	// Shared cache across all pack loads to deduplicate diamond DAGs.
@@ -401,6 +430,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 
 		// Accumulate pack dirs (deduped).
 		allPackDirs = appendUnique(allPackDirs, topoDirs...)
+		packGraphOnlyDirs = appendUniqueLastWins(packGraphOnlyDirs, topoDirs...)
 
 		// Keep only city-scoped and unscoped agents for city expansion.
 		agents = filterAgentsByScope(agents, true)
@@ -459,6 +489,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 			commands := cachedPackCommands(cache, impDir)
 			doctors := cachedPackDoctors(cache, impDir)
+			mcpTopoDirs := topoDirs
 
 			// When transitive = false, keep only agents directly defined
 			// by this import (not its own transitive dependencies).
@@ -474,6 +505,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 				agents = direct
 				commands = filterCommandsBySourceDir(commands, impDir)
 				doctors = filterDoctorsBySourceDir(doctors, impDir)
+				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
 
 			// Stamp binding name on all agents and named sessions.
@@ -550,6 +582,17 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 			allPackDirs = appendUnique(allPackDirs, topoDirs...)
+			switch {
+			case cfg.BootstrapImportBindings != nil && cfg.BootstrapImportBindings[bindingName]:
+				bootstrapImportPackDirs = prependUniqueBlock(bootstrapImportPackDirs, mcpTopoDirs...)
+				cfg.BootstrapImportMCPBindings = stampMCPDirBindings(cfg.BootstrapImportMCPBindings, mcpTopoDirs, bindingName)
+			case cfg.ImplicitImportBindings != nil && cfg.ImplicitImportBindings[bindingName]:
+				implicitImportPackDirs = prependUniqueBlock(implicitImportPackDirs, mcpTopoDirs...)
+				cfg.ImplicitImportMCPBindings = stampMCPDirBindings(cfg.ImplicitImportMCPBindings, mcpTopoDirs, bindingName)
+			default:
+				explicitImportPackDirs = prependUniqueBlock(explicitImportPackDirs, mcpTopoDirs...)
+				cfg.ExplicitImportMCPBindings = stampMCPDirBindings(cfg.ExplicitImportMCPBindings, mcpTopoDirs, bindingName)
+			}
 
 			// Filter by scope for city expansion.
 			agents = filterAgentsByScope(agents, true)
@@ -582,6 +625,10 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 
 	// Store city pack dirs.
 	cfg.PackDirs = appendUnique(cfg.PackDirs, allPackDirs...)
+	cfg.PackGraphOnlyDirs = appendUniqueLastWins(cfg.PackGraphOnlyDirs, packGraphOnlyDirs...)
+	cfg.ExplicitImportPackDirs = appendUniqueLastWins(cfg.ExplicitImportPackDirs, explicitImportPackDirs...)
+	cfg.ImplicitImportPackDirs = appendUniqueLastWins(cfg.ImplicitImportPackDirs, implicitImportPackDirs...)
+	cfg.BootstrapImportPackDirs = appendUniqueLastWins(cfg.BootstrapImportPackDirs, bootstrapImportPackDirs...)
 
 	// Collect overlay/ dirs from pack dirs.
 	for _, dir := range allPackDirs {
@@ -1429,6 +1476,34 @@ func filterDoctorsBySourceDir(doctors []DiscoveredDoctor, sourceDir string) []Di
 	return out
 }
 
+func filterPackDirsByRoot(packDirs []string, rootDir string) []string {
+	absRoot, _ := filepath.Abs(rootDir)
+	var out []string
+	for _, dir := range packDirs {
+		absDir, _ := filepath.Abs(dir)
+		if absDir == absRoot {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+func stampMCPDirBindings(dst map[string]string, packDirs []string, binding string) map[string]string {
+	if len(packDirs) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(packDirs))
+	}
+	for _, dir := range packDirs {
+		if _, exists := dst[dir]; exists {
+			continue
+		}
+		dst[dir] = binding
+	}
+	return dst
+}
+
 func agentNameSet(agents []Agent) map[string]bool {
 	names := make(map[string]bool, len(agents))
 	for _, a := range agents {
@@ -1688,6 +1763,45 @@ func appendUnique(dst []string, items ...string) []string {
 		}
 	}
 	return dst
+}
+
+// appendUniqueLastWins appends items to dst while keeping only the
+// highest-precedence occurrence of each path. Re-seeing an item moves it to the
+// end of the slice.
+func appendUniqueLastWins(dst []string, items ...string) []string {
+	for _, item := range items {
+		filtered := dst[:0]
+		for _, existing := range dst {
+			if existing == item {
+				continue
+			}
+			filtered = append(filtered, existing)
+		}
+		dst = filtered
+		dst = append(dst, item)
+	}
+	return dst
+}
+
+// prependUniqueBlock prepends one precedence block ahead of dst, keeping the
+// first insertion of any shared path. This lets earlier processed root bindings
+// retain ownership of shared dependency dirs while still placing later sibling
+// roots at lower precedence under later-wins merges.
+func prependUniqueBlock(dst []string, items ...string) []string {
+	if len(items) == 0 {
+		return dst
+	}
+	out := make([]string, 0, len(items)+len(dst))
+	added := setFromSlice(dst)
+	for _, item := range items {
+		if added[item] {
+			continue
+		}
+		out = append(out, item)
+		added[item] = true
+	}
+	out = append(out, dst...)
+	return out
 }
 
 // setFromSlice builds a set from a string slice.
