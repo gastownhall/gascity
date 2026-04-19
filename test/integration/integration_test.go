@@ -379,26 +379,16 @@ func subprocessTestKillSet(procs map[int]procSnapshot, agentScript string) map[i
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func gc(dir string, args ...string) (string, error) {
-	return runCommand(dir, commandEnvForDir(commandEnvLookupDir(dir, args), false), gcCommandTimeout(args), gcBinary, args...)
+	envDir := commandCityDirForArgs(dir, args)
+	return runCommand(dir, commandEnvForDir(envDir, false), gcCommandTimeout(args), gcBinary, args...)
 }
 
 // gcDolt runs the gc binary with the given args using the isolated integration
 // supervisor state, but without forcing GC_DOLT=skip. Use this for tests that
 // need the real bd+dolt-backed bead store.
 func gcDolt(dir string, args ...string) (string, error) {
-	return runCommand(dir, commandEnvForDir(commandEnvLookupDir(dir, args), true), integrationGCDoltCommandTimeout, gcBinary, args...)
-}
-
-func commandEnvLookupDir(dir string, args []string) string {
-	if dir != "" {
-		return dir
-	}
-	for _, arg := range args {
-		if _, ok := cityCommandEnv.Load(arg); ok {
-			return arg
-		}
-	}
-	return ""
+	envDir := commandCityDirForArgs(dir, args)
+	return runCommand(dir, commandEnvForDir(envDir, true), integrationGCDoltCommandTimeout, gcBinary, args...)
 }
 
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
@@ -861,6 +851,23 @@ func commandEnvForDir(dir string, useDolt bool) []string {
 		return integrationEnvDolt()
 	}
 	return integrationEnv()
+}
+
+func commandCityDirForArgs(dir string, args []string) string {
+	if dir != "" || len(args) < 2 {
+		return dir
+	}
+	switch args[0] {
+	case "start", "stop", "restart", "suspend", "resume":
+		if filepath.IsAbs(args[1]) {
+			return args[1]
+		}
+	}
+	return dir
+}
+
+func commandEnvLookupDir(dir string, args []string) string {
+	return commandCityDirForArgs(dir, args)
 }
 
 func replaceEnv(env []string, name, value string) []string {

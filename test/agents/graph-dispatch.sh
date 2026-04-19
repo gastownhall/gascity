@@ -593,14 +593,7 @@ while true; do
             fi
         fi
     fi
-    if [ "$sibling_hard_fail" = "true" ]; then
-        case "$ref" in
-            *.cleanup-worktree*)
-                sibling_hard_fail="false"
-                ;;
-        esac
-    fi
-    if [ "$sibling_hard_fail" = "true" ]; then
+    if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
         trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
         bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
             trace "skip-close-failed bead=$bead_id ref=$ref"

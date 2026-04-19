@@ -120,33 +120,27 @@ func (r *e2eReport) hasKey(key string) bool {
 // renderE2EToml generates a full single-file template for gc init --file.
 func renderE2EToml(city e2eCity) string {
 	var b strings.Builder
-
 	writeE2EWorkspaceSection(&b, city.Workspace)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
 	writeE2EProviderSections(&b, city.Providers)
 	writeE2EAgentSections(&b, city.Agents)
 	writeE2ENamedSessionSections(&b, city.Agents)
-
 	return b.String()
 }
 
 func renderE2ECityRuntimeToml(city e2eCity) string {
 	var b strings.Builder
-
 	writeE2EWorkspaceSection(&b, city.Workspace)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
-
 	return b.String()
 }
 
 func renderE2EPackToml(city e2eCity) string {
 	var b strings.Builder
-
 	fmt.Fprintf(&b, "[pack]\nname = %s\nschema = 2\n", quote(city.Workspace.Name))
 	writeE2EProviderSections(&b, city.Providers)
 	writeE2EAgentSections(&b, city.Agents)
 	writeE2ENamedSessionSections(&b, city.Agents)
-
 	return b.String()
 }
 
@@ -264,11 +258,13 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 	t.Helper()
 
 	packPath := filepath.Join(cityDir, "pack.toml")
-	if err := os.WriteFile(packPath, []byte(renderE2EPackToml(city)), 0o644); err != nil {
-		t.Fatalf("writing pack.toml: %v", err)
-	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	writeFileAtomic(t, tomlPath, []byte(renderE2ECityRuntimeToml(city)))
+	if _, err := os.Stat(packPath); err == nil {
+		writeFileAtomic(t, packPath, []byte(renderE2EPackToml(city)))
+		writeFileAtomic(t, tomlPath, []byte(renderE2ECityRuntimeToml(city)))
+		return
+	}
+	writeFileAtomic(t, tomlPath, []byte(renderE2EToml(city)))
 }
 
 func writeE2ETomlFile(t *testing.T, tomlPath string, city e2eCity) {

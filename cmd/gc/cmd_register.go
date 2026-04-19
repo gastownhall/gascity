@@ -162,10 +162,11 @@ func newCitiesCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE:  runList,
 	}
 	cmd.AddCommand(&cobra.Command{
-		Use:   "list",
-		Short: "List registered cities",
-		Args:  cobra.NoArgs,
-		RunE:  runList,
+		Use:     "list",
+		Short:   "List registered cities",
+		Aliases: []string{"ls"},
+		Args:    cobra.NoArgs,
+		RunE:    runList,
 	})
 	return cmd
 }
