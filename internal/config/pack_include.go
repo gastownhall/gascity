@@ -176,6 +176,17 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 }
 
 func resolveImportRef(ref, declDir, cityRoot string) (string, error) {
+	if isGitHubTreeURL(ref) {
+		_, subpath, _ := parseGitHubTreeURL(ref)
+		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		if err != nil {
+			return "", err
+		}
+		if subpath != "" {
+			return filepath.Join(cacheDir, subpath), nil
+		}
+		return cacheDir, nil
+	}
 	if isRemoteInclude(ref) {
 		_, subpath, gitRef := parseRemoteInclude(ref)
 		if gitRef == "" {
