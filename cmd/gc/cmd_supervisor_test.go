@@ -302,6 +302,27 @@ path = %q
 	}
 }
 
+func TestEmitSupervisorLoadCityConfigWarningsOncePerCity(t *testing.T) {
+	var stderr bytes.Buffer
+	prov := &config.Provenance{
+		Warnings: []string{
+			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+		},
+	}
+	cityPath := filepath.Join(t.TempDir(), "city")
+	otherCityPath := filepath.Join(t.TempDir(), "other-city")
+
+	emitSupervisorLoadCityConfigWarnings(&stderr, cityPath, prov)
+	emitSupervisorLoadCityConfigWarnings(&stderr, cityPath, prov)
+	emitSupervisorLoadCityConfigWarnings(&stderr, otherCityPath, prov)
+
+	const want = "[agents] is a deprecated compatibility alias for [agent_defaults]"
+	if got := strings.Count(stderr.String(), want); got != 2 {
+		t.Fatalf("warning count = %d, want 2 (once per city); stderr=%q", got, stderr.String())
+	}
+}
+
 func TestBuildSupervisorServiceDataOmitsXDGRuntimeDirForIsolatedGCHome(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -47,7 +48,7 @@ func apiClient(cityPath string) *api.Client {
 // the API server can find the agent. If already qualified or resolution
 // fails, the original name is returned.
 func resolveAgentForAPI(cityPath, name string) string {
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return name
 	}

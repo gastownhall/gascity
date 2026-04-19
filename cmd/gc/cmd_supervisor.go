@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -850,7 +851,7 @@ func reconcileCities(
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
-		emitLoadCityConfigWarnings(stderr, prov)
+		emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
 
 		// Use registered name as authoritative identity. Warn if live
 		// config has a different workspace.name (name drift).
@@ -1264,6 +1265,29 @@ func reconcileCities(
 
 	// Reconcile the global rig index from all registered cities.
 	reconcileRigIndex(reg, stderr)
+}
+
+var supervisorLoadWarningSeen sync.Map
+
+func emitSupervisorLoadCityConfigWarnings(w io.Writer, cityPath string, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !shouldEmitLoadCityConfigWarning(warning) {
+			continue
+		}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
+		key := filepath.Clean(cityPath) + "\x00" + warning
+		if _, loaded := supervisorLoadWarningSeen.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+	}
 }
 
 // reconcileRigIndex rebuilds the [[rigs]] section of cities.toml from the

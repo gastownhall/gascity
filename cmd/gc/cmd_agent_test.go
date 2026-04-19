@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -210,6 +213,32 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
 		t.Fatalf("expected unsupported-key warning, got %q", output)
+	}
+}
+
+func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("Glob(*.go): %v", err)
+	}
+	bareCall := regexp.MustCompile(`\bloadCityConfig\([^,\n)]*\)`)
+	var offenders []string
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") || file == "cmd_agent.go" {
+			continue
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", file, err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if bareCall.MatchString(line) {
+				offenders = append(offenders, fmt.Sprintf("%s:%d: %s", file, i+1, strings.TrimSpace(line)))
+			}
+		}
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("bare loadCityConfig callers found:\n%s", strings.Join(offenders, "\n"))
 	}
 }
 
