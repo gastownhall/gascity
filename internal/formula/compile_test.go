@@ -267,7 +267,7 @@ title = "Scan"
 	}
 }
 
-func TestCompileRalphMarksWorkflowRootAndBlocksOnTopLevelSteps(t *testing.T) {
+func TestCompileCheckSyntaxMarksWorkflowRootAndBlocksOnTopLevelSteps(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
@@ -286,10 +286,10 @@ id = "implement"
 title = "Implement"
 needs = ["design"]
 
-[steps.ralph]
+[steps.check]
 max_attempts = 2
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "30s"

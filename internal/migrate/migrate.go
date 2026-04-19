@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -40,6 +41,8 @@ type packFile struct {
 	AgentsDefaults config.AgentDefaults           `toml:"agents,omitempty"`
 	Defaults       packDefaults                   `toml:"defaults,omitempty"`
 	Agents         []config.Agent                 `toml:"agent"`
+
+	defaultRigImportOrder []string
 }
 
 type packDefaults struct {
@@ -128,7 +131,7 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 	}
 
 	packPath := filepath.Join(cityPath, "pack.toml")
-	packCfg, packExists, err := loadPackFile(packPath)
+	packCfg, _, err := loadPackFile(packPath)
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +163,10 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	if len(selectedAgents) > 0 || len(cityCfg.Workspace.Includes) > 0 || len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
-		ensurePackMeta(&packCfg, cityCfg, cityPath)
+	if len(selectedAgents) > 0 || len(cityCfg.Workspace.Includes) > 0 {
+		if ensurePackMeta(&packCfg, cityCfg, cityPath) {
+			packChanged = true
+		}
 	}
 
 	if len(cityCfg.Workspace.Includes) > 0 {
@@ -173,15 +178,6 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		packChanged = true
 	}
 
-	if len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
-		if packCfg.Defaults.Rig.Imports == nil {
-			packCfg.Defaults.Rig.Imports = make(map[string]config.Import)
-		}
-		addImports(packCfg.Defaults.Rig.Imports, cityCfg.Workspace.DefaultRigIncludes, cityCfg.Packs)
-		cityCfg.Workspace.DefaultRigIncludes = nil
-		packChanged = true
-	}
-
 	cityContent, err := cityCfg.Marshal()
 	if err != nil {
 		return nil, fmt.Errorf("marshal city.toml: %w", err)
@@ -190,7 +186,7 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		return nil, err
 	}
 
-	if packChanged || packExists || len(selectedAgents) > 0 {
+	if packChanged {
 		packContent, err := marshalPackFile(packCfg)
 		if err != nil {
 			return nil, fmt.Errorf("marshal pack.toml: %w", err)
@@ -224,10 +220,34 @@ func loadPackFile(path string) (packFile, bool, error) {
 		return packFile{}, false, fmt.Errorf("migrate %q: %w", path, err)
 	}
 	var cfg packFile
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return packFile{}, true, fmt.Errorf("migrate %q: %w", path, err)
 	}
+	if warnings := config.CheckUndecodedKeys(md, path); len(warnings) > 0 {
+		return packFile{}, true, fmt.Errorf("migrate %q: %s", path, strings.Join(warnings, "; "))
+	}
+	cfg.defaultRigImportOrder = packDefaultRigImportOrder(md)
 	return cfg, true, nil
+}
+
+func packDefaultRigImportOrder(md toml.MetaData) []string {
+	var order []string
+	seen := make(map[string]bool)
+	for _, key := range md.Keys() {
+		if len(key) != 4 ||
+			key[0] != "defaults" ||
+			key[1] != "rig" ||
+			key[2] != "imports" {
+			continue
+		}
+		if seen[key[3]] {
+			continue
+		}
+		seen[key[3]] = true
+		order = append(order, key[3])
+	}
+	return order
 }
 
 func selectAgents(packAgents, cityAgents []config.Agent) ([]agentEntry, []string) {
@@ -377,16 +397,20 @@ func migrateAgentAssets(cityPath string, entry agentEntry, usage usageCounts, re
 	return nil
 }
 
-func ensurePackMeta(packCfg *packFile, cityCfg *config.City, cityPath string) {
+func ensurePackMeta(packCfg *packFile, cityCfg *config.City, cityPath string) bool {
+	changed := false
 	if packCfg.Pack.Name == "" {
 		packCfg.Pack.Name = strings.TrimSpace(cityCfg.Workspace.Name)
 		if packCfg.Pack.Name == "" {
 			packCfg.Pack.Name = filepath.Base(cityPath)
 		}
+		changed = true
 	}
 	if packCfg.Pack.Schema == 0 {
 		packCfg.Pack.Schema = 1
+		changed = true
 	}
+	return changed
 }
 
 func addImports(target map[string]config.Import, includes []string, packs map[string]config.PackSource) {
@@ -606,7 +630,84 @@ func pruneEmptyParents(dir, stopDir string) {
 }
 
 func marshalPackFile(cfg packFile) ([]byte, error) {
-	return encodeTOML(cfg)
+	defaultRigImports := cfg.Defaults.Rig.Imports
+	cfg.Defaults.Rig.Imports = nil
+
+	data, err := encodeTOML(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(defaultRigImports) == 0 {
+		return data, nil
+	}
+
+	var buf bytes.Buffer
+	buf.Write(data)
+	if buf.Len() > 0 && !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+		buf.WriteByte('\n')
+	}
+	if buf.Len() > 0 && !bytes.HasSuffix(buf.Bytes(), []byte("\n\n")) {
+		buf.WriteByte('\n')
+	}
+
+	names := orderedPackDefaultRigImportNames(defaultRigImports, cfg.defaultRigImportOrder)
+	for i, name := range names {
+		if i > 0 {
+			buf.WriteByte('\n')
+		}
+		fmt.Fprintf(&buf, "[defaults.rig.imports.%s]\n", tomlKey(name))
+		importData, err := encodeTOML(defaultRigImports[name])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(importData)
+		if !bytes.HasSuffix(importData, []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func orderedPackDefaultRigImportNames(imports map[string]config.Import, order []string) []string {
+	names := make([]string, 0, len(imports))
+	seen := make(map[string]bool, len(imports))
+	for _, name := range order {
+		if _, ok := imports[name]; !ok || seen[name] {
+			continue
+		}
+		names = append(names, name)
+		seen[name] = true
+	}
+
+	var remaining []string
+	for name := range imports {
+		if !seen[name] {
+			remaining = append(remaining, name)
+		}
+	}
+	sort.Strings(remaining)
+	return append(names, remaining...)
+}
+
+func tomlKey(key string) string {
+	if key != "" {
+		bare := true
+		for _, r := range key {
+			if (r >= 'A' && r <= 'Z') ||
+				(r >= 'a' && r <= 'z') ||
+				(r >= '0' && r <= '9') ||
+				r == '_' ||
+				r == '-' {
+				continue
+			}
+			bare = false
+			break
+		}
+		if bare {
+			return key
+		}
+	}
+	return strconv.Quote(key)
 }
 
 func marshalAgentFile(cfg agentFile) ([]byte, error) {

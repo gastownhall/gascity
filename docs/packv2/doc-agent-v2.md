@@ -217,15 +217,44 @@ Promoting is an explicit human decision — skills don't automatically flow from
 
 MCP (Model Context Protocol) servers provide tools, resources, and prompts to agents over a runtime protocol. Unlike skills (which have a portable file standard), MCP server configuration is provider-specific — each provider embeds it in its own settings file. Gas City abstracts this with a provider-agnostic TOML format.
 
-> **First slice:** MCP discovery and listing are current-city-pack only. Imported-pack MCP catalogs, provider projection, and ownership/reconciliation are later slices.
-
-The first MCP CLI slice is list-only:
+`gc mcp list` is projected-only and target-specific:
 
 ```sh
-gc mcp list
 gc mcp list --agent polecat
 gc mcp list --session <id>
 ```
+
+> **Breaking change:** bare `gc mcp list` with no target flag now
+> errors. Projected MCP depends on a concrete agent or session target,
+> so the un-targeted form has no well-defined meaning. Automation that
+> previously ran `gc mcp list` as a pack-inventory check must switch
+> to `--agent` or `--session`.
+
+When a target has effective MCP, Gas City adopts the provider-native MCP
+surface as GC-managed runtime state. On first adoption the existing
+provider-native content is snapshotted to
+`.gc/mcp-adopted/<provider>/<timestamp>.<ext>` and a one-line warning
+is emitted to stderr, so hand-authored `.mcp.json`/`settings.json`/
+`config.toml` entries can be recovered. Symlinked targets are rejected
+unconditionally — managed targets must be regular files.
+
+Cleanup on each stage-1 reconcile walks `.gc/mcp-managed/` under the
+city root and every **still-attached** rig and removes managed
+markers/targets that no longer have a claimant (agent removed from
+`city.toml`, provider changed, MCP dir deleted). Rigs detached from
+`city.toml` are no longer reachable from the configured roots, so their
+managed markers persist and must be cleaned up manually or via explicit
+`gc rig detach` tooling. GC also adds managed runtime artifacts to the
+local `.gitignore` best-effort, and effective MCP changes participate
+in session fingerprints so affected sessions restart on drift.
+
+> **Template expansion and TOML escaping.** `.template.toml` files are
+> expanded by Go `text/template` *before* TOML parsing. Values that
+> contain `"`, `\`, or newlines can produce invalid TOML — the parse
+> error will point at the expanded file, not your template. Either
+> keep secret values simple strings (no embedded quotes/backslashes)
+> or escape them yourself with Go's `printf "%q"` template function
+> so the expanded output is valid TOML.
 
 #### Definition format
 

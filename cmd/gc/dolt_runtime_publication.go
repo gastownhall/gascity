@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -46,14 +48,45 @@ func removeDoltRuntimeStateFile(path string) error {
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
-	if !cityUsesBdStoreContract(cityPath) {
+	if cityUsesBdStoreContract(cityPath) {
+		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
+		if invalid {
+			return false, fmt.Errorf("invalid canonical city endpoint state")
+		}
+		return !ok, nil
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("load city config for managed dolt ownership: %w", err)
+	}
+	if cfg == nil {
 		return false, nil
 	}
-	_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
-	if invalid {
-		return false, fmt.Errorf("invalid canonical city endpoint state")
+	resolveRigPaths(cityPath, cfg.Rigs)
+	cityState, err := syncDesiredCityDoltConfigState(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg))
+	if err != nil {
+		return false, err
 	}
-	return !ok, nil
+	if cityState.EndpointOrigin != contract.EndpointOriginManagedCity {
+		return false, nil
+	}
+	for _, rig := range cfg.Rigs {
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)
+		if err != nil {
+			return false, err
+		}
+		if rigState.EndpointOrigin == contract.EndpointOriginInheritedCity {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func syncManagedDoltPortMirrors(cityPath string) error {
@@ -62,7 +95,7 @@ func syncManagedDoltPortMirrors(cityPath string) error {
 		removeDoltPortFile(cityPath)
 		return nil
 	}
-	return syncConfiguredDoltPortFiles(cityPath, rawBeadsProvider(cityPath), cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs)
+	return syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs)
 }
 
 func publishManagedDoltRuntimeState(cityPath string) error {
@@ -104,7 +137,14 @@ func publishManagedDoltRuntimeStateIfOwned(cityPath string) error {
 }
 
 func clearManagedDoltRuntimeStateIfOwned(cityPath string) error {
-	if !cityUsesBdStoreContract(cityPath) {
+	if cityUsesBdStoreContract(cityPath) {
+		return clearManagedDoltRuntimeState(cityPath)
+	}
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return err
+	}
+	if !owned {
 		return nil
 	}
 	return clearManagedDoltRuntimeState(cityPath)

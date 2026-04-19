@@ -53,6 +53,9 @@ func suggestKey(unknown string, known []string) string {
 			bestKey = k
 		}
 	}
+	if bestKey == leaf {
+		return ""
+	}
 	return bestKey
 }
 
@@ -114,6 +117,16 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(ServiceWorkflowConfig{}),
 		reflect.TypeOf(ServiceProcessConfig{}),
 		reflect.TypeOf(AgentDefaults{}),
+		reflect.TypeOf(packConfig{}),
+		reflect.TypeOf(PackMeta{}),
+		reflect.TypeOf(Import{}),
+		reflect.TypeOf(NamedSession{}),
+		reflect.TypeOf(PackRequirement{}),
+		reflect.TypeOf(PackDoctorEntry{}),
+		reflect.TypeOf(PackCommandEntry{}),
+		reflect.TypeOf(PackGlobal{}),
+		reflect.TypeOf(packDefaults{}),
+		reflect.TypeOf(packRigDefaults{}),
 	}
 	for _, t := range types {
 		collectTOMLTags(t, seen)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,7 +54,7 @@ type Server struct {
 	readOnly bool // mirrors supervisor's read-only flag for /svc/ enforcement
 
 	// sessionLogSearchPaths overrides the default search paths for Claude
-	// session JSONL files. Nil means use sessionlog.DefaultSearchPaths().
+	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
 
 	// idem caches responses for Idempotency-Key replay on create endpoints.
@@ -170,4 +171,98 @@ func syncFeatureFlags(cfg *config.City) {
 	if molecule.IsGraphApplyEnabled() != enabled {
 		molecule.SetGraphApplyEnabled(enabled)
 	}
+}
+
+type singleStateResolver struct {
+	state State
+}
+
+func (r *singleStateResolver) ListCities() []CityInfo {
+	return []CityInfo{{
+		Name:    r.state.CityName(),
+		Path:    r.state.CityPath(),
+		Running: true,
+	}}
+}
+
+func (r *singleStateResolver) CityState(name string) State {
+	if name == r.state.CityName() {
+		return r.state
+	}
+	return nil
+}
+
+func (s *Server) legacySessionHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
+	mux.HandleFunc("GET /v0/sessions", s.handleSessionList)
+	mux.HandleFunc("GET /v0/session/{id}", s.handleSessionGet)
+	mux.HandleFunc("GET /v0/session/{id}/transcript", s.handleSessionTranscript)
+	mux.HandleFunc("GET /v0/session/{id}/pending", s.handleSessionPending)
+	mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
+	mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
+	mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
+	mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
+	mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)
+	mux.HandleFunc("POST /v0/session/{id}/respond", s.handleSessionRespond)
+	mux.HandleFunc("POST /v0/session/{id}/suspend", s.handleSessionSuspend)
+	mux.HandleFunc("POST /v0/session/{id}/close", s.handleSessionClose)
+	mux.HandleFunc("POST /v0/session/{id}/wake", s.handleSessionWake)
+	mux.HandleFunc("POST /v0/session/{id}/rename", s.handleSessionRename)
+	mux.HandleFunc("GET /v0/session/{id}/agents", s.handleSessionAgentList)
+	mux.HandleFunc("GET /v0/session/{id}/agents/{agentId}", s.handleSessionAgentGet)
+	return mux
+}
+
+func (s *Server) legacyAgentHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/v0/agent/")
+		switch {
+		case strings.HasSuffix(path, "/output/stream"):
+			name := strings.TrimSuffix(path, "/output/stream")
+			if strings.TrimSpace(name) == "" {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAgentOutputStream(w, r, name)
+		case strings.HasSuffix(path, "/output"):
+			name := strings.TrimSuffix(path, "/output")
+			if strings.TrimSpace(name) == "" {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAgentOutput(w, r, name)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// ServeHTTP exists for tests that exercise a caller-provided *Server directly.
+// It delegates through the real SupervisorMux so the direct path exercises the
+// same typed routes and middleware as production. Legacy no-city session URLs
+// are rewritten onto the city-scoped Huma surface for compatibility.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.URL.Path, "/v0/city/") &&
+		(strings.HasPrefix(r.URL.Path, "/v0/session/") || r.URL.Path == "/v0/session" ||
+			strings.HasPrefix(r.URL.Path, "/v0/sessions")) {
+		s.legacySessionHandler().ServeHTTP(w, r)
+		return
+	}
+	if !strings.HasPrefix(r.URL.Path, "/v0/city/") && strings.HasPrefix(r.URL.Path, "/v0/agent/") {
+		s.legacyAgentHandler().ServeHTTP(w, r)
+		return
+	}
+
+	sm := NewSupervisorMux(&singleStateResolver{state: s.state}, s.readOnly, "test", time.Now())
+	sm.cacheMu.Lock()
+	sm.cache[s.state.CityName()] = cachedCityServer{state: s.state, srv: s}
+	sm.cacheMu.Unlock()
+
+	req := r.Clone(r.Context())
+	sm.Handler().ServeHTTP(w, req)
 }

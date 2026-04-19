@@ -81,10 +81,6 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		fmt.Fprintf(stderr, "gc rig set-endpoint: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if !cityUsesBdStoreContract(cityPath) {
-		fmt.Fprintln(stderr, "gc rig set-endpoint: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
-		return 1
-	}
 
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
@@ -108,6 +104,10 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		// relative `.beads/...` writes under the current working directory
 		// instead of erroring cleanly.
 		fmt.Fprintf(stderr, "gc rig set-endpoint: rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before setting its endpoint\n", rig.Name, rig.Name) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !scopeUsesManagedBdStoreContract(cityPath, rig.Path) {
+		fmt.Fprintln(stderr, "gc rig set-endpoint: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

@@ -492,23 +492,32 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	}
 }
 
-// TestInstallOverlayManagedNoOp verifies that providers whose hooks ship via
-// the core pack overlay are accepted by Install but produce no Go-side files.
-func TestInstallOverlayManagedNoOp(t *testing.T) {
+// TestInstallOverlayManagedProviders verifies that overlay-managed providers
+// are materialized from the embedded core pack overlay into the workdir.
+func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
 	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if len(fs.Files) != 0 {
-		t.Errorf("overlay-managed providers should not write any files; got %v", fs.Files)
+	for _, rel := range []string{
+		"/work/.codex/hooks.json",
+		"/work/.gemini/settings.json",
+		"/work/.opencode/plugins/gascity.js",
+		"/work/.github/hooks/gascity.json",
+		"/work/.github/copilot-instructions.md",
+		"/work/.cursor/hooks.json",
+		"/work/.pi/extensions/gc-hooks.js",
+		"/work/.omp/hooks/gc-hook.ts",
+	} {
+		if _, ok := fs.Files[rel]; !ok {
+			t.Errorf("expected overlay-managed provider file %s to be written", rel)
+		}
 	}
 }
 
 func TestInstallMultipleProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	// Claude writes city-level files; the overlay-managed names are accepted
-	// but produce nothing here.
 	err := Install(fs, "/city", "/work", []string{"claude", "codex", "gemini", "copilot"})
 	if err != nil {
 		t.Fatalf("Install: %v", err)
@@ -524,8 +533,8 @@ func TestInstallMultipleProviders(t *testing.T) {
 		"/work/.gemini/settings.json",
 		"/work/.github/hooks/gascity.json",
 	} {
-		if _, ok := fs.Files[rel]; ok {
-			t.Errorf("overlay-managed provider should not write %s via Install", rel)
+		if _, ok := fs.Files[rel]; !ok {
+			t.Errorf("expected overlay-managed provider file %s via Install", rel)
 		}
 	}
 }

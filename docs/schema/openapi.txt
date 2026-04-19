@@ -1866,6 +1866,9 @@
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerOperationEventPayload"
           }
         ]
       },
@@ -6334,6 +6337,65 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "WorkerOperationEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "delivered": {
+            "type": "boolean"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "op_id": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "queued": {
+            "type": "boolean"
+          },
+          "result": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "op_id",
+          "operation",
+          "result",
+          "started_at",
+          "finished_at",
+          "duration_ms"
         ],
         "type": "object"
       },

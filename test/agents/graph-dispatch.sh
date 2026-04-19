@@ -574,8 +574,10 @@ while true; do
     # Scoped to gc.failure_class="hard" so retry-flavor transient
     # failures (which the controller DOESN'T use to skip siblings) don't
     # trigger false positives.
+    # Teardown beads must still run after body failure; only body members get
+    # the sibling-hard-fail short-circuit.
     sibling_hard_fail="false"
-    if [ -n "$root_id" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
+    if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
         if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
             if printf '%s\n' "$sibling_json" | json_payload | jq -e \
                 --arg root "$root_id" --arg self "$bead_id" '

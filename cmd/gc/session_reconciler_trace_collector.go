@@ -552,16 +552,20 @@ func buildTraceDetailScopes(cfg *config.City, arms []TraceArm) map[string]TraceS
 	return scopes
 }
 
-func (c *SessionReconcilerTraceCycle) RecordConfigReload(previousRev, newRev string, outcome TraceOutcomeCode, added, removed []string, providerChanged bool, err error) {
+func (c *SessionReconcilerTraceCycle) RecordConfigReload(previousRev, newRev string, outcome TraceOutcomeCode, source reloadSource, added, removed []string, providerChanged bool, warnings []string, err error) {
 	if c == nil {
 		return
 	}
 	fields := map[string]any{
 		"previous_config_revision": previousRev,
 		"new_config_revision":      newRev,
+		"source":                   string(source),
 		"added_templates":          added,
 		"removed_templates":        removed,
 		"provider_changed":         providerChanged,
+	}
+	if len(warnings) > 0 {
+		fields["warnings"] = warnings
 	}
 	if err != nil {
 		fields["error"] = err.Error()

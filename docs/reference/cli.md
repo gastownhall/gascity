@@ -39,12 +39,13 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc mcp](#gc-mcp) | List MCP catalog visibility |
+| [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
+| [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
@@ -114,7 +115,7 @@ gc agent add --name mayor
 
 ## gc agent resume
 
-Resume a suspended agent by clearing suspended in city.toml.
+Resume a suspended agent by clearing suspended in its durable config.
 
 The reconciler will start the agent on its next tick. Supports bare
 names (resolved via rig context) and qualified names (e.g. "myrig/worker").
@@ -125,7 +126,7 @@ gc agent resume <name>
 
 ## gc agent suspend
 
-Suspend an agent by setting suspended=true in city.toml.
+Suspend an agent by setting suspended=true in its durable config.
 
 Suspended agents are skipped by the reconciler — their sessions are not
 started or restarted. Existing sessions continue running but won't be
@@ -289,6 +290,18 @@ List all cities registered with the machine-wide supervisor.
 
 ```
 gc cities
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc cities list](#gc-cities-list) | List registered cities |
+
+## gc cities list
+
+List registered cities
+
+```
+gc cities list
 ```
 
 ## gc config
@@ -975,7 +988,7 @@ Checks for available work using the agent's work_query config.
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
 With --inject: wraps output in &lt;system-reminder&gt; for hook injection, always exits 0.
 
-The agent is determined from $GC_AGENT or a positional argument.
+		The agent is determined from $GC_AGENT or a positional argument.
 
 ```
 gc hook [agent] [flags]
@@ -983,6 +996,7 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--hook-format` | string |  | format hook output for a provider |
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc import
@@ -1163,6 +1177,7 @@ gc mail check
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--hook-format` | string |  | format hook output for a provider |
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc mail count
@@ -1294,10 +1309,11 @@ gc mail thread <thread-id>
 
 ## gc mcp
 
-List MCP catalog visibility for the current city pack.
+Inspect the projected MCP catalog for a concrete target.
 
-The first MCP slice is list-only. Provider projection and reconciliation
-are later work.
+Projected MCP is target-specific. Use "gc mcp list --agent &lt;name&gt;" when
+the agent has a single deterministic projection target from config, or
+"gc mcp list --session &lt;id&gt;" for a live session target.
 
 ```
 gc mcp
@@ -1305,11 +1321,11 @@ gc mcp
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc mcp list](#gc-mcp-list) | List visible MCP definitions |
+| [gc mcp list](#gc-mcp-list) | Show projected MCP servers |
 
 ## gc mcp list
 
-List the current city pack's visible MCP definitions, optionally scoped to an agent or session.
+Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
 
 ```
 gc mcp list [flags]
@@ -1317,8 +1333,8 @@ gc mcp list [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--agent` | string |  | show the effective MCP view for this agent |
-| `--session` | string |  | show the effective MCP view for this session |
+| `--agent` | string |  | show the projected MCP config for this agent |
+| `--session` | string |  | show the projected MCP config for this session |
 
 ## gc nudge
 
@@ -1497,16 +1513,17 @@ gc prime [agent-name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
+| `--hook-format` | string |  | format hook output for a provider |
 
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
-Use --name to set the registration name; this also persists workspace.name
-in city.toml so later registrations stay aligned. When --name is omitted,
-workspace.name is used if present, otherwise [pack].name is used and
-backfilled into workspace.name.
+Use --name to set the machine-local registration alias. The alias is stored
+in the machine-local supervisor registry and never written back to city.toml.
+When --name is omitted, workspace.name is used if present, otherwise
+[pack].name is used — in either case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 
@@ -1517,6 +1534,24 @@ gc register [path] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--name` | string |  | machine-local alias for this city registration |
+
+## gc reload
+
+Force the current city controller to re-read effective config and
+process one reload tick without restarting the city/controller.
+
+Reload may fetch configured remote packs before recomputing effective
+config. Existing per-session restarts may still happen if normal config
+drift rules require them.
+
+```
+gc reload [path] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--async` | bool |  | Return after the controller accepts the reload request |
+| `--timeout` | string | `5m` | How long to wait for reload completion |
 
 ## gc restart
 
@@ -1573,7 +1608,8 @@ Register an external project directory as a rig.
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration.
+to apply a pack directory that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -1595,6 +1631,7 @@ gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
   gc rig add /path/to/existing --adopt
 ```
@@ -1602,7 +1639,7 @@ gc rig add /path/to/project
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
-| `--include` | string |  | pack directory for rig agents |
+| `--include` | stringArray |  | pack directory for rig agents (repeatable) |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
@@ -2177,6 +2214,7 @@ List skills visible to the current city.
 
 Output includes:
   - City pack skills (skills/&lt;name&gt;/SKILL.md under the city root)
+  - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
   - Bootstrap implicit-import pack skills (e.g. core)
   - With --agent/--session: that agent's agents/&lt;name&gt;/skills/ catalog
 
@@ -2197,7 +2235,7 @@ gc skill
 
 ## gc skill list
 
-List the current city pack's visible skills, optionally scoped to an agent or session.
+List the current shared and agent-local visible skills, optionally scoped to an agent or session.
 
 ```
 gc skill list [flags]

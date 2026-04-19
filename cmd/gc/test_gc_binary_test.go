@@ -24,6 +24,9 @@ func currentGCBinaryForTests(t *testing.T) string {
 			return
 		}
 		binPath := filepath.Join(buildDir, "gc")
+		goModCache := filepath.Join(buildDir, "gomodcache")
+		goCache := filepath.Join(buildDir, "gocache")
+		goPath := filepath.Join(buildDir, "gopath")
 		wd, err := os.Getwd()
 		if err != nil {
 			testGCBinaryErr = fmt.Errorf("getwd: %w", err)
@@ -31,6 +34,11 @@ func currentGCBinaryForTests(t *testing.T) string {
 		}
 		cmd := exec.Command("go", "build", "-o", binPath, ".")
 		cmd.Dir = wd
+		cmd.Env = append(os.Environ(),
+			"GOMODCACHE="+goModCache,
+			"GOCACHE="+goCache,
+			"GOPATH="+goPath,
+		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			testGCBinaryErr = fmt.Errorf("go build -o %s .: %w\n%s", binPath, err, string(out))

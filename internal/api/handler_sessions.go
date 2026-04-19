@@ -1,8 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,7 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // sessionResponse is the JSON representation of a chat session.
@@ -60,6 +64,11 @@ type sessionResponse struct {
 
 	// Metadata exposes mc_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type sessionResponseHandle interface {
+	worker.StateHandle
+	worker.PeekHandle
 }
 
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
@@ -162,14 +171,321 @@ func filterMetadata(m map[string]string) map[string]string {
 	return filtered
 }
 
-// enrichSessionResponse populates runtime fields on a session response:
-// running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, sp runtime.Provider, wantPeek bool) {
-	if info.State != session.StateActive {
+// writeResolveError maps session.ResolveSessionID errors to HTTP responses.
+func writeResolveError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
+		writeError(w, http.StatusConflict, "ambiguous", err.Error())
+	case errors.Is(err, session.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+	}
+}
+
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	cfg := s.state.Config()
+
+	q := r.URL.Query()
+	stateFilter := q.Get("state")
+	templateFilter := q.Get("template")
+	wantPeek := q.Get("peek") == "true"
+
+	sessions, err := catalog.List(stateFilter, templateFilter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 
-	resp.Running = sp.IsRunning(info.SessionName)
+	// Build bead index for reason enrichment.
+	beadIndex := make(map[string]*beads.Bead)
+	if all, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
+		for i := range all {
+			beadIndex[all[i].ID] = &all[i]
+		}
+	}
+
+	items := make([]sessionResponse, len(sessions))
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	for i, sess := range sessions {
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
+		handle, err := s.workerHandleForSession(store, sess.ID)
+		if err == nil {
+			s.enrichSessionResponse(&items[i], sess, cfg, handle, wantPeek)
+		}
+	}
+
+	pp := parsePagination(r, maxPaginationLimit)
+	if !pp.IsPaging {
+		if pp.Limit < len(items) {
+			items = items[:pp.Limit]
+		}
+		writeJSON(w, http.StatusOK, listResponse{Items: items, Total: len(items)})
+		return
+	}
+	page, total, nextCursor := paginate(items, pp)
+	if page == nil {
+		page = []sessionResponse{}
+	}
+	writeJSON(w, http.StatusOK, listResponse{Items: page, Total: total, NextCursor: nextCursor})
+}
+
+func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	cfg := s.state.Config()
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	b, _ := store.Get(id)
+	wantPeek := r.URL.Query().Get("peek") == "true"
+	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
+	handle, err := s.workerHandleForSession(store, id)
+	if err == nil {
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Stop(r.Context()); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	nudgeIDs, err := session.WaitNudgeIDs(store, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := handle.Close(r.Context()); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
+	}
+
+	// Optional: permanently delete the bead after closing.
+	if r.URL.Query().Get("delete") == "true" {
+		if err := store.Delete(id); err != nil {
+			log.Printf("gc api: deleting bead after close %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleSessionWake clears hold and quarantine on a session.
+func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	b, err := store.Get(id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
+		return
+	}
+	session.RepairEmptyType(store, &b)
+	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	if err != nil {
+		if state, conflict := session.WakeConflictState(err); conflict {
+			writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+state)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
+	}
+	// Clear in-memory crash tracker so the reconciler doesn't immediately
+	// re-quarantine the session based on stale crash history.
+	sessionName := b.Metadata["session_name"]
+	if sessionName != "" {
+		s.state.ClearCrashHistory(sessionName)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+// handleSessionRename updates a session's title.
+func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	var body struct {
+		Title string `json:"title"`
+	}
+	if decErr := decodeBody(r, &body); decErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
+		return
+	}
+	if body.Title == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "title is required")
+		return
+	}
+
+	b, err := store.Get(id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
+		return
+	}
+	session.RepairEmptyType(store, &b)
+
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Rename(r.Context(), body.Title); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	// Re-fetch to return the updated session, consistent with PATCH.
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	updated, _ := store.Get(id)
+	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	writeJSON(w, http.StatusOK, rresp)
+}
+
+// enrichSessionResponse populates runtime fields on a session response:
+// running state, active bead, peek output, and model/context metadata.
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, runtimeHandle any, wantPeek bool) {
+	if info.State != session.StateActive {
+		return
+	}
+	var (
+		stateHandle worker.StateHandle
+		peekHandle  worker.PeekHandle
+	)
+	switch v := runtimeHandle.(type) {
+	case worker.Handle:
+		stateHandle = v
+		peekHandle = v
+	case sessionResponseHandle:
+		stateHandle = v
+		peekHandle = v
+	case runtime.Provider:
+		store := s.state.CityBeadStore()
+		if store == nil {
+			return
+		}
+		resolved, err := s.workerHandleForSession(store, info.ID)
+		if err != nil {
+			return
+		}
+		stateHandle = resolved
+		peekHandle = resolved
+	default:
+		return
+	}
+	if stateHandle == nil {
+		return
+	}
+	state, err := stateHandle.State(context.Background())
+	if err != nil {
+		return
+	}
+	resp.Running = workerPhaseHasLiveOutput(state.Phase)
 
 	// Active bead: search rig stores for in_progress work assigned to the
 	// concrete session first, then fall back to alias/runtime/session names.
@@ -185,8 +501,8 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 
 	// Peek preview (opt-in, only when running).
-	if wantPeek && resp.Running {
-		if output, err := sp.Peek(info.SessionName, 5); err == nil {
+	if wantPeek && resp.Running && peekHandle != nil {
+		if output, err := peekHandle.Peek(context.Background(), 5); err == nil {
 			resp.LastOutput = output
 		}
 	}
@@ -197,23 +513,15 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
 		}
-		searchPaths := s.sessionLogSearchPaths
-		if searchPaths == nil && cfg != nil {
-			searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-		}
-		if searchPaths == nil {
-			searchPaths = sessionlog.DefaultSearchPaths()
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
 		}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
-		var sessionFile string
-		if info.SessionKey != "" {
-			sessionFile = sessionlog.FindSessionFileByID(searchPaths, workDir, info.SessionKey)
-		} else {
-			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
-		}
+		sessionFile := factory.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
 		if sessionFile != "" {
-			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
+			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage
@@ -223,6 +531,108 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
+}
+
+// handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
+func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	var body map[string]any
+	if decErr := decodeBody(r, &body); decErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
+		return
+	}
+
+	// Reject any field other than "title" or "alias".
+	for key := range body {
+		if key != "title" && key != "alias" {
+			writeError(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("field %q is immutable on sessions; only 'title' and 'alias' can be patched", key))
+			return
+		}
+	}
+
+	var titlePtr *string
+	if rawTitle, ok := body["title"]; ok {
+		title, isString := rawTitle.(string)
+		if !isString || title == "" {
+			writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
+			return
+		}
+		titlePtr = &title
+	}
+
+	var aliasPtr *string
+	if rawAlias, ok := body["alias"]; ok {
+		alias, isString := rawAlias.(string)
+		if !isString {
+			writeError(w, http.StatusBadRequest, "invalid", "alias must be a string")
+			return
+		}
+		aliasPtr = &alias
+	}
+	if titlePtr == nil && aliasPtr == nil {
+		writeError(w, http.StatusBadRequest, "invalid", "at least one of 'title' or 'alias' is required")
+		return
+	}
+
+	b, err := store.Get(id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
+		return
+	}
+	session.RepairEmptyType(store, &b)
+
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	updateFn := func() error {
+		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
+	}
+	if aliasPtr != nil {
+		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
+			return
+		}
+		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
+				return err
+			}
+			return updateFn()
+		}); err != nil {
+			writeSessionManagerError(w, err)
+			return
+		}
+	} else if err := updateFn(); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	// Re-fetch to get updated state.
+	info, err := catalog.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	updated, _ := store.Get(id)
+	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	writeJSON(w, http.StatusOK, presp)
 }
 
 // resolveProviderForTemplate resolves the provider for an agent template,

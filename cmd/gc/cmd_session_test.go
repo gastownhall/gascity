@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type attachmentAwareProvider struct {
@@ -433,17 +434,22 @@ func TestShouldAttachNewSession(t *testing.T) {
 	}
 }
 
-func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
+func TestBuildAttachmentCache_CachesWorkerObservedAttachmentState(t *testing.T) {
 	cache := buildAttachmentCache([]session.Info{
 		{SessionName: "active-attached", State: session.StateActive, Attached: true},
 		{SessionName: "active-detached", State: session.StateActive, Attached: false},
 		{SessionName: "sleeping", State: session.StateAsleep, Attached: false},
 		{SessionName: "suspended", State: session.StateSuspended, Attached: false},
 		{State: session.StateActive, Attached: true},
+	}, func(info session.Info) (bool, error) {
+		if info.SessionName == "sleeping" {
+			return true, nil
+		}
+		return info.Attached, nil
 	})
 
-	if len(cache) != 2 {
-		t.Fatalf("cache entries = %d, want 2", len(cache))
+	if len(cache) != 4 {
+		t.Fatalf("cache entries = %d, want 4", len(cache))
 	}
 	if got, ok := cache["active-attached"]; !ok || !got {
 		t.Fatalf("cache[active-attached] = (%v, %v), want (true, true)", got, ok)
@@ -451,11 +457,11 @@ func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
 	if got, ok := cache["active-detached"]; !ok || got {
 		t.Fatalf("cache[active-detached] = (%v, %v), want (false, true)", got, ok)
 	}
-	if _, ok := cache["sleeping"]; ok {
-		t.Fatal("sleeping session should not be cached")
+	if got, ok := cache["sleeping"]; !ok || !got {
+		t.Fatalf("cache[sleeping] = (%v, %v), want (true, true)", got, ok)
 	}
-	if _, ok := cache["suspended"]; ok {
-		t.Fatal("suspended session should not be cached")
+	if got, ok := cache["suspended"]; !ok || got {
+		t.Fatalf("cache[suspended] = (%v, %v), want (false, true)", got, ok)
 	}
 }
 
@@ -587,10 +593,10 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 }
 
 func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T) {
-	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "sleeping-worker", runtime.Config{})
-	sp.SetAttached("sleeping-worker", true)
-
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	cfg := &config.City{}
 	bead := beads.Bead{
 		ID:     "gc-1",
@@ -609,15 +615,18 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 		SessionName: "sleeping-worker",
 		Attached:    false,
 	}
+	wrapped := &attachmentCachingProvider{
+		Provider: provider,
+		cache: buildAttachmentCache([]session.Info{info}, func(info session.Info) (bool, error) {
+			return info.SessionName == "sleeping-worker", nil
+		}),
+	}
 
 	reason := sessionReason(
 		info,
 		map[string]beads.Bead{bead.ID: bead},
 		cfg,
-		&attachmentCachingProvider{
-			Provider: sp,
-			cache:    buildAttachmentCache([]session.Info{info}),
-		},
+		wrapped,
 		nil,
 		nil,
 	)
@@ -720,8 +729,8 @@ func TestAttachmentCachingProvider_DelegatesPendingInteraction(t *testing.T) {
 		t.Fatal("pendingInteractionReady should delegate to wrapped provider")
 	}
 
-	response := runtime.InteractionResponse{RequestID: "req-1", Action: "approve"}
-	if err := wrapped.Respond("worker", response); err != nil {
+	response := worker.InteractionResponse{RequestID: "req-1", Action: "approve"}
+	if err := workerRespondSessionTargetWithConfig("", nil, provider, nil, "worker", response); err != nil {
 		t.Fatalf("Respond error = %v", err)
 	}
 	if provider.responded.RequestID != response.RequestID || provider.responded.Action != response.Action {
@@ -732,10 +741,14 @@ func TestAttachmentCachingProvider_DelegatesPendingInteraction(t *testing.T) {
 func TestAttachmentCachingProvider_RejectsUnsupportedInteraction(t *testing.T) {
 	wrapped := &attachmentCachingProvider{cache: map[string]bool{}}
 
-	if _, err := wrapped.Pending("worker"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
+	pending, err := workerSessionTargetPendingWithConfig("", nil, wrapped, nil, "worker")
+	if err != nil {
+		t.Fatalf("Pending error = %v, want nil for unsupported interaction", err)
 	}
-	if err := wrapped.Respond("worker", runtime.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+	if pending != nil {
+		t.Fatalf("Pending = %+v, want nil for unsupported interaction", pending)
+	}
+	if err := workerRespondSessionTargetWithConfig("", nil, wrapped, nil, "worker", worker.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		t.Fatalf("Respond error = %v, want ErrInteractionUnsupported", err)
 	}
 }
@@ -1174,5 +1187,68 @@ func TestMaybeAutoTitle_EmptyMessageSkipsGeneration(t *testing.T) {
 	}
 	if got.Title != "original" {
 		t.Fatalf("title = %q, want unchanged %q", got.Title, "original")
+	}
+}
+
+func TestResolvedSessionCommandIncludesDefaultsAndSettings(t *testing.T) {
+	cityPath := t.TempDir()
+	settingsDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	claude := config.BuiltinProviders()["claude"]
+	resolved := &config.ResolvedProvider{
+		Name:              "claude",
+		Command:           claude.Command,
+		OptionsSchema:     claude.OptionsSchema,
+		EffectiveDefaults: config.ComputeEffectiveDefaults(claude.OptionsSchema, claude.OptionDefaults, nil),
+	}
+
+	got, err := resolvedSessionCommand(cityPath, resolved, nil)
+	if err != nil {
+		t.Fatalf("resolvedSessionCommand: %v", err)
+	}
+	if !strings.Contains(got, "--dangerously-skip-permissions") {
+		t.Fatalf("command %q should include unrestricted default permissions", got)
+	}
+	if !strings.Contains(got, "--effort max") {
+		t.Fatalf("command %q should include effort=max default", got)
+	}
+	wantSettings := `--settings "` + settingsPath + `"`
+	if !strings.Contains(got, wantSettings) {
+		t.Fatalf("command %q should include %s", got, wantSettings)
+	}
+}
+
+func TestResolvedSessionCommandAppliesOverridesOverDefaults(t *testing.T) {
+	cityPath := t.TempDir()
+	claude := config.BuiltinProviders()["claude"]
+	resolved := &config.ResolvedProvider{
+		Name:              "claude",
+		Command:           claude.Command,
+		OptionsSchema:     claude.OptionsSchema,
+		EffectiveDefaults: config.ComputeEffectiveDefaults(claude.OptionsSchema, claude.OptionDefaults, nil),
+	}
+
+	got, err := resolvedSessionCommand(cityPath, resolved, map[string]string{
+		"permission_mode": "plan",
+		"effort":          "low",
+	})
+	if err != nil {
+		t.Fatalf("resolvedSessionCommand: %v", err)
+	}
+	if strings.Contains(got, "--dangerously-skip-permissions") {
+		t.Fatalf("command %q should not keep unrestricted default when overridden", got)
+	}
+	if !strings.Contains(got, "--permission-mode plan") {
+		t.Fatalf("command %q should include plan permission override", got)
+	}
+	if !strings.Contains(got, "--effort low") {
+		t.Fatalf("command %q should include effort=low override", got)
 	}
 }

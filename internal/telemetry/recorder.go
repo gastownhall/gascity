@@ -308,15 +308,22 @@ func RecordNudge(ctx context.Context, target string, err error) {
 }
 
 // RecordConfigReload records a config reload attempt (metrics + log event).
-func RecordConfigReload(ctx context.Context, revision string, err error) {
+func RecordConfigReload(ctx context.Context, revision, source, outcome string, warningCount int, err error) {
 	initInstruments()
 	status := statusStr(err)
 	inst.configReloadTotal.Add(ctx, 1,
-		metric.WithAttributes(attribute.String("status", status)),
+		metric.WithAttributes(
+			attribute.String("status", status),
+			attribute.String("source", source),
+			attribute.String("outcome", outcome),
+		),
 	)
 	emit(ctx, "config.reload", severity(err),
 		otellog.String("revision", revision),
 		otellog.String("status", status),
+		otellog.String("source", source),
+		otellog.String("outcome", outcome),
+		otellog.Int("warning_count", warningCount),
 		errKV(err),
 	)
 }

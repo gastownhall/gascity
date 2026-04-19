@@ -228,10 +228,39 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// DialogProvider is an optional extension for runtimes that can detect and
+// dismiss known startup-style dialogs (workspace trust, bypass permissions,
+// rate-limit prompts) on an already-running session.
+type DialogProvider interface {
+	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
+}
+
 // ImmediateNudgeProvider is an optional extension for runtimes that can inject
 // input immediately without performing their own wait-idle heuristic first.
 type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
+}
+
+// InterruptedTurnResetProvider is an optional extension for runtimes that can
+// discard the just-interrupted user turn from the provider's active
+// conversation state without restarting the session.
+//
+// Gemini CLI needs this after Ctrl-C: canceling generation alone does not
+// remove the interrupted user turn, so the next reply can otherwise answer both
+// the canceled request and the replacement request in one combined turn.
+type InterruptedTurnResetProvider interface {
+	ResetInterruptedTurn(ctx context.Context, name string) error
+}
+
+// InterruptBoundaryWaitProvider is an optional extension for runtimes that can
+// confirm a provider-native interrupt boundary before the next user turn is
+// injected.
+//
+// Codex CLI emits a durable "<turn_aborted>" marker when an in-flight turn has
+// actually been canceled. Waiting for that marker avoids racing a replacement
+// prompt into a session that still intends to finish the interrupted turn.
+type InterruptBoundaryWaitProvider interface {
+	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
 // CopyEntry describes a file or directory to stage in the session's
@@ -418,7 +447,7 @@ func SyncWorkDirEnv(cfg Config) Config {
 	if cfg.Env != nil && cfg.Env["GC_DIR"] == cfg.WorkDir {
 		return cfg
 	}
-	env := make(map[string]string, len(cfg.Env))
+	env := make(map[string]string)
 	for k, v := range cfg.Env {
 		env[k] = v
 	}

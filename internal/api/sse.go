@@ -119,6 +119,22 @@ func registerSSE[I any](
 	})
 }
 
+// writeSSE writes a single SSE frame and flushes.
+func writeSSE(w http.ResponseWriter, eventType string, id any, data []byte) {
+	fmt.Fprintf(w, "event: %s\nid: %v\ndata: %s\n\n", eventType, id, data) //nolint:errcheck
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_ = err
+	}
+}
+
+// writeSSEComment emits a keepalive comment frame and flushes.
+func writeSSEComment(w http.ResponseWriter) {
+	fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_ = err
+	}
+}
+
 // registerSSEStringID is the string-ID sibling of registerSSE. It emits
 // `id: <string>` on the wire so browsers echo the exact value back via
 // the `Last-Event-ID` header on reconnect — a requirement for streams whose

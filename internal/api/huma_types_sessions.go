@@ -86,6 +86,8 @@ type SessionStreamInput struct {
 	CityScope
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
+
+	resolved *sessionStreamState
 }
 
 // SessionPatchBody is the request body for PATCH /v0/session/{id}.

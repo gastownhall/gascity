@@ -55,22 +55,6 @@ func wrapRawFrameBytes(values []json.RawMessage) []SessionRawMessageFrame {
 	return out
 }
 
-// wrapRawFrames wraps each provider-native frame value in a
-// SessionRawMessageFrame so the wire shape is preserved while the Go
-// slice type carries the documented schema.
-//
-// Deprecated: prefer wrapRawFrameBytes — passing decoded `any` values
-// forces a float64 round-trip that loses int64 precision above 2^53
-// and does not preserve map-key order. Kept for callers (closed-snapshot
-// paths) that have already decoded the frame.
-func wrapRawFrames(values []any) []SessionRawMessageFrame {
-	out := make([]SessionRawMessageFrame, len(values))
-	for i, v := range values {
-		out[i] = SessionRawMessageFrame{Value: v}
-	}
-	return out
-}
-
 // MarshalJSON emits Raw verbatim if set; otherwise json.Marshal(Value).
 // Emits `null` when both are empty.
 func (f SessionRawMessageFrame) MarshalJSON() ([]byte, error) {

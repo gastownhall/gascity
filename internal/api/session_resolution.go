@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -22,7 +23,35 @@ const (
 	apiNamedSessionModeKey     = session.NamedSessionModeMetadata
 )
 
-var errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
+var (
+	errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
+	errSessionTargetRejectedByConfig  = errors.New("session target rejected by config")
+)
+
+type apiSessionTargetNotFoundError struct {
+	identifier       string
+	rejectedByConfig bool
+}
+
+func (e apiSessionTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%v: %q", session.ErrSessionNotFound, e.identifier)
+}
+
+func (e apiSessionTargetNotFoundError) Unwrap() error {
+	return session.ErrSessionNotFound
+}
+
+func (e apiSessionTargetNotFoundError) Is(target error) bool {
+	return target == session.ErrSessionNotFound || (e.rejectedByConfig && target == errSessionTargetRejectedByConfig)
+}
+
+func apiSessionTargetNotFound(identifier string) error {
+	return apiSessionTargetNotFoundError{identifier: identifier}
+}
+
+func apiSessionTargetRejectedByConfig(identifier string) error {
+	return apiSessionTargetNotFoundError{identifier: identifier, rejectedByConfig: true}
+}
 
 type apiSessionResolveOptions struct {
 	allowClosed bool
@@ -125,7 +154,9 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 			continue
 		}
 		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
-			_ = s.state.SessionProvider().Stop(sessionName)
+			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
+				_ = handle.Kill(context.Background())
+			}
 		}
 		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
 		patch["alias_history"] = ""
@@ -243,20 +274,20 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if err != nil {
 		return "", err
 	}
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
-	mgr := s.sessionManager(store)
 	extraMeta := map[string]string{
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	hints := sessionCreateHints(resolved)
+	resolvedCfg, err := resolvedSessionConfigForProvider(spec.Identity, spec.SessionName, qualifiedTemplate, spec.Identity, transport, extraMeta, resolved, "", workDir)
+	if err != nil {
+		return "", err
+	}
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+	if err != nil {
+		return "", err
+	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
@@ -266,21 +297,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-			ctx,
-			spec.Identity,
-			spec.SessionName,
-			qualifiedTemplate,
-			spec.Identity,
-			resolved.CommandString(),
-			workDir,
-			resolved.Name,
-			transport,
-			resolved.Env,
-			resume,
-			hints,
-			extraMeta,
-		)
+		info, createErr = handle.Create(ctx, worker.CreateModeStarted)
 		return createErr
 	})
 	if err == nil {
@@ -308,7 +325,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return "", fmt.Errorf("session store unavailable")
 	}
 	if _, ok := parseAPITemplateTarget(identifier); ok {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+		return "", apiSessionTargetNotFound(identifier)
 	}
 	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -325,7 +342,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			if bead, getErr := store.Get(id); getErr == nil && apiIsNamedSessionBead(bead) {
 				identity := apiNamedSessionIdentity(bead)
 				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
-					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+					return "", apiSessionTargetRejectedByConfig(identifier)
 				}
 			}
 		}
@@ -337,7 +354,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		if _, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {
 			return "", err
 		} else if ok {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+			return "", apiSessionTargetNotFound(identifier)
 		}
 		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
 			return id, nil
@@ -345,7 +362,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	return "", apiSessionTargetNotFound(identifier)
 }
 
 func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
@@ -369,29 +386,30 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 }
 
 func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	return mgr.Submit(ctx, id, message, resumeCommand, hints, intent)
+	result, err := handle.Message(ctx, worker.MessageRequest{
+		Text:     message,
+		Delivery: workerDeliveryIntent(intent),
+	})
+	if err != nil {
+		return session.SubmitOutcome{}, err
+	}
+	return session.SubmitOutcome{Queued: result.Queued}, nil
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it.
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	if err := mgr.Send(ctx, id, message, resumeCommand, hints); err != nil {
-		return err
-	}
-	return nil
+	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	return err
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
@@ -399,4 +417,59 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
 	return err
+}
+
+func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
+	return factory.SessionByID(id)
+}
+
+func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) (worker.Handle, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, session.ErrSessionNotFound
+	}
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
+	if store != nil {
+		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
+			return factory.SessionByID(id)
+		} else if !errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, errSessionTargetRejectedByConfig) {
+			return nil, err
+		}
+	}
+	return factory.HandleForTarget(target, nil)
+}
+
+func (s *Server) newResolvedWorkerSessionHandle(store beads.Store, cfg worker.ResolvedSessionConfig) (worker.Handle, error) {
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
+	return factory.SessionForResolvedRuntime(cfg)
+}
+
+func workerDeliveryIntent(intent session.SubmitIntent) worker.DeliveryIntent {
+	switch intent {
+	case session.SubmitIntentFollowUp:
+		return worker.DeliveryIntentFollowUp
+	case session.SubmitIntentInterruptNow:
+		return worker.DeliveryIntentInterruptNow
+	default:
+		return worker.DeliveryIntentDefault
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

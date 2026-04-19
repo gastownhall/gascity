@@ -175,6 +175,44 @@ func TestResolveTemplateDefaultsRigScopedAgentsToRigRootWithoutWorkDir(t *testin
 	}
 }
 
+func TestResolveTemplateUsesRigScopeBeadsProviderForBdBackedRig(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	rigRoot := filepath.Join(cityPath, "demo")
+	if err := os.MkdirAll(filepath.Join(rigRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"de"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "demo", Path: rigRoot}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "worker", Dir: "demo"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_BEADS"]; got != "bd" {
+		t.Fatalf("GC_BEADS = %q, want bd for bd-backed rig", got)
+	}
+	if got := tp.Env["GC_BEADS_SCOPE_ROOT"]; got != rigRoot {
+		t.Fatalf("GC_BEADS_SCOPE_ROOT = %q, want %q", got, rigRoot)
+	}
+}
+
 func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")

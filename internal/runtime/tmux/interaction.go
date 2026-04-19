@@ -145,8 +145,6 @@ type approvalDedup struct {
 	lastHash map[string]string // session name → hash of last emitted approval
 }
 
-var dedup = &approvalDedup{lastHash: make(map[string]string)}
-
 func approvalHash(a *parsedApproval) string {
 	h := sha256.Sum256([]byte(a.ToolName + "\x00" + a.Input))
 	return fmt.Sprintf("%x", h[:8])
@@ -188,12 +186,12 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 
 	approval := parseApprovalPrompt(paneText)
 	if approval == nil {
-		dedup.clear(name)
+		t.approvalDedup().clear(name)
 		return nil, nil
 	}
 
 	// Dedup: don't re-emit the same approval on repeated polls.
-	if !dedup.isNew(name, approval) {
+	if !t.approvalDedup().isNew(name, approval) {
 		// Return the interaction (caller may need it for display) but it's
 		// not a new detection. The stable RequestID makes this idempotent.
 		_ = struct{}{} // satisfy empty-block linter; dedup check is intentionally a no-op
@@ -233,7 +231,7 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	}
 	current := parseApprovalPrompt(paneText)
 	if current == nil {
-		dedup.clear(name)
+		t.approvalDedup().clear(name)
 		return nil // prompt already gone
 	}
 	// If caller specified a RequestID, verify it matches the current prompt.
@@ -274,13 +272,13 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 		verifyText, verifyErr := t.CapturePane(name, 40)
 		if verifyErr != nil {
 			// Pane gone — session ended, treat as success.
-			dedup.clear(name)
+			t.approvalDedup().clear(name)
 			return nil
 		}
 
 		if parseApprovalPrompt(verifyText) == nil {
 			// Prompt cleared — success.
-			dedup.clear(name)
+			t.approvalDedup().clear(name)
 			return nil
 		}
 	}

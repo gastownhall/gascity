@@ -271,6 +271,79 @@ func TestWatchDirs_IncludesConventionDiscoveryRoots(t *testing.T) {
 	}
 }
 
+// Regression for gastownhall/gascity#779:
+// WatchDirs iterated only the v1 Includes slices and ignored v2-resolved
+// PackDirs / RigPackDirs, so cities composing packs via [imports.X] or
+// [rigs.imports.X] got zero fsnotify coverage for imported pack trees.
+// Hot reload was silently broken for v2 layouts.
+func TestWatchDirs_Regression779_IncludesV2ResolvedPackDirs(t *testing.T) {
+	dir := t.TempDir()
+	prov := &Provenance{
+		Sources: []string{filepath.Join(dir, "city.toml")},
+	}
+
+	cityPack := filepath.Join(dir, "imported", "city-pack")
+	rigPack := filepath.Join(dir, "imported", "rig-pack")
+
+	cfg := &City{
+		PackDirs: []string{cityPack},
+		RigPackDirs: map[string][]string{
+			"api-server": {rigPack},
+		},
+		Rigs: []Rig{{Name: "api-server", Path: "/srv/api"}},
+	}
+
+	dirs := WatchDirs(prov, cfg, dir)
+	sort.Strings(dirs)
+
+	for _, want := range []string{cityPack, rigPack} {
+		found := false
+		for _, d := range dirs {
+			if d == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("watch dirs = %v, want %q present (v2 resolved pack dir, gascity#779)", dirs, want)
+		}
+	}
+}
+
+// Regression for gastownhall/gascity#779:
+// Revision hashed only v1 Includes-based pack content. Cities using v2
+// [imports.X] saw no revision change when imported pack files were edited,
+// so the reconciler never detected the change.
+func TestRevision_Regression779_HashesV2ResolvedPackDirs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+	packRel := filepath.Join("imported", "city-pack")
+	writeFile(t, dir, filepath.Join(packRel, "pack.toml"), `[pack]
+name = "imported"
+schema = 2
+`)
+
+	packAbs := filepath.Join(dir, packRel)
+	prov := &Provenance{
+		Sources: []string{filepath.Join(dir, "city.toml")},
+	}
+	cfg := &City{PackDirs: []string{packAbs}}
+
+	h1 := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+	writeFile(t, dir, filepath.Join(packRel, "pack.toml"), `[pack]
+name = "imported-v2-changed"
+schema = 2
+`)
+
+	h2 := Revision(fsys.OSFS{}, prov, cfg, dir)
+	if h1 == h2 {
+		t.Errorf("Revision did not change when v2-imported pack content changed (gascity#779)")
+	}
+}
+
 func TestWatchDirs_Deduplicates(t *testing.T) {
 	dir := t.TempDir()
 	prov := &Provenance{

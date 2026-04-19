@@ -51,13 +51,14 @@ func ReadGeminiFile(path string, _ int) (*Session, error) {
 
 func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 	var message struct {
-		ID        string           `json:"id"`
-		Timestamp string           `json:"timestamp"`
-		Type      string           `json:"type"`
-		Content   json.RawMessage  `json:"content"`
-		Thoughts  []geminiThought  `json:"thoughts"`
-		ToolCalls []geminiToolCall `json:"toolCalls"`
-		Model     string           `json:"model"`
+		ID           string              `json:"id"`
+		Timestamp    string              `json:"timestamp"`
+		Type         string              `json:"type"`
+		Content      json.RawMessage     `json:"content"`
+		Thoughts     []geminiThought     `json:"thoughts"`
+		ToolCalls    []geminiToolCall    `json:"toolCalls"`
+		Interactions []geminiInteraction `json:"interactions"`
+		Model        string              `json:"model"`
 	}
 	if err := json.Unmarshal(rawMessage, &message); err != nil {
 		return nil
@@ -74,6 +75,20 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 		text := geminiContentText(message.Content)
 		if text == "" {
 			text = strings.TrimSpace(string(message.Content))
+		}
+		if interactionBlocks := geminiInteractionBlocks(message.Interactions); len(interactionBlocks) > 0 {
+			content := make([]ContentBlock, 0, 1+len(interactionBlocks))
+			if strings.TrimSpace(text) != "" {
+				content = append(content, ContentBlock{Type: "text", Text: text})
+			}
+			content = append(content, interactionBlocks...)
+			return &Entry{
+				UUID:      uuid,
+				Type:      "user",
+				Timestamp: ts,
+				Message:   mustMarshal(MessageContent{Role: "user", Content: mustMarshal(content)}),
+				Raw:       append(json.RawMessage(nil), rawMessage...),
+			}
 		}
 		return &Entry{
 			UUID:      uuid,
@@ -95,7 +110,7 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 			Raw:       append(json.RawMessage(nil), rawMessage...),
 		}
 	case "gemini":
-		content := make([]ContentBlock, 0, len(message.Thoughts)+1+len(message.ToolCalls))
+		content := make([]ContentBlock, 0, len(message.Thoughts)+1+len(message.ToolCalls)+len(message.Interactions))
 		for _, thought := range message.Thoughts {
 			text := strings.TrimSpace(thought.Description)
 			subject := strings.TrimSpace(thought.Subject)
@@ -134,6 +149,8 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 			}
 		}
 
+		content = append(content, geminiInteractionBlocks(message.Interactions)...)
+
 		return &Entry{
 			UUID:      uuid,
 			Type:      "assistant",
@@ -147,6 +164,27 @@ func parseGeminiMessage(rawMessage json.RawMessage, idx int) *Entry {
 	default:
 		return nil
 	}
+}
+
+func geminiInteractionBlocks(interactions []geminiInteraction) []ContentBlock {
+	if len(interactions) == 0 {
+		return nil
+	}
+	blocks := make([]ContentBlock, 0, len(interactions))
+	for _, interaction := range interactions {
+		blocks = append(blocks, ContentBlock{
+			Type:      "interaction",
+			RequestID: firstNonEmpty(interaction.RequestID, interaction.ID),
+			Kind:      strings.TrimSpace(interaction.Kind),
+			State:     strings.TrimSpace(interaction.State),
+			Text:      strings.TrimSpace(interaction.Text),
+			Prompt:    strings.TrimSpace(interaction.Prompt),
+			Options:   append([]string(nil), interaction.Options...),
+			Action:    strings.TrimSpace(interaction.Action),
+			Metadata:  cloneRawJSON(interaction.Metadata),
+		})
+	}
+	return blocks
 }
 
 func geminiContentText(raw json.RawMessage) string {
@@ -375,4 +413,16 @@ type geminiToolCall struct {
 			} `json:"response"`
 		} `json:"functionResponse"`
 	} `json:"result"`
+}
+
+type geminiInteraction struct {
+	RequestID string          `json:"request_id"`
+	ID        string          `json:"id"`
+	Kind      string          `json:"kind"`
+	State     string          `json:"state"`
+	Text      string          `json:"text"`
+	Prompt    string          `json:"prompt"`
+	Options   []string        `json:"options"`
+	Action    string          `json:"action"`
+	Metadata  json.RawMessage `json:"metadata"`
 }

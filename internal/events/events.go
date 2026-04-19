@@ -46,6 +46,7 @@ const (
 	OrderCompleted     = "order.completed"
 	OrderFailed        = "order.failed"
 	ProviderSwapped    = "provider.swapped"
+	WorkerOperation    = "worker.operation"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -72,7 +73,7 @@ var KnownEventTypes = []string{
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped,
+	ProviderSwapped, WorkerOperation,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

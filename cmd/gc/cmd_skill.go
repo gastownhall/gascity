@@ -277,49 +277,6 @@ func discoverSkillDirEntries(dir, relBase, source string) []visibilityEntry {
 	return out
 }
 
-func discoverMcpEntries(root, source string) []visibilityEntry {
-	return discoverMcpDirEntries(filepath.Join(root, "mcp"), "mcp", source)
-}
-
-func discoverAgentMcpEntries(root, agentName, source string) []visibilityEntry {
-	return discoverMcpDirEntries(filepath.Join(root, "agents", agentName, "mcp"), filepath.Join("agents", agentName, "mcp"), source)
-}
-
-func discoverMcpDirEntries(dir, relBase, source string) []visibilityEntry {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var out []visibilityEntry
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name, ok := mcpIdentityForFilename(entry.Name())
-		if !ok {
-			continue
-		}
-		out = append(out, visibilityEntry{
-			Name:   name,
-			Source: source,
-			Path:   filepath.ToSlash(filepath.Join(relBase, entry.Name())),
-		})
-	}
-	sortVisibilityEntries(out)
-	return out
-}
-
-func mcpIdentityForFilename(name string) (string, bool) {
-	switch {
-	case strings.HasSuffix(name, ".template.toml"):
-		return strings.TrimSuffix(name, ".template.toml"), true
-	case strings.HasSuffix(name, ".toml"):
-		return strings.TrimSuffix(name, ".toml"), true
-	default:
-		return "", false
-	}
-}
-
 func sortVisibilityEntries(entries []visibilityEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Source != entries[j].Source {

@@ -418,6 +418,107 @@ func TestControllerStateOpenRigStoreFileOpenErrorDoesNotFallbackToBd(t *testing.
 	}
 }
 
+func TestControllerStateBuildStoresUsesScopeAwareProviderForMixedRig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   rigDir,
+			Prefix: "fe",
+		}},
+	}
+
+	cs := &controllerState{cityPath: cityDir, cfg: cfg}
+	stores := cs.buildStores(cfg)
+	store, ok := stores["frontend"]
+	if !ok {
+		t.Fatal("buildStores() missing frontend store")
+	}
+	if _, ok := store.(*beads.FileStore); ok {
+		t.Fatalf("buildStores() returned %T, want scope-aware non-file store for bd-backed rig", store)
+	}
+}
+
+func TestControllerStateBuildStoresUsesRigFileMarkerUnderLegacyFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   rigDir,
+			Prefix: "fe",
+		}},
+	}
+
+	cs := &controllerState{cityPath: cityDir, cfg: cfg}
+	stores := cs.buildStores(cfg)
+	rigStore, ok := stores["frontend"]
+	if !ok {
+		t.Fatal("buildStores() missing frontend store")
+	}
+	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+
+	cityStore, err := openScopeLocalFileStore(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityList, err := cityStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("city List: %v", err)
+	}
+	if len(cityList) != 0 {
+		t.Fatalf("city store should stay empty after rig create, got %#v", cityList)
+	}
+
+	persistedRigStore, err := openScopeLocalFileStore(rigDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rigList, err := persistedRigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rig List: %v", err)
+	}
+	if len(rigList) != 1 || rigList[0].Title != "rig bead" {
+		t.Fatalf("rig store should contain its own bead, got %#v", rigList)
+	}
+}
+
 func TestControllerStateNilEventProvider(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{

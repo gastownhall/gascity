@@ -16,6 +16,7 @@ import (
 // agentBuildParams holds shared, per-city parameters for building agents.
 // These are constant across all agents in a single buildDesiredState call.
 type agentBuildParams struct {
+	city            *config.City
 	cityName        string
 	cityPath        string
 	workspace       *config.Workspace
@@ -74,6 +75,7 @@ type agentBuildParams struct {
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := &agentBuildParams{
+		city:            cfg,
 		cityName:        cityName,
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
