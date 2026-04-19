@@ -95,7 +95,7 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 // cmdHandoffRemote sends handoff mail to a remote session and stops the target
 // only when the controller can restart it. Returns immediately.
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
-	targetInfo, err := resolveSessionRuntimeTarget(target)
+	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

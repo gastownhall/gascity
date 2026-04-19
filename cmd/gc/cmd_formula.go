@@ -18,13 +18,13 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage and inspect formulas",
 	}
 
-	cmd.AddCommand(newFormulaListCmd(stdout))
+	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
 	return cmd
 }
 
-func newFormulaListCmd(stdout io.Writer) *cobra.Command {
+func newFormulaListCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List available formulas",
@@ -33,7 +33,7 @@ func newFormulaListCmd(stdout io.Writer) *cobra.Command {
 Formulas are discovered from city-level and rig-level formula directories
 configured via packs and formulas_dir settings.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			paths := allFormulaSearchPaths()
+			paths := allFormulaSearchPaths(stderr)
 			if len(paths) == 0 {
 				_, _ = fmt.Fprintln(stdout, "No formula search paths configured.")
 				return nil
@@ -79,7 +79,7 @@ configured via packs and formulas_dir settings.`,
 	}
 }
 
-func newFormulaShowCmd(stdout, _ io.Writer) *cobra.Command {
+func newFormulaShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <formula-name>",
 		Short: "Show a compiled formula recipe",
@@ -106,7 +106,7 @@ Examples:
 
 			compileVars := vars
 
-			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(), compileVars)
+			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(stderr), compileVars)
 			if err != nil {
 				return err
 			}
@@ -201,7 +201,7 @@ Examples:
 	return cmd
 }
 
-func newFormulaCookCmd(stdout, _ io.Writer) *cobra.Command {
+func newFormulaCookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var title string
 	var vars []string
 	var metadata []string
@@ -225,7 +225,7 @@ bead into a sub-workflow at runtime.`,
 			if err != nil {
 				return err
 			}
-			cfg, err := loadCityConfig(cityPath)
+			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
 				return err
 			}
@@ -331,12 +331,12 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 
 // cityFormulaSearchPaths returns the city-level formula search paths.
 // Best-effort: returns nil if no city is loaded.
-func cityFormulaSearchPaths() []string {
+func cityFormulaSearchPaths(warningWriter ...io.Writer) []string {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nil
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
 		return nil
 	}
@@ -346,12 +346,12 @@ func cityFormulaSearchPaths() []string {
 // allFormulaSearchPaths returns the deduplicated union of formula search
 // paths across city and all rigs. Used by gc formula list to discover
 // every available formula regardless of scope.
-func allFormulaSearchPaths() []string {
+func allFormulaSearchPaths(warningWriter ...io.Writer) []string {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nil
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
 		return nil
 	}
