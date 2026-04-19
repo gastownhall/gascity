@@ -475,6 +475,11 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestControllerReloadsConventionDiscoveredAgentOnWatchEvent exercises
+// tryReloadConfig directly — a fast, deterministic unit test for the
+// reload logic. It does NOT cover the watcher/debounce wiring between
+// fsnotify and tryReloadConfig; see
+// TestControllerLoop_WatcherDrivesConventionAgentReload for that.
 func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
 
@@ -522,6 +527,94 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 	}
 	if len(names) != 1 || names[0] != "noreen" {
 		t.Fatalf("reloaded agent names = %v, want [noreen]", names)
+	}
+}
+
+// TestWatchConfigDirs_DetectsFileChangeAndSetsDirty covers the
+// fsnotify → debounce → dirty flag wiring. This is the integration
+// complement to the reload-logic unit test above: if this test breaks
+// but the unit test passes, the watcher glue has regressed
+// independently. Focuses on the primitive (watchConfigDirs) rather
+// than a full controllerLoop to keep the test fast and free of
+// bead-store dependencies.
+func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigDirs([]string{dir}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	// Rewrite city.toml — fsnotify watches the dir, so the write fires
+	// a WRITE or CREATE event that flips dirty after the debounce.
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-v2\"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite city.toml: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after city.toml rewrite; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after file change; stderr=%q", stderr.String())
+	}
+
+	// New directory under a watched dir should be picked up and added to
+	// the watch list — verifies the subtree auto-add path (critical for
+	// convention-discovered agent dirs created after startup).
+	dirty.Store(false)
+	// Drain any pending poke so we can observe the next one.
+	select {
+	case <-pokeCh:
+	default:
+	}
+
+	agentsDir := filepath.Join(dir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents): %v", err)
+	}
+	// First poke is from the mkdir CREATE event on the watched city dir.
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for poke after agents/ mkdir; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after agents/ mkdir; stderr=%q", stderr.String())
+	}
+
+	// Now prove the subtree-add path actually registered agents/: create
+	// a file INSIDE agents/ and verify the watcher fires again. Without
+	// the watcher.Add(event.Name) in watchConfigDirs's event loop, this
+	// write would silently miss and a real-world regression (conv-agent
+	// file showing up after startup) would be invisible.
+	dirty.Store(false)
+	select {
+	case <-pokeCh:
+	default:
+	}
+
+	agentFile := filepath.Join(agentsDir, "noreen.template.md")
+	if err := os.WriteFile(agentFile, []byte("You are noreen.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agentFile): %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for poke after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
 	}
 }
 

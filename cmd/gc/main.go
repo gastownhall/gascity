@@ -665,10 +665,17 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	}
 }
 
+// resolveStoreScopeRoot resolves a store's scope root under cityPath.
+// An empty storePath falls back to cityPath — this is the "city scope"
+// default used by callers that don't have a specific rig context. Callers
+// that need to distinguish an unbound rig from the city scope must check
+// rig.Path themselves before calling (see rig_scope_resolution.go and
+// beads_provider_lifecycle.go for the `if rig.Path == "" { continue }`
+// pattern).
 func resolveStoreScopeRoot(cityPath, storePath string) string {
 	scopeRoot := strings.TrimSpace(storePath)
 	if scopeRoot == "" {
-		return ""
+		scopeRoot = cityPath
 	}
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)

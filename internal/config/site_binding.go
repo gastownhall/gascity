@@ -97,6 +97,10 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 			continue
 		}
 		cfg.Rigs[i].Path = ""
+		if !keepLegacy {
+			warnings = append(warnings,
+				fmt.Sprintf("rig %q is declared in city.toml but has no path binding in .gc/site.toml; run `gc rig add <dir> --name %s` to bind it", name, name))
+		}
 	}
 	for name := range paths {
 		if _, ok := seen[name]; ok {
@@ -141,7 +145,10 @@ func PersistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig) error {
 	if err := fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating runtime dir %q: %w", filepath.Dir(path), err)
 	}
-	if err := fsys.WriteFileAtomic(fs, path, buf.Bytes(), 0o644); err != nil {
+	// Skip the write when on-disk content already matches. Keeps repeated
+	// rig/suspend/resume/agent commands idempotent instead of churning
+	// .gc/site.toml mtime (and breaking watcher debounce logic).
+	if err := fsys.WriteFileIfChangedAtomic(fs, path, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("writing site binding %q: %w", path, err)
 	}
 	return nil

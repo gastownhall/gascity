@@ -137,16 +137,33 @@ func (e *Editor) loadForEdit() (*config.City, error) {
 	return cfg, nil
 }
 
+// write persists city.toml first, then .gc/site.toml. A crash between the
+// two writes leaves city.toml with rig paths stripped while .gc/site.toml
+// retains its previous state — producing an orphan legacy/unbound rig
+// that the loader surfaces via warnings rather than the silent
+// site-wins-over-stale-city state the reverse order would create.
+//
+// The city.toml write is skipped when on-disk content already matches,
+// matching the idempotency guarantee documented on
+// writeCityConfigForEditFS so repeated no-op mutations don't churn
+// watcher mtime or break debounce.
 func (e *Editor) write(cfg *config.City) error {
 	cityPath := filepath.Dir(e.tomlPath)
-	if err := config.PersistRigSiteBindings(e.fs, cityPath, cfg.Rigs); err != nil {
-		return fmt.Errorf("writing site binding: %w", err)
-	}
 	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return fsys.WriteFileAtomic(e.fs, e.tomlPath, content, 0o644)
+	if err := fsys.WriteFileIfChangedAtomic(e.fs, e.tomlPath, content, 0o644); err != nil {
+		return err
+	}
+	if err := config.PersistRigSiteBindings(e.fs, cityPath, cfg.Rigs); err != nil {
+		// Surface the half-migrated state: city.toml has been rewritten
+		// without rig paths, but the site binding wasn't persisted, so
+		// any previously-bound rigs whose path came only from city.toml
+		// are now unbound.
+		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs may be unbound; re-run the command or `gc doctor --fix` to retry: %w", err)
+	}
+	return nil
 }
 
 // AgentOrigin determines whether an agent is defined inline in the raw

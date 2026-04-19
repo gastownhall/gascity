@@ -288,6 +288,9 @@ func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
 	add(cityPath)
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			add(resolveStoreScopeRoot(cityPath, rig.Path))
 		}
 	}

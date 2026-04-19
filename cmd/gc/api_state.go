@@ -152,6 +152,14 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	}
 
 	for _, rig := range cfg.Rigs {
+		// Unbound rigs (declared in city.toml but missing a .gc/site.toml
+		// binding) have an empty rig.Path. resolveStoreScopeRoot would
+		// alias them to the city scope, silently routing rig-scoped API
+		// traffic to the city store. Skip them so the API reports no
+		// store for the rig and operators notice the unbound state.
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
 		store := sharedLegacyFileStore
 		if store == nil {
 			store = cs.openRigStore(provider, rig.Name, rig.Path, rig.EffectivePrefix())

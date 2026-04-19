@@ -357,8 +357,13 @@ func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a c
 	if cfg == nil {
 		return storeDir
 	}
+	// Unbound rigs (declared in city.toml but missing a .gc/site.toml
+	// binding) have an empty rig.Path; falling through to
+	// resolveStoreScopeRoot would silently alias them to the city
+	// scope. Skip them so sling falls back to the agent's rig_dir or
+	// the city store instead of operating on the wrong store.
 	if bp := beadPrefix(beadOrFormula); bp != "" {
-		if rig, found := findRigByPrefix(cfg, bp); found {
+		if rig, found := findRigByPrefix(cfg, bp); found && strings.TrimSpace(rig.Path) != "" {
 			return resolveStoreScopeRoot(cityPath, rig.Path)
 		}
 	}
