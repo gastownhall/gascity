@@ -111,6 +111,8 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
+		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
