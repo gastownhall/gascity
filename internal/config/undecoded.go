@@ -12,18 +12,13 @@ import (
 
 const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
 
-var agentDefaultsCompatibilityKeys = []string{
+var agentDefaultsCompatibilityOverlapKeys = []string{
 	"model",
 	"wake_mode",
 	"default_sling_formula",
 	"allow_overlay",
 	"allow_env_override",
 	"append_fragments",
-	"skills",
-	"mcp",
-	"provider",
-	"scope",
-	"install_agent_hooks",
 }
 
 // CheckUndecodedKeys examines TOML metadata for keys that were present in
@@ -68,7 +63,7 @@ func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []strin
 }
 
 func agentDefaultsTablesOverlap(md toml.MetaData) bool {
-	for _, key := range agentDefaultsCompatibilityKeys {
+	for _, key := range agentDefaultsCompatibilityOverlapKeys {
 		if md.IsDefined("agent_defaults", key) && md.IsDefined("agents", key) {
 			return true
 		}

@@ -1120,7 +1120,7 @@
         },
         "transitive": {
           "type": "boolean",
-          "description": "Transitive controls whether this import's own imports are visible\nto the consumer. Defaults to true (transitive). Set to false to\nsuppress transitive resolution for this specific import."
+          "description": "Transitive controls whether this import's own transitive pack\ndependencies are visible to the consumer. Defaults to true\n(transitive). Set to false to keep only content defined directly\nin the imported pack, suppressing nested dependencies reached\nthrough either [imports] or legacy [pack].includes."
         },
         "shadow": {
           "type": "string",
