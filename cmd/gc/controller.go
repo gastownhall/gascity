@@ -803,7 +803,7 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 		}
 	}
 	if fatalWarnings := strictFatalLoadConfigWarnings(reloadWarnings); strictMode && len(fatalWarnings) > 0 {
-		warnings := append(append([]string(nil), fatalWarnings...), reloadStrictWarningHint)
+		warnings := append(append([]string(nil), reloadWarnings...), reloadStrictWarningHint)
 		result := resultWithWarnings(warnings)
 		return result, reloadWarningError{
 			err:      fmt.Errorf("strict mode: %d collision warning(s)", len(fatalWarnings)),
