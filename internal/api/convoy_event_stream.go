@@ -66,26 +66,31 @@ type WireTaggedEvent struct {
 }
 
 // toWireEvent decodes the bus's opaque Payload into the registered
-// typed variant and returns the list-endpoint wire shape. On decode
-// failure or unregistered event type it returns (WireEvent{}, false)
-// so the caller can omit the event from the list — the spec's §4
-// uniform decode-failure policy: skip + log, never emit a degraded
-// envelope with nil payload. The registry-coverage test
-// (TestEveryKnownEventTypeHasRegisteredPayload) makes both failure
-// paths unreachable for any KnownEventTypes constant (Principle 7);
-// the log is for bus corruption and unregistered custom types so
-// operators can investigate.
+// typed variant and returns the list-endpoint wire shape.
+//
+// Policy:
+//   - Registered event types: emit with the typed payload variant.
+//   - Unregistered event types (e.g. ad-hoc `gc event emit custom.foo`
+//     from a user hook): emit the envelope with a null payload so the
+//     CLI user's custom events remain visible in the list. The type
+//     string, actor, subject, message, seq, and ts are preserved — only
+//     structured payload data is dropped (there is no registered schema
+//     to interpret it against). The registry-coverage test
+//     (TestEveryKnownEventTypeHasRegisteredPayload) still guarantees
+//     every KnownEventTypes constant has a registered payload; this
+//     passthrough covers only types the SDK does not know about.
+//   - Decode error on registered types: skip + log. Emitting a typed
+//     event with bus corruption would violate Principle 7.
 func toWireEvent(e events.Event) (WireEvent, bool) {
 	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
 	if err != nil {
 		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
 		return WireEvent{}, false
 	}
-	if !registered {
-		log.Printf("api: events wire: unregistered event type %q seq=%d (add to events.KnownEventTypes and register a payload)", e.Type, e.Seq)
-		return WireEvent{}, false
+	var payload events.Payload
+	if registered {
+		payload, _ = decoded.(events.Payload)
 	}
-	payload, _ := decoded.(events.Payload)
 	return WireEvent{
 		Seq:     e.Seq,
 		Type:    e.Type,
