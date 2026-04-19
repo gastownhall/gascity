@@ -10,11 +10,11 @@ title: "Config System"
 The Config system is a Layer 0-1 primitive that serves as Gas City's
 universal activation mechanism. It loads, composes, and resolves TOML
 configuration from `city.toml`, included fragments, pack directories,
-and remote pack sources into a single flat `City` struct that drives
-all other subsystems. Capabilities activate progressively based on which
-config sections are present (Levels 0-8), and multi-layer override
-resolution ensures that pack defaults can be customized per-rig
-without forking.
+and preinstalled import metadata into a single flat `City` struct that
+drives all other subsystems. Capabilities activate progressively based
+on which config sections are present (Levels 0-8), and multi-layer
+override resolution ensures that pack defaults can be customized
+per-rig without forking.
 
 ## Key Concepts
 
@@ -240,7 +240,7 @@ All implementation lives in `internal/config/`:
 | `internal/config/compose.go` | `LoadWithIncludes`: the main entry point. Fragment merging, path resolution, provenance tracking. Orchestrates the full load pipeline. |
 | `internal/config/patch.go` | `Patches`, `AgentPatch`, `RigPatch`, `ProviderPatch`, `PoolOverride` types. `ApplyPatches` and per-type apply functions. |
 | `internal/config/pack.go` | `ExpandPacks`, `ExpandCityPacks`, `ComputeFormulaLayers`. Pack loading, agent stamping, city_agents partitioning, override application, collision detection. |
-| `internal/config/pack_fetch.go` | `FetchPacks`: git clone/update for remote pack sources. `PackLock` for reproducible builds. Cache management under `.gc/packs/`. |
+| `internal/config/pack_fetch.go` | Legacy V1 remote-pack fetch and lock helpers. Schema-2 import bootstrap/repair belongs to `gc import`; config load consumes already-materialized imports. |
 | `internal/config/provider.go` | `ProviderSpec`, `ResolvedProvider`, `BuiltinProviders`. Built-in provider presets for seven CLI agents. |
 | `internal/config/resolve.go` | `ResolveProvider`: the five-step provider resolution chain. `AgentHasHooks` for hook detection. Auto-detection via PATH scanning. |
 | `internal/config/revision.go` | `Revision`: deterministic SHA-256 config hashing. `WatchDirs`: filesystem watch targets for config change detection. |
@@ -317,7 +317,7 @@ Each source file has a companion `_test.go`:
 | `internal/config/compose_test.go` | LoadWithIncludes, fragment merging, collision warnings, path resolution, provenance tracking, recursive include rejection |
 | `internal/config/patch_test.go` | ApplyPatches for agents/rigs/providers, targeting errors, env merge/remove, pool sub-field patching, provider replace mode |
 | `internal/config/pack_test.go` | ExpandPacks, ExpandCityPacks, city_agents partitioning, agent collision detection, override application, formula layer computation |
-| `internal/config/pack_fetch_test.go` | FetchPacks, clone/update, PackCachePath, lock read/write, LockFromCache |
+| `internal/config/pack_fetch_test.go` | Legacy fetch/lock helper coverage for the V1 `[packs]` path |
 | `internal/config/provider_test.go` | BuiltinProviders completeness, BuiltinProviderOrder coverage |
 | `internal/config/resolve_test.go` | ResolveProvider chain (all five steps), escape hatches, auto-detect, agent-level overrides, env additive merge |
 | `internal/config/revision_test.go` | Revision determinism, WatchDirs deduplication |
@@ -334,13 +334,13 @@ overall testing philosophy.
   verify that referenced paths (prompt_template, overlay_dir) actually
   exist on disk. Path existence is checked at agent startup time.
 
-- **Remote pack fetch requires git.** `FetchPacks` shells out
-  to `git clone`/`git fetch`. There is no fallback for environments
-  without git.
+- **Schema-2 import repair is out of band.** PackV2 load/start/config
+  flows do not fetch imports. Missing import state must be repaired with
+  `gc import install`.
 
-- **Shallow clones only.** Remote packs are cloned with
-  `--depth 1`. Switching to a commit ref that is not at the tip of a
-  branch may fail.
+- **Legacy V1 remote fetch requires git.** The older `FetchPacks` path
+  shells out to `git clone`/`git fetch`. There is no fallback for
+  environments without git.
 
 - **No hot-reload of pack content.** The controller watches config
   source files and reloads on change, but pack directories are only
