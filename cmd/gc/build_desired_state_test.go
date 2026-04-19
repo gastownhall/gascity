@@ -255,10 +255,10 @@ template = "watcher"
 scope = "rig"
 mode = "always"
 `,
-		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "agent.toml"):  "scope = \"city\"\n",
-		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "prompt.md"):   "You are the imported captain.\n",
-		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "agent.toml"):  "scope = \"rig\"\n",
-		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "prompt.md"):   "You are the imported watcher.\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "prompt.md"):  "You are the imported captain.\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "agent.toml"): "scope = \"rig\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "prompt.md"):  "You are the imported watcher.\n",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
