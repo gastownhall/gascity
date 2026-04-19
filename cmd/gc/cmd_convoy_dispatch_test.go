@@ -759,6 +759,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	wfcAgent := config.Agent{Name: "control-dispatcher", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}
 	err := runWorkflowServeFollow(
 		wfcAgent,
+		wfcAgent.EffectiveWorkQuery(),
 		t.TempDir(),
 		nil,
 		io.Discard,

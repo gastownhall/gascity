@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -647,7 +648,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 		return "", nil // empty = no work for idle's custom query
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
 	if !work["worker"] {
 		t.Error("expected worker to have work")
 	}
@@ -677,7 +678,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when dir is resolved")
 	}
@@ -701,7 +702,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when rig root is configured externally")
 	}
@@ -748,7 +749,7 @@ func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
 		}},
 	}
 
-	work := computeWorkSet(cfg, shellScaleCheck, "test-city", cityDir, nil, nil)
+	work := computeWorkSet(cfg, shellScaleCheck, "test-city", cityDir, nil, nil, nil)
 	if !work["demo/worker"] {
 		t.Fatal("expected explicit rig work query to see rig-scoped password and report work")
 	}
@@ -758,7 +759,7 @@ func TestComputeWorkSet_NilRunner(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
-	work := computeWorkSet(cfg, nil, "test-city", "/tmp", nil, nil)
+	work := computeWorkSet(cfg, nil, "test-city", "/tmp", nil, nil, nil)
 	if work != nil {
 		t.Errorf("expected nil, got %v", work)
 	}
@@ -773,7 +774,7 @@ func TestComputeWorkSet_CommandError(t *testing.T) {
 		return "", fmt.Errorf("connection refused")
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
 	if work["worker"] {
 		t.Error("command error should not produce work")
 	}
@@ -788,7 +789,7 @@ func TestComputeWorkSet_IgnoresNoReadyMessage(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 
-	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil)
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
 	if work["worker"] {
 		t.Error("no-ready message should not produce work")
 	}
@@ -2065,5 +2066,70 @@ func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
 	}
 	if session.Metadata["sleep_reason"] != "" {
 		t.Errorf("sleep_reason = %q, want empty", session.Metadata["sleep_reason"])
+	}
+}
+
+// TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate verifies that
+// {{.Rig}} in a rig-scoped agent's work_query is substituted per-rig
+// before computeWorkSet runs the probe — regression test for #793, the
+// third call site at session_reconcile.go:~412 (prefixedWorkQueryForProbeWithEnv).
+//
+// The runner asserts that the command string reaching the shell has
+// {{.Rig}} replaced with the configured rig name. Two rig-scoped agents
+// with identical work_query templates must receive rig-specific commands.
+func TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate(t *testing.T) {
+	cityDir := t.TempDir()
+	alphaDir := filepath.Join(cityDir, "alpha")
+	betaDir := filepath.Join(cityDir, "beta")
+	if err := os.MkdirAll(alphaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(betaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: alphaDir},
+			{Name: "beta", Path: betaDir},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "alpha", WorkQuery: "bd ready --metadata-field gc.routed_to={{.Rig}}/worker"},
+			{Name: "worker", Dir: "beta", WorkQuery: "bd ready --metadata-field gc.routed_to={{.Rig}}/worker"},
+		},
+	}
+
+	var mu sync.Mutex
+	seenCommands := map[string]string{} // rig dir -> command
+	runner := func(command, dir string, _ map[string]string) (string, error) {
+		mu.Lock()
+		seenCommands[dir] = command
+		mu.Unlock()
+		if strings.Contains(command, "{{.Rig}}") {
+			return "", fmt.Errorf("unexpanded template in command: %q", command)
+		}
+		if strings.Contains(command, "gc.routed_to=alpha/worker") && dir == alphaDir {
+			return `[{"id":"AL-1"}]`, nil
+		}
+		if strings.Contains(command, "gc.routed_to=beta/worker") && dir == betaDir {
+			return "", nil // no work for beta
+		}
+		return "", fmt.Errorf("unexpected command %q in dir %q", command, dir)
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil, nil)
+
+	if !work["alpha/worker"] {
+		t.Errorf("expected alpha/worker to have work; seen commands = %v", seenCommands)
+	}
+	if work["beta/worker"] {
+		t.Errorf("expected beta/worker to have no work; seen commands = %v", seenCommands)
+	}
+	if got := seenCommands[alphaDir]; !strings.Contains(got, "gc.routed_to=alpha/worker") {
+		t.Errorf("alpha probe command = %q, want expanded gc.routed_to=alpha/worker", got)
+	}
+	if got := seenCommands[betaDir]; !strings.Contains(got, "gc.routed_to=beta/worker") {
+		t.Errorf("beta probe command = %q, want expanded gc.routed_to=beta/worker", got)
 	}
 }

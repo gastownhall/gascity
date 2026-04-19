@@ -141,6 +141,10 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	}()
 
 	workQuery := a.EffectiveWorkQuery()
+	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
+	// hook invocation sees the same rig substitution as the controller-side
+	// probes in build_desired_state.go / session_reconcile.go. #793.
+	workQuery = expandProbeCommandTemplate(cityPath, cfg.Workspace.Name, &a, cfg.Rigs, workQuery, stderr)
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 	workEnv := controllerWorkQueryEnv(cityPath, cfg, &a)
 	if workEnv == nil {

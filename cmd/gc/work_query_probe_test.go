@@ -28,7 +28,7 @@ func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
 		}},
 	}
 
-	command := prefixedWorkQueryForProbe(cfg, cityPath, "test-city", nil, nil, &cfg.Agents[0])
+	command := prefixedWorkQueryForProbe(cfg, cityPath, "test-city", nil, nil, &cfg.Agents[0], nil)
 	if !strings.Contains(command, "gc.routed_to=demo/witness") {
 		t.Fatalf("prefixedWorkQueryForProbe() = %q, want gc.routed_to=demo/witness", command)
 	}
@@ -147,7 +147,7 @@ func TestControllerQueryEnvOmitsCredentialsFromPrefix(t *testing.T) {
 	if got := env["GC_DOLT_PORT"]; got != "4406" {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "4406")
 	}
-	command := prefixedWorkQueryForProbeWithEnv(env, cfg, cityPath, cfg.Workspace.Name, nil, nil, &cfg.Agents[0])
+	command := prefixedWorkQueryForProbeWithEnv(env, cfg, cityPath, cfg.Workspace.Name, nil, nil, &cfg.Agents[0], nil)
 	if strings.Contains(command, "rig-secret") || strings.Contains(command, "city-secret") {
 		t.Fatalf("prefixedWorkQueryForProbeWithEnv leaked credentials into command: %q", command)
 	}

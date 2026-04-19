@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"sort"
 	"strings"
 
@@ -99,8 +100,9 @@ func prefixedWorkQueryForProbe(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	agentCfg *config.Agent,
+	stderr io.Writer,
 ) string {
-	return prefixedWorkQueryForProbeWithEnv(controllerQueryEnv(cityPath, cfg, agentCfg), cfg, cityPath, cityName, store, sessionBeads, agentCfg)
+	return prefixedWorkQueryForProbeWithEnv(controllerQueryEnv(cityPath, cfg, agentCfg), cfg, cityPath, cityName, store, sessionBeads, agentCfg, stderr)
 }
 
 func prefixedWorkQueryForProbeWithEnv(
@@ -111,12 +113,17 @@ func prefixedWorkQueryForProbeWithEnv(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	agentCfg *config.Agent,
+	stderr io.Writer,
 ) string {
-	_ = cityPath
 	if agentCfg == nil {
 		return ""
 	}
 	command := strings.TrimSpace(agentCfg.EffectiveWorkQuery())
+	// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped agents probe with
+	// rig-specific metadata. Mirrors the scale_check expansion in
+	// build_desired_state.go; #793. Malformed templates are logged to
+	// stderr (when supplied) and fall back to the raw command.
+	command = expandProbeCommandTemplate(cityPath, cityName, agentCfg, cfg.Rigs, command, stderr)
 	if command == "" || agentCfg.SupportsMultipleSessions() {
 		return prefixShellEnv(queryEnv, command)
 	}

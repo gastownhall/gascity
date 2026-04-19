@@ -13,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -383,7 +384,7 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 // commands continue to operate on the real repo even when agent sessions use
 // isolated work_dir sandboxes. Non-empty output means work exists. Agents
 // without a work_query produce no WakeWork reason.
-func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
+func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
 	if cfg == nil || runner == nil {
 		return nil
 	}
@@ -409,7 +410,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		}
 		seen[qn] = true
 		probeEnv := controllerQueryRuntimeEnv(cityDir, cfg, a)
-		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a)
+		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a, stderr)
 		if wq == "" {
 			continue
 		}
