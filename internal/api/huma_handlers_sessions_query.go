@@ -167,7 +167,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 					Template:   info.Template,
 					Provider:   info.Provider,
 					Format:     "raw",
-					Messages:   wrapRawFrames(rawSess.RawPayloads()),
+					Messages:   wrapRawFrameBytes(rawSess.RawPayloadBytes()),
 					Pagination: rawSess.Pagination,
 				},
 			}, nil

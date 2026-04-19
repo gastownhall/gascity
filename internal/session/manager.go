@@ -748,14 +748,13 @@ func (m *Manager) Kill(id string) error {
 // Idempotent: returns nil if the session is already draining.
 func (m *Manager) BeginDrain(id, reason string) error {
 	return withSessionMutationLock(id, func() error {
-		current, cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
+		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
 		if err != nil {
 			return err
 		}
 		if !cmdLegal {
 			return nil // idempotent: already draining
 		}
-		_ = current
 		return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
 	})
 }
@@ -764,7 +763,7 @@ func (m *Manager) BeginDrain(id, reason string) error {
 // returns nil if the session is already archived.
 func (m *Manager) Archive(id, reason string) error {
 	return withSessionMutationLock(id, func() error {
-		_, cmdLegal, err := m.checkTransition(id, CmdArchive, StateArchived)
+		cmdLegal, err := m.checkTransition(id, CmdArchive, StateArchived)
 		if err != nil {
 			return err
 		}
@@ -779,7 +778,7 @@ func (m *Manager) Archive(id, reason string) error {
 // Idempotent: returns nil if the session is already quarantined.
 func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
 	return withSessionMutationLock(id, func() error {
-		_, cmdLegal, err := m.checkTransition(id, CmdQuarantine, StateQuarantined)
+		cmdLegal, err := m.checkTransition(id, CmdQuarantine, StateQuarantined)
 		if err != nil {
 			return err
 		}
@@ -795,7 +794,7 @@ func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
 // returns nil if the session is already in an awake-eligible state.
 func (m *Manager) Reactivate(id string) error {
 	return withSessionMutationLock(id, func() error {
-		_, cmdLegal, err := m.checkTransition(id, CmdWake, StateAsleep)
+		cmdLegal, err := m.checkTransition(id, CmdWake, StateAsleep)
 		if err != nil {
 			return err
 		}
@@ -822,7 +821,7 @@ func (m *Manager) Reactivate(id string) error {
 // session is already active.
 func (m *Manager) ConfirmCreation(id string) error {
 	return withSessionMutationLock(id, func() error {
-		_, cmdLegal, err := m.checkTransition(id, CmdReady, StateActive)
+		cmdLegal, err := m.checkTransition(id, CmdReady, StateActive)
 		if err != nil {
 			return err
 		}
@@ -838,24 +837,23 @@ func (m *Manager) ConfirmCreation(id string) error {
 // bootstrap beads (pre-metadata upgrades). Closed beads are terminal and
 // reject any lifecycle mutation (callers should use the dedicated Close
 // idempotency branch, not a lifecycle transition). Returns:
-//   - current: the observed current state (StateActive if empty)
 //   - cmdLegal: true if the command produces a real transition, false if
 //     the session is already in targetState (idempotent no-op)
 //   - err: *IllegalTransitionError wrapping ErrIllegalTransition when the
 //     command is neither legal nor a no-op
 //
 // MUST be called while holding withSessionMutationLock(id).
-func (m *Manager) checkTransition(id string, cmd TransitionCommand, targetState State) (State, bool, error) {
+func (m *Manager) checkTransition(id string, cmd TransitionCommand, targetState State) (bool, error) {
 	b, _, err := m.sessionBead(id)
 	if err != nil {
-		return StateNone, false, err
+		return false, err
 	}
 	// Closed beads are terminal. Mutating lifecycle metadata after close
 	// would produce impossible status=closed + live-state combinations
 	// that the reconciler misreads. Surface a clear illegal-transition
 	// error instead of silently mutating.
 	if b.Status == "closed" {
-		return StateClosed, false, &IllegalTransitionError{From: StateClosed, Command: cmd}
+		return false, &IllegalTransitionError{From: StateClosed, Command: cmd}
 	}
 	current := State(b.Metadata["state"])
 	if current == StateNone {
@@ -871,29 +869,12 @@ func (m *Manager) checkTransition(id string, cmd TransitionCommand, targetState 
 		current = StateActive
 	}
 	if current == targetState {
-		return current, false, nil
+		return false, nil
 	}
 	if _, err := Transition(current, cmd); err != nil {
-		return current, false, err
+		return false, err
 	}
-	return current, true, nil
-}
-
-// validateTransition reads the current state of session id and confirms
-// that cmd is legal via the state machine. Returns an *IllegalTransitionError
-// wrapping ErrIllegalTransition when the transition is disallowed. Callers
-// at the API boundary map that to 409 Conflict.
-//
-// Deprecated: prefer checkTransition which short-circuits idempotent calls
-// and normalizes legacy StateNone metadata.
-func (m *Manager) validateTransition(id string, cmd TransitionCommand) error {
-	b, _, err := m.sessionBead(id)
-	if err != nil {
-		return err
-	}
-	current := State(b.Metadata["state"])
-	_, err = Transition(current, cmd)
-	return err
+	return true, nil
 }
 
 // Rename updates the title of a chat session.

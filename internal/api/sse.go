@@ -102,7 +102,7 @@ func registerSSE[I any](
 				// exit promptly on send-error.
 				reqCtx, cancel := context.WithCancel(hctx.Context())
 				defer cancel()
-				hctx = hctxWithCtx(hctx, reqCtx)
+				hctx = hctxWithCtx(reqCtx, hctx)
 
 				bw, encoder, flusher := beginSSEStream(hctx)
 				rawSend := func(msg sse.Message) error {
@@ -147,7 +147,7 @@ func registerSSEStringID[I any](
 			Body: func(hctx huma.Context) {
 				reqCtx, cancel := context.WithCancel(hctx.Context())
 				defer cancel()
-				hctx = hctxWithCtx(hctx, reqCtx)
+				hctx = hctxWithCtx(reqCtx, hctx)
 
 				bw, encoder, flusher := beginSSEStream(hctx)
 				rawSend := func(msg StringIDMessage) error {
@@ -189,7 +189,7 @@ func stringIDCancelOnSendError(send StringIDSender, cancel context.CancelFunc) S
 // Note: we cannot embed huma.Context because the interface is literally
 // named Context, which collides with our override method Context(). The
 // override instead delegates every method explicitly.
-func hctxWithCtx(hctx huma.Context, ctx context.Context) huma.Context {
+func hctxWithCtx(ctx context.Context, hctx huma.Context) huma.Context {
 	return &hctxOverride{inner: hctx, ctx: ctx}
 }
 
@@ -212,20 +212,21 @@ func (h *hctxOverride) Header(name string) string  { return h.inner.Header(name)
 func (h *hctxOverride) EachHeader(cb func(name, value string)) {
 	h.inner.EachHeader(cb)
 }
-func (h *hctxOverride) BodyReader() io.Reader       { return h.inner.BodyReader() }
+func (h *hctxOverride) BodyReader() io.Reader { return h.inner.BodyReader() }
 func (h *hctxOverride) GetMultipartForm() (*multipart.Form, error) {
 	return h.inner.GetMultipartForm()
 }
+
 func (h *hctxOverride) SetReadDeadline(deadline time.Time) error {
 	return h.inner.SetReadDeadline(deadline)
 }
-func (h *hctxOverride) SetStatus(code int)                   { h.inner.SetStatus(code) }
-func (h *hctxOverride) Status() int                          { return h.inner.Status() }
-func (h *hctxOverride) AppendHeader(name, value string)      { h.inner.AppendHeader(name, value) }
-func (h *hctxOverride) SetHeader(name, value string)         { h.inner.SetHeader(name, value) }
-func (h *hctxOverride) BodyWriter() io.Writer                { return h.inner.BodyWriter() }
-func (h *hctxOverride) TLS() *tls.ConnectionState            { return h.inner.TLS() }
-func (h *hctxOverride) Version() huma.ProtoVersion           { return h.inner.Version() }
+func (h *hctxOverride) SetStatus(code int)              { h.inner.SetStatus(code) }
+func (h *hctxOverride) Status() int                     { return h.inner.Status() }
+func (h *hctxOverride) AppendHeader(name, value string) { h.inner.AppendHeader(name, value) }
+func (h *hctxOverride) SetHeader(name, value string)    { h.inner.SetHeader(name, value) }
+func (h *hctxOverride) BodyWriter() io.Writer           { return h.inner.BodyWriter() }
+func (h *hctxOverride) TLS() *tls.ConnectionState       { return h.inner.TLS() }
+func (h *hctxOverride) Version() huma.ProtoVersion      { return h.inner.Version() }
 
 // attachSSEResponseSchema populates op.Responses with the text/event-stream
 // media block for the given event map. Returns the reverse-lookup map

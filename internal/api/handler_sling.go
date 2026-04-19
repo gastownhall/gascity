@@ -48,7 +48,6 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	cfg := s.state.Config()
 	agentCfg, _ := findAgent(cfg, body.Target)
 
-
 	formulaName := strings.TrimSpace(body.Formula)
 	attachedBeadID := strings.TrimSpace(body.AttachedBeadID)
 
