@@ -96,7 +96,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if err != nil {
 		t.Fatalf("Marshal(body): %v", err)
 	}
-	req := newPostRequest("/v0/extmsg/outbound", strings.NewReader(string(body)))
+	req := newPostRequest(cityURL(fs, "/extmsg/outbound"), strings.NewReader(string(body)))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -110,7 +110,15 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 		t.Fatalf("publish text = %q, want hello peers", adapter.publishCalls[0].Text)
 	}
 
-	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	var peerID string
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		peerID, err = session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -127,16 +135,24 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	}
 
 	peerNudges := 0
-	for _, call := range fs.sp.Calls {
-		if call.Method != "Nudge" {
-			continue
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		peerNudges = 0
+		for _, call := range fs.sp.Calls {
+			if call.Method != "Nudge" {
+				continue
+			}
+			if call.Name == source.SessionName {
+				t.Fatalf("source session should not receive peer publish nudge; calls=%#v", fs.sp.Calls)
+			}
+			if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
+				peerNudges++
+			}
 		}
-		if call.Name == source.SessionName {
-			t.Fatalf("source session should not receive peer publish nudge; calls=%#v", fs.sp.Calls)
+		if peerNudges == 1 {
+			break
 		}
-		if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
-			peerNudges++
-		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if peerNudges != 1 {
 		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, fs.sp.Calls)

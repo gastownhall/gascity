@@ -1827,7 +1827,7 @@ func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity
 	}}
 	srv := New(fs)
 
-	req := newPostRequest("/v0/session/employees.corp--alex/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/employees.corp--alex/messages"), strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
