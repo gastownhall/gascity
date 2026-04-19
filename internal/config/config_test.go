@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -192,6 +191,36 @@ append_fragments = []
 	}
 	if len(cfg.AgentDefaults.AppendFragments) != 0 {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want empty canonical override", cfg.AgentDefaults.AppendFragments)
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+}
+
+func TestParseAgentDefaultsMergesNonOverlappingAgentsAliasFields(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agent_defaults]
+append_fragments = ["canonical-fragment"]
+
+[agents]
+default_sling_formula = "mol-legacy"
+skills = ["shared-skill"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.AgentDefaults.DefaultSlingFormula; got != "mol-legacy" {
+		t.Errorf("AgentDefaults.DefaultSlingFormula = %q, want %q", got, "mol-legacy")
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.AppendFragments, []string{"canonical-fragment"}) {
+		t.Errorf("AgentDefaults.AppendFragments = %v, want %v", cfg.AgentDefaults.AppendFragments, []string{"canonical-fragment"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"shared-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"shared-skill"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -4445,24 +4474,10 @@ scale_check = "echo 5"
 	}
 }
 
-// withDeprecationWarningSink swaps the package-level sink for a capturing
-// buffer and returns a restore function. Tests should defer restore() so
-// the sink is restored even if the test fails.
-func withDeprecationWarningSink(t *testing.T) (*bytes.Buffer, func()) {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := deprecationWarningSink
-	deprecationWarningSink = &buf
-	return &buf, func() { deprecationWarningSink = prev }
-}
-
 // TestLoadWithIncludes_DeprecatedAttachmentWarning confirms that a config
 // containing the v0.15.0 attachment-list tombstone fields still parses,
-// and that a single deprecation warning is emitted to the sink.
+// and that a single deprecation warning is surfaced through provenance.
 func TestLoadWithIncludes_DeprecatedAttachmentWarning(t *testing.T) {
-	buf, restore := withDeprecationWarningSink(t)
-	defer restore()
-
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -4474,7 +4489,7 @@ skills = ["code-review", "incident-response"]
 mcp = ["beads-health"]
 `)
 
-	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
@@ -4498,13 +4513,13 @@ mcp = ["beads-health"]
 		t.Errorf("mayor.MCP = %v, want tombstone parse-through", mayor.MCP)
 	}
 
-	got := buf.String()
+	got := strings.Join(prov.Warnings, "\n")
 	if !strings.Contains(got, "deprecated as of v0.15.1 and ignored") {
-		t.Fatalf("deprecation warning not emitted, got:\n%s", got)
+		t.Fatalf("deprecation warning not surfaced, got:\n%s", got)
 	}
-	// Exactly one warning line — the emission is one-per-load.
+	// Exactly one warning line — the warning is one-per-load.
 	if n := strings.Count(got, "gc: warning:"); n != 1 {
-		t.Errorf("emitted %d warnings, want exactly 1\nstderr:\n%s", n, got)
+		t.Errorf("emitted %d warnings, want exactly 1\nwarnings:\n%s", n, got)
 	}
 }
 
@@ -4514,9 +4529,6 @@ mcp = ["beads-health"]
 // [[rigs.overrides]]. Prior to this test, the scan only covered
 // rig.Overrides and would silently miss the rig.RigPatches surface.
 func TestLoadWithIncludes_DeprecatedAttachmentWarning_RigPatches(t *testing.T) {
-	buf, restore := withDeprecationWarningSink(t)
-	defer restore()
-
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -4531,25 +4543,23 @@ name = "polecat"
 skills_append = ["incident-response"]
 `)
 
-	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	got := buf.String()
+	got := strings.Join(prov.Warnings, "\n")
 	if !strings.Contains(got, "deprecated as of v0.15.1 and ignored") {
 		t.Fatalf("rig.patches attachment fields should trigger deprecation warning, got:\n%s", got)
 	}
 	if n := strings.Count(got, "gc: warning:"); n != 1 {
-		t.Errorf("emitted %d warnings, want exactly 1\nstderr:\n%s", n, got)
+		t.Errorf("emitted %d warnings, want exactly 1\nwarnings:\n%s", n, got)
 	}
 }
 
 // TestLoadWithIncludes_NoAttachmentsSilent confirms that a clean config
 // (no attachment-list tombstone fields) emits no deprecation warning.
 func TestLoadWithIncludes_NoAttachmentsSilent(t *testing.T) {
-	buf, restore := withDeprecationWarningSink(t)
-	defer restore()
-
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -4559,11 +4569,12 @@ name = "clean-city"
 name = "mayor"
 `)
 
-	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if got := buf.String(); got != "" {
-		t.Errorf("expected no warning, got:\n%s", got)
+	if len(prov.Warnings) != 0 {
+		t.Errorf("expected no warning, got:\n%s", strings.Join(prov.Warnings, "\n"))
 	}
 }

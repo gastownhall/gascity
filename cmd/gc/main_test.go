@@ -2559,6 +2559,38 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 	}
 }
 
+func TestDoInitFromDirEmitsLoadWarningsFromCopiedConfig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "template")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte(`[workspace]
+name = "template"
+provider = "claude"
+
+[agent_defaults]
+skills = ["demo"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "target-dir")
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "attachment-list fields") {
+		t.Fatalf("stderr = %q, want deprecated attachment-list warning", stderr.String())
+	}
+}
+
 func TestInitNameFlagWithFile(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -3684,6 +3716,75 @@ prompt_template = "prompts/mayor.md"
 	}
 	if stdout.String() != promptContent {
 		t.Errorf("stdout = %q, want %q (got default prompt instead of mayor template)", stdout.String(), promptContent)
+	}
+}
+
+func TestDoPrimeImportedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "packs", "imported", "agents", "mayor", "template-fragments"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"root\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+includes = ["packs/imported"]
+
+[agent_defaults]
+append_fragments = ["city-footer"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "packs", "imported", "pack.toml"), []byte(`
+[pack]
+name = "imported"
+schema = 2
+
+[agent_defaults]
+append_fragments = ["pack-footer"]
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+prompt_template = "agents/mayor/prompt.template.md"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "packs", "imported", "agents", "mayor", "prompt.template.md"), []byte("Hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "packs", "imported", "agents", "mayor", "template-fragments", "pack-footer.template.md"), []byte(`{{ define "pack-footer" }}Pack Footer{{ end }}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "packs", "imported", "agents", "mayor", "template-fragments", "city-footer.template.md"), []byte(`{{ define "city-footer" }}City Footer{{ end }}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrime([]string{"mayor"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	packIdx := strings.Index(out, "Pack Footer")
+	cityIdx := strings.Index(out, "City Footer")
+	if packIdx < 0 || cityIdx < 0 {
+		t.Fatalf("prompt missing inherited fragments: %q", out)
+	}
+	if packIdx > cityIdx {
+		t.Fatalf("pack fragment should render before city fragment: %q", out)
 	}
 }
 

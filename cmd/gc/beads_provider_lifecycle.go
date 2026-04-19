@@ -181,7 +181,7 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 		return contract.ConfigState{}, false, nil
 	}
 	cityDolt := config.DoltConfig{}
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		cityPrefix := config.EffectiveHQPrefix(cfg)
 		cityDolt = cfg.Dolt
@@ -492,7 +492,7 @@ func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.C
 		return contract.ConfigState{}, false, nil
 	}
 	cityDolt := config.DoltConfig{}
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		cityState := desiredCityDoltConfigState(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg))
 		if samePath(cityPath, dir) {

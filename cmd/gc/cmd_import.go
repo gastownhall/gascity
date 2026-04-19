@@ -31,19 +31,124 @@ var (
 
 const cityPackSchema = 1
 
+type cityPackAgentDefaults struct {
+	Model               string    `toml:"model,omitempty"`
+	WakeMode            string    `toml:"wake_mode,omitempty"`
+	DefaultSlingFormula string    `toml:"default_sling_formula,omitempty"`
+	AllowOverlay        []string  `toml:"allow_overlay,omitempty"`
+	AllowEnvOverride    []string  `toml:"allow_env_override,omitempty"`
+	AppendFragments     []string  `toml:"append_fragments,omitempty"`
+	Skills              []string  `toml:"skills,omitempty"`
+	MCP                 []string  `toml:"mcp,omitempty"`
+	Provider            *string   `toml:"provider,omitempty"`
+	Scope               *string   `toml:"scope,omitempty"`
+	InstallAgentHooks   *[]string `toml:"install_agent_hooks,omitempty"`
+}
+
 type cityPackManifest struct {
-	Pack          config.PackMeta                `toml:"pack"`
-	Imports       map[string]config.Import       `toml:"imports,omitempty"`
-	AgentDefaults config.AgentDefaults           `toml:"agent_defaults,omitempty"`
-	Agents        []config.Agent                 `toml:"agent,omitempty"`
-	NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
-	Services      []config.Service               `toml:"service,omitempty"`
-	Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
-	Formulas      config.FormulasConfig          `toml:"formulas,omitempty"`
-	Patches       config.Patches                 `toml:"patches,omitempty"`
-	Doctor        []config.PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands      []config.PackCommandEntry      `toml:"commands,omitempty"`
-	Global        config.PackGlobal              `toml:"global,omitempty"`
+	Pack                       config.PackMeta                `toml:"pack"`
+	Imports                    map[string]config.Import       `toml:"imports,omitempty"`
+	AgentDefaults              cityPackAgentDefaults          `toml:"agent_defaults,omitempty"`
+	AgentsDefaults             cityPackAgentDefaults          `toml:"agents,omitempty"`
+	Agents                     []config.Agent                 `toml:"agent,omitempty"`
+	NamedSessions              []config.NamedSession          `toml:"named_session,omitempty"`
+	Services                   []config.Service               `toml:"service,omitempty"`
+	Providers                  map[string]config.ProviderSpec `toml:"providers,omitempty"`
+	Formulas                   config.FormulasConfig          `toml:"formulas,omitempty"`
+	Patches                    config.Patches                 `toml:"patches,omitempty"`
+	Doctor                     []config.PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands                   []config.PackCommandEntry      `toml:"commands,omitempty"`
+	Global                     config.PackGlobal              `toml:"global,omitempty"`
+	HadAgentsDefaultsAlias     bool                           `toml:"-"`
+	HadBothAgentDefaultsTables bool                           `toml:"-"`
+}
+
+func (d cityPackAgentDefaults) unsupportedKeys() []string {
+	var keys []string
+	if d.Provider != nil {
+		keys = append(keys, "provider")
+	}
+	if d.Scope != nil {
+		keys = append(keys, "scope")
+	}
+	if d.InstallAgentHooks != nil {
+		keys = append(keys, "install_agent_hooks")
+	}
+	return keys
+}
+
+func warnPackAgentDefaultsCompatibility(stderr io.Writer, manifest *cityPackManifest, rewrite bool) {
+	if stderr == nil || manifest == nil {
+		return
+	}
+	if manifest.HadAgentsDefaultsAlias {
+		if rewrite {
+			fmt.Fprintln(stderr, "gc import: [agents] is a deprecated compatibility alias for [agent_defaults]; rewriting pack.toml to canonical [agent_defaults]") //nolint:errcheck
+		} else {
+			fmt.Fprintln(stderr, "gc import: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") //nolint:errcheck
+		}
+	}
+	if manifest.HadBothAgentDefaultsTables {
+		fmt.Fprintln(stderr, "gc import: both [agent_defaults] and [agents] are present in pack.toml; canonical [agent_defaults] wins for overlapping keys") //nolint:errcheck
+	}
+	keys := manifest.AgentDefaults.unsupportedKeys()
+	if len(keys) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "gc import: preserved unsupported [agent_defaults] keys in pack.toml: %s; runtime will continue warning until they are moved to per-agent config\n", strings.Join(keys, ", ")) //nolint:errcheck
+}
+
+func mergeCityPackAgentDefaultsPreferCanonical(dst *cityPackAgentDefaults, src cityPackAgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "model") {
+		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "wake_mode") {
+		dst.WakeMode = src.WakeMode
+	}
+	if !meta.IsDefined("agent_defaults", "default_sling_formula") {
+		dst.DefaultSlingFormula = src.DefaultSlingFormula
+	}
+	if !meta.IsDefined("agent_defaults", "allow_overlay") {
+		dst.AllowOverlay = append([]string(nil), src.AllowOverlay...)
+	}
+	if !meta.IsDefined("agent_defaults", "allow_env_override") {
+		dst.AllowEnvOverride = append([]string(nil), src.AllowEnvOverride...)
+	}
+	if !meta.IsDefined("agent_defaults", "append_fragments") {
+		dst.AppendFragments = append([]string(nil), src.AppendFragments...)
+	}
+	if !meta.IsDefined("agent_defaults", "skills") {
+		dst.Skills = append([]string(nil), src.Skills...)
+	}
+	if !meta.IsDefined("agent_defaults", "mcp") {
+		dst.MCP = append([]string(nil), src.MCP...)
+	}
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = copyStringPointer(src.Provider)
+	}
+	if !meta.IsDefined("agent_defaults", "scope") {
+		dst.Scope = copyStringPointer(src.Scope)
+	}
+	if !meta.IsDefined("agent_defaults", "install_agent_hooks") {
+		dst.InstallAgentHooks = copyStringSlicePointer(src.InstallAgentHooks)
+	}
+}
+
+func copyStringPointer(in *string) *string {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func copyStringSlicePointer(in *[]string) *[]string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(*in))
+	copy(out, *in)
+	return &out
 }
 
 func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -291,6 +396,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, true)
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
@@ -320,6 +426,7 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, true)
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
@@ -334,6 +441,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
 	lock, err := syncImports(cityPath, manifest.Imports, packman.InstallFromLock)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
@@ -359,6 +467,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
 
 	var lock *packman.Lockfile
 	if target == "" {
@@ -420,6 +529,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	warnPackAgentDefaultsCompatibility(stderr, manifest, false)
 	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
@@ -551,9 +661,11 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	}
 
 	var manifest cityPackManifest
-	if _, err := toml.Decode(string(data), &manifest); err != nil {
+	md, err := toml.Decode(string(data), &manifest)
+	if err != nil {
 		return nil, fmt.Errorf("parsing pack.toml: %w", err)
 	}
+	normalizeCityPackManifestAgentDefaultsAlias(&manifest, md)
 	if manifest.Pack.Name == "" {
 		manifest.Pack.Name = defaultCityPackName(fs, cityPath)
 	}
@@ -563,6 +675,7 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 	if manifest.Imports == nil {
 		manifest.Imports = make(map[string]config.Import)
 	}
+	manifest.AgentsDefaults = cityPackAgentDefaults{}
 	return &manifest, nil
 }
 
@@ -579,12 +692,29 @@ func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManife
 	if manifest.Imports == nil {
 		manifest.Imports = make(map[string]config.Import)
 	}
+	manifest.AgentsDefaults = cityPackAgentDefaults{}
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(manifest); err != nil {
 		return fmt.Errorf("encoding pack.toml: %w", err)
 	}
 	return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "pack.toml"), buf.Bytes(), 0o644)
+}
+
+func normalizeCityPackManifestAgentDefaultsAlias(manifest *cityPackManifest, meta toml.MetaData) {
+	manifest.HadAgentsDefaultsAlias = meta.IsDefined("agents")
+	if meta.IsDefined("agent_defaults") {
+		if meta.IsDefined("agents") {
+			manifest.HadBothAgentDefaultsTables = true
+			mergeCityPackAgentDefaultsPreferCanonical(&manifest.AgentDefaults, manifest.AgentsDefaults, meta)
+		}
+		manifest.AgentsDefaults = cityPackAgentDefaults{}
+		return
+	}
+	if meta.IsDefined("agents") {
+		manifest.AgentDefaults = manifest.AgentsDefaults
+		manifest.AgentsDefaults = cityPackAgentDefaults{}
+	}
 }
 
 func defaultCityPackName(fs fsys.FS, cityPath string) string {

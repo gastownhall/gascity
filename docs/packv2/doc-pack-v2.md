@@ -84,7 +84,8 @@ source = "./assets/maintenance"
 # Pack-wide agent defaults — individual agents defined in agents/ directories
 # City-level [agent_defaults] in city.toml can override these.
 [agent_defaults]
-provider = "claude"
+default_sling_formula = "mol-do-work"
+append_fragments = ["operational-awareness"]
 
 [[named_session]]
 template = "mayor"
@@ -174,8 +175,8 @@ name = "gastown"
 version = "1.2.0"
 
 [agent_defaults]
-provider = "claude"
-scope = "rig"
+default_sling_formula = "mol-do-work"
+append_fragments = ["operational-awareness"]
 ```
 
 ```

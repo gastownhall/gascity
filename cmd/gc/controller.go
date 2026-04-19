@@ -350,8 +350,10 @@ type reloadResult struct {
 // tryReloadConfig attempts to reload city.toml with includes and patches.
 // Returns the new config, provenance, and revision on success, or an error
 // on failure (parse error, validation error, cityName changed). Callers
-// should keep the old config on error. Warnings are written to stderr;
-// strict mode (default) makes them fatal — use --no-strict to disable.
+// should keep the old config on error. Alias-only/unsupported-key/deprecation
+// warnings are written to stderr but stay soft; composition collisions and
+// mixed canonical/compat default tables stay strict-fatal unless --no-strict
+// disables the gate.
 func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer) (*reloadResult, error) {
 	// Auto-fetch remote packs before full config load (mirrors cmd_start).
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
@@ -365,12 +367,13 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
 	applyFeatureFlags(newCfg)
-	if strictMode && len(prov.Warnings) > 0 {
-		for _, w := range prov.Warnings {
+	if fatalWarnings := strictFatalLoadConfigWarnings(prov.Warnings); strictMode && len(fatalWarnings) > 0 {
+		emitNonFatalLoadConfigWarnings(stderr, prov)
+		for _, w := range fatalWarnings {
 			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
-		return nil, fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings))
+		return nil, fmt.Errorf("strict mode: %d collision warning(s)", len(fatalWarnings))
 	}
 	for _, w := range prov.Warnings {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr

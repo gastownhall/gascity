@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -850,6 +851,7 @@ func reconcileCities(
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
+		emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
 
 		// Use registered name as authoritative identity. Warn if live
 		// config has a different workspace.name (name drift).
@@ -1265,6 +1267,29 @@ func reconcileCities(
 	reconcileRigIndex(reg, stderr)
 }
 
+var supervisorLoadWarningSeen sync.Map
+
+func emitSupervisorLoadCityConfigWarnings(w io.Writer, cityPath string, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !shouldEmitLoadCityConfigWarning(warning) {
+			continue
+		}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
+		key := filepath.Clean(cityPath) + "\x00" + warning
+		if _, loaded := supervisorLoadWarningSeen.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+	}
+}
+
 // reconcileRigIndex rebuilds the [[rigs]] section of cities.toml from the
 // rig definitions in each registered city's city.toml.
 func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
@@ -1276,7 +1301,9 @@ func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
 	var mappings []supervisor.RigCityMapping
 	var loadFailed bool
 	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path)
+		// Rig-index patrol runs continuously under the supervisor. Suppress
+		// migration warnings here so steady-state reconciles do not flood logs.
+		cfg, err := loadCityConfig(c.Path, io.Discard)
 		if err != nil {
 			// Abort reconciliation if any city can't be loaded — a partial
 			// snapshot would cause ReconcileRigs to drop rigs from the

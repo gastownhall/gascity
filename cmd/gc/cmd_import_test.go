@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -45,6 +47,9 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no warnings for synthetic empty manifest, got stderr %q", stderr.String())
+	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
 	if err != nil {
@@ -70,6 +75,35 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 	}
 	if _, ok := lock.Packs["https://github.com/example/tools.git"]; !ok {
 		t.Fatal("missing lock entry")
+	}
+}
+
+func TestCityPackAgentDefaultsCoversConfigAgentDefaultsFields(t *testing.T) {
+	configFields := make(map[string]bool)
+	for _, field := range reflect.VisibleFields(reflect.TypeOf(config.AgentDefaults{})) {
+		if field.PkgPath != "" {
+			continue
+		}
+		configFields[field.Name] = true
+	}
+
+	manifestFields := make(map[string]bool)
+	for _, field := range reflect.VisibleFields(reflect.TypeOf(cityPackAgentDefaults{})) {
+		if field.PkgPath != "" {
+			continue
+		}
+		manifestFields[field.Name] = true
+	}
+
+	var missing []string
+	for name := range configFields {
+		if !manifestFields[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("cityPackAgentDefaults missing config.AgentDefaults fields: %v", missing)
 	}
 }
 
@@ -151,6 +185,224 @@ session_live = ["echo hi"]
 		if !strings.Contains(text, want) {
 			t.Fatalf("pack.toml missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestDoImportAddCanonicalizesLegacyAgentsDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+default_sling_formula = "mol-legacy"
+append_fragments = ["legacy-fragment"]
+provider = "claude"
+scope = "city"
+install_agent_hooks = ["claude"]
+`)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "[agents]") {
+		t.Fatalf("pack.toml should be rewritten to canonical [agent_defaults]:\n%s", text)
+	}
+	for _, want := range []string{
+		`[agent_defaults]`,
+		`default_sling_formula = "mol-legacy"`,
+		`append_fragments = ["legacy-fragment"]`,
+		`provider = "claude"`,
+		`scope = "city"`,
+		`install_agent_hooks = ["claude"]`,
+		`[imports.tools]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pack.toml missing %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		t.Fatalf("expected alias warning, got stderr %q", stderr.String())
+	}
+}
+
+func TestDoImportAddMergesLegacyAgentsDefaultsWhenCanonicalAlsoPresent(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-canonical"
+append_fragments = ["canonical-fragment"]
+scope = "city"
+
+[agents]
+default_sling_formula = "mol-legacy"
+append_fragments = ["legacy-fragment"]
+provider = "claude"
+install_agent_hooks = ["claude"]
+`)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "[agents]") {
+		t.Fatalf("pack.toml should be rewritten to canonical [agent_defaults]:\n%s", text)
+	}
+	for _, want := range []string{
+		`[agent_defaults]`,
+		`default_sling_formula = "mol-canonical"`,
+		`append_fragments = ["canonical-fragment"]`,
+		`provider = "claude"`,
+		`scope = "city"`,
+		`install_agent_hooks = ["claude"]`,
+		`[imports.tools]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pack.toml missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{
+		`default_sling_formula = "mol-legacy"`,
+		`append_fragments = ["legacy-fragment"]`,
+	} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("pack.toml should preserve canonical overlap instead of %q:\n%s", unwanted, text)
+		}
+	}
+	if !strings.Contains(stderr.String(), "both [agent_defaults] and [agents] are present in pack.toml") {
+		t.Fatalf("expected mixed-table warning, got stderr %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "preserved unsupported [agent_defaults] keys in pack.toml: provider, scope, install_agent_hooks") {
+		t.Fatalf("expected unsupported-keys warning, got stderr %q", stderr.String())
+	}
+}
+
+func TestDoImportAddPreservesUnsupportedZeroValueAgentDefaultsKeys(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = ""
+scope = ""
+install_agent_hooks = []
+`)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`[agent_defaults]`,
+		`provider = ""`,
+		`scope = ""`,
+		`install_agent_hooks = []`,
+		`[imports.tools]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pack.toml missing %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		t.Fatalf("expected alias warning, got stderr %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "preserved unsupported [agent_defaults] keys in pack.toml: provider, scope, install_agent_hooks") {
+		t.Fatalf("expected unsupported-keys warning, got stderr %q", stderr.String())
 	}
 }
 
@@ -413,6 +665,44 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	}
 }
 
+func TestDoImportInstallWarnsOnLegacyAgentDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = "claude"
+`)
+	if err := writeImportLockfile(fsys.OSFS{}, dir, &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}); err != nil {
+		t.Fatalf("writeImportLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportInstall(dir, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") {
+		t.Fatalf("expected alias guidance, got stderr %q", stderr.String())
+	}
+}
+
 func TestDoImportUpgradeTargetedMergesPreservedImports(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -485,6 +775,43 @@ source = "../packs/local"
 	}
 }
 
+func TestDoImportUpgradeWarnsOnLegacyAgentDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = "claude"
+
+[imports.a]
+source = "https://example.com/a.git"
+version = "^1.0"
+`)
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				imports["a"].Source: {Version: "1.1.0", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "a", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") {
+		t.Fatalf("expected alias guidance, got stderr %q", stderr.String())
+	}
+}
+
 func TestDoImportListShowsDirectAndTransitive(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -539,6 +866,31 @@ source = "../packs/local"
 	}
 	if !strings.Contains(stdout.String(), "local\t../packs/local\t\t(path)") {
 		t.Fatalf("unexpected flat output:\n%s", stdout.String())
+	}
+}
+
+func TestDoImportListWarnsOnLegacyAgentDefaultsAlias(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[agents]
+provider = "claude"
+`)
+	if err := writeImportLockfile(fsys.OSFS{}, dir, &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}); err != nil {
+		t.Fatalf("writeImportLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportList(dir, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite pack.toml to canonical [agent_defaults]") {
+		t.Fatalf("expected alias guidance, got stderr %q", stderr.String())
 	}
 }
 

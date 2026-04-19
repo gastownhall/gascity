@@ -24,12 +24,13 @@ Describe what this agent should do here.
 // via packs are visible. The only exceptions are quick pre-fetch checks
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
-func loadCityConfig(cityPath string) (*config.City, error) {
+func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
 	extras := builtinPackIncludes(cityPath)
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
 	if err != nil {
 		return nil, err
 	}
+	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -37,13 +38,95 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
-func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
-	cfg, _, err := config.LoadWithIncludes(fs, tomlPath)
+func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}
+	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
+}
+
+func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
+	for _, w := range warningWriter {
+		if w != nil {
+			return w
+		}
+	}
+	return os.Stderr
+}
+
+func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !shouldEmitLoadCityConfigWarning(warning) {
+			continue
+		}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+	}
+}
+
+// Alias-only warnings, deferred future-surface keys, and tombstone attachment
+// deprecations stay soft so legacy configs keep booting. A mixed
+// [agent_defaults]/[agents] config remains strict-fatal because overlapping
+// default tables are ambiguous even after normalization.
+func isNonFatalLoadConfigWarning(warning string) bool {
+	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		return true
+	}
+	if strings.Contains(warning, "attachment-list fields") {
+		return true
+	}
+	if !strings.Contains(warning, `" is not supported`) {
+		return false
+	}
+	return strings.Contains(warning, `"agent_defaults.`) || strings.Contains(warning, `"agents.`)
+}
+
+func shouldEmitLoadCityConfigWarning(warning string) bool {
+	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
+		return true
+	}
+	return isNonFatalLoadConfigWarning(warning)
+}
+
+func strictFatalLoadConfigWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	var fatal []string
+	for _, warning := range warnings {
+		if isNonFatalLoadConfigWarning(warning) {
+			continue
+		}
+		fatal = append(fatal, warning)
+	}
+	return fatal
+}
+
+func emitNonFatalLoadConfigWarnings(w io.Writer, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !isNonFatalLoadConfigWarning(warning) {
+			continue
+		}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+	}
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
@@ -267,7 +350,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 		return 1
 	}
 
-	cfg, err := loadCityConfigFS(fs, tomlPath)
+	cfg, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -418,7 +501,7 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	}
 
 	// Phase 2: not in raw config — check expanded config for pack-derived agents.
-	expanded, err := loadCityConfigFS(fs, tomlPath)
+	expanded, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
 		// Fall through to generic not-found using raw cfg.
 		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent suspend", name, cfg)) //nolint:errcheck // best-effort stderr
@@ -519,7 +602,7 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 	}
 
 	// Phase 2: not in raw config — check expanded config for pack-derived agents.
-	expanded, err := loadCityConfigFS(fs, tomlPath)
+	expanded, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
 		// Fall through to generic not-found using raw cfg.
 		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent resume", name, cfg)) //nolint:errcheck // best-effort stderr

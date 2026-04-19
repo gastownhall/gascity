@@ -181,9 +181,26 @@ func mergeFragmentLists(global, perAgent []string) []string {
 		return nil
 	}
 	merged := make([]string, 0, len(global)+len(perAgent))
+	seen := make(map[string]struct{}, len(global)+len(perAgent))
 	merged = append(merged, global...)
-	merged = append(merged, perAgent...)
+	for _, name := range global {
+		seen[name] = struct{}{}
+	}
+	for _, name := range perAgent {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		merged = append(merged, name)
+	}
 	return merged
+}
+
+// effectivePromptFragments applies the runtime fragment layering contract.
+func effectivePromptFragments(global, inject, inherited, defaults []string) []string {
+	fragments := mergeFragmentLists(global, inject)
+	fragments = mergeFragmentLists(fragments, inherited)
+	return mergeFragmentLists(fragments, defaults)
 }
 
 // buildTemplateData merges Env (lower priority) with SDK fields (higher

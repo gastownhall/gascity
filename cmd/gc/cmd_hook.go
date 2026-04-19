@@ -80,7 +80,7 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		if inject {
 			return 0

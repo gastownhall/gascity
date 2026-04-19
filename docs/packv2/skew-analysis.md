@@ -88,12 +88,12 @@
 |--------|-------|----------|--------------------|-----------------------|
 | 🟡 | `name` | Required string | **Optional.** Transitional runtime identity field in this wave. Fresh `gc init` keeps it aligned with `pack.name`; `gc register` keeps it aligned with the registered city name and backfills it from `pack.name` when absent. Soft warning: full site-binding cutover remains later. | `.gc/` site binding (#600) |
 | 🟡 | `prefix` | String | **Optional.** Same treatment as `name`. Soft warning. | `.gc/` site binding (#600) |
-| 🟡 | `provider` | String | **Soft warning.** "Use `[agent_defaults] provider = ...` instead." | `[agent_defaults]` in pack.toml |
+| 🟢 | `provider` | String | **Keep as-is in this wave.** Current runtime default-provider field. Corresponding `[agent_defaults].provider` is still unsupported and emits a migration warning — see `doc-conformance-matrix.md`. | Later default-provider redesign, not part of this rollout |
 | 🟡 | `start_command` | String | **Soft warning.** "Use per-agent `start_command` in `agent.toml` instead." | Per-agent `agent.toml` |
 | 🟡 | `suspended` | Boolean | **Soft warning.** "Use `gc suspend`/`gc resume` instead." | `.gc/` site binding |
 | 🟢 | `max_active_sessions` | Integer | **Keep as-is.** Deployment capacity. | Top-level city.toml field when `[workspace]` is dismantled |
 | 🟢 | `session_template` | String | **Keep as-is.** Deployment. | `[session]` when `[workspace]` is dismantled |
-| 🟡 | `install_agent_hooks` | []string | **Soft warning.** "Use `[agent_defaults]` instead." | `[agent_defaults]` in pack.toml |
+| 🟢 | `install_agent_hooks` | []string | **Keep as-is in this wave.** No `[agent_defaults]` replacement is implemented yet; `[agent_defaults].install_agent_hooks` still warns. | Later hooks-default redesign |
 | 🟡 | `global_fragments` | []string | **Soft warning.** "Use `[agent_defaults] append_fragments` or explicit `{{ template }}` instead." | Removed (replaced by template-fragments) |
 | 🟡 | `includes` | []string | **Loud warning on schema 2.** V1 composition, use `[imports]`. | Removed |
 | 🟡 | `default_rig_includes` | []string | **Loud warning on schema 2.** Use `[defaults.rig.imports]` in pack.toml. | Removed |
@@ -153,7 +153,7 @@ All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface sta
 | 🟢 | `session_setup` | |
 | 🟢 | `session_setup_script` | Path resolves against pack root |
 | 🟢 | `session_live` | |
-| 🟢 | `install_agent_hooks` | Overrides agent_defaults |
+| 🟢 | `install_agent_hooks` | Overrides workspace.install_agent_hooks |
 | 🟢 | `hooks_installed` | |
 | 🟢 | `idle_timeout` | |
 | 🟢 | `sleep_after_idle` | |

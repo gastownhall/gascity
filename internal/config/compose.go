@@ -63,10 +63,11 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	packPath := filepath.Join(cityRoot, packFile)
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
-		var pc packConfig
-		if _, decErr := toml.Decode(string(packData), &pc); decErr != nil {
+		pc, packWarnings, decErr := parsePackConfigWithMeta(packData, packPath)
+		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
 		}
+		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
@@ -297,6 +298,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		return nil, nil, ctErr
 	}
 	prov.Warnings = append(prov.Warnings, shadowWarnings...)
+	if len(root.LoadWarnings) > 0 {
+		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
+	}
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
@@ -323,6 +327,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	if HasPackRigs(root.Rigs) {
 		if err := ExpandPacks(root, fs, cityRoot, rigFormulaDirs); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
+		}
+		if len(root.LoadWarnings) > 0 {
+			prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 		}
 		// Track pack-expanded agents in provenance.
 		for _, r := range root.Rigs {
@@ -394,7 +401,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// still populates the v0.15.0 attachment-list tombstone fields. The
 	// fields still parse (TOML won't error) but are ignored by the new
 	// materializer.
-	WarnDeprecatedAttachmentFields(root)
+	if warning := WarnDeprecatedAttachmentFields(root); warning != "" {
+		prov.Warnings = append(prov.Warnings, warning)
+	}
 
 	// v0.15.1: enrich every agent with its convention-discovered
 	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
@@ -944,7 +953,8 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
-	warnings := CheckUndecodedKeys(md, source)
+	warnings := agentDefaultsCompatibilityWarnings(md, source)
+	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return &cfg, md, warnings, nil
 }
 

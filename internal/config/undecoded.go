@@ -2,12 +2,29 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
+const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
+
+var agentDefaultsCompatibilityKeys = []string{
+	"model",
+	"wake_mode",
+	"default_sling_formula",
+	"allow_overlay",
+	"allow_env_override",
+	"append_fragments",
+	"skills",
+	"mcp",
+	"provider",
+	"scope",
+	"install_agent_hooks",
+}
 
 // CheckUndecodedKeys examines TOML metadata for keys that were present in
 // the input but not mapped to any struct field. For each unknown key, it
@@ -23,6 +40,10 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 	var warnings []string
 	for _, key := range undecoded {
 		keyStr := key.String()
+		if special, ok := specializedUndecodedWarning(source, keyStr); ok {
+			warnings = append(warnings, special)
+			continue
+		}
 		// Skip deeply nested keys — we only warn on section-level and
 		// field-level keys, not on sub-sub-fields of tables.
 		suggestion := suggestKey(keyStr, known)
@@ -33,6 +54,46 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 		warnings = append(warnings, w)
 	}
 	return warnings
+}
+
+func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []string {
+	if !md.IsDefined("agents") {
+		return nil
+	}
+	warnings := []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
+	if md.IsDefined("agent_defaults") && agentDefaultsTablesOverlap(md) {
+		warnings = append(warnings, fmt.Sprintf("%s: both [agent_defaults] and [agents] are present; canonical [agent_defaults] wins for overlapping keys", source))
+	}
+	return warnings
+}
+
+func agentDefaultsTablesOverlap(md toml.MetaData) bool {
+	for _, key := range agentDefaultsCompatibilityKeys {
+		if md.IsDefined("agent_defaults", key) && md.IsDefined("agents", key) {
+			return true
+		}
+	}
+	return false
+}
+
+func specializedUndecodedWarning(source, key string) (string, bool) {
+	isPackSource := filepath.Base(source) == "pack.toml"
+	switch key {
+	case "agent_defaults.provider", "agents.provider":
+		if isPackSource {
+			return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml", source, key), true
+		}
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.provider (or set provider per agent in agents/<name>/agent.toml)", source, key), true
+	case "agent_defaults.scope", "agents.scope":
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml", source, key), true
+	case "agent_defaults.install_agent_hooks", "agents.install_agent_hooks":
+		if isPackSource {
+			return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting install_agent_hooks per agent in agents/<name>/agent.toml", source, key), true
+		}
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.install_agent_hooks (or set install_agent_hooks per agent in agents/<name>/agent.toml)", source, key), true
+	default:
+		return "", false
+	}
 }
 
 // suggestKey finds the closest known key to the given unknown key using

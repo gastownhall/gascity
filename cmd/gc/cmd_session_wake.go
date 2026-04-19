@@ -44,7 +44,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
 	if err != nil {

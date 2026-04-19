@@ -100,14 +100,14 @@ func pokeControlDispatch(cityPath string) error {
 	return pokeController(cityPath)
 }
 
-func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
+func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return err
 	}
 
 	// Try all stores (city + rigs) to find the bead.
-	store, bead, err := findBeadAcrossStores(cityPath, beadID)
+	store, bead, err := findBeadAcrossStores(cityPath, beadID, stderr)
 	if err != nil {
 		return fmt.Errorf("loading bead %s: %w", beadID, err)
 	}
@@ -120,7 +120,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 		loadCfg = true
 	}
 	if loadCfg {
-		cfg, err := loadCityConfig(cityPath)
+		cfg, err := loadCityConfig(cityPath, stderr)
 		if err != nil {
 			return err
 		}
@@ -170,7 +170,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 
 // findBeadAcrossStores tries the city store first, then all rig stores,
 // returning the store and bead on first match.
-func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, error) {
+func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, error) {
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
@@ -183,7 +183,7 @@ func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, err
 	}
 
 	// Try rig stores.
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, warningWriter)
 	if err != nil {
 		return nil, beads.Bead{}, fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
 	}
@@ -374,7 +374,7 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,7 @@ func gcExecLifecycleInitProcessEnv(cityPath string, target execStoreTarget, prov
 		return mergeRuntimeEnv(os.Environ(), env), nil
 	}
 	if target.ScopeKind == "rig" {
-		cfg, err := loadCityConfig(cityPath)
+		cfg, err := loadCityConfig(cityPath, io.Discard)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +107,7 @@ func execProviderNeedsScopedDoltStoreEnv(provider string) bool {
 
 func resolveConfiguredExecStoreTarget(cityPath, storePath string) (execStoreTarget, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return execStoreTarget{}, err
 	}

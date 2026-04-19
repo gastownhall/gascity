@@ -221,7 +221,7 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	target, err := resolveNudgeTarget(targetID)
+	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
@@ -279,7 +279,7 @@ func cmdNudgeDrain(args []string, inject bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	target, err := resolveNudgeTarget(targetID)
+	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
 		if inject {
 			return 0
@@ -380,7 +380,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintln(stderr, "gc nudge poll: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
-	target, err := resolveNudgeTarget(targetID)
+	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return 1
@@ -517,12 +517,12 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender 
 	return nil
 }
 
-func resolveNudgeTarget(identifier string) (nudgeTarget, error) {
+func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
 		return nudgeTarget{}, err
 	}

@@ -167,7 +167,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
@@ -485,7 +485,7 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 		}
 		return cityStore.Get(depID)
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return beads.Bead{}, err
 	}

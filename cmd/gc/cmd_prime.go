@@ -116,7 +116,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
@@ -167,7 +167,12 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			ctx = buildPrimeContext(cityPath, &a, cfg.Rigs)
 		}
 		if ok && a.PromptTemplate != "" {
-			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
+			fragments := effectivePromptFragments(
+				cfg.Workspace.GlobalFragments,
+				a.InjectFragments,
+				a.InheritedAppendFragments,
+				cfg.AgentDefaults.AppendFragments,
+			)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {

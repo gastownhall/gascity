@@ -151,7 +151,7 @@ func cmdRuntimeDrain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc runtime drain: missing session alias or ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	target, err := resolveSessionRuntimeTarget(args[0])
+	target, err := resolveSessionRuntimeTarget(args[0], stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -210,7 +210,7 @@ func cmdRuntimeUndrain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc runtime undrain: missing session alias or ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	target, err := resolveSessionRuntimeTarget(args[0])
+	target, err := resolveSessionRuntimeTarget(args[0], stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -268,7 +268,7 @@ arguments, uses the current session context.`,
 
 func cmdRuntimeDrainCheck(args []string, stderr io.Writer) int {
 	if len(args) > 0 {
-		target, err := resolveSessionRuntimeTarget(args[0])
+		target, err := resolveSessionRuntimeTarget(args[0], stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1                                                 // silent — same as current "not draining" behavior
@@ -322,7 +322,7 @@ finished its current work in response to a drain signal.`,
 
 func cmdRuntimeDrainAck(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
-		target, err := resolveSessionRuntimeTarget(args[0])
+		target, err := resolveSessionRuntimeTarget(args[0], stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

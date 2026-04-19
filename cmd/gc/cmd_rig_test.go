@@ -2156,3 +2156,40 @@ func TestCmdRigAddUsesCityRelativePathWhenOutsideCity(t *testing.T) {
 		t.Fatalf("city.toml should contain city-relative absolute path %q:\n%s", wantRigPath, data)
 	}
 }
+
+func TestDoRigAddEmitsLoadWarningsFromReloadedConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[agent_defaults]
+skills = ["demo"]
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+	isolateRigRegistryEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "attachment-list fields") {
+		t.Fatalf("stderr = %q, want deprecated attachment-list warning", stderr.String())
+	}
+}

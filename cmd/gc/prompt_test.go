@@ -649,6 +649,7 @@ func TestMergeFragmentLists(t *testing.T) {
 		{"global only", []string{"a"}, nil, []string{"a"}, false},
 		{"agent only", nil, []string{"b"}, []string{"b"}, false},
 		{"both", []string{"a", "b"}, []string{"c"}, []string{"a", "b", "c"}, false},
+		{"dedup preserves first occurrence", []string{"a", "b"}, []string{"b", "c"}, []string{"a", "b", "c"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -668,5 +669,44 @@ func TestMergeFragmentLists(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEffectivePromptFragments(t *testing.T) {
+	got := effectivePromptFragments(
+		[]string{"global"},
+		[]string{"inject"},
+		[]string{"inherited"},
+		[]string{"default"},
+	)
+	want := []string{"global", "inject", "inherited", "default"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if effectivePromptFragments(nil, nil, nil, nil) != nil {
+		t.Fatal("effectivePromptFragments(nil, nil, nil, nil) = non-nil, want nil")
+	}
+}
+
+func TestEffectivePromptFragmentsDedupsAcrossLayers(t *testing.T) {
+	got := effectivePromptFragments(
+		[]string{"shared"},
+		[]string{"inject"},
+		[]string{"shared", "pack"},
+		[]string{"pack", "city"},
+	)
+	want := []string{"shared", "inject", "pack", "city"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

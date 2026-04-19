@@ -56,7 +56,7 @@ func doPackFetch(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
 		return 1
@@ -122,7 +122,7 @@ func doPackList(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
 		return 1

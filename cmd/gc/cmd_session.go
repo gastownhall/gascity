@@ -150,7 +150,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -773,7 +773,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -946,7 +946,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1018,7 +1018,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1075,7 +1075,7 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1209,7 +1209,7 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1265,7 +1265,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1361,7 +1361,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		}
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1412,7 +1412,7 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr i
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
-	targetInfo, err := resolveNudgeTarget(target)
+	targetInfo, err := resolveNudgeTarget(target, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

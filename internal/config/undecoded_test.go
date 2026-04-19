@@ -183,3 +183,233 @@ proivder = "claude"
 		t.Errorf("warning should suggest provider, got: %s", warnings[0])
 	}
 }
+
+func TestParseWithMetaWarnsOnAgentsAlias(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agents]
+append_fragments = ["footer"]
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected warning for [agents] alias")
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, agentsAliasWarning) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected warning containing %q, got: %v", agentsAliasWarning, warnings)
+	}
+}
+
+func TestParseWithMetaWarnsWhenCanonicalAndAliasAgentDefaultsBothPresent(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+append_fragments = ["canonical"]
+
+[agents]
+append_fragments = ["legacy"]
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected mixed-table warning, got: %v", warnings)
+	}
+}
+
+func TestParseWithMetaSkipsMixedTableWarningWhenCanonicalAndAliasAreDisjoint(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+append_fragments = ["canonical"]
+
+[agents]
+allow_overlay = ["GC_HOME"]
+`
+	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			t.Fatalf("expected no mixed-table warning for disjoint keys, got: %v", warnings)
+		}
+	}
+	foundAlias := false
+	for _, w := range warnings {
+		if strings.Contains(w, agentsAliasWarning) {
+			foundAlias = true
+			break
+		}
+	}
+	if !foundAlias {
+		t.Fatalf("expected alias warning, got: %v", warnings)
+	}
+}
+
+func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "provider",
+			input: `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "claude"
+`,
+			want: `keep using workspace.provider`,
+		},
+		{
+			name: "scope",
+			input: `
+[workspace]
+name = "test"
+
+[agent_defaults]
+scope = "rig"
+`,
+			want: `keep setting scope per agent in agents/<name>/agent.toml`,
+		},
+		{
+			name: "install_agent_hooks",
+			input: `
+[workspace]
+name = "test"
+
+[agent_defaults]
+install_agent_hooks = ["hooks/gascity.json"]
+`,
+			want: `keep using workspace.install_agent_hooks`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, warnings, err := parseWithMeta([]byte(tt.input), "test.toml")
+			if err != nil {
+				t.Fatalf("parseWithMeta: %v", err)
+			}
+			if len(warnings) == 0 {
+				t.Fatal("expected warning")
+			}
+			found := false
+			for _, w := range warnings {
+				if strings.Contains(w, tt.want) {
+					found = true
+				}
+				if strings.Contains(w, "unknown field") {
+					t.Fatalf("got generic unknown-field warning for %s: %v", tt.name, warnings)
+				}
+			}
+			if !found {
+				t.Fatalf("expected warning containing %q, got: %v", tt.want, warnings)
+			}
+		})
+	}
+}
+
+func TestParsePackConfigWithMetaWarnsOnPackLocalUnsupportedAgentDefaultsKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "provider",
+			input: `
+[pack]
+name = "test"
+schema = 2
+
+[agent_defaults]
+provider = "claude"
+`,
+			want: `keep setting provider per agent in agents/<name>/agent.toml`,
+		},
+		{
+			name: "install_agent_hooks",
+			input: `
+[pack]
+name = "test"
+schema = 2
+
+[agent_defaults]
+install_agent_hooks = ["hooks/gascity.json"]
+`,
+			want: `keep setting install_agent_hooks per agent in agents/<name>/agent.toml`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, warnings, err := parsePackConfigWithMeta([]byte(tt.input), "/city/packs/test/pack.toml")
+			if err != nil {
+				t.Fatalf("parsePackConfigWithMeta: %v", err)
+			}
+			if len(warnings) == 0 {
+				t.Fatal("expected warning")
+			}
+			found := false
+			for _, w := range warnings {
+				if strings.Contains(w, tt.want) {
+					found = true
+				}
+				if strings.Contains(w, "workspace.") {
+					t.Fatalf("pack warning should not point at workspace.*, got: %v", warnings)
+				}
+			}
+			if !found {
+				t.Fatalf("expected warning containing %q, got: %v", tt.want, warnings)
+			}
+		})
+	}
+}
+
+func TestParsePackConfigWithMetaAllowsPackDescription(t *testing.T) {
+	input := `
+[pack]
+name = "core"
+version = "0.1.0"
+schema = 2
+description = "Built-in reference skills."
+`
+
+	cfg, warnings, err := parsePackConfigWithMeta([]byte(input), "/city/.gc/system/packs/core/pack.toml")
+	if err != nil {
+		t.Fatalf("parsePackConfigWithMeta: %v", err)
+	}
+	if cfg.Pack.Description != "Built-in reference skills." {
+		t.Fatalf("Pack.Description = %q, want %q", cfg.Pack.Description, "Built-in reference skills.")
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}

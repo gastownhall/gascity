@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -212,6 +213,153 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
 		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
+func TestBuildDesiredState_IncludesImportedAlwaysNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repo")
+	for path, contents := range map[string]string{
+		filepath.Join(cityPath, "pack.toml"): `
+[pack]
+name = "import-regression"
+schema = 2
+
+[imports.gs]
+source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, "city.toml"): `
+[workspace]
+name = "import-regression"
+provider = "claude"
+
+[[rigs]]
+name = "repo"
+path = "./repo"
+
+[rigs.imports.gs]
+source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, "assets", "sidecar", "pack.toml"): `
+[pack]
+name = "sidecar"
+schema = 2
+
+[[named_session]]
+template = "captain"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "watcher"
+scope = "rig"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "prompt.md"):  "You are the imported captain.\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "agent.toml"): "scope = \"rig\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "prompt.md"):  "You are the imported watcher.\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", rigPath, err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
+
+	captain, ok := dsResult.State["gs__captain"]
+	if !ok {
+		t.Fatalf("desired state missing gs__captain; keys=%v", mapKeys(dsResult.State))
+	}
+	if captain.TemplateName != "gs.captain" {
+		t.Fatalf("gs__captain TemplateName = %q, want %q", captain.TemplateName, "gs.captain")
+	}
+	if captain.ConfiguredNamedIdentity != "gs.captain" {
+		t.Fatalf("gs__captain ConfiguredNamedIdentity = %q, want %q", captain.ConfiguredNamedIdentity, "gs.captain")
+	}
+
+	watcher, ok := dsResult.State["repo--gs__watcher"]
+	if !ok {
+		t.Fatalf("desired state missing repo--gs__watcher; keys=%v", mapKeys(dsResult.State))
+	}
+	if watcher.TemplateName != "repo/gs.watcher" {
+		t.Fatalf("repo--gs__watcher TemplateName = %q, want %q", watcher.TemplateName, "repo/gs.watcher")
+	}
+	if watcher.ConfiguredNamedIdentity != "repo/gs.watcher" {
+		t.Fatalf("repo--gs__watcher ConfiguredNamedIdentity = %q, want %q", watcher.ConfiguredNamedIdentity, "repo/gs.watcher")
+	}
+}
+
+func TestBuildDesiredState_TransitiveFalseSkipsNestedImportedNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	for path, contents := range map[string]string{
+		filepath.Join(cityPath, "city.toml"): `
+[workspace]
+name = "import-regression"
+provider = "claude"
+
+[imports.outer]
+source = "./assets/outer"
+transitive = false
+`,
+		filepath.Join(cityPath, "assets", "outer", "pack.toml"): `
+[pack]
+name = "outer"
+schema = 2
+
+[imports.inner]
+source = "../inner"
+
+[[named_session]]
+template = "captain"
+scope = "city"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "outer", "agents", "captain", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "outer", "agents", "captain", "prompt.md"):  "You are the outer captain.\n",
+		filepath.Join(cityPath, "assets", "inner", "pack.toml"): `
+[pack]
+name = "inner"
+schema = 2
+
+[[named_session]]
+template = "watcher"
+scope = "city"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "inner", "agents", "watcher", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "inner", "agents", "watcher", "prompt.md"):  "You are the inner watcher.\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
+	if _, ok := dsResult.State["outer__captain"]; !ok {
+		t.Fatalf("desired state missing outer__captain; keys=%v", mapKeys(dsResult.State))
+	}
+	if _, ok := dsResult.State["outer__watcher"]; ok {
+		t.Fatalf("desired state should not include nested named session when transitive=false; keys=%v", mapKeys(dsResult.State))
 	}
 }
 

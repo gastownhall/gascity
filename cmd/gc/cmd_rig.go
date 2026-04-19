@@ -390,7 +390,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
-	reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	reloadedCfg, prov, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	emitLoadCityConfigWarnings(stderr, prov)
 	if reloadedCfg != nil {
 		layers, ok := reloadedCfg.FormulaLayers.Rigs[name]
 		if !ok || len(layers) == 0 {
@@ -578,7 +579,7 @@ type RigListItem struct {
 // how the rig path is declared in city.toml. The cityPath parameter must be
 // absolute.
 func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
-	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"))
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -918,7 +919,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 			// Update .beads/.env and routes for the rig's new default city.
 			if newDefault != "" {
 				_ = writeBeadsEnvGTRoot(fsys.OSFS{}, removedPath, newDefault)
-				if newCfg, err := loadCityConfig(newDefault); err == nil {
+				if newCfg, err := loadCityConfig(newDefault, io.Discard); err == nil {
 					resolveRigPaths(newDefault, newCfg.Rigs)
 					newRigs := collectRigRoutes(newDefault, newCfg)
 					_ = writeAllRoutes(newRigs)
@@ -995,7 +996,7 @@ func cmdRigDefault(rigNameOrPath, cityNameOrPath string, stdout, stderr io.Write
 	}
 
 	// Validate rig belongs to this city.
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig default: loading city config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

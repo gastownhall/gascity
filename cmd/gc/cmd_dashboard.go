@@ -64,7 +64,7 @@ func runDashboardServe(commandName string, port int, apiURLOverride string, stde
 		return err
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
