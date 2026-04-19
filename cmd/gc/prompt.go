@@ -33,8 +33,9 @@ type PromptContext struct {
 	Branch        string
 	DefaultBranch string            // e.g. "main" — from git symbolic-ref origin/HEAD
 	WorkQuery     string            // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
-	Env           map[string]string // from Agent.Env — custom vars
+	SlingQuery       string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	InstructionsFile string            // provider-specific repo instructions file (e.g. "CLAUDE.md", "AGENTS.md")
+	Env              map[string]string // from Agent.Env — custom vars
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -69,7 +70,7 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	}
 
 	tmpl := template.New("prompt").
-		Funcs(promptFuncMap(cityName, sessionTemplate, store)).
+		Funcs(promptFuncMap(fs, ctx, cityName, sessionTemplate, store)).
 		Option("missingkey=zero")
 
 	// Load shared templates from pack dirs (lower priority).
@@ -189,7 +190,7 @@ func mergeFragmentLists(global, perAgent []string) []string {
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+8)
+	m := make(map[string]string, len(ctx.Env)+12)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -205,6 +206,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
+	m["InstructionsFile"] = ctx.InstructionsFile
 	return m
 }
 
@@ -231,10 +233,12 @@ func defaultBranchFor(dir string) string {
 }
 
 // promptFuncMap returns template functions available in prompt templates.
+// fs is used by repoInstructions to read the instructions file from the repo.
+// ctx provides the PromptContext for repo-root resolution and InstructionsFile.
 // sessionTemplate is the custom session naming template (empty = default).
 // store is used by the "session" function to look up bead-derived session
 // names; nil falls back to legacy naming.
-func promptFuncMap(cityName, sessionTemplate string, store beads.Store) template.FuncMap {
+func promptFuncMap(fs fsys.FS, ctx PromptContext, cityName, sessionTemplate string, store beads.Store) template.FuncMap {
 	return template.FuncMap{
 		"cmd": func() string {
 			return filepath.Base(os.Args[0])
@@ -246,5 +250,36 @@ func promptFuncMap(cityName, sessionTemplate string, store beads.Store) template
 			_, name := config.ParseQualifiedName(qualifiedName)
 			return name
 		},
+		"repoInstructions": func() string {
+			return readRepoInstructions(fs, ctx)
+		},
 	}
+}
+
+// readRepoInstructions reads the provider-specific instructions file
+// (e.g. CLAUDE.md or AGENTS.md) from the rig's repo root. This allows
+// pack prompt templates to fall back to repo-level quality-gate guidance
+// when pack-specific guidance is missing or empty.
+//
+// Resolution order: RigRoot first (the canonical repo root for rig-scoped
+// agents), then WorkDir (for non-rig agents whose work dir IS the repo).
+// Returns empty string if neither location has the file, or if
+// InstructionsFile is not set.
+func readRepoInstructions(fs fsys.FS, ctx PromptContext) string {
+	if ctx.InstructionsFile == "" {
+		return ""
+	}
+	// Try RigRoot first (canonical repo root for rig-scoped agents).
+	if ctx.RigRoot != "" {
+		if data, err := fs.ReadFile(filepath.Join(ctx.RigRoot, ctx.InstructionsFile)); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	// Fall back to WorkDir (for agents whose workdir is the repo root).
+	if ctx.WorkDir != "" && ctx.WorkDir != ctx.RigRoot {
+		if data, err := fs.ReadFile(filepath.Join(ctx.WorkDir, ctx.InstructionsFile)); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
 }

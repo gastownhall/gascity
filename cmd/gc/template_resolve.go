@@ -251,17 +251,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		fragments = mergeFragmentLists(fragments, p.appendFragments)
 	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-		CityRoot:      p.cityPath,
-		AgentName:     qualifiedName,
-		TemplateName:  cfgAgent.Name,
-		RigName:       rigName,
-		RigRoot:       rigRoot,
-		WorkDir:       workDir,
-		IssuePrefix:   findRigPrefix(rigName, p.rigs),
-		DefaultBranch: defaultBranchFor(workDir),
-		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
-		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
-		Env:           cfgAgent.Env,
+		CityRoot:         p.cityPath,
+		AgentName:        qualifiedName,
+		TemplateName:     cfgAgent.Name,
+		RigName:          rigName,
+		RigRoot:          rigRoot,
+		WorkDir:          workDir,
+		IssuePrefix:      findRigPrefix(rigName, p.rigs),
+		DefaultBranch:    defaultBranchFor(workDir),
+		WorkQuery:        expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		SlingQuery:       expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		InstructionsFile: resolved.InstructionsFile,
+		Env:              cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
