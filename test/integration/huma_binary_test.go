@@ -63,10 +63,10 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	}
 	var supervisorLog strings.Builder
 	go func() { _, _ = io.Copy(&supervisorLog, stderr) }()
-	cityInitialized := false
+	cityRegistered := false
 	t.Cleanup(func() {
-		if cityInitialized {
-			runCLIAllowError(t, bin, env, "gc stop", "stop", cityRoot)
+		if cityRegistered {
+			runCLIAllowError(t, bin, env, "gc unregister", "unregister", cityRoot)
 		}
 		runCLIAllowError(t, bin, env, "gc supervisor stop --wait", "supervisor", "stop", "--wait")
 		cancel()
@@ -108,11 +108,17 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	// 1) `gc cities` — supervisor scope, no city required.
 	runCLI(t, bin, env, "gc cities", "cities")
 
-	// 2) Create a city the supervisor can see, then exercise per-city commands.
-	// `gc init` already registers with the supervisor, so set the desired name
-	// there instead of trying to register a standalone-controller city again.
-	runCLI(t, bin, env, "gc init", "init", cityRoot, "--provider", "claude", "--name", "humatest")
-	cityInitialized = true
+	// 2) Create a minimal city the supervisor can register without relying on
+	// any real provider or agent runtime.
+	if err := os.MkdirAll(cityRoot, 0o755); err != nil {
+		t.Fatalf("create city root: %v", err)
+	}
+	cityConfig := "[workspace]\nname = \"humatest\"\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(cityRoot, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	runCLI(t, bin, env, "gc register", "register", cityRoot, "--name", "humatest")
+	cityRegistered = true
 
 	// Give the supervisor a moment to pick up the registered city.
 	cityListURL := baseURL + "/v0/cities"
