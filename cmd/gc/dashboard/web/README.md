@@ -22,10 +22,10 @@ npm run dev          # Vite dev server with HMR on :5173
 `npm run test`, `npm run typecheck`, `npm run build`, and `npm run dev`
 all regenerate `src/generated/` first so they work from a clean checkout.
 
-`dist/` is git-ignored. It is built fresh by CI and by the pre-commit
-hook (see `.githooks/pre-commit`). Run `npm run build` before handing
-a branch to a reviewer if they don't have Node available — or let the
-hook do it.
+`dist/` is committed because the Go binary embeds the built SPA bundle.
+It is rebuilt by CI and by the pre-commit hook (see
+`.githooks/pre-commit`). Run `npm run build` before handing a branch to
+a reviewer if they don't have Node available — or let the hook do it.
 
 `src/generated/` is also git-ignored. Run `npm run gen` after any change
 to `internal/api/openapi.json`, or rely on the lifecycle hooks baked into

@@ -19,6 +19,24 @@ func TestEncodedMetadataFieldCapacity(t *testing.T) {
 			want:       5,
 		},
 		{
+			name:       "adds metadata when fields are empty",
+			fieldCount: 0,
+			metaCount:  3,
+			want:       3,
+		},
+		{
+			name:       "keeps fields when metadata is empty",
+			fieldCount: 4,
+			metaCount:  0,
+			want:       4,
+		},
+		{
+			name:       "uses exact boundary when addition is safe",
+			fieldCount: math.MaxInt - 1,
+			metaCount:  1,
+			want:       math.MaxInt,
+		},
+		{
 			name:       "skips addition when it would overflow",
 			fieldCount: math.MaxInt,
 			metaCount:  1,
