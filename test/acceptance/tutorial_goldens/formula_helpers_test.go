@@ -4,42 +4,68 @@ package tutorialgoldens
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-const tutorialPancakesFormula = `formula = "pancakes"
-description = "Make pancakes from scratch"
+const tutorialPancakesFormulaCommand = "cat > formulas/pancakes.toml << 'EOF'"
 
-[[steps]]
-id = "dry"
-title = "Mix dry ingredients"
-description = "Combine flour, sugar, baking powder, salt in a large bowl."
+func tutorialPancakesFormulaShellCommand(t *testing.T) string {
+	t.Helper()
+	return tutorialPancakesFormulaCommand + "\n" + loadTutorialPancakesFormula(t) + "EOF"
+}
 
-[[steps]]
-id = "wet"
-title = "Mix wet ingredients"
-description = "Whisk eggs, milk, and melted butter together."
+func loadTutorialPancakesFormula(t *testing.T) string {
+	t.Helper()
 
-[[steps]]
-id = "combine"
-title = "Combine wet and dry"
-description = "Fold wet ingredients into dry. Do not overmix."
-needs = ["dry", "wet"]
+	snapshot := loadTutorialSnapshot(t)
+	page := snapshot.pages["docs/tutorials/05-formulas.md"]
+	if page == nil {
+		t.Fatal("tutorial 05 snapshot missing")
+	}
 
-[[steps]]
-id = "cook"
-title = "Cook the pancakes"
-description = "Heat griddle to 375F. Pour 1/4 cup batter per pancake."
-needs = ["combine"]
+	for _, snippet := range page.Snippets {
+		if snippet.Language != "shell" {
+			continue
+		}
+		body, ok := extractShellHeredocBody(snippet.Body, tutorialPancakesFormulaCommand, "EOF")
+		if ok {
+			return body
+		}
+	}
 
-[[steps]]
-id = "serve"
-title = "Serve"
-description = "Stack pancakes on a plate with butter and syrup."
-needs = ["cook"]
-`
+	t.Fatal("tutorial 05 pancakes heredoc not found in docs snapshot")
+	return ""
+}
+
+func extractShellHeredocBody(shellSnippet, command, terminator string) (string, bool) {
+	lines := strings.Split(shellSnippet, "\n")
+	wantCommand := "$ " + command
+	started := false
+	body := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !started {
+			if trimmed == wantCommand {
+				started = true
+			}
+			continue
+		}
+		if trimmed == terminator {
+			return strings.Join(body, "\n") + "\n", true
+		}
+		body = append(body, line)
+	}
+
+	return "", false
+}
 
 func writeTutorialPancakesFormula(t *testing.T, cityRoot string) {
 	t.Helper()
-	writeFile(t, filepath.Join(cityRoot, "formulas", "pancakes.toml"), tutorialPancakesFormula, 0o644)
+	formula := loadTutorialPancakesFormula(t)
+	if formula == "" {
+		t.Fatal("tutorial pancakes formula should not be empty")
+	}
+	writeFile(t, filepath.Join(cityRoot, "formulas", "pancakes.toml"), formula, 0o644)
 }

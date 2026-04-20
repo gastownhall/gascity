@@ -530,7 +530,12 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 		if stderr.Len() == 0 {
 			return stdout.String(), err
 		}
-		return stdout.String() + stderr.String(), err
+		stdoutText := stdout.String()
+		stderrText := stderr.String()
+		if strings.HasSuffix(stdoutText, "\n") || strings.HasPrefix(stderrText, "\n") {
+			return stdoutText + stderrText, err
+		}
+		return stdoutText + "\n" + stderrText, err
 	}
 	// Keep successful JSON callers isolated from non-fatal bd warnings emitted
 	// on stderr; CombinedOutput corrupts stdout payloads that expect pure JSON.

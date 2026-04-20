@@ -100,12 +100,11 @@ count = 3
 id = "attempt"
 title = "Try to deploy"
 `, 0o644)
-	ws.noteWarning("tutorial 05 continuity workaround: gc init no longer seeds a built-in pancakes formula, so the page driver writes the documented example formula before exercising formula list/show/sling/cook")
 
 	var pancakesRootID string
 
 	t.Run("cat > formulas/pancakes.toml << 'EOF'", func(t *testing.T) {
-		cmd := "cat > formulas/pancakes.toml << 'EOF'\n" + tutorialPancakesFormula + "EOF"
+		cmd := tutorialPancakesFormulaShellCommand(t)
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("writing pancakes formula: %v\n%s", err, out)
 		}
