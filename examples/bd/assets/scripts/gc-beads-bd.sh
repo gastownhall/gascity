@@ -441,10 +441,10 @@ EOF
 }
 
 load_existing_managed_from_gc() {
-    local gc_bin host output key value status parsed=false timeout_ms="${1:-45000}"
+    local gc_bin host output key value status parsed=false timeout_ms="${1:-30000}"
     case "$timeout_ms" in
         ''|*[!0-9]*)
-            timeout_ms=45000
+            timeout_ms=30000
             ;;
     esac
     if [ "$timeout_ms" -lt 1 ]; then
@@ -945,7 +945,7 @@ EOF
 }
 
 wait_for_concurrent_start_ready() {
-    local existing_pid="" existing_port="" holder="" waited=0 timeout_ms max_attempts attempt_timeout_ms
+    local existing_pid="" existing_port="" holder="" timeout_ms deadline_sec now_sec remaining_sec remaining_ms
     timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
     case "$timeout_ms" in
         ''|*[!0-9]*)
@@ -955,13 +955,15 @@ wait_for_concurrent_start_ready() {
     if [ "$timeout_ms" -lt 500 ]; then
         timeout_ms=500
     fi
-    max_attempts=$(( (timeout_ms + 499) / 500 ))
-    while [ "$waited" -lt "$max_attempts" ]; do
-        attempt_timeout_ms=$((timeout_ms - (waited * 500)))
-        if [ "$attempt_timeout_ms" -lt 1 ]; then
-            attempt_timeout_ms=1
+    deadline_sec=$(( $(date +%s) + ((timeout_ms + 999) / 1000) ))
+    while :; do
+        now_sec=$(date +%s)
+        remaining_sec=$((deadline_sec - now_sec))
+        if [ "$remaining_sec" -le 0 ]; then
+            return 1
         fi
-        if load_existing_managed_from_gc "$attempt_timeout_ms"; then
+        remaining_ms=$((remaining_sec * 1000))
+        if load_existing_managed_from_gc "$remaining_ms"; then
             existing_pid="$GC_EXISTING_MANAGED_PID"
             if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
                 DOLT_PORT="$GC_EXISTING_STATE_PORT"
@@ -994,10 +996,13 @@ wait_for_concurrent_start_ready() {
                 fi
             fi
         fi
+        now_sec=$(date +%s)
+        remaining_sec=$((deadline_sec - now_sec))
+        if [ "$remaining_sec" -le 0 ]; then
+            return 1
+        fi
         sleep 0.5 2>/dev/null || sleep 1
-        waited=$((waited + 1))
     done
-    return 1
 }
 
 load_stop_managed_from_gc() {

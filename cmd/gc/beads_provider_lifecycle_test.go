@@ -6031,8 +6031,8 @@ sleep 5
 		t.Fatalf("gc-beads-bd start output = %q, want lock acquisition failure", out)
 	}
 	invocation := string(mustReadFile(t, invocationFile))
-	if strings.Contains(invocation, "timeout=45000") {
-		t.Fatalf("existing-managed should not receive the default 45s timeout inside concurrent wait:\n%s", invocation)
+	if strings.Contains(invocation, "timeout=30000") {
+		t.Fatalf("existing-managed should not receive the default 30s timeout inside concurrent wait:\n%s", invocation)
 	}
 	if !strings.Contains(invocation, "timeout=1000") {
 		t.Fatalf("existing-managed should receive the remaining wait budget on the first attempt:\n%s", invocation)
