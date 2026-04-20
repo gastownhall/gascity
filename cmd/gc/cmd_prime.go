@@ -50,6 +50,12 @@ type primeHookInput struct {
 	Source    string `json:"source"`
 }
 
+type primeHookContext struct {
+	SessionID     string
+	Source        string
+	HookEventName string
+}
+
 // newPrimeCmd creates the "gc prime [agent-name]" command.
 func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
@@ -140,6 +146,12 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		agentName = args[0]
 	}
 
+	hookContext := primeHookContext{}
+	suppressHookPrompt := false
+	if hookMode {
+		hookContext = readPrimeHookContext()
+		suppressHookPrompt = managedSessionHookPromptAlreadyDelivered(hookContext)
+	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
 	// In strict mode, we defer them until after strict checks pass so that a
 	// failing --strict invocation does not persist a session-id for failed
@@ -148,7 +160,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		if !hookMode {
 			return
 		}
-		if sessionID, _ := readPrimeHookContext(); sessionID != "" {
+		if sessionID := hookContext.SessionID; sessionID != "" {
 			persistPrimeHookSessionID(sessionID)
 		}
 		persistPrimeHookProviderSessionKey()
@@ -272,7 +284,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {
-				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat)
+				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
 				return 0
 			}
 			// File is present but rendered empty. Treat as a legitimate
@@ -293,7 +305,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt)
 					return 0
 				}
 			}
@@ -363,7 +375,22 @@ func prependHookBeacon(cityName, agentName, prompt string) string {
 	return beacon + "\n\n" + prompt
 }
 
-func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string) {
+func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
+	if strings.TrimSpace(os.Getenv(startupPromptDeliveredEnv)) != "1" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv(managedSessionHookEnv)) != "1" {
+		return false
+	}
+	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
+}
+
+func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool) {
+	if hookMode && suppressPrompt {
+		// Managed sessions receive the rendered startup prompt through the
+		// launch payload or nudge path. SessionStart hooks add context only.
+		prompt = ""
+	}
 	if hookMode {
 		prompt = prependHookBeacon(cityName, agentName, prompt)
 	}
@@ -374,23 +401,31 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 }
 
-func readPrimeHookContext() (sessionID, source string) {
-	source = os.Getenv("GC_HOOK_SOURCE")
-	if id := os.Getenv("GC_SESSION_ID"); id != "" {
-		return id, source
+func readPrimeHookContext() primeHookContext {
+	ctx := primeHookContext{
+		Source:        strings.TrimSpace(os.Getenv("GC_HOOK_SOURCE")),
+		HookEventName: strings.TrimSpace(os.Getenv("GC_HOOK_EVENT_NAME")),
 	}
-	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		return id, source
-	}
-	if input := readPrimeHookStdin(); input != nil {
-		if input.Source != "" {
-			source = input.Source
-		}
-		if input.SessionID != "" {
-			return input.SessionID, source
+	if shouldReadPrimeHookStdin() {
+		if input := readPrimeHookStdin(); input != nil {
+			if source := strings.TrimSpace(input.Source); source != "" {
+				ctx.Source = source
+			}
+			ctx.SessionID = strings.TrimSpace(input.SessionID)
 		}
 	}
-	return "", source
+	if id := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); id != "" {
+		ctx.SessionID = id
+	} else if id := strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")); id != "" {
+		ctx.SessionID = id
+	}
+	return ctx
+}
+
+func shouldReadPrimeHookStdin() bool {
+	hasEnvSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != "" ||
+		strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")) != ""
+	return !hasEnvSessionID
 }
 
 func readPrimeHookStdin() *primeHookInput {

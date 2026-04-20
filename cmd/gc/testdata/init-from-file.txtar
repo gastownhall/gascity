@@ -21,10 +21,8 @@ exec gc config show
 stdout 'worker'
 stdout 'max_active_sessions = 5'
 
-# gc init --file preserves workspace identity from the source (#795);
-# it must not silently replace it with the target dir basename in .gc/site.toml.
-exec grep 'workspace_name = "placeholder"' $WORK/my-city/.gc/site.toml
-! exec grep 'workspace_name = "my-city"' $WORK/my-city/.gc/site.toml
+# gc init --file uses the target dir basename unless --name overrides it.
+exec grep 'name = "my-city"' $WORK/my-city/city.toml
 ! exec grep 'name = "placeholder"' $WORK/my-city/city.toml
 
 # gc init --file rejects already-initialized city.

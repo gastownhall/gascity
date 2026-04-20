@@ -378,23 +378,6 @@ func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads
 	if identifier == "" || identifier == "human" {
 		return "human", nil
 	}
-	if store != nil && cfg != nil {
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
-		if err == nil {
-			b, err := store.Get(sessionID)
-			if err != nil {
-				return "", err
-			}
-			address := sessionMailboxAddress(b)
-			if address == "" {
-				return "", fmt.Errorf("session %q has no mailbox identity", identifier)
-			}
-			return address, nil
-		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
-	}
 	if target, matched, targetErr := resolveLiveConfiguredNamedMailTarget(store, identifier); targetErr != nil {
 		return "", targetErr
 	} else if matched {

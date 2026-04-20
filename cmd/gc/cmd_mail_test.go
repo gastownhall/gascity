@@ -807,6 +807,87 @@ func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *t
 	}
 }
 
+func TestResolveMailRecipientIdentity_BareNamedSessionUsesConfiguredMailboxWithoutMaterializing(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+
+	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveMailRecipientIdentity(mayor): %v", err)
+	}
+	if address != "mayor" {
+		t.Fatalf("address = %q, want configured mailbox mayor", address)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(all))
+	}
+}
+
+func TestResolveMailRecipientIdentity_BareNamedSessionUsesExistingLiveMailboxWithoutMaterializing(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+	existing, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"session_name": "mayor",
+			"template":     "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(existing session): %v", err)
+	}
+
+	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveMailRecipientIdentity(mayor): %v", err)
+	}
+	if address != "mayor" {
+		t.Fatalf("address = %q, want existing live mailbox mayor", address)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+	if all[0].ID != existing.ID {
+		t.Fatalf("session bead ID = %q, want existing %q", all[0].ID, existing.ID)
+	}
+}
+
 func TestResolveMailRecipientIdentity_BareRigScopedNamedUsesUniqueLiveConfiguredNamedSession(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 

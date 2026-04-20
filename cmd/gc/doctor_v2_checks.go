@@ -65,12 +65,9 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 	if !ok || len(cfg.Workspace.DefaultRigIncludes) == 0 {
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
-	if len(cfg.Workspace.Includes) == 0 && len(legacyAgentFiles(ctx.CityPath)) == 0 {
-		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes preserved for ordered rig defaults")
-	}
 	return warnCheck("v2-default-rig-import-format",
-		"workspace.default_rig_includes is deprecated; migrate to [rig_defaults] imports = [...]",
-		v2MigrationHint(),
+		"workspace.default_rig_includes is deprecated; migrate to root pack.toml [defaults.rig.imports.<binding>]",
+		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
 		cfg.Workspace.DefaultRigIncludes)
 }
 
@@ -85,10 +82,6 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	if err != nil {
 		return err
 	}
-	// Snapshot the raw legacy paths before overlay so we can detect divergence
-	// with the existing site binding. Without this, ApplySiteBindingsForEdit
-	// would overwrite each legacy path with the site binding, silently discarding
-	// the legacy value when they conflict.
 	legacyByName := make(map[string]string, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
 		legacyByName[rig.Name] = strings.TrimSpace(rig.Path)
@@ -111,12 +104,6 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 		if !ok || legacy == "" || site == "" {
 			continue
 		}
-		// Normalize both sides so semantically equivalent path spellings
-		// (relative vs absolute, redundant separators, trailing slashes,
-		// symlinks, case-only differences on case-insensitive file
-		// systems) don't trigger false conflicts that block migration.
-		// The `resolveRigPaths` runtime follows the same convention:
-		// relative paths are joined to the city root, then cleaned.
 		if sameRigPath(ctx.CityPath, legacy, site) {
 			continue
 		}
@@ -130,11 +117,6 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	if _, err := config.ApplySiteBindingsForEdit(fsys.OSFS{}, ctx.CityPath, cfg); err != nil {
 		return err
 	}
-	// Write city.toml FIRST, then .gc/site.toml. A crash between the two
-	// writes leaves `.gc/site.toml` missing the new binding while city.toml
-	// already has the path stripped — which the site-binding loader surfaces
-	// via warnings (orphan legacy path) rather than silently resolving to an
-	// empty effective path.
 	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return err
@@ -144,18 +126,11 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 		return err
 	}
 	if err := config.PersistRigSiteBindings(fsys.OSFS{}, ctx.CityPath, cfg.Rigs); err != nil {
-		// Surface the half-migrated state explicitly: city.toml has
-		// already been stripped of legacy paths but .gc/site.toml was
-		// not updated, so declared rigs will load as unbound until the
-		// user re-runs the migration.
 		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs are now unbound; re-run `gc doctor --fix` to retry: %w", err)
 	}
 	return nil
 }
 
-// normalizeRigPath resolves a rig path for equality comparison: relative
-// paths are joined to cityPath, then filepath.Clean is applied. This
-// matches the runtime convention in config.resolveRigPaths.
 func normalizeRigPath(cityPath, p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" {
@@ -167,16 +142,6 @@ func normalizeRigPath(cityPath, p string) string {
 	return filepath.Clean(p)
 }
 
-// sameRigPath reports whether two rig paths refer to the same directory,
-// accounting for the normalization differences that trip up naive string
-// equality: relative vs absolute spellings, symlinks, and case-only
-// differences on case-insensitive filesystems (macOS, Windows).
-//
-// When both normalized paths exist on disk, os.Stat + os.SameFile is the
-// authoritative answer — it resolves symlinks and compares inodes, which
-// covers every spelling difference including case on case-insensitive
-// filesystems. Otherwise the function falls back to normalized string
-// equality (which catches the common relative-vs-absolute case).
 func sameRigPath(cityPath, a, b string) bool {
 	na := normalizeRigPath(cityPath, a)
 	nb := normalizeRigPath(cityPath, b)
@@ -230,11 +195,6 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 		}
 		orphan = append(orphan, name)
 	}
-	// Unbound rigs are declared in city.toml but have no legacy path AND
-	// no site binding — usually the aftermath of a half-migrated edit
-	// (e.g., city.toml written, site.toml write failed). Surface this
-	// state explicitly so operators don't silently run with rigs that
-	// won't resolve to any store.
 	var unbound []string
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) != "" {
@@ -249,11 +209,6 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 	sort.Strings(orphan)
 	sort.Strings(unbound)
 
-	// Multiple conditions may coexist (e.g., an unbound rig alongside an
-	// orphan site binding whose name no longer matches). Combine all
-	// non-empty categories into a single warning so operators see every
-	// relevant name rather than just the first category the switch
-	// would have picked.
 	var messages []string
 	var hints []string
 	var details []string

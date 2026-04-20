@@ -1,9 +1,12 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func writeScriptFile(t *testing.T, dir, relPath, content string) {
@@ -230,11 +233,35 @@ func TestResolveScripts_RealFileNotOverwritten(t *testing.T) {
 }
 
 func TestResolveScripts_EmptyLayers(t *testing.T) {
-	if err := ResolveScripts("/tmp/nonexistent", nil); err != nil {
+	target := filepath.Join(t.TempDir(), "city")
+	if err := ResolveScripts(target, nil); err != nil {
 		t.Errorf("nil layers should be no-op: %v", err)
 	}
-	if err := ResolveScripts("/tmp/nonexistent", []string{}); err != nil {
+	if err := ResolveScripts(target, []string{}); err != nil {
 		t.Errorf("empty layers should be no-op: %v", err)
+	}
+}
+
+func TestResolveScripts_EmptyLayersCleanStaleSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	layer := filepath.Join(dir, "pack", "scripts")
+	writeScriptFile(t, layer, "setup.sh", "setup")
+
+	target := filepath.Join(dir, "city")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll target: %v", err)
+	}
+
+	if err := ResolveScripts(target, []string{layer}); err != nil {
+		t.Fatalf("first ResolveScripts: %v", err)
+	}
+
+	if err := ResolveScripts(target, nil); err != nil {
+		t.Fatalf("second ResolveScripts: %v", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(target, "scripts", "setup.sh")); !os.IsNotExist(err) {
+		t.Fatalf("setup.sh should have been removed after empty-layer cleanup, err=%v", err)
 	}
 }
 
@@ -280,5 +307,110 @@ func TestResolveScripts_EmptySubdirCleanup(t *testing.T) {
 	checksDir := filepath.Join(target, "scripts", "checks")
 	if _, err := os.Stat(checksDir); !os.IsNotExist(err) {
 		t.Errorf("empty checks/ subdir should have been removed, err=%v", err)
+	}
+}
+
+func TestResolveConfiguredScripts_CleansCityAndRigWhenLayersDisappear(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	cityLayer := filepath.Join(dir, "pack", "scripts")
+	rigLayer := filepath.Join(dir, "rig-pack", "scripts")
+	writeScriptFile(t, cityLayer, "city.sh", "city")
+	writeScriptFile(t, rigLayer, "rig.sh", "rig")
+
+	cityPath := filepath.Join(dir, "city")
+	rigPath := filepath.Join(cityPath, "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll city: %v", err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll rig: %v", err)
+	}
+	cwdStale := filepath.Join(dir, "scripts", "stale.sh")
+	if err := os.MkdirAll(filepath.Dir(cwdStale), 0o755); err != nil {
+		t.Fatalf("MkdirAll cwd scripts: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "unbound.sh"), cwdStale); err != nil {
+		t.Fatalf("cwd stale symlink: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "app", Path: "rig"},
+			{Name: "unbound"},
+		},
+		ScriptLayers: config.ScriptLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"app": {cityLayer, rigLayer}},
+		},
+	}
+	var warnings []string
+	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		warnings = append(warnings, scope+": "+err.Error())
+	})
+	if len(warnings) > 0 {
+		t.Fatalf("resolveConfiguredScripts warnings: %v", warnings)
+	}
+
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("city script should exist: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
+		t.Fatalf("rig script should exist: %v", err)
+	}
+
+	cfg.ScriptLayers = config.ScriptLayers{Rigs: map[string][]string{}}
+	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		warnings = append(warnings, scope+": "+err.Error())
+	})
+	if len(warnings) > 0 {
+		t.Fatalf("resolveConfiguredScripts cleanup warnings: %v", warnings)
+	}
+
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); !os.IsNotExist(err) {
+		t.Fatalf("city script should be cleaned after layers disappear, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); !os.IsNotExist(err) {
+		t.Fatalf("rig script should be cleaned after layers disappear, err=%v", err)
+	}
+	if _, err := os.Lstat(cwdStale); err != nil {
+		t.Fatalf("blank rig path should not clean cwd scripts, err=%v", err)
+	}
+}
+
+func TestPrepareCityForSupervisorCleansScriptsWhenLayersDisappear(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	rigPath := filepath.Join(dir, "rig")
+	if err := os.MkdirAll(filepath.Join(cityPath, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll city scripts: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll rig scripts: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "old-city.sh"), filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("city symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "old-rig.sh"), filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
+		t.Fatalf("rig symlink: %v", err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "beads.log")
+	t.Setenv("GC_BEADS", "exec:"+writeSpyScript(t, logFile))
+
+	cfg := config.DefaultCity("bright-lights")
+	cfg.Rigs = []config.Rig{{Name: "app", Path: rigPath}}
+	cfg.ScriptLayers = config.ScriptLayers{Rigs: map[string][]string{}}
+
+	if err := prepareCityForSupervisor(cityPath, "bright-lights", &cfg, io.Discard, nil); err != nil {
+		t.Fatalf("prepareCityForSupervisor: %v", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); !os.IsNotExist(err) {
+		t.Fatalf("city script should be cleaned by supervisor start path, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); !os.IsNotExist(err) {
+		t.Fatalf("rig script should be cleaned by supervisor start path, err=%v", err)
 	}
 }

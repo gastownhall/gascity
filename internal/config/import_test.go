@@ -99,6 +99,120 @@ scope = "city"
 	}
 }
 
+func TestImport_AgentDefaultsDefaultSlingFormulaInherited(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "tools")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.tools]
+source = "../tools"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-pack-default"
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.QualifiedName() != "tools.worker" {
+			continue
+		}
+		if a.DefaultSlingFormula != nil {
+			t.Fatalf("tools.worker DefaultSlingFormula = %v, want nil explicit override", *a.DefaultSlingFormula)
+		}
+		if a.InheritedDefaultSlingFormula == nil || *a.InheritedDefaultSlingFormula != "mol-pack-default" {
+			got := "<nil>"
+			if a.InheritedDefaultSlingFormula != nil {
+				got = *a.InheritedDefaultSlingFormula
+			}
+			t.Fatalf("tools.worker InheritedDefaultSlingFormula = %s, want %q", got, "mol-pack-default")
+		}
+		if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+		}
+		return
+	}
+	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
+}
+
+func TestImport_AgentDefaultsDefaultSlingFormulaInheritedBeatsCityDefault(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "tools")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-city-default"
+
+[imports.tools]
+source = "../tools"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-pack-default"
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.QualifiedName() != "tools.worker" {
+			continue
+		}
+		if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+		}
+		if a.DefaultSlingFormula != nil {
+			t.Fatalf("tools.worker DefaultSlingFormula = %q, want nil when city default should not override imported pack default", *a.DefaultSlingFormula)
+		}
+		return
+	}
+	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
+}
+
 func TestImport_BindingNameStamped(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
@@ -601,8 +715,39 @@ fetched = "2026-04-10T00:00:00Z"
 	if err == nil {
 		t.Fatal("expected missing shared cache error")
 	}
-	if !strings.Contains(err.Error(), "locked but not cached") {
-		t.Fatalf("error = %v, want locked but not cached", err)
+	if !strings.Contains(err.Error(), "locked but not cached") || !strings.Contains(err.Error(), `run "gc import install"`) {
+		t.Fatalf("error = %v, want locked-but-not-cached install hint", err)
+	}
+}
+
+func TestImport_RootPackRemoteImportMissingLockfileSuggestsInstall(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/example/gastown.git"
+version = "^1.2"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected missing lockfile error")
+	}
+	if !strings.Contains(err.Error(), "missing packs.lock") || !strings.Contains(err.Error(), `run "gc import install"`) {
+		t.Fatalf("error = %v, want missing packs.lock install hint", err)
 	}
 }
 
@@ -663,6 +808,104 @@ scope = "city"
 	}
 	if !found["base.scout"] {
 		t.Errorf("missing base.scout; got: %v", found)
+	}
+}
+
+func TestImport_RootPackGitHubTreeImportFromLockfileCache(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	commit := "abc123def456"
+	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte("https://github.com/example/repo.git"+commit)))
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", cacheKey)
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	mustMkdirAll(t, filepath.Join(cacheDir, "packs", "base"), 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.base]
+source = "https://github.com/example/repo/tree/main/packs/base"
+version = "^1.2"
+`)
+	writeTestFile(t, cityDir, "packs.lock", `
+schema = 1
+
+[packs."https://github.com/example/repo/tree/main/packs/base"]
+version = "1.2.3"
+commit = "abc123def456"
+fetched = "2026-04-10T00:00:00Z"
+`)
+	writeTestFile(t, filepath.Join(cacheDir, "packs", "base"), "pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "scout"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+	if !found["base.scout"] {
+		t.Errorf("missing base.scout; got: %v", found)
+	}
+}
+
+func TestImport_RootPackRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "base")
+
+	for _, d := range []string{cityDir, packDir} {
+		mustMkdirAll(t, d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.base]
+sorce = "../base"
+`)
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "base"
+schema = 1
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected unknown-field error for root pack.toml")
+	}
+	if !strings.Contains(err.Error(), `unknown field "imports.base.sorce"`) {
+		t.Fatalf("error = %v, want unknown-field message", err)
+	}
+	if !strings.Contains(err.Error(), `did you mean "source"`) {
+		t.Fatalf("error = %v, want suggestion", err)
 	}
 }
 
@@ -1436,7 +1679,7 @@ scope = "city"
 func TestImport_RootNamedSessionCanTargetImportedTemplate(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
-	packDir := filepath.Join(dir, "employees-pack")
+	packDir := filepath.Join(dir, "mypk")
 
 	for _, d := range []string{cityDir, packDir} {
 		mustMkdirAll(t, d, 0o755)
@@ -1444,28 +1687,23 @@ func TestImport_RootNamedSessionCanTargetImportedTemplate(t *testing.T) {
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
-name = "corp"
-`)
-	writeTestFile(t, cityDir, "pack.toml", `
-[pack]
-name = "corp"
-schema = 2
+name = "test"
 
-[imports.employees]
-source = "../employees-pack"
+[imports.gs]
+source = "../mypk"
 
 [[named_session]]
-template = "employees.penny"
-name = "corp--penny-root"
-mode = "on_demand"
+name = "witness"
+template = "gs.polecat"
+mode = "always"
 `)
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
-name = "employees-pack"
-schema = 2
+name = "mypk"
+schema = 1
 
 [[agent]]
-name = "penny"
+name = "polecat"
 scope = "city"
 `)
 
@@ -1474,13 +1712,15 @@ scope = "city"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "employees.penny" {
-		t.Fatalf("TemplateQualifiedName() = %q, want employees.penny", got)
+	named := FindNamedSession(cfg, "witness")
+	if named == nil {
+		t.Fatal("FindNamedSession(witness) = nil")
 	}
-	if agent := FindAgent(cfg, cfg.NamedSessions[0].TemplateQualifiedName()); agent == nil {
-		t.Fatal("FindAgent() = nil, want imported employees.penny template")
-	} else if got := agent.QualifiedName(); got != "employees.penny" {
-		t.Fatalf("QualifiedName() = %q, want employees.penny", got)
+	if named.TemplateQualifiedName() != "gs.polecat" {
+		t.Fatalf("TemplateQualifiedName() = %q, want %q", named.TemplateQualifiedName(), "gs.polecat")
+	}
+	if got := FindAgent(cfg, named.TemplateQualifiedName()); got == nil {
+		t.Fatalf("FindAgent(%q) = nil", named.TemplateQualifiedName())
 	}
 }
 
@@ -1828,44 +2068,37 @@ func TestAgentMatchesIdentity(t *testing.T) {
 
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
-		name    string
-		agent   Agent
-		wantQN  string
-		wantBQN string
+		name   string
+		agent  Agent
+		wantQN string
 	}{
 		{
-			name:    "bare name, no binding, no dir",
-			agent:   Agent{Name: "mayor"},
-			wantQN:  "mayor",
-			wantBQN: "mayor",
+			name:   "bare name, no binding, no dir",
+			agent:  Agent{Name: "mayor"},
+			wantQN: "mayor",
 		},
 		{
-			name:    "with dir, no binding",
-			agent:   Agent{Name: "mayor", Dir: "proj"},
-			wantQN:  "proj/mayor",
-			wantBQN: "mayor",
+			name:   "with dir, no binding",
+			agent:  Agent{Name: "mayor", Dir: "proj"},
+			wantQN: "proj/mayor",
 		},
 		{
-			name:    "with binding, no dir",
-			agent:   Agent{Name: "mayor", BindingName: "gastown"},
-			wantQN:  "gastown.mayor",
-			wantBQN: "gastown.mayor",
+			name:   "with binding, no dir",
+			agent:  Agent{Name: "mayor", BindingName: "gastown"},
+			wantQN: "gastown.mayor",
 		},
 		{
-			name:    "with binding and dir",
-			agent:   Agent{Name: "polecat", BindingName: "gastown", Dir: "proj"},
-			wantQN:  "proj/gastown.polecat",
-			wantBQN: "gastown.polecat",
+			name:   "with binding and dir",
+			agent:  Agent{Name: "polecat", BindingName: "gastown", Dir: "proj"},
+			wantQN: "proj/gastown.polecat",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.agent.QualifiedName(); got != tt.wantQN {
+			got := tt.agent.QualifiedName()
+			if got != tt.wantQN {
 				t.Errorf("QualifiedName() = %q, want %q", got, tt.wantQN)
-			}
-			if got := tt.agent.BindingQualifiedName(); got != tt.wantBQN {
-				t.Errorf("BindingQualifiedName() = %q, want %q", got, tt.wantBQN)
 			}
 		})
 	}

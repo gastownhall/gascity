@@ -24,7 +24,7 @@ The current model tangles three concerns that should be separate: portable **def
 
 5. **Managed state has no clear home.** `workspace.name`, `rig.path`, and operational toggles live in checked-in TOML alongside shareable definition. We want clean separation: `pack.toml` is the *definition* (what this city is), `city.toml` is the *deployment plan* (team-shared decisions about how to run it), `.gc/` is the *site binding* (machine-local state that attaches the deployment to a specific filesystem).
 
-This proposal does not cover `.gc/` internals beyond what the pack changes require, package registry/distribution (though it's compatible with a future registry), or the mechanical migration UX for breaking existing cities. Old cities may hard-break until migrated; the public migration path is `gc doctor` followed by `gc doctor --fix`.
+This proposal does not cover `.gc/` internals beyond what the pack changes require, any package-registry or implicit-import surface, or the mechanical migration UX for breaking existing cities. Old cities may hard-break until migrated; the public migration path is `gc doctor` followed by `gc doctor --fix`.
 ## Proposed change
 
 ### Cities
@@ -84,8 +84,7 @@ source = "./assets/maintenance"
 # Pack-wide agent defaults — individual agents defined in agents/ directories
 # City-level [agent_defaults] in city.toml can override these.
 [agent_defaults]
-default_sling_formula = "mol-do-work"
-append_fragments = ["operational-awareness"]
+provider = "claude"
 
 [[named_session]]
 template = "mayor"
@@ -115,7 +114,7 @@ name = "frontend"
 max_active_sessions = 2
 ```
 
-Site binding (today: rig paths) is managed by `gc` commands and stored in `.gc/`:
+Site binding (rig paths, suspended flags, prefixes) is managed by `gc` commands and stored in `.gc/`:
 
 ```
 gc rig add ~/src/api-server --name api-server
@@ -140,7 +139,7 @@ Everything else — agents, named sessions, providers, formulas, prompts, script
 
 `gc register` accepts `--name` to set the city's registration name explicitly. The chosen name is stored in the machine-local supervisor registry and is not written back to `city.toml`. When `--name` is omitted, `gc register` uses the current effective city identity (site-bound workspace name if present, otherwise legacy `workspace.name`, otherwise the directory basename) and stores that value in the registry. `gc register` does not rewrite `city.toml` or `pack.toml`. ([#602](https://github.com/gastownhall/gascity/issues/602))
 
-Names and prefixes are both managed by `gc`, but the current Phase A rollout only moves the machine-local rig path into `.gc/`. Rig names, prefixes, and suspended flags still live in `city.toml` for now. Names are human-facing labels; prefixes are derived from names and baked into bead IDs. Neither should be casually changed after creation.
+Names and prefixes are both managed by `gc`. The authoritative copy lives in `.gc/`. Names are human-facing labels; prefixes are derived from names and baked into bead IDs. Neither should be casually changed after creation.
 
 #### Renaming
 
@@ -175,8 +174,8 @@ name = "gastown"
 version = "1.2.0"
 
 [agent_defaults]
-default_sling_formula = "mol-do-work"
-append_fragments = ["operational-awareness"]
+provider = "claude"
+scope = "rig"
 ```
 
 ```
@@ -231,11 +230,7 @@ version = "^1.2"
 
 Local path imports have no version constraint.
 
-Resolved versions for remote imports are recorded in the lock file (`packs.lock`; format owned by [doc-packman.md](doc-packman.md)). The loader reads the lock file to find which commit each import resolves to and which directory under `~/.gc/cache/repos/` holds it. The loader itself does not clone git — that responsibility belongs to the built-in `gc import install`. A missing lock entry is a load-time error telling the user to run `gc import install`.
-
-#### Implicit imports
-
-Some packs are spliced into every city without the city declaring them. The set lives in `~/.gc/implicit-import.toml`, managed by the bootstrap/init flow and consumed by the loader. At load time the loader reads that file and treats each entry as if the root pack had declared it, recording `parent = "(implicit)"` in provenance. This is how bootstrap-managed packs such as `registry` can load for every city without being authored in every city. `gc import` itself is a built-in command surface, not an implicit pack.
+Resolved versions for remote imports are recorded in the lock file (`packs.lock`; format owned by [doc-packman.md](doc-packman.md)). The loader reads the lock file to find which commit each import resolves to and which directory under `~/.gc/cache/repos/` holds it. The loader itself does not clone git or self-heal missing state — that responsibility belongs to `gc import install`. A missing lock entry or cache entry is a load-time error telling the user to run `gc import install`.
 
 #### Transitive import and export
 
@@ -265,7 +260,7 @@ With `export = true`, maintenance's agents appear flattened into gastown's names
 
 #### Lock file model
 
-The root city's lock file records every pack in the entire transitive import graph. Imported packs do **not** carry their own lock files. `gc import install` walks the full DAG from the root and writes one flat `packs.lock` at the root. This is the npm/Cargo model: one source of truth, one place for version-conflict resolution, one file read for the loader. See [doc-packman.md](doc-packman.md) for the lock file format.
+The root city's lock file (`packs.lock`) records every pack in the entire transitive import graph. Imported packs do **not** carry their own lock files. `gc import install` is the only command that bootstraps or repairs this file: when `packs.lock` is missing it resolves the declared graph and writes it, and when `packs.lock` is present it restores the cache from that committed state. Normal load/start/config flows remain pure readers. See [doc-packman.md](doc-packman.md) for the lock file format.
 
 #### Lifecycle verbs
 
@@ -274,7 +269,7 @@ Four distinct operations, currently partially conflated:
 | Operation | Verb | What it does |
 |---|---|---|
 | Define a city's contents | `gc init` (creates files), or hand-edit | Creates pack.toml, city.toml, directory structure |
-| Install a city's packs | `gc import install` | Materializes all imports into the cache; writes the lock file |
+| Install a city's packs | `gc import install` | Bootstraps or repairs `packs.lock` and materializes all imports into the cache |
 | Register a city with the controller | `gc register` | Binds the city to `.gc/`; tells the controller it exists |
 | Start the city's runtime | `gc start` | Controller activates the registered city |
 
@@ -300,7 +295,7 @@ Rig-level imports produce rig-scoped agents: `api-server/gastown.polecat`. City-
 
 #### Default rig imports
 
-The current `workspace.default_rig_includes` becomes a default imports block for new rigs:
+The current `workspace.default_rig_includes` becomes `[defaults.rig.imports.<binding>]` entries for new rigs:
 
 ```toml
 # pack.toml
@@ -337,7 +332,7 @@ my-pack/
 | `[[agent]]` tables in pack.toml | `agents/<name>/` directory exists → agent exists |
 | `prompt_template = "prompts/mayor.md"` | `agents/<name>/prompt.md` |
 | `[[formula]].path` | File exists in `formulas/` → it's a formula |
-| `overlay_dir = "overlays/default"` | `overlay/` + `agents/<name>/overlay/` |
+| `overlay_dir = "overlay/default"` | `overlay/` + `agents/<name>/overlay/` |
 | `scripts_dir = "scripts"` | Gone. Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
 | `[formulas].dir` | Gone. `formulas/` is a fixed convention, not a configurable path |
 
@@ -397,8 +392,8 @@ Per-machine state lives in `.gc/` and is managed by `gc` commands:
 | Category | Examples | Set by |
 |---|---|---|
 | **Identity bindings** | Workspace name, workspace prefix | `gc init`, `gc config set` |
-| **Rig bindings** | Rig paths | `gc rig add` |
-| **Operational toggles** | Runtime-only local flags and state | `gc` runtime |
+| **Rig bindings** | Rig paths, rig prefixes | `gc rig add` |
+| **Operational toggles** | Rig suspended flag | `gc rig suspend/resume` |
 | **Machine-local config** | api.bind, session.socket, dolt.host | `gc config set` |
 | **Runtime state** | Sessions, beads, caches, logs, sockets | `gc` runtime |
 
@@ -429,7 +424,7 @@ A declared-but-unbound rig is a valid state. `gc start` warns about unbound rigs
 ## Scope and impact
 
 - **Breaking:** `includes` replaced by `[imports]`. `[[agent]]` tables move to `agents/` directories. `workspace.name` moves to `.gc/`. `fallback = true` removed (replaced by qualified names + explicit precedence). Pack globals are now scoped to the originating pack instead of applying city-wide.
-- **New concepts:** Import model with aliasing, versioning, transitive-by-default imports, flattened re-export, single root lock file. Implicit imports via `~/.gc/implicit-import.toml`. Lock file consumption (loader is a reader; `gc import` owns the cache). Shadow warnings. Lifecycle verb separation (define / install / register / start).
+- **New concepts:** Import model with aliasing, versioning, transitive-by-default imports, flattened re-export, single root lock file (`packs.lock`). Lock file consumption (loader is a reader; `gc import` owns bootstrap, repair, and cache materialization). Shadow warnings. Lifecycle verb separation (define / install / register / start).
 - **Config split:** Current city.toml splits into pack.toml (definition) + city.toml (deployment) + `.gc/` (site binding).
 - **Convention:** Filesystem layout replaces most TOML path declarations.
 - **Migration:** Hard cutover. `gc doctor` detects V1 patterns and `gc doctor --fix` handles the safe mechanical conversion. `gc import migrate` is no longer the primary public path. After one release of deprecation warnings, the V2 loader will refuse V1 shapes.
@@ -489,7 +484,7 @@ backlog.
 | Field | pack.toml | city.toml | `.gc/` | Rationale |
 |---|---|---|---|---|
 | `[imports]` | **yes** | | | What packs compose this city |
-| `[defaults.rig.imports]` | **yes** | | | Default imports for new rigs |
+| `[defaults.rig.imports.<binding>]` | **yes** | | | Default imports for new rigs |
 
 ### Agents and sessions
 
@@ -513,8 +508,8 @@ backlog.
 |---|---|---|---|---|
 | `[[rigs]].name` | | **yes** | | Structural deployment config |
 | `[[rigs]].path` | | | **yes** | Machine-local binding |
-| `[[rigs]].prefix` | | **yes** | | Derived, baked into bead IDs |
-| `[[rigs]].suspended` | | **yes** | | Operational toggle |
+| `[[rigs]].prefix` | | | **yes** | Derived, baked into bead IDs |
+| `[[rigs]].suspended` | | | **yes** | Operational toggle |
 | `[[rigs]].imports` | | **yes** | | Team-shared rig composition |
 | `[[rigs]].patches` | | **yes** | | Deployment-specific customization |
 | `[[rigs]].max_active_sessions` | | **yes** | | Deployment capacity |

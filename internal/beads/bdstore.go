@@ -650,6 +650,9 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")
 	}
+	if !query.CreatedBefore.IsZero() {
+		args = append(args, "--created-before", query.CreatedBefore.Format(time.RFC3339Nano))
+	}
 	args = append(args, "--include-infra", "--include-gates", "--limit", fmt.Sprintf("%d", limit))
 	if query.ParentID != "" {
 		args = append(args, "--parent", query.ParentID)

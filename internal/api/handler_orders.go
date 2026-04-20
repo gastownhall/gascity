@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -16,6 +14,7 @@ import (
 var (
 	errOrderNotFound  = errors.New("order not found")
 	errOrderAmbiguous = errors.New("ambiguous order name")
+	errNoOrderStores  = errors.New("order bead stores unavailable")
 )
 
 type orderResponse struct {
@@ -91,28 +90,6 @@ func toOrderResponse(a orders.Order) orderResponse {
 		Enabled:       a.IsEnabled(),
 		Rig:           a.Rig,
 		CaptureOutput: a.IsExec(), // exec orders capture output
-	}
-}
-
-func beadLastRunFunc(store beads.Store) orders.LastRunFunc {
-	return func(name string) (time.Time, error) {
-		if store == nil {
-			return time.Time{}, nil
-		}
-		label := "order-run:" + name
-		results, err := store.List(beads.ListQuery{
-			Label:         label,
-			Limit:         1,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-		})
-		if err != nil {
-			return time.Time{}, err
-		}
-		if len(results) == 0 {
-			return time.Time{}, nil
-		}
-		return results[0].CreatedAt, nil
 	}
 }
 

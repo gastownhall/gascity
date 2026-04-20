@@ -376,8 +376,12 @@ func sendControllerCommand(cityPath, command string) ([]byte, error) {
 }
 
 func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout time.Duration) ([]byte, error) {
+	return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 5*time.Second, readTimeout)
+}
+
+func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
 	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
 		return nil, controllerCommandError{
 			op:          "connecting to controller",
@@ -385,9 +389,9 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 			unavailable: true,
 		}
 	}
-	defer conn.Close()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(readTimeout))      //nolint:errcheck
+	defer conn.Close()                                  //nolint:errcheck
+	conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck
+	conn.SetReadDeadline(time.Now().Add(readTimeout))   //nolint:errcheck
 	if _, err := conn.Write([]byte(command + "\n")); err != nil {
 		return nil, fmt.Errorf("sending command: %w", err)
 	}
@@ -414,20 +418,11 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 // to the controller.sock and sending a "ping". Returns the PID if alive,
 // or 0 if not reachable.
 func controllerAlive(cityPath string) int {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	resp, err := sendControllerCommandWithTimeouts(cityPath, "ping", 500*time.Millisecond, 500*time.Millisecond, 2*time.Second)
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()                                    //nolint:errcheck // best-effort
-	conn.Write([]byte("ping\n"))                          //nolint:errcheck // best-effort
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck // best-effort
-	buf := make([]byte, 64)
-	n, err := conn.Read(buf)
-	if err != nil || n == 0 {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(resp)))
 	if err != nil {
 		return 0
 	}
@@ -774,11 +769,8 @@ func reloadWarningsFromError(err error) []string {
 // canonical/compat default tables stay strict-fatal unless --no-strict
 // disables the gate.
 func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
-	// Auto-fetch remote packs before full config load (mirrors cmd_start).
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityRoot); fErr != nil {
-			return nil, fmt.Errorf("fetching packs: %w", fErr)
-		}
+	if err := ensureLegacyNamedPacksCached(cityRoot); err != nil {
+		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
 
 	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)

@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -43,6 +42,14 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	return cmd.CombinedOutput()
 }
 
+func logDispatchError(stderr io.Writer, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	log.Print(msg)
+	if stderr != nil {
+		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+	}
+}
+
 type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 
 // memoryOrderDispatcher is the production implementation.
@@ -65,12 +72,12 @@ type memoryOrderDispatcher struct {
 func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher {
 	allAA, err := scanAllOrders(cityPath, cfg, stderr, "gc start: order scan")
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: order scan: %v\n", err) //nolint:errcheck // best-effort stderr
+		logDispatchError(stderr, "gc start: order scan: %v", err)
 		return nil
 	}
 	if len(cfg.Orders.Overrides) > 0 {
 		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			fmt.Fprintf(stderr, "gc start: order overrides: %v\n", err) //nolint:errcheck // best-effort stderr
+			logDispatchError(stderr, "gc start: order overrides: %v", err)
 		}
 	}
 
@@ -123,7 +130,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 		target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
 		if err != nil {
-			fmt.Fprintf(m.stderr, "gc: order dispatch: resolving target for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
+			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
 		}
 
@@ -132,7 +139,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if !ok {
 			store, err = m.storeFn(target)
 			if err != nil {
-				fmt.Fprintf(m.stderr, "gc: order dispatch: opening %s store for %s: %v\n", target.ScopeKind, a.ScopedName(), err) //nolint:errcheck
+				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
 				continue
 			}
 			stores[storeKey] = store
@@ -146,7 +153,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if legacyStore != nil {
 			storesForGate = append(storesForGate, legacyStore)
 		}
-		baseLastRunFn := orderLastRunFnAcrossStores(storesForGate...)
+		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
 			last, err := baseLastRunFn(orderName)
@@ -155,11 +162,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			return last, err
 		}
-		cursorFn := bdCursorFuncAcrossStores(storesForGate...)
+		cursorFn := orders.CursorAcrossStores(storesForGate...)
 		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
-				fmt.Fprintf(m.stderr, "gc: order dispatch: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
+				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 				continue
 			}
 			cursorFn = func(string) uint64 {
@@ -168,7 +175,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		result := orders.CheckTrigger(a, now, lastRunFn, m.ep, cursorFn)
 		if lastRunErr != nil {
-			fmt.Fprintf(m.stderr, "gc: order dispatch: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck
+			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue
 		}
 		if !result.Due {
@@ -179,7 +186,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		scoped := a.ScopedName()
 		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
 		if err != nil {
-			fmt.Fprintf(m.stderr, "gc: order dispatch: checking open work for %s: %v\n", scoped, err) //nolint:errcheck
+			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
 		}
 		if hasOpenWork {
@@ -193,7 +200,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			Labels: []string{"order-run:" + scoped, labelOrderTracking},
 		})
 		if err != nil {
-			fmt.Fprintf(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v\n", scoped, err) //nolint:errcheck
+			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
 			continue
 		}
 
@@ -214,7 +221,7 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	}
 	store, err := m.storeFn(legacyTarget)
 	if err != nil {
-		fmt.Fprintf(m.stderr, "gc: order dispatch: opening legacy city store for rig order fallback: %v\n", err) //nolint:errcheck
+		logDispatchError(m.stderr, "gc: order dispatch: opening legacy city store for rig order fallback: %v", err)
 		return nil, false
 	}
 	stores[key] = store
@@ -254,9 +261,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
 		labels = append(labels, "exec-failed")
-		fmt.Fprintf(m.stderr, "gc: order exec %s failed: %v\n", scoped, err) //nolint:errcheck
+		logDispatchError(m.stderr, "gc: order exec %s failed: %v", scoped, err)
 		if len(output) > 0 {
-			fmt.Fprintf(m.stderr, "gc: order exec %s output: %s\n", scoped, output) //nolint:errcheck
+			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, output)
 		}
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -274,76 +281,6 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 
 	// Label tracking bead with outcome via store (not CLI).
 	store.Update(trackingID, beads.UpdateOpts{Labels: labels}) //nolint:errcheck // best-effort
-}
-
-func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error) {
-	if strings.TrimSpace(a.Rig) == "" {
-		prefix := ""
-		if cfg != nil {
-			prefix = config.EffectiveHQPrefix(cfg)
-		}
-		return execStoreTarget{ScopeRoot: cityPath, ScopeKind: "city", Prefix: prefix}, nil
-	}
-	if cfg == nil {
-		return execStoreTarget{}, fmt.Errorf("rig-scoped order %q requires city config", a.ScopedName())
-	}
-	resolveRigPaths(cityPath, cfg.Rigs)
-	rig, ok := rigByName(cfg, a.Rig)
-	if !ok {
-		return execStoreTarget{}, fmt.Errorf("rig %q not found in %s", a.Rig, filepath.Join(cityPath, "city.toml"))
-	}
-	if strings.TrimSpace(rig.Path) == "" {
-		return execStoreTarget{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before dispatching rig-scoped orders", rig.Name, rig.Name)
-	}
-	return execStoreTarget{
-		ScopeRoot: rig.Path,
-		ScopeKind: "rig",
-		Prefix:    rig.EffectivePrefix(),
-		RigName:   rig.Name,
-	}, nil
-}
-
-func resolveOrderExecTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error) {
-	return resolveOrderStoreTarget(cityPath, cfg, a)
-}
-
-func orderStoreTargetKey(target execStoreTarget) string {
-	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
-}
-
-func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) []string {
-	var env map[string]string
-	if target.ScopeKind == "rig" {
-		env = bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot)
-	} else {
-		env = bdRuntimeEnv(cityPath)
-		env["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
-	}
-	env["GC_STORE_ROOT"] = target.ScopeRoot
-	env["GC_STORE_SCOPE"] = target.ScopeKind
-	env["GC_BEADS_PREFIX"] = target.Prefix
-	if target.ScopeKind == "rig" {
-		env["GC_RIG"] = target.RigName
-		env["GC_RIG_ROOT"] = target.ScopeRoot
-	} else {
-		env["GC_RIG"] = ""
-		env["GC_RIG_ROOT"] = ""
-	}
-	if a.Source != "" {
-		env["ORDER_DIR"] = filepath.Dir(a.Source)
-	}
-	if a.FormulaLayer != "" {
-		packDir := filepath.Dir(a.FormulaLayer)
-		env["PACK_DIR"] = packDir
-		env["GC_PACK_DIR"] = packDir
-
-		packName := filepath.Base(packDir)
-		if packName != "." && packName != string(filepath.Separator) {
-			env["GC_PACK_NAME"] = packName
-			env["GC_PACK_STATE_DIR"] = citylayout.PackStateDir(cityPath, packName)
-		}
-	}
-	return mergeRuntimeEnv(nil, env)
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
@@ -388,7 +325,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		pool := qualifyPool(a.Pool, a.Rig)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
-			fmt.Fprintf(m.stderr, "gc: order %s: routing decoration failed: %v\n", scoped, err) //nolint:errcheck
+			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
 		}
 	}
@@ -422,7 +359,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
-		fmt.Fprintf(m.stderr, "gc: order %s: failed to label wisp %s: %v\n", scoped, rootID, err) //nolint:errcheck
+		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",

@@ -193,18 +193,8 @@ func TestEnsureBootstrapForCityNonCollidingImportsAllowWrite(t *testing.T) {
 	}
 }
 
-// TestBootstrapManagedNames_MatchesBootstrapPacks asserts that the
-// duplicated bootstrap-managed name list in internal/config/compose.go
-// (exposed via config.BootstrapManagedImportNames) agrees with this
-// package's BootstrapPackNames. The duplication exists because
-// internal/config cannot import internal/bootstrap without a cycle;
-// this test catches drift if one list is updated without the other.
-func TestBootstrapManagedNames_MatchesBootstrapPacks(t *testing.T) {
-	bootstrap := PackNames()
-	composer := config.BootstrapManagedImportNames()
-	sort.Strings(bootstrap)
-	sort.Strings(composer)
-	if !reflect.DeepEqual(bootstrap, composer) {
-		t.Fatalf("bootstrap pack name list drift:\n  PackNames()            = %v\n  config.BootstrapManagedImportNames() = %v", bootstrap, composer)
+func TestBootstrapPacksDefaultToEmpty(t *testing.T) {
+	if got := PackNames(); len(got) != 0 {
+		t.Fatalf("PackNames() = %v, want no default bootstrap implicit imports", got)
 	}
 }

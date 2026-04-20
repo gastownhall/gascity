@@ -54,16 +54,6 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 	return timeout
 }
 
-func fetchCityPacksIfNeeded(cityPath string) error {
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
-		if err := config.FetchPacks(quickCfg.Packs, cityPath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func effectiveCityName(cityPath string) (string, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
@@ -179,7 +169,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 			return 1
 		}
 	}
-	if err := fetchCityPacksIfNeeded(cityPath); err != nil {
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -412,6 +402,18 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 	}
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
+
+	// If the city directory is gone, there's nothing to wait on or restore.
+	// Skip the supervisor-side probes that would otherwise spew
+	// "probing standalone controller" + "restore failed" on a missing path
+	// (the unregister itself already succeeded; the supervisor's next
+	// reconcile will drop the dead city).
+	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
+		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
+			return true, 1
+		}
+		return true, 0
+	}
 
 	if supervisorAliveHook() != 0 {
 		if reloadSupervisorHook(stdout, stderr) != 0 {

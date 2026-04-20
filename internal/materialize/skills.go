@@ -18,9 +18,9 @@
 // The package owns three responsibilities:
 //
 //  1. Source discovery — enumerate the union of (city pack skills) ∪
-//     (each bootstrap implicit-import pack's skills) ∪ (the agent's
-//     local skills) and resolve the precedence rule (city > bootstrap;
-//     agent-local wins on collision with the shared catalog).
+//     (imported pack shared-skill catalogs) ∪ (legacy compatibility
+//     bootstrap pack skills, when present) ∪ (the agent's local
+//     skills), with agent-local entries winning on collision.
 //  2. Cleanup by ownership-by-target-prefix — symlinks under the sink
 //     whose target lives under a known gc-managed root are owned and
 //     pruned/replaced; everything else is left alone.
@@ -113,9 +113,10 @@ type ShadowedEntry struct {
 	Loser string
 }
 
-// CityCatalog is the city-wide shared skill catalog: the union of the
-// current city pack's skills and every bootstrap implicit-import pack's
-// skills, with city-pack entries winning on name collision.
+// CityCatalog is the shared skill catalog for a city: the union of the
+// current city pack's skills, imported pack catalogs, and any legacy
+// compatibility bootstrap packs, with earlier layers winning on name
+// collision.
 //
 // CityCatalog is independent of any specific agent and may be reused
 // across all agents in the same city.
@@ -157,10 +158,10 @@ type AgentCatalog struct {
 // from pack imports. Each catalog contributes `<binding>.<name>`
 // entries to the shared city catalog.
 //
-// Bootstrap implicit-import packs are read from
-// ~/.gc/implicit-import.toml via config.ReadImplicitImports. Each
-// pack's skills/ subdirectory is enumerated and added to the catalog.
-// City-pack entries win on name collision with bootstrap entries.
+// Legacy compatibility bootstrap packs are read from
+// ~/.gc/implicit-import.toml via config.ReadImplicitImports. On the gc
+// import launch path this is usually empty because BootstrapPacks is
+// empty, but upgraded installs may still carry compatibility state.
 func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCatalog) (CityCatalog, error) {
 	var (
 		cat       CityCatalog
@@ -210,7 +211,8 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 		addRoot(bd.Dir)
 	}
 
-	// City pack first — wins precedence over bootstrap entries.
+	// City pack first — wins precedence over imported and compatibility
+	// bootstrap entries.
 	if packSkillsDir != "" {
 		entries, err := readSkillDir(packSkillsDir, "city")
 		if err != nil {
@@ -245,7 +247,7 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 	for _, bd := range bootstrapDirs {
 		entries, err := readSkillDir(bd.Dir, bd.Name)
 		if err != nil {
-			return cat, fmt.Errorf("reading bootstrap pack %q skills %q: %w", bd.Name, bd.Dir, err)
+			return cat, fmt.Errorf("reading compatibility bootstrap pack %q skills %q: %w", bd.Name, bd.Dir, err)
 		}
 		for _, e := range entries {
 			addEntry(e)

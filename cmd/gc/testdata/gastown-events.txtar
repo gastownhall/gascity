@@ -23,22 +23,22 @@ exec grep 'gc-1' .gc/events.jsonl
 # --- 2. Mail operations emit events ---
 
 exec gc mail send mayor 'Deploy status?'
-exec gc mail read gc-3
+exec gc mail read gc-2
 
 exec grep 'mail.sent' .gc/events.jsonl
 exec grep 'mail.read' .gc/events.jsonl
-exec grep 'gc-3' .gc/events.jsonl
+exec grep 'gc-2' .gc/events.jsonl
 
 # --- 3. Convoy operations emit events ---
 
 exec bd create 'Task A'
-exec gc convoy create 'Sprint' gc-4
+exec gc convoy create 'Sprint' gc-3
 exec grep 'convoy.created' .gc/events.jsonl
-exec grep 'gc-5' .gc/events.jsonl
+exec grep 'gc-4' .gc/events.jsonl
 
-exec gc convoy close gc-5
+exec gc convoy close gc-4
 exec grep 'convoy.closed' .gc/events.jsonl
-exec grep 'gc-5' .gc/events.jsonl
+exec grep 'gc-4' .gc/events.jsonl
 
 # --- 4. Custom events via gc event emit ---
 

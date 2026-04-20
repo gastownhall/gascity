@@ -965,6 +965,89 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 	}
 }
 
+func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "test-city",
+		cfg:                 &config.City{},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		wg:                  fixedWispGC{purged: 2, err: fmt.Errorf("delete failed")},
+		rec:                 events.Discard,
+		logPrefix:           "test-city",
+		stdout:              &stdout,
+		stderr:              &stderr,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+
+	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
+		t.Fatalf("stderr = %q, want wisp gc error", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Bead GC: purged 2 expired bead(s)") {
+		t.Fatalf("stdout = %q, want purge count despite non-fatal error", stdout.String())
+	}
+}
+
+func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "test-city",
+		cfg:                 &config.City{},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		wg: fixedWispGC{err: fmt.Errorf("%s\n%s",
+			"deleting expired bead \"mol-1\": delete failed",
+			"listing closed order-tracking beads: list failed",
+		)},
+		rec:       events.Discard,
+		logPrefix: "test-city",
+		stdout:    io.Discard,
+		stderr:    &stderr,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+
+	got := stderr.String()
+	for _, want := range []string{
+		"test-city: wisp gc: deleting expired bead \"mol-1\": delete failed\n",
+		"test-city: wisp gc: listing closed order-tracking beads: list failed\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want line %q", got, want)
+		}
+	}
+}
+
+type fixedWispGC struct {
+	purged int
+	err    error
+}
+
+func (f fixedWispGC) shouldRun(time.Time) bool {
+	return true
+}
+
+func (f fixedWispGC) runGC(beads.Store, time.Time) (int, error) {
+	return f.purged, f.err
+}
+
 func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{

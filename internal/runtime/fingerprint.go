@@ -308,13 +308,14 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 	}
 	fmt.Fprintf(w, "  config-drift-diag %s: drifted fields: %s\n", name, strings.Join(diffs, ", ")) //nolint:errcheck // best-effort diag
 	for _, field := range diffs {
+		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedBreakdown[field], currentBreakdown[field]) //nolint:errcheck // best-effort diag
 		switch field {
 		case "Command":
 			fmt.Fprintf(w, "    Command: %q\n", current.Command) //nolint:errcheck // best-effort diag
 		case "Env":
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
-			fmt.Fprintf(w, "    FPExtra: %v\n", current.FingerprintExtra) //nolint:errcheck // best-effort diag
+			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", current.FingerprintExtra, len(current.FingerprintExtra)) //nolint:errcheck // best-effort diag
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":

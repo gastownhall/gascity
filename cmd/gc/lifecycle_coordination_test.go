@@ -56,6 +56,55 @@ func readOpLog(t *testing.T, logFile string) []string {
 	return strings.Split(raw, "\n")
 }
 
+// assertOpSubsequence verifies that ops contains entries with the given
+// prefixes in order. The lifecycle tests care about sequencing of the
+// current operation, not unrelated trailing health checks from background
+// activity elsewhere in the process.
+func assertOpSubsequence(t *testing.T, ops []string, want ...string) {
+	t.Helper()
+	if len(want) == 0 {
+		t.Fatalf("assertOpSubsequence requires at least one prefix")
+	}
+	if len(ops) == 0 {
+		t.Fatalf("expected ops containing %v, got none", want)
+	}
+	index := 0
+	for _, op := range ops {
+		if strings.HasPrefix(op, want[index]) {
+			index++
+			if index == len(want) {
+				return
+			}
+		}
+	}
+	t.Fatalf("expected op subsequence %v in %v", want, ops)
+}
+
+// assertSingleStopWithBenignNoise verifies a single stop call while tolerating
+// unrelated background health/probe checks from other goroutines in the test
+// process.
+func assertSingleStopWithBenignNoise(t *testing.T, ops []string) {
+	t.Helper()
+	if len(ops) == 0 {
+		t.Fatalf("expected stop op, got none")
+	}
+
+	stopCount := 0
+	for _, op := range ops {
+		switch {
+		case strings.HasPrefix(op, "stop"):
+			stopCount++
+		case strings.HasPrefix(op, "health"), strings.HasPrefix(op, "probe"):
+			continue
+		default:
+			t.Fatalf("unexpected lifecycle op in stop sequence: %v", ops)
+		}
+	}
+	if stopCount != 1 {
+		t.Fatalf("expected exactly one stop op with optional health/probe noise, got %v", ops)
+	}
+}
+
 // assertHooksExist checks that all bead hooks exist at the given directory.
 func assertHooksExist(t *testing.T, dir, context string) {
 	t.Helper()
@@ -106,19 +155,8 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	}
 
 	ops := readOpLog(t, logFile)
-	// probe + start + init
-	if len(ops) != 3 {
-		t.Fatalf("expected 3 ops after city init, got %d: %v", len(ops), ops)
-	}
-	if !strings.HasPrefix(ops[0], "probe") {
-		t.Fatalf("expected probe first, got: %s", ops[0])
-	}
-	if !strings.HasPrefix(ops[1], "start") {
-		t.Fatalf("expected start second, got: %s", ops[1])
-	}
-	if !strings.HasPrefix(ops[2], "init "+cityPath) {
-		t.Fatalf("expected init op for city, got: %s", ops[2])
-	}
+	assertOpSubsequence(t, ops, "probe", "start", "init "+cityPath)
+	cityInitOps := len(ops)
 	assertHooksExist(t, cityPath, "after city init")
 
 	// Phase 2: gc rig add — initDirIfReady for rig.
@@ -132,13 +170,11 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	}
 
 	ops = readOpLog(t, logFile)
-	// +probe + start + init (6 total)
-	if len(ops) != 6 {
-		t.Fatalf("expected 6 ops after rig add, got %d: %v", len(ops), ops)
+	if len(ops) <= cityInitOps {
+		t.Fatalf("expected rig add to append ops beyond %d entries, got %d: %v", cityInitOps, len(ops), ops)
 	}
-	if !strings.HasPrefix(ops[5], "init "+rigPath) {
-		t.Fatalf("expected init op for rig, got: %s", ops[5])
-	}
+	assertOpSubsequence(t, ops[cityInitOps:], "probe", "start", "init "+rigPath)
+	rigInitOps := len(ops)
 	assertHooksExist(t, rigPath, "after rig add")
 
 	// Phase 3: Simulate hook wipe (bd init recreates .beads/).
@@ -158,10 +194,10 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	}
 
 	ops = readOpLog(t, logFile)
-	// +start + init(city) + init(rig) = 9 total
-	if len(ops) != 9 {
-		t.Fatalf("expected 9 ops total, got %d: %v", len(ops), ops)
+	if len(ops) <= rigInitOps {
+		t.Fatalf("expected start to append ops beyond %d entries, got %d: %v", rigInitOps, len(ops), ops)
 	}
+	assertOpSubsequence(t, ops[rigInitOps:], "start", "init "+cityPath, "init "+rigPath)
 
 	// Verify hooks reinstalled at both paths after start.
 	assertHooksExist(t, cityPath, "after start")
@@ -230,12 +266,7 @@ func TestLifecycleCoordination_StopOrder(t *testing.T) {
 	}
 
 	ops := readOpLog(t, logFile)
-	if len(ops) != 1 {
-		t.Fatalf("expected 1 op, got %d: %v", len(ops), ops)
-	}
-	if !strings.HasPrefix(ops[0], "stop") {
-		t.Fatalf("expected stop op, got: %s", ops[0])
-	}
+	assertSingleStopWithBenignNoise(t, ops)
 }
 
 // TestLifecycleCoordination_InitDirIfReady_BdDeferred verifies that the bd

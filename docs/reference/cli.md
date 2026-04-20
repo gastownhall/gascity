@@ -1028,11 +1028,12 @@ gc import
 | Subcommand | Description |
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
-| [gc import install](#gc-import-install) | Install imports from packs.lock |
+| [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
+| [gc import why](#gc-import-why) | Explain why an import is present |
 
 ## gc import add
 
@@ -1049,7 +1050,7 @@ gc import add <source> [flags]
 
 ## gc import install
 
-Install imports from packs.lock
+Install imports from pack.toml and packs.lock
 
 ```
 gc import install
@@ -1099,6 +1100,14 @@ Upgrade imported packs within their constraints
 gc import upgrade [name]
 ```
 
+## gc import why
+
+Explain why an import is present
+
+```
+gc import why <name-or-source>
+```
+
 ## gc init
 
 Create a new Gas City workspace in the given directory (or cwd).
@@ -1130,7 +1139,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
-| `--name` | string |  | machine-local city name (default: source template's workspace.name if set, else source pack.name if set, else target directory basename) |
+| `--name` | string |  | workspace name (default: target directory basename) |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1524,6 +1533,20 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
+Pass --strict to fail on debugging mistakes instead of silently falling
+back to the default prompt. Strict errors on:
+
+  - no city config found
+  - city config fails to load
+  - no agent name given (from args, GC_ALIAS, or GC_AGENT)
+  - agent name not in city config (typo detection — the main use case)
+  - agent's prompt_template points at a file that cannot be read
+
+Strict does NOT error on agents whose config intentionally lacks a
+prompt_template (a supported minimal config), on templates that render
+to empty output from valid conditional logic, or on suspended states
+(city or agent) — those are legitimate quiet states, not mistakes.
+
 ```
 gc prime [agent-name] [flags]
 ```
@@ -1532,6 +1555,7 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 | `--hook-format` | string |  | format hook output for a provider |
+| `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
 
 ## gc register
 
@@ -2212,7 +2236,7 @@ List skills visible to the current city.
 Output includes:
   - City pack skills (skills/&lt;name&gt;/SKILL.md under the city root)
   - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
-  - Bootstrap implicit-import pack skills (e.g. core)
+  - Compatibility bootstrap skills, when legacy implicit imports still exist
   - With --agent/--session: that agent's agents/&lt;name&gt;/skills/ catalog
 
 The listing is a diagnostic view of what's *available*. It does not

@@ -32,6 +32,8 @@ fi
 # is wrapped in run_bounded so an unresponsive server — the very
 # failure mode `gc dolt recover` exists to handle — cannot hang the
 # script indefinitely. Mirrors the patterns established in health/run.sh.
+# This table-only probe intentionally avoids DROP DATABASE; explicit
+# managed probe recovery is available through `gc dolt-state reset-probe`.
 check_read_only() {
   host="${GC_DOLT_HOST:-127.0.0.1}"
   args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"

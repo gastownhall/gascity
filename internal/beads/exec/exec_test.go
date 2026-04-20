@@ -1001,3 +1001,41 @@ esac
 		}
 	}
 }
+
+func TestListWithCreatedBeforeDoesNotForwardLimitBeforeClientFilter(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{
+		Type:          "task",
+		CreatedBefore: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
+		Limit:         7,
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	if strings.Contains(argsText, "--limit=7") {
+		t.Fatalf("list args should not limit before created-before filtering: %s", argsText)
+	}
+	if !strings.Contains(argsText, "--type=task") {
+		t.Fatalf("list args missing type filter: %s", argsText)
+	}
+}

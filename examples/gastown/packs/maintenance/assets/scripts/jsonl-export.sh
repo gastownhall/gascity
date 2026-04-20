@@ -31,8 +31,9 @@ if [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_STATE_FILE" ]; then
 fi
 mkdir -p "$(dirname "$STATE_FILE")"
 
-# Discover databases.
-DATABASES=$(dolt sql -P "$DOLT_PORT" -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -v '^information_schema$\|^mysql$' || true)
+# Discover databases. Exclude Dolt/MySQL system schemas and Gas City's internal
+# health-probe database; the remaining databases are expected to be bead stores.
+DATABASES=$(dolt sql -P "$DOLT_PORT" -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$' || true)
 if [ -z "$DATABASES" ]; then
     exit 0
 fi

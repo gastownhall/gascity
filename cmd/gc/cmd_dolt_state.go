@@ -34,6 +34,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		userText      string
 		checkReadOnly bool
 		checkDeleted  bool
+		forceReset    bool
 		logLevel      string
 		timeoutMS     int
 	)
@@ -270,6 +271,30 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	readOnlyCheck.Flags().StringVar(&userText, "user", "", "Dolt user")
 	_ = readOnlyCheck.MarkFlagRequired("port")
 	cmd.AddCommand(readOnlyCheck)
+
+	resetProbe := &cobra.Command{
+		Use:    "reset-probe",
+		Short:  "Drop the managed Dolt health probe database",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if !forceReset {
+				fmt.Fprintf(stderr, "gc dolt-state reset-probe: refusing to drop %s without --force; this database may contain a legacy bead store in old metadata\n", managedDoltProbeDatabase) //nolint:errcheck
+				return errExit
+			}
+			if err := managedDoltResetProbe(hostText, portText, userText); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state reset-probe: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	resetProbe.Flags().StringVar(&hostText, "host", "", "Dolt host")
+	resetProbe.Flags().StringVar(&portText, "port", "", "Dolt port")
+	resetProbe.Flags().StringVar(&userText, "user", "", "Dolt user")
+	resetProbe.Flags().BoolVar(&forceReset, "force", false, "acknowledge dropping the managed probe database")
+	_ = resetProbe.MarkFlagRequired("port")
+	cmd.AddCommand(resetProbe)
 
 	healthCheck := &cobra.Command{
 		Use:    "health-check",

@@ -349,6 +349,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			bootstrapSet[name] = true
 		}
 		for name, imp := range implicitImports {
+			if !bootstrapSet[name] {
+				continue
+			}
 			if _, exists := root.Imports[name]; exists {
 				continue
 			}
@@ -446,6 +449,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
+	if root.AgentDefaults.DefaultSlingFormula != "" {
+		for i := range root.Agents {
+			if root.Agents[i].BindingName == "" {
+				root.Agents[i].InheritedDefaultSlingFormula = nil
+			}
+		}
+	}
 	ApplyAgentDefaults(root)
 
 	// Canonicalize duration-or-"off" session sleep fields after all config
@@ -482,6 +492,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, fmt.Errorf("%s: provider cache build failed: %w", path, err)
 	}
 
+	populateAgentLocalAssetDirs(fs, root, cityRoot)
+
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
 
@@ -508,8 +520,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// SkillsDir, so that gap silently loses agent-local skills for every
 	// explicitly-declared agent. Populate the fields here so the
 	// convention works uniformly.
-	populateAgentLocalAssetDirs(fs, root, cityRoot)
-
 	return root, prov, nil
 }
 
@@ -530,6 +540,7 @@ func populateAgentLocalAssetDirs(fs fsys.FS, root *City, cityRoot string) {
 		if base == "" {
 			base = cityRoot
 		}
+		applyAgentConventionDefaults(fs, base, a)
 		if a.SkillsDir == "" {
 			skillsDir := filepath.Join(base, "agents", a.Name, "skills")
 			if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
@@ -602,6 +613,16 @@ var bootstrapManagedImportNames = []string{"registry", "core"}
 func BootstrapManagedImportNames() []string {
 	out := make([]string, len(bootstrapManagedImportNames))
 	copy(out, bootstrapManagedImportNames)
+	return out
+}
+
+func resolveImplicitImport(imp ImplicitImport) Import {
+	out := Import{Source: strings.TrimSpace(imp.Source)}
+	if version := strings.TrimSpace(imp.Version); version != "" {
+		out.Version = version
+	} else if commit := strings.TrimSpace(imp.Commit); commit != "" {
+		out.Version = "sha:" + commit
+	}
 	return out
 }
 
@@ -1052,10 +1073,9 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	return &cfg, md, warnings, nil
 }
 
-// LoadRootPackDefaultRigIncludes loads default rig includes from the root
-// city pack without expanding the full config. Edit paths use this to honor
-// pack v2 defaults while still writing only city.toml.
-func LoadRootPackDefaultRigIncludes(fs fsys.FS, cityRoot string) ([]string, error) {
+// LoadRootPackDefaultRigImports loads the canonical [defaults.rig.imports]
+// entries from the root pack without expanding the full config.
+func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, error) {
 	packPath := filepath.Join(cityRoot, packFile)
 	packData, err := fs.ReadFile(packPath)
 	if err != nil {
@@ -1069,25 +1089,37 @@ func LoadRootPackDefaultRigIncludes(fs fsys.FS, cityRoot string) ([]string, erro
 	if err != nil {
 		return nil, fmt.Errorf("parsing city pack.toml: %w", err)
 	}
-	if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
+	if warnings := fatalUndecodedWarnings(md, packPath); len(warnings) > 0 {
 		return nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
 	}
-	return defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+	return defaultRigImportsFromPackDefaults(pc.Defaults, md)
 }
 
-func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
+func defaultRigImportsFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]BoundImport, error) {
 	if len(defaults.Rig.Imports) == 0 {
 		return nil, nil
 	}
-	names := orderedDefaultRigImportNames(defaults.Rig.Imports, md)
 
-	includes := make([]string, 0, len(names))
+	names := orderedDefaultRigImportNames(defaults.Rig.Imports, md)
+	imports := make([]BoundImport, 0, len(names))
 	for _, name := range names {
 		imp := defaults.Rig.Imports[name]
 		if strings.TrimSpace(imp.Source) == "" {
 			return nil, fmt.Errorf("defaults.rig.imports.%s.source is required", name)
 		}
-		includes = append(includes, imp.Source)
+		imports = append(imports, BoundImport{Binding: name, Import: imp})
+	}
+	return imports, nil
+}
+
+func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
+	imports, err := defaultRigImportsFromPackDefaults(defaults, md)
+	if err != nil {
+		return nil, err
+	}
+	includes := make([]string, 0, len(imports))
+	for _, bound := range imports {
+		includes = append(includes, bound.Import.Source)
 	}
 	return includes, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,7 +96,7 @@ func TestWispGC_EmptyList(t *testing.T) {
 	}
 }
 
-func TestWispGC_DeleteErrorContinues(t *testing.T) {
+func TestWispGC_DeleteErrorIsSurfacedAndContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -105,11 +106,14 @@ func TestWispGC_DeleteErrorContinues(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour)
 	purged, err := wg.runGC(store, now)
-	if err != nil {
-		t.Fatalf("runGC: %v", err)
+	if err == nil {
+		t.Fatal("expected delete error to be surfaced")
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
 	}
 	assertDeletedIDs(t, store.deletedIDs, "mol-2")
 }
@@ -245,8 +249,11 @@ func TestWispGC_LeavesRootWhenChildDeleteFails(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour)
 	purged, err := wg.runGC(store, now)
-	if err != nil {
-		t.Fatalf("runGC: %v", err)
+	if err == nil {
+		t.Fatal("expected child delete error")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
 	}
 	if purged != 0 {
 		t.Fatalf("purged = %d, want 0 when child delete fails", purged)
@@ -301,8 +308,11 @@ func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour)
 	purged, err := wg.runGC(store, now)
-	if err != nil {
-		t.Fatalf("runGC first pass: %v", err)
+	if err == nil {
+		t.Fatal("expected first pass child delete error")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("first pass err = %v, want delete failure to be included", err)
 	}
 	if purged != 0 {
 		t.Fatalf("first purged = %d, want 0", purged)
@@ -353,6 +363,28 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
 }
 
+func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBeadWithLabels("track-old", now.Add(-3*time.Hour), "closed", "task", labelOrderTracking),
+	})
+	store.listErrors[gcQueryKey{Status: "closed", Label: labelOrderTracking}] = fmt.Errorf("tracking list failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected tracking list error to be surfaced")
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if !strings.Contains(err.Error(), "tracking list failed") {
+		t.Fatalf("err = %v, want tracking list failure to be included", err)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+}
+
 func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -381,25 +413,6 @@ func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
 	if _, err := store.Get("track-child"); err != nil {
 		t.Fatalf("tracking child was deleted: %v", err)
 	}
-}
-
-func TestWispGC_TrackingListErrorIsBestEffort(t *testing.T) {
-	now := time.Now()
-	store := newGCStore([]beads.Bead{
-		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
-		makeGCBeadWithLabels("track-old", now.Add(-3*time.Hour), "closed", "task", labelOrderTracking),
-	})
-	store.listErrors[gcQueryKey{Status: "closed", Label: labelOrderTracking}] = fmt.Errorf("tracking list failed")
-
-	wg := newWispGC(5*time.Minute, time.Hour)
-	purged, err := wg.runGC(store, now)
-	if err != nil {
-		t.Fatalf("runGC: %v", err)
-	}
-	if purged != 1 {
-		t.Fatalf("purged = %d, want 1", purged)
-	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1")
 }
 
 func TestWispGC_ListErrorFailsRun(t *testing.T) {

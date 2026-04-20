@@ -343,7 +343,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 				rigAgents = append(rigAgents, agents...)
 				rigNamedSessions = append(rigNamedSessions, namedSessions...)
-				cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 
 				if len(providers) > 0 {
@@ -567,11 +566,14 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 
 		for _, bindingName := range importNames {
 			imp := cfg.Imports[bindingName]
+			if cfg.ImplicitImportBindings != nil && cfg.ImplicitImportBindings[bindingName] {
+				continue
+			}
 
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+			impDir, err := resolveImportPackRef(imp.Source, cityRoot, cityRoot)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -810,6 +812,32 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	shadowWarnings = appendUnique(shadowWarnings, packWarnings...)
 
 	return formulaDirs, allRequires, shadowWarnings, nil
+}
+
+func resolveImportPackRef(ref, declDir, cityRoot string) (string, error) {
+	if isGitHubTreeURL(ref) {
+		_, subpath, _ := parseGitHubTreeURL(ref)
+		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		if err != nil {
+			return "", err
+		}
+		if subpath != "" {
+			return filepath.Join(cacheDir, subpath), nil
+		}
+		return cacheDir, nil
+	}
+	if isRemoteInclude(ref) {
+		_, subpath, _ := parseRemoteInclude(ref)
+		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
+		if err != nil {
+			return "", err
+		}
+		if subpath != "" {
+			return filepath.Join(cacheDir, subpath), nil
+		}
+		return cacheDir, nil
+	}
+	return resolvePackRef(ref, declDir, cityRoot)
 }
 
 // ComputeFormulaLayers builds the FormulaLayers from the resolved formula

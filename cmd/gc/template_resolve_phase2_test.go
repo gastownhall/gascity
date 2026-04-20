@@ -105,6 +105,21 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 	return selected
 }
 
+func phase2ProviderCaseForFamily(t *testing.T, family string) phase2ProviderCase {
+	t.Helper()
+
+	if filter := strings.TrimSpace(os.Getenv("PROFILE")); filter != "" && filter != family && !strings.HasPrefix(filter, family+"/") {
+		t.Skipf("PROFILE=%q excludes %s phase2 provider case", filter, family)
+	}
+	for _, tc := range selectedPhase2ProviderCases(t) {
+		if tc.family == family {
+			return tc
+		}
+	}
+	t.Fatalf("phase2 provider case for family %q not found", family)
+	return phase2ProviderCase{}
+}
+
 func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 	t.Helper()
 

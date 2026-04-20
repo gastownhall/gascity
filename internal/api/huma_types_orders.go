@@ -44,7 +44,8 @@ type OrderHistoryInput struct {
 // OrderHistoryDetailInput is the Huma input for GET /v0/city/{cityName}/order/history/{bead_id}.
 type OrderHistoryDetailInput struct {
 	CityScope
-	BeadID string `path:"bead_id" doc:"Bead ID for the order run."`
+	BeadID   string `path:"bead_id" doc:"Bead ID for the order run."`
+	StoreRef string `query:"store_ref" required:"false" doc:"Store reference for disambiguating store-local bead IDs."`
 }
 
 // OrderEnableInput is the Huma input for POST /v0/city/{cityName}/order/{name}/enable.

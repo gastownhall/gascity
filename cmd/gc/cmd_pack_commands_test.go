@@ -238,6 +238,30 @@ func TestNewRootCmdExposesRootPackCommands(t *testing.T) {
 	}
 }
 
+func TestLegacyPackCommandHelpFlagUsesBuiltInHelp(t *testing.T) {
+	cityPath, packDir := setupPackCity(t)
+
+	root := &cobra.Command{Use: "gc"}
+	entries := config.LoadPackCommandEntries(fsys.OSFS{}, []string{packDir})
+
+	var stdout, stderr bytes.Buffer
+	addPackCommandsToRoot(root, entries, cityPath, "testcity", &stdout, &stderr)
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"mypack", "hello", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Say hello to the world.") {
+		t.Fatalf("stdout missing long help, got:\n%s", out)
+	}
+	if strings.Contains(out, "hello from mypack") {
+		t.Fatalf("help should not execute the pack command, got:\n%s", out)
+	}
+}
+
 func TestSetupPackCityWritesExpectedLayout(t *testing.T) {
 	cityPath, packDir := setupPackCity(t)
 	for _, path := range []string{

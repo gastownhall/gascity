@@ -3716,6 +3716,9 @@
           "status": {
             "type": "string"
           },
+          "store_ref": {
+            "type": "string"
+          },
           "target": {
             "type": "string"
           },
@@ -3873,10 +3876,14 @@
           },
           "output": {
             "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
           }
         },
         "required": [
           "bead_id",
+          "store_ref",
           "created_at",
           "labels",
           "output"
@@ -3928,12 +3935,16 @@
           "signal": {
             "type": "string"
           },
+          "store_ref": {
+            "type": "string"
+          },
           "wisp_root_id": {
             "type": "string"
           }
         },
         "required": [
           "bead_id",
+          "store_ref",
           "name",
           "scoped_name",
           "created_at",
@@ -11911,6 +11922,16 @@
             "required": true,
             "schema": {
               "description": "Bead ID for the order run.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store reference for disambiguating store-local bead IDs.",
+            "explode": false,
+            "in": "query",
+            "name": "store_ref",
+            "schema": {
+              "description": "Store reference for disambiguating store-local bead IDs.",
               "type": "string"
             }
           }

@@ -1090,12 +1090,9 @@ func reconcileCities(
 			}
 		}
 
-		// Auto-fetch remote packs before full config load (same as doStart).
-		if qErr == nil && len(quickCfg.Packs) > 0 {
-			if fErr := config.FetchPacks(quickCfg.Packs, path); fErr != nil {
-				recordInitFailure(name, fmt.Sprintf("fetching packs: %v", fErr))
-				continue
-			}
+		if err := ensureLegacyNamedPacksCached(path); err != nil {
+			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
+			continue
 		}
 
 		// Load city config with provenance so WatchTargets covers included files.
@@ -1652,6 +1649,14 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 			}
 		}
 	}
+
+	// Resolve script symlinks, including empty layer sets so stale links are pruned.
+	if progress != nil {
+		progress("resolving_scripts")
+	}
+	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
+	})
 
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {

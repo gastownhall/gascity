@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,8 +17,8 @@ type wispGC interface {
 
 	// runGC lists closed molecules, deletes those older than TTL, and returns
 	// the count of purged entries. Errors from individual deletes are
-	// best-effort (logged but not fatal); the returned error is for list
-	// failures.
+	// best-effort and surfaced without stopping the purge; the returned error
+	// also covers list failures.
 	runGC(store beads.Store, now time.Time) (int, error)
 }
 
@@ -56,36 +57,42 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	}
 
 	cutoff := now.Add(-m.ttl)
-	purged := purgeExpiredBeadClosures(store, entries, cutoff)
+	purged, deleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
 
 	trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking})
 	if trackErr == nil {
-		purged += purgeExpiredBeadRoots(store, trackEntries, cutoff)
+		trackPurged, trackDeleteErr := purgeExpiredBeadRoots(store, trackEntries, cutoff)
+		purged += trackPurged
+		deleteErr = errors.Join(deleteErr, trackDeleteErr)
+	} else {
+		deleteErr = errors.Join(deleteErr, fmt.Errorf("listing closed order-tracking beads: %w", trackErr))
 	}
 
-	return purged, nil
+	return purged, deleteErr
 }
 
-func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff time.Time) int {
+func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
 	return purgeExpiredBeads(store, entries, cutoff, deleteExpiredBeadClosure)
 }
 
-func purgeExpiredBeadRoots(store beads.Store, entries []beads.Bead, cutoff time.Time) int {
+func purgeExpiredBeadRoots(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
 	return purgeExpiredBeads(store, entries, cutoff, deleteWorkflowBead)
 }
 
-func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, deleteFn func(beads.Store, string) error) int {
+func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, deleteFn func(beads.Store, string) error) (int, error) {
 	purged := 0
+	var deleteErr error
 	for _, entry := range entries {
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
 		if err := deleteFn(store, entry.ID); err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
 		}
 		purged++
 	}
-	return purged
+	return purged, deleteErr
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {

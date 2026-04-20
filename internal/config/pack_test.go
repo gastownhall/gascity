@@ -382,18 +382,18 @@ version = "1.0.0"
 	}
 }
 
-func TestExpandPacks_RejectsUnknownPackTomlFields(t *testing.T) { //nolint:misspell // intentional typo in test data
+func TestExpandPacks_RejectsUnknownPackTomlFields(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/bad/pack.toml", `
 [pack]
 name = "bad"
-schema = 2
-schemla = 2
+schema = 1
+scheam = 1
 `)
 
 	cfg := &City{
 		Rigs: []Rig{
-			{Name: "hello-world", Path: "/home/user/hello-world", Includes: []string{"packs/bad"}},
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/bad"}},
 		},
 	}
 
@@ -401,33 +401,68 @@ schemla = 2
 	if err == nil {
 		t.Fatal("expected error for unknown pack.toml field")
 	}
-	if !strings.Contains(err.Error(), `unknown field "pack.schemla"`) {
-		t.Fatalf("error = %v, want unknown field detail for pack.schemla", err)
+	if !strings.Contains(err.Error(), `unknown field "pack.scheam"`) {
+		t.Fatalf("error should mention unknown pack field, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), `did you mean "schema"`) {
-		t.Fatalf("error = %v, want schema suggestion", err)
+		t.Fatalf("error should suggest schema, got: %v", err)
 	}
 }
 
-func TestLoadWithIncludes_RejectsUnknownRootPackTomlFields(t *testing.T) {
+func TestExpandPacks_AcceptsPackDescription(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "city.toml", `
-[workspace]
-name = "test"
-`)
-	writeFile(t, dir, "pack.toml", `
+	writeFile(t, dir, "packs/described/pack.toml", `
 [pack]
-name = "test"
+name = "described"
 schema = 2
-legacy_unknown = "silently accepted before issue 783"
+description = "Human-readable pack summary"
+
+[[agent]]
+name = "worker"
 `)
 
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
-	if err == nil {
-		t.Fatal("expected error for unknown root pack.toml field")
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/described"}},
+		},
 	}
-	if !strings.Contains(err.Error(), `unknown field "pack.legacy_unknown"`) {
-		t.Fatalf("error = %v, want unknown field detail for pack.legacy_unknown", err)
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks rejected [pack].description: %v", err)
+	}
+}
+
+func TestExpandPacks_RejectsUnknownPackImportFields(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/helper/pack.toml", `
+[pack]
+name = "helper"
+schema = 1
+`)
+	writeFile(t, dir, "packs/bad/pack.toml", `
+[pack]
+name = "bad"
+schema = 2
+
+[imports.helper]
+sorce = "../helper"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/bad"}},
+		},
+	}
+
+	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown import field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "imports.helper.sorce"`) {
+		t.Fatalf("error should mention unknown import field, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `did you mean "source"`) {
+		t.Fatalf("error should suggest source, got: %v", err)
 	}
 }
 

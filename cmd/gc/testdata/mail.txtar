@@ -14,7 +14,7 @@ cd $WORK/bright-lights
 # --- Human sends a message to the mayor ---
 
 exec gc mail send mayor 'hey, are you still there?'
-stdout 'Sent message gc-2 to mayor'
+stdout 'Sent message gc-1 to mayor'
 
 # --- Mayor checks inbox ---
 
@@ -24,7 +24,7 @@ stdout 'hey, are you still there?'
 
 # --- Mayor reads the message ---
 
-exec gc mail read gc-2
+exec gc mail read gc-1
 stdout 'From:     human'
 stdout 'To:       mayor'
 stdout 'Body:     hey, are you still there?'
@@ -36,14 +36,14 @@ stdout 'No unread messages for mayor'
 
 # --- But message is still accessible via peek ---
 
-exec gc mail peek gc-2
+exec gc mail peek gc-1
 stdout 'Body:     hey, are you still there?'
 
 # --- Mayor replies (agent perspective) ---
 
 env GC_ALIAS=mayor
 exec gc mail send human 'yes, working on gc-4'
-stdout 'Sent message gc-3 to human'
+stdout 'Sent message gc-2 to human'
 
 # --- Human checks their inbox ---
 
@@ -54,29 +54,29 @@ stdout 'yes, working on gc-4'
 
 # --- Human reads the reply ---
 
-exec gc mail read gc-3
+exec gc mail read gc-2
 stdout 'From:     mayor'
 stdout 'To:       human'
 stdout 'Body:     yes, working on gc-4'
 
 # --- Reading again still works (already read) ---
 
-exec gc mail read gc-3
+exec gc mail read gc-2
 stdout 'Body:     yes, working on gc-4'
 
 # --- Messages are beads: they appear in bead list ---
 
 exec bd list
+stdout 'gc-1'
 stdout 'gc-2'
-stdout 'gc-3'
 
 # --- Archive a new message ---
 
 exec gc mail send mayor 'archive me'
-stdout 'Sent message gc-4 to mayor'
+stdout 'Sent message gc-3 to mayor'
 
-exec gc mail archive gc-4
-stdout 'Archived message gc-4'
+exec gc mail archive gc-3
+stdout 'Archived message gc-3'
 
 # --- Archived message no longer appears in inbox ---
 
@@ -85,30 +85,30 @@ stdout 'No unread messages for mayor'
 
 # --- Archiving already-archived message is idempotent ---
 
-exec gc mail archive gc-4
-stdout 'Already archived gc-4'
+exec gc mail archive gc-3
+stdout 'Already archived gc-3'
 
 # --- Mark read / mark unread ---
 
 exec gc mail send mayor 'toggle me'
-stdout 'Sent message gc-5 to mayor'
+stdout 'Sent message gc-4 to mayor'
 
-exec gc mail mark-read gc-5
-stdout 'Marked gc-5 as read'
+exec gc mail mark-read gc-4
+stdout 'Marked gc-4 as read'
 
 exec gc mail inbox mayor
 stdout 'No unread messages for mayor'
 
-exec gc mail mark-unread gc-5
-stdout 'Marked gc-5 as unread'
+exec gc mail mark-unread gc-4
+stdout 'Marked gc-4 as unread'
 
 exec gc mail inbox mayor
 stdout 'toggle me'
 
 # --- Delete ---
 
-exec gc mail delete gc-5
-stdout 'Deleted message gc-5'
+exec gc mail delete gc-4
+stdout 'Deleted message gc-4'
 
 exec gc mail inbox mayor
 stdout 'No unread messages for mayor'

@@ -90,6 +90,30 @@ func TestTemplateParamsToConfigFlagModePrependsFlag(t *testing.T) {
 	}
 }
 
+func TestTemplateParamsToConfigFlagModeMissingFlagDoesNotMarkPromptDelivered(t *testing.T) {
+	tp := TemplateParams{
+		Command: "myprovider",
+		Prompt:  "You are an agent.",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "myprovider",
+			Command:    "myprovider",
+			PromptMode: "flag",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix == "" {
+		t.Fatal("PromptSuffix should preserve the rendered prompt for diagnostics")
+	}
+	if cfg.PromptFlag != "" {
+		t.Fatalf("PromptFlag = %q, want empty when provider metadata has no prompt flag", cfg.PromptFlag)
+	}
+	if cfg.Env != nil && cfg.Env[startupPromptDeliveredEnv] == "1" {
+		t.Fatalf("%s marked despite missing flag delivery metadata", startupPromptDeliveredEnv)
+	}
+}
+
 // TestTemplateParamsToConfigNoneModeUsesNudge verifies that when PromptMode is
 // "none" and hooks are not available, startup instructions are delivered via
 // runtime.Config.Nudge instead of PromptSuffix.

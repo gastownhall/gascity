@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -16,13 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
-
-func isolateRigRegistryEnv(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc-home"))
-}
 
 func TestDoRigAdd_Basic(t *testing.T) {
 	cityPath := t.TempDir()
@@ -40,8 +31,7 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 
 	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-	isolateRigRegistryEnv(t)
+	t.Setenv("GC_BEADS", "bd")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
@@ -70,19 +60,57 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_DoesNotWriteConfigWhenCanonicalBdNormalizationFails(t *testing.T) {
+func TestResolveRigAddPath(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	setCwd(t, cwd)
+	absPath := filepath.Join(t.TempDir(), "frontend")
+
+	tests := []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{
+			name: "bare relative resolves against city",
+			arg:  "frontend",
+			want: filepath.Join(cityPath, "frontend"),
+		},
+		{
+			name: "dot-prefixed resolves against cwd",
+			arg:  "./frontend",
+			want: filepath.Join(cwd, "frontend"),
+		},
+		{
+			name: "absolute path stays absolute",
+			arg:  absPath,
+			want: absPath,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveRigAddPath(cityPath, tt.arg)
+			if err != nil {
+				t.Fatalf("resolveRigAddPath(%q): %v", tt.arg, err)
+			}
+			if got != filepath.Clean(tt.want) {
+				t.Fatalf("resolveRigAddPath(%q) = %q, want %q", tt.arg, got, filepath.Clean(tt.want))
+			}
+		})
+	}
+}
+
+func TestDoRigAddWritesSiteBindingInsteadOfPath(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	origToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(origToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "metadata.json"), 0o755); err != nil {
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -91,228 +119,88 @@ func TestDoRigAdd_DoesNotWriteConfigWhenCanonicalBdNormalizationFails(t *testing
 		t.Fatal(err)
 	}
 
-	isolateRigRegistryEnv(t)
 	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cityData), rigPath) {
+		t.Fatalf("city.toml should not persist rig path after writeCityConfigForEditFS:\n%s", cityData)
+	}
+
+	siteData, err := os.ReadFile(config.SiteBindingPath(cityPath))
+	if err != nil {
+		t.Fatalf("reading .gc/site.toml: %v", err)
+	}
+	if !strings.Contains(string(siteData), "my-frontend") || !strings.Contains(string(siteData), rigPath) {
+		t.Fatalf(".gc/site.toml = %q, want rig binding for %q", siteData, rigPath)
+	}
+}
+
+func TestDoRigAddRouteFailureRollsBackConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	brokenRigFile := filepath.Join(t.TempDir(), "broken-rig")
+	if err := os.WriteFile(brokenRigFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := strings.Join([]string{
+		"[workspace]",
+		`name = "test-city"`,
+		"",
+		"[[agent]]",
+		`name = "mayor"`,
+		"",
+		"[[rigs]]",
+		`name = "broken"`,
+		`path = "` + brokenRigFile + `"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "new-rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("doRigAdd should fail when canonical bd normalization fails, got code %d, stderr: %s", code, stderr.String())
+		t.Fatalf("doRigAdd = %d, want 1; stderr=%s", code, stderr.String())
 	}
-	if errMsg := stderr.String(); !strings.Contains(errMsg, "snapshot canonical files") && !strings.Contains(errMsg, "canonicalizing city metadata") {
-		t.Fatalf("stderr should mention canonical metadata failure, got: %s", errMsg)
+	if !strings.Contains(stderr.String(), "writing routes") {
+		t.Fatalf("stderr = %q, want route failure context", stderr.String())
 	}
 
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != origToml {
-		t.Fatalf("city.toml should remain unchanged when canonical bd normalization fails.\nBefore:\n%s\nAfter:\n%s", origToml, data)
+	if strings.Contains(string(cityData), "new-rig") {
+		t.Fatalf("city.toml should roll back the new rig after route failure:\n%s", cityData)
 	}
-}
-
-func TestDoRigAddFailsOnInvalidCanonicalCityEndpointState(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(string(cityData), brokenRigFile) {
+		t.Fatalf("city.toml should restore the original broken rig binding after rollback:\n%s", cityData)
 	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	origToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(origToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	invalidCfg := `issue_prefix: gc
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-dolt.host: invalid-db.example.com
-dolt.port: 3307
-`
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(invalidCfg), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "my-frontend")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	isolateRigRegistryEnv(t)
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "bd")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("doRigAdd should fail for invalid canonical city endpoint state, got code %d, stderr: %s", code, stderr.String())
-	}
-	if errMsg := stderr.String(); !strings.Contains(errMsg, "invalid canonical city endpoint state") {
-		t.Fatalf("stderr should mention invalid canonical city endpoint state, got: %s", errMsg)
-	}
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != origToml {
-		t.Fatalf("city.toml should remain unchanged when canonical endpoint state is invalid.\nBefore:\n%s\nAfter:\n%s", origToml, data)
-	}
-}
-
-func TestDoRigAdd_SkipDoltReportsDeferredInit(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\nprefix = \"gc\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	seedDeferredManagedBeads(cityPath, cityPath, "gc", "hq")
-
-	rigPath := filepath.Join(t.TempDir(), "my-frontend")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	isolateRigRegistryEnv(t)
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "bd")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-	if out := stdout.String(); !strings.Contains(out, "Beads init deferred to controller") {
-		t.Fatalf("stdout should report deferred init, got: %s", out)
-	} else if strings.Contains(out, "Initialized beads database") {
-		t.Fatalf("stdout should not claim beads database initialized when GC_DOLT=skip: %s", out)
-	}
-}
-
-func TestDoRigAdd_SkipDoltWaitsForControllerStoreInit(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := `[workspace]
-name = "test-city"
-prefix = "gc"
-
-[[agent]]
-name = "mayor"
-`
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	seedDeferredManagedBeads(cityPath, cityPath, "gc", "hq")
-
-	rigPath := filepath.Join(t.TempDir(), "my-frontend")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	oldReload := rigReloadControllerConfig
-	oldWait := rigWaitForStoreAccessible
-	t.Cleanup(func() {
-		rigReloadControllerConfig = oldReload
-		rigWaitForStoreAccessible = oldWait
-	})
-
-	reloadCalls := 0
-	waitCalls := 0
-	var gotCity, gotRig string
-	var gotTimeout time.Duration
-	rigReloadControllerConfig = func(city string) error {
-		reloadCalls++
-		gotCity = city
-		return nil
-	}
-	rigWaitForStoreAccessible = func(city string, rig string, timeout time.Duration) error {
-		waitCalls++
-		gotCity = city
-		gotRig = rig
-		gotTimeout = timeout
-		return nil
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "bd")
-	isolateRigRegistryEnv(t)
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-	if reloadCalls != 1 {
-		t.Fatalf("reload calls = %d, want 1", reloadCalls)
-	}
-	if waitCalls != 1 {
-		t.Fatalf("wait calls = %d, want 1", waitCalls)
-	}
-	if gotCity != cityPath {
-		t.Fatalf("wait city = %q, want %q", gotCity, cityPath)
-	}
-	if gotRig != rigPath {
-		t.Fatalf("wait rig = %q, want %q", gotRig, rigPath)
-	}
-	if gotTimeout != rigDeferredStoreInitWait {
-		t.Fatalf("wait timeout = %v, want %v", gotTimeout, rigDeferredStoreInitWait)
-	}
-	if errOut := stderr.String(); errOut != "" {
-		t.Fatalf("stderr = %q, want empty", errOut)
-	}
-}
-
-func TestDoRigAdd_SkipDoltWarnsWhenControllerInitStillPending(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := `[workspace]
-name = "test-city"
-prefix = "gc"
-
-[[agent]]
-name = "mayor"
-`
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	seedDeferredManagedBeads(cityPath, cityPath, "gc", "hq")
-
-	rigPath := filepath.Join(t.TempDir(), "my-frontend")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	oldReload := rigReloadControllerConfig
-	oldWait := rigWaitForStoreAccessible
-	t.Cleanup(func() {
-		rigReloadControllerConfig = oldReload
-		rigWaitForStoreAccessible = oldWait
-	})
-	rigReloadControllerConfig = func(string) error { return nil }
-	rigWaitForStoreAccessible = func(_ string, _ string, _ time.Duration) error {
-		return fmt.Errorf("still pending")
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "bd")
-	isolateRigRegistryEnv(t)
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-	if errOut := stderr.String(); !strings.Contains(errOut, "controller init still pending") {
-		t.Fatalf("stderr should warn about pending controller init, got: %s", errOut)
+	if _, err := os.Stat(config.SiteBindingPath(cityPath)); err == nil {
+		t.Fatalf(".gc/site.toml should not be left behind after rollback")
 	}
 }
 
@@ -365,6 +253,12 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Save original config content.
+	origData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
 
@@ -382,26 +276,17 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 		t.Errorf("output should say re-initialized: %s", output)
 	}
 
-	// Re-add should migrate the machine-local path out of city.toml while
-	// preserving the effective rig binding.
+	// city.toml must be unchanged (no duplicate rig or polecat added).
 	newData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\n"
-	if string(newData) != wantCityToml {
-		t.Errorf("city.toml should be rewritten without rig.path on re-add.\nWant:\n%s\nGot:\n%s", wantCityToml, newData)
-	}
-	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
-	if err != nil {
-		t.Fatalf("LoadSiteBinding: %v", err)
-	}
-	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "my-frontend" || binding.Rigs[0].Path != rigPath {
-		t.Fatalf("site binding = %+v, want my-frontend=%s", binding.Rigs, rigPath)
+	if string(newData) != string(origData) {
+		t.Errorf("city.toml should be unchanged on re-add.\nBefore:\n%s\nAfter:\n%s", origData, newData)
 	}
 }
 
-func TestDoRigAddSkipsBDPortMirrorForFileProvider(t *testing.T) {
+func TestDoRigAdd_DoesNotWritePortFileForFileBackedExternalRig(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -444,7 +329,7 @@ func TestDoRigAddSkipsBDPortMirrorForFileProvider(t *testing.T) {
 	}
 
 	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
-		t.Fatalf("expected no bd port mirror for file provider, stat err = %v", err)
+		t.Fatalf("file-backed external rig should not get dolt-server.port, stat err = %v", err)
 	}
 }
 
@@ -904,116 +789,6 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 	}
 }
 
-// TestDoRigList_JSON_RelativeRigPath verifies that doRigList emits absolute
-// paths in JSON output when the rig path in city.toml is relative.
-func TestDoRigList_JSON_RelativeRigPath(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create the rig directory at the resolved absolute location.
-	relRigPath := "rigs/local-rig"
-	absRigPath := filepath.Join(cityPath, relRigPath)
-	if err := os.MkdirAll(absRigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create .beads/metadata.json in the rig so its beads status reads "initialized".
-	beadsDir := filepath.Join(absRigPath, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write city.toml with a relative path for the rig.
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-rig\"\npath = \"" + relRigPath + "\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
-	}
-
-	var result RigListJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\noutput: %s", err, stdout.String())
-	}
-
-	// Find the non-HQ rig entry.
-	var rigItem *RigListItem
-	for i := range result.Rigs {
-		if !result.Rigs[i].HQ {
-			rigItem = &result.Rigs[i]
-			break
-		}
-	}
-	if rigItem == nil {
-		t.Fatal("no non-HQ rig found in JSON output")
-	}
-
-	if !filepath.IsAbs(rigItem.Path) {
-		t.Errorf("rig path %q is not absolute", rigItem.Path)
-	}
-	if rigItem.Path != absRigPath {
-		t.Errorf("rig path = %q, want %q", rigItem.Path, absRigPath)
-	}
-	if rigItem.Beads != "initialized" {
-		t.Errorf("rig beads = %q, want \"initialized\"", rigItem.Beads)
-	}
-}
-
-// TestDoRigList_JSON_AbsolutePathPreserved verifies that doRigList does not
-// mangle rig paths that are already absolute in city.toml (idempotency guard).
-func TestDoRigList_JSON_AbsolutePathPreserved(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	absRigPath := filepath.Join(t.TempDir(), "external-rig")
-	if err := os.MkdirAll(absRigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"external-rig\"\npath = \"" + absRigPath + "\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
-	}
-
-	var result RigListJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\noutput: %s", err, stdout.String())
-	}
-
-	var rigItem *RigListItem
-	for i := range result.Rigs {
-		if !result.Rigs[i].HQ {
-			rigItem = &result.Rigs[i]
-			break
-		}
-	}
-	if rigItem == nil {
-		t.Fatal("no non-HQ rig found in JSON output")
-	}
-
-	// The path must be byte-identical to the original absolute path (no double-prefix).
-	if rigItem.Path != absRigPath {
-		t.Errorf("rig path = %q, want byte-identical %q", rigItem.Path, absRigPath)
-	}
-}
-
 func TestDoRigAdd_WithPack(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1057,6 +832,70 @@ func TestDoRigAdd_WithPack(t *testing.T) {
 	}
 	if len(cfg.Rigs[0].Includes) != 1 || cfg.Rigs[0].Includes[0] != "packs/gastown" {
 		t.Errorf("rig includes = %v, want [packs/gastown]; city.toml:\n%s", cfg.Rigs[0].Includes, data)
+	}
+}
+
+func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"packs/planner", "packs/architect"}, "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Include: packs/planner, packs/architect") {
+		t.Errorf("output missing combined includes: %s", output)
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"packs/planner", "packs/architect"}
+	if !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
+		t.Errorf("rig includes = %v, want %v", cfg.Rigs[0].Includes, want)
+	}
+}
+
+func TestNewRigAddCmdIncludeFlagIsRepeatable(t *testing.T) {
+	cmd := newRigAddCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	flag := cmd.Flags().Lookup("include")
+	if flag == nil {
+		t.Fatal("include flag not registered")
+	}
+	if flag.Value.Type() != "stringArray" {
+		t.Fatalf("include flag type = %q, want stringArray", flag.Value.Type())
+	}
+}
+
+func TestNewRigCmdRegistersSetEndpointSubcommand(t *testing.T) {
+	cmd := newRigCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	found := false
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "set-endpoint" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("set-endpoint subcommand not registered")
 	}
 }
 
@@ -1144,7 +983,7 @@ func TestDoRigAdd_DefaultRigIncludes(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_RootPackDefaultRigIncludes(t *testing.T) {
+func TestDoRigAdd_RootPackDefaultRigImports(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1182,8 +1021,11 @@ source = "packs/a-pack"
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Include: packs/z-pack, packs/a-pack, packs/city-pack (default)") {
-		t.Errorf("output missing root pack default includes in declaration order: %s", output)
+	if !strings.Contains(output, "Import: z-pack=packs/z-pack, a-pack=packs/a-pack (default)") {
+		t.Errorf("output missing root pack default imports in declaration order: %s", output)
+	}
+	if !strings.Contains(output, "Include: packs/city-pack (default)") {
+		t.Errorf("output missing legacy default include fallback: %s", output)
 	}
 
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1193,12 +1035,17 @@ source = "packs/a-pack"
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
 	}
-	want := []string{"packs/z-pack", "packs/a-pack", "packs/city-pack"}
-	if !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
+	if want := []string{"packs/city-pack"}; !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
 		t.Errorf("rig includes = %v, want %v", cfg.Rigs[0].Includes, want)
 	}
-	if !reflect.DeepEqual(cfg.Workspace.DefaultRigIncludes, []string{"packs/city-pack"}) {
-		t.Errorf("derived root pack defaults should not be written back to city.toml, got %v", cfg.Workspace.DefaultRigIncludes)
+	if len(cfg.Rigs[0].Imports) != 2 {
+		t.Fatalf("len(rig imports) = %d, want 2", len(cfg.Rigs[0].Imports))
+	}
+	if got := cfg.Rigs[0].Imports["z-pack"].Source; got != "packs/z-pack" {
+		t.Errorf("rig imports[z-pack] = %q, want packs/z-pack", got)
+	}
+	if got := cfg.Rigs[0].Imports["a-pack"].Source; got != "packs/a-pack" {
+		t.Errorf("rig imports[a-pack] = %q, want packs/a-pack", got)
 	}
 }
 
@@ -1245,171 +1092,6 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 	}
 	if len(cfg.Rigs[0].Includes) != 1 || cfg.Rigs[0].Includes[0] != "packs/custom" {
 		t.Errorf("rig includes = %v, want [packs/custom]", cfg.Rigs[0].Includes)
-	}
-}
-
-// Regression for #782: --include repeated on the CLI populates rig.Includes
-// in order so students can compose a rig from multiple packs in one command.
-func TestDoRigAdd_MultipleIncludes(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "my-mini-project")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	var stdout, stderr bytes.Buffer
-	includes := []string{"packs/planner", "packs/architect"}
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-
-	output := stdout.String()
-	if !strings.Contains(output, "Include: packs/planner, packs/architect") {
-		t.Errorf("output missing joined include line: %s", output)
-	}
-
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Rigs) != 1 {
-		t.Fatalf("expected 1 rig, got %d", len(cfg.Rigs))
-	}
-	got := cfg.Rigs[0].Includes
-	if len(got) != 2 || got[0] != "packs/planner" || got[1] != "packs/architect" {
-		t.Errorf("rig includes = %v, want [packs/planner packs/architect]", got)
-	}
-}
-
-// Regression for #782: `--include=` (empty string) and whitespace-only
-// entries must be filtered so rig.Includes never contains a blank path
-// (which downstream pack resolution would read as the city root).
-func TestDoRigAdd_EmptyIncludesFiltered(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\ndefault_rig_includes = [\"packs/default\"]\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "my-project")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"", "  ", "packs/real", ""}, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := cfg.Rigs[0].Includes
-	if len(got) != 1 || got[0] != "packs/real" {
-		t.Errorf("rig includes = %v, want [packs/real] (blank entries filtered)", got)
-	}
-}
-
-// Regression for #782: if ALL --include flags are empty, fall back to
-// default_rig_includes rather than producing a rig with blank pack paths.
-func TestDoRigAdd_AllEmptyIncludesFallsBackToDefaults(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\ndefault_rig_includes = [\"packs/default\"]\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "my-project")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"", "  "}, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := cfg.Rigs[0].Includes
-	if len(got) != 1 || got[0] != "packs/default" {
-		t.Errorf("rig includes = %v, want [packs/default] (defaults apply when all --include blank)", got)
-	}
-}
-
-// Regression for #782: re-add warns only when the --include set differs from
-// the existing rig. Order matters: slices.Equal is order-sensitive, so a
-// reorder is treated as a mismatch (pack precedence depends on order).
-func TestDoRigAdd_ReAddIncludesWarning(t *testing.T) {
-	tests := []struct {
-		name        string
-		newIncludes []string
-		wantWarn    bool
-	}{
-		{"identical no warn", []string{"packs/a", "packs/b"}, false},
-		{"different values warns", []string{"packs/a", "packs/c"}, true},
-		{"reordered warns", []string{"packs/b", "packs/a"}, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			isolateRigRegistryEnv(t)
-			cityPath := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-
-			rigPath := filepath.Join(t.TempDir(), "my-frontend")
-			if err := os.MkdirAll(rigPath, 0o755); err != nil {
-				t.Fatal(err)
-			}
-
-			cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\nincludes = [\"packs/a\", \"packs/b\"]\n"
-			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-				t.Fatal(err)
-			}
-
-			t.Setenv("GC_DOLT", "skip")
-			t.Setenv("GC_BEADS", "file")
-
-			var stdout, stderr bytes.Buffer
-			code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, tc.newIncludes, "", "", false, false, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-			}
-			gotWarn := strings.Contains(stderr.String(), "--include")
-			if gotWarn != tc.wantWarn {
-				t.Errorf("--include warning = %v, want %v; stderr: %s", gotWarn, tc.wantWarn, stderr.String())
-			}
-		})
 	}
 }
 
@@ -1800,6 +1482,132 @@ func TestDoRigAdd_PrefixRejectsHyphens(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Pack-preservation tests: write-back must NOT expand includes
+// ---------------------------------------------------------------------------
+
+func TestDoRigSuspendPreservesConfig(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/city.toml"] = []byte(`include = ["packs/mypack/agents.toml"]
+
+[workspace]
+name = "test-city"
+
+[[agent]]
+name = "inline-agent"
+
+[[rigs]]
+name = "frontend"
+path = "/some/path"
+`)
+	f.Files["/city/packs/mypack/agents.toml"] = []byte(`[[agent]]
+name = "pack-worker"
+dir = "myrig"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSuspend(f, "/city", "frontend", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data := string(f.Files["/city/city.toml"])
+	if !strings.Contains(data, "packs/mypack/agents.toml") {
+		t.Errorf("city.toml should preserve include directive:\n%s", data)
+	}
+	if strings.Contains(data, "pack-worker") {
+		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
+	}
+}
+
+func TestDoRigResumePreservesConfig(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/city.toml"] = []byte(`include = ["packs/mypack/agents.toml"]
+
+[workspace]
+name = "test-city"
+
+[[agent]]
+name = "inline-agent"
+
+[[rigs]]
+name = "frontend"
+path = "/some/path"
+suspended = true
+`)
+	f.Files["/city/packs/mypack/agents.toml"] = []byte(`[[agent]]
+name = "pack-worker"
+dir = "myrig"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doRigResume(f, "/city", "frontend", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data := string(f.Files["/city/city.toml"])
+	if !strings.Contains(data, "packs/mypack/agents.toml") {
+		t.Errorf("city.toml should preserve include directive:\n%s", data)
+	}
+	if strings.Contains(data, "pack-worker") {
+		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
+	}
+}
+
+func TestDoRigAddPreservesConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create city.toml with include directive (must be top-level, before any [section]).
+	cityToml := `include = ["packs/mypack/agents.toml"]
+
+[workspace]
+name = "test-city"
+
+[[agent]]
+name = "inline-agent"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create the pack fragment (so LoadWithIncludes would find it, but we don't use it).
+	packDir := filepath.Join(cityPath, "packs", "mypack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "agents.toml"), []byte("[[agent]]\nname = \"pack-worker\"\ndir = \"myrig\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "packs/mypack/agents.toml") {
+		t.Errorf("city.toml should preserve include directive:\n%s", data)
+	}
+	if strings.Contains(string(data), "pack-worker") {
+		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
+	}
+	if !strings.Contains(string(data), "my-rig") {
+		t.Errorf("city.toml should contain new rig:\n%s", data)
+	}
+}
+
 func TestDoRigAdd_AdoptExistingBeads(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -2016,472 +1824,31 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rigPath := filepath.Join(t.TempDir(), "prefix-rig")
+	// Create rig whose directory basename ("mismatch-rig") derives a prefix
+	// ("mismatchrig") that differs from config.yaml's prefix ("xr").
+	rigPath := filepath.Join(t.TempDir(), "mismatch-rig")
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	meta := `{"name":"prefix-rig","issue_prefix":"pr"}`
+	meta := `{"name":"mismatch-rig","issue_prefix":"xr"}`
 	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: pr\n"), 0o644); err != nil {
+	configYaml := "issue_prefix: xr\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
 
+	// No --prefix: derived prefix from basename "mismatch-rig" won't match "xr".
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, true, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected adopt without explicit prefix to succeed, got code %d, stderr: %s", code, stderr.String())
-	}
-}
-
-func TestDoRigAdd_AdoptBootstrapsScopedFileStoreLayout(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"name":"adopted-rig","issue_prefix":"ar"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: ar\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", false, true, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(rigPath, ".gc", "beads.json")); err != nil {
-		t.Fatalf("scoped file-store beads.json missing after adopt: %v", err)
-	}
-}
-
-func TestDoRigAdd_AdoptRollsBackConfigWhenRouteGenerationFails(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rigPath := filepath.Join(t.TempDir(), "route-fail-rig")
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"name":"route-fail-rig","issue_prefix":"rf"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: rf\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := writeAllRigRoutes
-	writeAllRigRoutes = func([]rigRoute) error { return errors.New("injected routes failure") }
-	t.Cleanup(func() { writeAllRigRoutes = orig })
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "rf", false, true, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("expected route failure, got code %d, stderr: %s", code, stderr.String())
+		t.Fatalf("expected prefix mismatch failure, got code %d, stdout: %s", code, stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "writing routes") {
-		t.Fatalf("stderr = %q, want writing routes", stderr.String())
-	}
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != cityToml {
-		t.Fatalf("city.toml changed after route rollback:\nwant: %s\n got: %s", cityToml, data)
-	}
-	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks")); !os.IsNotExist(err) {
-		t.Fatalf(".beads/hooks should not be created on rolled-back adopt, stat err = %v", err)
-	}
-}
-
-type failCityTomlWriteFS struct {
-	fsys.OSFS
-	target string
-	failed bool
-}
-
-func (f *failCityTomlWriteFS) WriteFile(name string, data []byte, perm os.FileMode) error {
-	if !f.failed && filepath.Clean(name) == filepath.Clean(f.target) {
-		f.failed = true
-		return errors.New("injected write failure")
-	}
-	return f.OSFS.WriteFile(name, data, perm)
-}
-
-func (f *failCityTomlWriteFS) Rename(oldpath, newpath string) error {
-	if !f.failed && filepath.Clean(newpath) == filepath.Clean(f.target) {
-		f.failed = true
-		return errors.New("injected write failure")
-	}
-	return f.OSFS.Rename(oldpath, newpath)
-}
-
-func TestDoRigAdd_RollsBackCanonicalFilesWhenConfigWriteFails(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cityMetaPath := filepath.Join(cityPath, ".beads", "metadata.json")
-	cityConfigPath := filepath.Join(cityPath, ".beads", "config.yaml")
-	cityPortPath := filepath.Join(cityPath, ".beads", "dolt-server.port")
-	cityMeta := []byte(`{"name":"test-city","issue_prefix":"gc"}`)
-	cityConfig := []byte("issue_prefix: gc\n")
-	cityPort := []byte("3307\n")
-	if err := os.WriteFile(cityMetaPath, cityMeta, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cityConfigPath, cityConfig, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cityPortPath, cityPort, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "frontend")
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rigMetaPath := filepath.Join(rigPath, ".beads", "metadata.json")
-	rigConfigPath := filepath.Join(rigPath, ".beads", "config.yaml")
-	rigPortPath := filepath.Join(rigPath, ".beads", "dolt-server.port")
-	rigMeta := []byte(`{"name":"frontend","issue_prefix":"fr"}`)
-	rigConfig := []byte("issue_prefix: fr\n")
-	rigPort := []byte("3307\n")
-	if err := os.WriteFile(rigMetaPath, rigMeta, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(rigConfigPath, rigConfig, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(rigPortPath, rigPort, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "bd")
-	isolateRigRegistryEnv(t)
-
-	fs := &failCityTomlWriteFS{target: filepath.Join(cityPath, "city.toml")}
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fs, cityPath, rigPath, nil, "", "fr", false, true, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("expected config write failure, got code %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "writing config") {
-		t.Fatalf("stderr should mention config write failure: %s", stderr.String())
-	}
-	gotCityToml, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(gotCityToml) != cityToml {
-		t.Fatalf("city.toml changed after rollback:\nwant: %s\n got: %s", cityToml, gotCityToml)
-	}
-	if _, err := os.Stat(config.SiteBindingPath(cityPath)); !os.IsNotExist(err) {
-		t.Fatalf(".gc/site.toml should be absent after rollback, stat err = %v", err)
-	}
-	for _, tc := range []struct {
-		path string
-		want []byte
-	}{
-		{cityMetaPath, cityMeta},
-		{cityConfigPath, cityConfig},
-		{cityPortPath, cityPort},
-		{rigMetaPath, rigMeta},
-		{rigConfigPath, rigConfig},
-		{rigPortPath, rigPort},
-	} {
-		got, err := os.ReadFile(tc.path)
-		if err != nil {
-			t.Fatalf("reading %s after rollback: %v", tc.path, err)
-		}
-		if string(got) != string(tc.want) {
-			t.Fatalf("rollback mismatch for %s\nwant: %s\n got: %s", tc.path, tc.want, got)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Pack-preservation tests: write-back must NOT expand includes
-// ---------------------------------------------------------------------------
-
-func TestDoRigSuspendPreservesConfig(t *testing.T) {
-	f := fsys.NewFake()
-	f.Files["/city/city.toml"] = []byte(`include = ["packs/mypack/agents.toml"]
-
-[workspace]
-name = "test-city"
-
-[[agent]]
-name = "inline-agent"
-
-[[rigs]]
-name = "frontend"
-path = "/some/path"
-`)
-	f.Files["/city/packs/mypack/agents.toml"] = []byte(`[[agent]]
-name = "pack-worker"
-dir = "myrig"
-`)
-
-	var stdout, stderr bytes.Buffer
-	code := doRigSuspend(f, "/city", "frontend", &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	data := string(f.Files["/city/city.toml"])
-	if !strings.Contains(data, "packs/mypack/agents.toml") {
-		t.Errorf("city.toml should preserve include directive:\n%s", data)
-	}
-	if strings.Contains(data, "pack-worker") {
-		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
-	}
-}
-
-func TestDoRigResumePreservesConfig(t *testing.T) {
-	f := fsys.NewFake()
-	f.Files["/city/city.toml"] = []byte(`include = ["packs/mypack/agents.toml"]
-
-[workspace]
-name = "test-city"
-
-[[agent]]
-name = "inline-agent"
-
-[[rigs]]
-name = "frontend"
-path = "/some/path"
-suspended = true
-`)
-	f.Files["/city/packs/mypack/agents.toml"] = []byte(`[[agent]]
-name = "pack-worker"
-dir = "myrig"
-`)
-
-	var stdout, stderr bytes.Buffer
-	code := doRigResume(f, "/city", "frontend", &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	data := string(f.Files["/city/city.toml"])
-	if !strings.Contains(data, "packs/mypack/agents.toml") {
-		t.Errorf("city.toml should preserve include directive:\n%s", data)
-	}
-	if strings.Contains(data, "pack-worker") {
-		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
-	}
-}
-
-func TestDoRigAddPreservesConfig(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Create city.toml with include directive (must be top-level, before any [section]).
-	cityToml := `include = ["packs/mypack/agents.toml"]
-
-[workspace]
-name = "test-city"
-
-[[agent]]
-name = "inline-agent"
-`
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Create the pack fragment (so LoadWithIncludes would find it, but we don't use it).
-	packDir := filepath.Join(cityPath, "packs", "mypack")
-	if err := os.MkdirAll(packDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(packDir, "agents.toml"), []byte("[[agent]]\nname = \"pack-worker\"\ndir = \"myrig\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "my-rig")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "packs/mypack/agents.toml") {
-		t.Errorf("city.toml should preserve include directive:\n%s", data)
-	}
-	if strings.Contains(string(data), "pack-worker") {
-		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
-	}
-	if !strings.Contains(string(data), "my-rig") {
-		t.Errorf("city.toml should contain new rig:\n%s", data)
-	}
-}
-
-func TestResolveRigAddPath(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "city")
-	got, err := resolveRigAddPath(cityPath, "frontend")
-	if err != nil {
-		t.Fatalf("resolveRigAddPath(relative): %v", err)
-	}
-	if want := filepath.Join(cityPath, "frontend"); got != want {
-		t.Fatalf("resolveRigAddPath(relative) = %q, want %q", got, want)
-	}
-
-	wd := t.TempDir()
-	setCwd(t, wd)
-	got, err = resolveRigAddPath(cityPath, ".")
-	if err != nil {
-		t.Fatalf("resolveRigAddPath(dot): %v", err)
-	}
-	if want := wd; got != want {
-		t.Fatalf("resolveRigAddPath(dot) = %q, want %q", got, want)
-	}
-
-	abs := filepath.Join(t.TempDir(), "repo")
-	got, err = resolveRigAddPath(cityPath, abs)
-	if err != nil {
-		t.Fatalf("resolveRigAddPath(abs): %v", err)
-	}
-	if got != abs {
-		t.Fatalf("resolveRigAddPath(abs) = %q, want %q", got, abs)
-	}
-}
-
-func TestCmdRigAddStoresMachinePathInSiteBindingWhenOutsideCity(t *testing.T) {
-	origCityFlag := cityFlag
-	origRigFlag := rigFlag
-	defer func() {
-		cityFlag = origCityFlag
-		rigFlag = origRigFlag
-	}()
-
-	cityPath := filepath.Join(t.TempDir(), "city")
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[[agent]]\nname = \"mayor\"\n"
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	isolateRigRegistryEnv(t)
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-	cityFlag = cityPath
-	rigFlag = ""
-	setCwd(t, t.TempDir())
-
-	var stdout, stderr bytes.Buffer
-	code := cmdRigAdd([]string{"frontend"}, nil, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-
-	wantRigPath := filepath.Join(cityPath, "frontend")
-	if _, err := os.Stat(wantRigPath); err != nil {
-		t.Fatalf("rig dir %q not created: %v", wantRigPath, err)
-	}
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed, err := config.Parse(data)
-	if err != nil {
-		t.Fatalf("parse city.toml: %v\ncontents:\n%s", err, data)
-	}
-	if len(parsed.Rigs) != 1 {
-		t.Fatalf("parsed rigs = %d, want 1\ncontents:\n%s", len(parsed.Rigs), data)
-	}
-	if got := parsed.Rigs[0].Path; got != "" {
-		t.Fatalf("city.toml rig.path = %q, want empty (moved to site binding)\ncontents:\n%s", got, data)
-	}
-	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
-	if err != nil {
-		t.Fatalf("LoadSiteBinding: %v", err)
-	}
-	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != wantRigPath {
-		t.Fatalf("site binding = %+v, want frontend=%s", binding.Rigs, wantRigPath)
-	}
-}
-
-func TestDoRigAddEmitsLoadWarningsFromReloadedConfig(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := `[workspace]
-name = "test-city"
-
-[agent_defaults]
-skills = ["demo"]
-
-[[agent]]
-name = "mayor"
-`
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigPath := filepath.Join(t.TempDir(), "frontend")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-	isolateRigRegistryEnv(t)
-
-	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "attachment-list fields") {
-		t.Fatalf("stderr = %q, want deprecated attachment-list warning", stderr.String())
+	if !strings.Contains(stderr.String(), "already has bead prefix") {
+		t.Errorf("error should mention prefix mismatch: %s", stderr.String())
 	}
 }

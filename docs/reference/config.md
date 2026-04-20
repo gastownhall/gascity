@@ -32,7 +32,7 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
-| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula plus shared skill/MCP attachment baselines; other fields are parsed/composed but not yet inherited automatically. |
+| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 
 ## ACPSessionConfig
 
@@ -83,18 +83,18 @@ Agent defines a configured agent in the city.
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the provider's effective schema defaults for this agent. Keys are option keys, values are choice values. Applied on top of the provider's OptionDefaults (agent keys win). Example: option_defaults = &#123; permission_mode = "plan", model = "sonnet" &#125; |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. |
-| `scale_check` | string |  |  | ScaleCheck is a shell command whose output determines desired session count. Optional override — when set, its output is the desired count (still clamped by all cap levels). |
+| `scale_check` | string |  |  | ScaleCheck is a shell command template whose output determines desired session count. Optional override — when set, its output is the desired count (still clamped by all cap levels). If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `drain_timeout` | string |  | `5m` | DrainTimeout is the maximum time to wait for a session to finish its current work before force-killing it during scale-down. Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". |
-| `on_boot` | string |  |  | OnBoot is a shell command run once at controller startup for this agent. |
-| `on_death` | string |  |  | OnDeath is a shell command run when a session dies unexpectedly. |
+| `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
+| `on_death` | string |  |  | OnDeath is a shell command template run when a session dies unexpectedly. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `namepool` | string |  |  | Namepool is the path to a plain text file with one name per line. When set, sessions use names from the file as display aliases. |
-| `work_query` | string |  |  | WorkQuery is the shell command to find available work for this agent. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. If unset, Gas City uses a three-tier default query:   1. in_progress work assigned to this session/alias (crash recovery)   2. ready work assigned to this session/alias (pre-assigned work)   3. ready unassigned work with gc.routed_to=&lt;qualified-name&gt; When the controller probes for demand without session context, only the routed_to tier applies. Override to integrate with external task systems. |
-| `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this session config. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for all agents: "bd update &#123;&#125; --set-metadata gc.routed_to=&lt;qualified-name&gt;". Routing is metadata-based; sling stamps the target template and the reconciler/scale_check paths decide when sessions are created. Custom sling_query and work_query can be overridden independently. |
+| `work_query` | string |  |  | WorkQuery is the shell command template to find available work for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and prompt-context execution. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. If unset, Gas City uses a three-tier default query:   1. in_progress work assigned to this session/alias (crash recovery)   2. ready work assigned to this session/alias (pre-assigned work)   3. ready unassigned work with gc.routed_to=&lt;qualified-name&gt; When the controller probes for demand without session context, only the routed_to tier applies. Override to integrate with external task systems. |
+| `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this session config. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before replacing &#123;&#125; with the bead ID. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for all agents: "bd update &#123;&#125; --set-metadata gc.routed_to=&lt;qualified-name&gt;". Routing is metadata-based; sling stamps the target template and the reconciler/scale_check paths decide when sessions are created. Custom sling_query and work_query can be overridden independently. |
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides workspace-level install_agent_hooks for this agent. When set, replaces (not adds to) the workspace default. |
-| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
-| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Accepted during parse for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Accepted during parse for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. Set to true when hooks are manually installed (e.g., merged into the project's own hook config) and auto-installation via install_agent_hooks is not desired. When true, the agent is treated as hook-enabled for startup behavior: no prime instruction in beacon and no delayed nudge. Interacts with install_agent_hooks — set this instead when hooks are pre-installed. |
 | `session_setup` | []string |  |  | SessionSetup is a list of shell commands run after session creation. Each command is a template string supporting placeholders: &#123;&#123;.Session&#125;&#125;, &#123;&#123;.Agent&#125;&#125;, &#123;&#123;.AgentBase&#125;&#125;, &#123;&#123;.Rig&#125;&#125;, &#123;&#123;.RigRoot&#125;&#125;, &#123;&#123;.CityRoot&#125;&#125;, &#123;&#123;.CityName&#125;&#125;, &#123;&#123;.WorkDir&#125;&#125;. Commands run in gc's process (not inside the agent session) via sh -c. |
 | `session_setup_script` | string |  |  | SessionSetupScript is the path to a script run after session_setup commands. Relative paths resolve against the city directory. The script receives context via environment variables (GC_SESSION plus existing GC_* vars). |
@@ -102,7 +102,7 @@ Agent defines a configured agent in the city.
 | `overlay_dir` | string |  |  | OverlayDir is a directory whose contents are recursively copied (additive) into the agent's working directory at startup. Existing files are not overwritten. Relative paths resolve against the declaring config file's directory (pack-safe). |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula is the formula name automatically applied via --on when beads are slung to this agent, unless --no-formula is set. Example: "mol-polecat-work" |
 | `inject_fragments` | []string |  |  | InjectFragments lists named template fragments to append to this agent's rendered prompt. Fragments come from shared template directories across all loaded packs. Each name must match a &#123;&#123; define "name" &#125;&#125; block. |
-| `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialisation vs which are the city-wide set.  Pointer tri-state:   nil  → inherit: inject when the agent has a vendor sink   *true  → explicitly inject (equivalent to the default)   *false → disable; the template is responsible for rendering            any skill guidance itself  See engdocs/proposals/skill-materialization.md. |
+| `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialization vs which are the city-wide set.  Pointer tri-state:   nil   -&gt; inherit: inject when the agent has a vendor sink   *true -&gt; explicitly inject (equivalent to the default)   *false -&gt; disable; the template is responsible for rendering             any skill guidance itself |
 | `attach` | boolean |  |  | Attach controls whether the agent's session supports interactive attachment (e.g., tmux attach). When false, the agent can use a lighter runtime (subprocess instead of tmux). Defaults to true. |
 | `fallback` | boolean |  |  | Fallback marks this agent as a fallback definition. During pack composition, a non-fallback agent with the same name wins silently. When two fallbacks collide, the first loaded (depth-first) wins. |
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
@@ -121,8 +121,8 @@ AgentDefaults provides city-level agent defaults declared via [agent_defaults] i
 | `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a city-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
 | `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a city-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
 | `append_fragments` | []string |  |  | AppendFragments lists named template fragments to auto-append to .template.md prompts after rendering. Legacy .md.tmpl prompts are still supported during the transition; plain .md remains inert. V2 migration convenience — replaces global_fragments/inject_fragments for city-wide defaults. |
-| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
-| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Parsed and composed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Parsed and composed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 
 ## AgentOverride
 
@@ -147,8 +147,8 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
-| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
-| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
+| `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills overrides Agent.InjectAssignedSkills (see that field for semantics). |
 | `session_setup` | []string |  |  | SessionSetup overrides the agent's session_setup commands. |
@@ -161,8 +161,8 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `session_setup_append` | []string |  |  | SessionSetupAppend appends commands to the agent's session_setup list. |
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
 | `install_agent_hooks_append` | []string |  |  | InstallAgentHooksAppend appends to the agent's install_agent_hooks list. |
-| `skills_append` | []string |  |  | SkillsAppend is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
-| `mcp_append` | []string |  |  | MCPAppend is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
+| `skills_append` | []string |  |  | SkillsAppend is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
+| `mcp_append` | []string |  |  | MCPAppend is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
@@ -219,7 +219,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
-| `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output determines desired session count. |
+| `scale_check` | string |  |  | ScaleCheck overrides the command template whose output determines desired session count. Supports the same Go template placeholders as Agent.scale_check. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## BeadsConfig
@@ -264,7 +264,7 @@ DaemonConfig holds controller daemon settings.
 | `drift_drain_timeout` | string |  | `2m` | DriftDrainTimeout is the maximum time to wait for an agent to acknowledge a drain signal during a config-drift restart. If the agent doesn't ack within this window, the controller force-kills and restarts it. Duration string (e.g., "2m", "5m"). Defaults to "2m". |
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
-| `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Raise this on cities with slow cold-starts (e.g. opus cold-start ~60s) where the default of 5 starves the rest of the candidate queue for minutes. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override.  Tradeoff: the default of 5 also bounds the process-spawn burst after a controller restart (thundering-herd protection). Raising it trades restart burst for steady-state throughput; keep within what the host can absorb. |
+| `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
 
 ## DoltConfig
 
@@ -333,7 +333,7 @@ NamedSession defines a canonical persistent session backed by an agent template.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string |  |  | Name is the configured public session identity. When omitted, Template remains the compatibility identity. |
-| `template` | string | **yes** |  | Template is the referenced agent template name. |
+| `template` | string | **yes** |  | Template is the referenced agent template name. Root declarations may target imported PackV2 agents via "binding.agent". |
 | `scope` | string |  |  | Scope defines where this named session is instantiated in pack expansion: "city" (one per city) or "rig" (one per rig). Enum: `city`, `rig` |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
 | `mode` | string |  |  | Mode controls controller behavior for this named session. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Enum: `on_demand`, `always` |
@@ -404,10 +404,10 @@ PoolOverride modifies legacy [pool] fields that map to session scaling.
 |-------|------|----------|---------|-------------|
 | `min` | integer |  |  | Min overrides the minimum number of sessions. |
 | `max` | integer |  |  | Max overrides the maximum number of sessions. 0 means no sessions can claim routed work. |
-| `check` | string |  |  | Check overrides the session scale check command. |
+| `check` | string |  |  | Check overrides the session scale check command template. Supports the same Go template placeholders as Agent.scale_check. |
 | `drain_timeout` | string |  |  | DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h"). |
-| `on_death` | string |  |  | OnDeath overrides the on_death command. |
-| `on_boot` | string |  |  | OnBoot overrides the on_boot command. |
+| `on_death` | string |  |  | OnDeath overrides the on_death command template. Supports the same Go template placeholders as Agent.on_death. |
+| `on_boot` | string |  |  | OnBoot overrides the on_boot command template. Supports the same Go template placeholders as Agent.on_boot. |
 
 ## ProviderOption
 
@@ -481,7 +481,7 @@ Rig defines an external project registered in the city.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the unique identifier for this rig. |
-| `path` | string |  |  | Path is the effective filesystem path to the rig's repository. New writes persist it to .gc/site.toml; legacy city.toml paths are accepted only so edit/migration flows can move them into site binding state. |
+| `path` | string |  |  | Path is the absolute filesystem path to the rig's repository. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived bead ID prefix for this rig. |
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
@@ -563,7 +563,7 @@ SessionConfig holds session provider settings.
 | `debounce_ms` | integer |  | `500` | DebounceMs is the default debounce interval in milliseconds for send-keys. Defaults to 500. |
 | `display_ms` | integer |  | `5000` | DisplayMs is the default display duration in milliseconds for status messages. Defaults to 5000. |
 | `startup_timeout` | string |  | `60s` | StartupTimeout is how long to wait for each agent's Start() call before treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s". |
-| `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the effective city name (site binding, legacy config, or basename) — giving every city its own tmux server automatically. Set explicitly to override. |
+| `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
 
 ## SessionSleepConfig
@@ -582,7 +582,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `name` | string |  |  | Name is the legacy checked-in city name. Runtime identity now resolves from site binding, legacy config, and basename precedence instead. |
+| `name` | string | **yes** |  | Name is the human-readable name for this city. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived HQ bead ID prefix. When empty, the prefix is derived from the city Name via DeriveBeadsPrefix. |
 | `provider` | string |  |  | Provider is the default provider name used by agents that don't specify one. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for all agents. |

@@ -171,6 +171,75 @@ func TestPhase0APIMailSend_BareConfigNameDoesNotResolveAsRecipient(t *testing.T)
 	}
 }
 
+func TestPhase0APIMailSend_BareNamedSessionUsesConfiguredMailboxWithoutMaterializing(t *testing.T) {
+	fs := newPhase0APINamedWorkerState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"from":"human","to":"worker","subject":"hello","body":"test"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/mail"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /v0/mail status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	msgs, err := fs.cityMailProv.Inbox("myrig/worker")
+	if err != nil {
+		t.Fatalf("Inbox(myrig/worker): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("configured named mailbox got %d message(s), want 1", len(msgs))
+	}
+	if got := msgs[0].To; got != "myrig/worker" {
+		t.Fatalf("message To = %q, want configured mailbox identity myrig/worker", got)
+	}
+	if count := phase0APISessionCount(t, fs.cityBeadStore); count != 0 {
+		t.Fatalf("POST /v0/mail materialized %d session(s) for configured named recipient", count)
+	}
+}
+
+func TestPhase0APIMailSend_BareNamedSessionUsesExistingLiveMailboxWithoutMaterializing(t *testing.T) {
+	fs := newPhase0APINamedWorkerState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	live, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: "myrig/worker",
+			apiNamedSessionModeKey:     "always",
+			"alias":                    "live-worker",
+			"session_name":             "s-gc-test-city-worker",
+			"state":                    "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create live named session: %v", err)
+	}
+
+	body := `{"from":"human","to":"worker","subject":"hello","body":"test"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/mail"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /v0/mail status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	msgs, err := fs.cityMailProv.Inbox("live-worker")
+	if err != nil {
+		t.Fatalf("Inbox(live-worker): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("live named mailbox got %d message(s), want 1", len(msgs))
+	}
+	if got := msgs[0].To; got != "live-worker" {
+		t.Fatalf("message To = %q, want existing live mailbox live-worker", got)
+	}
+	if count := phase0APISessionCount(t, fs.cityBeadStore); count != 1 {
+		t.Fatalf("POST /v0/mail left %d session(s), want only existing live session %s", count, live.ID)
+	}
+}
+
 func TestPhase0APIResolver_BareConfigNameDoesNotMaterializeOrdinarySession(t *testing.T) {
 	fs := newPhase0APIOrdinaryWorkerState(t)
 	srv := New(fs)
@@ -193,6 +262,32 @@ func newPhase0APIOrdinaryWorkerState(t *testing.T) *fakeState {
 			Name:              "worker",
 			Provider:          "test-agent",
 			MaxActiveSessions: intPtr(1),
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"test-agent": {DisplayName: "Test Agent"},
+		},
+	}
+	return fs
+}
+
+func newPhase0APINamedWorkerState(t *testing.T) *fakeState {
+	t.Helper()
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "myrig",
+			Provider:          "test-agent",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Dir:      "myrig",
+		}},
+		Rigs: []config.Rig{{
+			Name: "myrig",
+			Path: "/tmp/myrig",
 		}},
 		Providers: map[string]config.ProviderSpec{
 			"test-agent": {DisplayName: "Test Agent"},

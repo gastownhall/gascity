@@ -454,9 +454,20 @@ func CheckResidualTimeoutVars(s string) []string {
 // ValidateVars checks that all required variables are provided
 // and all values pass their constraints.
 func ValidateVars(formula *Formula, values map[string]string) error {
+	return validateVarDefs(formula.Vars, values)
+}
+
+// ValidateVarDefs validates explicit var definitions against provided values.
+// This is the recipe-level equivalent of ValidateVars, used after formula
+// compilation when only the remaining VarDef map is available.
+func ValidateVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	return validateVarDefs(defs, values)
+}
+
+func validateVarDefs(defs map[string]*VarDef, values map[string]string) error {
 	var errs []string
 
-	for name, def := range formula.Vars {
+	for name, def := range defs {
 		val, provided := values[name]
 
 		// Check required

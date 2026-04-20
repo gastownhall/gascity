@@ -621,7 +621,7 @@ This rollout also changes the generated schema contract: checked-in
 `city.toml` files and downstream validators must no longer require
 `[workspace].name` once workspace identity has moved to `.gc/site.toml`.
 
-| `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move to `[defaults.rig.imports]` in the root city `pack.toml`. This is the target shape, but loader-backed support is still tracked in [#360](https://github.com/gastownhall/gascity/issues/360). |
+| `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move each default include to `[defaults.rig.imports.<binding>]` entries in the root city `pack.toml`. |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
 | `[packs.*]` | Named remote pack sources used by includes | Collapse into `[imports.*]` entries. There should no longer be a separate `[packs.*]` registry in `city.toml`. |
 | `[[agent]]` | Inline agent definitions | Move to `agents/<name>/`, with optional `agent.toml`. |

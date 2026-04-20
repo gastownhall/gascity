@@ -9,6 +9,12 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+var agentPromptConventionFilenames = []string{
+	"prompt.template.md",
+	"prompt.md.tmpl",
+	"prompt.md",
+}
+
 // DiscoverPackAgents scans a pack's agents/ tree and returns
 // convention-discovered agents. Each immediate subdirectory is an agent.
 // agent.toml provides optional per-agent config, prompt.template.md is
@@ -44,34 +50,7 @@ func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool
 			}
 			agent.Name = agentName
 		}
-
-		for _, promptName := range []string{"prompt.template.md", "prompt.md.tmpl", "prompt.md"} {
-			promptPath := filepath.Join(agentDir, promptName)
-			if _, pErr := fs.Stat(promptPath); pErr == nil {
-				agent.PromptTemplate = promptPath
-				break
-			}
-		}
-
-		overlayPath := filepath.Join(agentDir, "overlay")
-		if info, oErr := fs.Stat(overlayPath); oErr == nil && info.IsDir() {
-			agent.OverlayDir = overlayPath
-		}
-
-		namepoolPath := filepath.Join(agentDir, "namepool.txt")
-		if _, npErr := fs.Stat(namepoolPath); npErr == nil {
-			agent.Namepool = namepoolPath
-		}
-
-		skillsDir := filepath.Join(agentDir, "skills")
-		if info, sErr := fs.Stat(skillsDir); sErr == nil && info.IsDir() {
-			agent.SkillsDir = skillsDir
-		}
-
-		mcpDir := filepath.Join(agentDir, "mcp")
-		if info, mErr := fs.Stat(mcpDir); mErr == nil && info.IsDir() {
-			agent.MCPDir = mcpDir
-		}
+		applyAgentConventionDefaults(fs, packDir, &agent)
 
 		discovered = append(discovered, agent)
 	}
@@ -93,4 +72,54 @@ func DiscoverPackAttachmentRoots(fs fsys.FS, packDir string) (skillsDir, mcpDir 
 	}
 
 	return skillsDir, mcpDir
+}
+
+func applyAgentConventionDefaults(fs fsys.FS, packDir string, agent *Agent) {
+	if agent == nil || strings.TrimSpace(agent.Name) == "" {
+		return
+	}
+
+	agentDir := filepath.Join(packDir, "agents", agent.Name)
+	info, err := fs.Stat(agentDir)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	if agent.PromptTemplate == "" {
+		for _, promptName := range agentPromptConventionFilenames {
+			promptPath := filepath.Join(agentDir, promptName)
+			if _, pErr := fs.Stat(promptPath); pErr == nil {
+				agent.PromptTemplate = promptPath
+				break
+			}
+		}
+	}
+
+	if agent.OverlayDir == "" {
+		overlayPath := filepath.Join(agentDir, "overlay")
+		if info, oErr := fs.Stat(overlayPath); oErr == nil && info.IsDir() {
+			agent.OverlayDir = overlayPath
+		}
+	}
+
+	if agent.Namepool == "" {
+		namepoolPath := filepath.Join(agentDir, "namepool.txt")
+		if _, npErr := fs.Stat(namepoolPath); npErr == nil {
+			agent.Namepool = namepoolPath
+		}
+	}
+
+	if agent.SkillsDir == "" {
+		skillsDir := filepath.Join(agentDir, "skills")
+		if info, sErr := fs.Stat(skillsDir); sErr == nil && info.IsDir() {
+			agent.SkillsDir = skillsDir
+		}
+	}
+
+	if agent.MCPDir == "" {
+		mcpDir := filepath.Join(agentDir, "mcp")
+		if info, mErr := fs.Stat(mcpDir); mErr == nil && info.IsDir() {
+			agent.MCPDir = mcpDir
+		}
+	}
 }

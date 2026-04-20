@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -236,11 +236,10 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	}
 }
 
-func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
+func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
-	t.Setenv("GC_BOOTSTRAP", "on")
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -269,77 +268,8 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 	}
 
 	implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
-	data, err := os.ReadFile(implicitPath)
-	if err != nil {
-		t.Fatalf("reading implicit-import.toml: %v", err)
-	}
-	text := string(data)
-	if !strings.Contains(text, `[imports."registry"]`) {
-		t.Fatalf("implicit-import.toml missing registry entry:\n%s", text)
-	}
-	if !strings.Contains(text, `source = "github.com/gastownhall/gc-registry"`) {
-		t.Fatalf("implicit-import.toml missing registry source:\n%s", text)
-	}
-}
-
-func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_DOLT", "skip")
-	configureIsolatedRuntimeEnv(t)
-	t.Setenv("GC_BOOTSTRAP", "on")
-
-	oldBootstrap := bootstrap.BootstrapPacks
-	bootstrap.BootstrapPacks = []bootstrap.Entry{{
-		Name:     "registry",
-		Source:   "github.com/gastownhall/gc-registry",
-		Version:  "0.1.0",
-		AssetDir: "packs/missing",
-	}}
-	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
-
-	cityPath := filepath.Join(t.TempDir(), "bright-lights")
-	var initStdout, initStderr bytes.Buffer
-	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
-	if code != 0 {
-		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
-	}
-
-	var stdout, stderr bytes.Buffer
-	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
-		commandName:           "gc init",
-		skipProviderReadiness: true,
-	})
-	if code != 1 {
-		t.Fatalf("finalizeInit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
-		t.Fatalf("stderr = %q, want bootstrap failure message", stderr.String())
-	}
-}
-
-func TestInitRunVersionTimesOut(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "hang-version.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	oldTimeout := initVersionTimeout
-	oldWaitDelay := initVersionWaitDelay
-	initVersionTimeout = 200 * time.Millisecond
-	initVersionWaitDelay = 50 * time.Millisecond
-	t.Cleanup(func() { initVersionTimeout = oldTimeout })
-	t.Cleanup(func() { initVersionWaitDelay = oldWaitDelay })
-
-	started := time.Now()
-	_, err := initRunVersion(script)
-	if err == nil {
-		t.Fatal("initRunVersion error = nil, want timeout")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("initRunVersion error = %v, want context deadline exceeded", err)
-	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("initRunVersion elapsed = %s, want fast timeout", elapsed)
+	if _, err := os.Stat(implicitPath); !os.IsNotExist(err) {
+		t.Fatalf("implicit-import.toml should not be created during finalizeInit, stat err = %v", err)
 	}
 }
 
@@ -575,6 +505,41 @@ func TestShellQuotePathForOSWindows(t *testing.T) {
 	}
 }
 
+func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
+	oldCommandContext := initRunVersionCommandContext
+	oldTimeout := initRunVersionTimeout
+	initRunVersionTimeout = 50 * time.Millisecond
+	initRunVersionCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcessInitRunVersionHang", "--")
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		initRunVersionCommandContext = oldCommandContext
+		initRunVersionTimeout = oldTimeout
+	})
+
+	start := time.Now()
+	line, err := initRunVersion("hung-binary")
+	if err == nil {
+		t.Fatal("initRunVersion error = nil, want timeout")
+	}
+	if line != "" {
+		t.Fatalf("initRunVersion line = %q, want empty on timeout", line)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("initRunVersion elapsed = %v, want timeout-bound execution", elapsed)
+	}
+}
+
+func TestHelperProcessInitRunVersionHang(_ *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	time.Sleep(10 * time.Second)
+	os.Exit(0)
+}
+
 func initBareProviderPackRepo(t *testing.T, name, provider string) string {
 	t.Helper()
 
@@ -688,6 +653,65 @@ prefix = "fe"
 	}
 }
 
+func TestCheckHardDependenciesRequiresBdToolsForSiteBoundBdRigUnderFileCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(`[[rig]]
+name = "frontend"
+path = "frontend"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "dolt" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(cityDir)
+	if len(missing) != 1 || missing[0].name != "dolt" {
+		t.Fatalf("missing deps = %#v, want only dolt for site-bound bd-backed rig", missing)
+	}
+}
+
 func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
@@ -740,6 +764,55 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	}
 	if calledRegister {
 		t.Fatal("registerCityWithSupervisor should not run when provider readiness blocks init")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("metadata.json missing after readiness block: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+		t.Fatalf("config.yaml missing after readiness block: %v", err)
+	}
+}
+
+func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "tutorial",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+			t.Fatalf("metadata.json missing before readiness block: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+			t.Fatalf("config.yaml missing before readiness block: %v", err)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
 		t.Fatalf("metadata.json missing after readiness block: %v", err)

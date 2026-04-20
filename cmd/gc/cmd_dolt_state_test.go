@@ -1406,6 +1406,12 @@ exit 1
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", string(invocation))
+	assertManagedDoltProbeWrites(t, "read-only-check invocation", string(invocation))
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
@@ -1426,6 +1432,82 @@ exit 0
 	}
 }
 
+func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+exit 0
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	text := string(invocation)
+	if !strings.Contains(text, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase) {
+		t.Fatalf("reset-probe invocation = %s, want managed probe drop", text)
+	}
+}
+
+func TestDoltStateResetProbeCmdRequiresForce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to drop "+managedDoltProbeDatabase+" without --force") ||
+		!strings.Contains(stderr.String(), "legacy bead store") {
+		t.Fatalf("stderr = %q, want force warning with legacy bead store context", stderr.String())
+	}
+}
+
+func TestDoltStateResetProbeCmdUsesDirectConnectionWithPassword(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+exit 42
+`)
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldResetDirect := managedDoltResetProbeDirectFn
+	called := false
+	managedDoltResetProbeDirectFn = func(host, port, user string) error {
+		called = true
+		if host != "127.0.0.1" || port != "3311" || user != "root" {
+			t.Fatalf("managedDoltResetProbeDirectFn(%q, %q, %q), want requested connection", host, port, user)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		managedDoltResetProbeDirectFn = oldResetDirect
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if !called {
+		t.Fatalf("managedDoltResetProbeDirectFn was not called")
+	}
+	if _, err := os.Stat(invocationFile); !os.IsNotExist(err) {
+		t.Fatalf("dolt CLI invocation file exists after password reset path: err=%v", err)
+	}
+}
+
 func TestDoltStateHealthCheckCmdReportsReadOnlyAndConnectionCount(t *testing.T) {
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
@@ -1436,7 +1518,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
     echo 'database is read only' >&2
     exit 1
     ;;
@@ -1473,6 +1555,8 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
+	assertNoManagedDoltProbeDrop(t, "health-check read-only probe", text)
+	assertManagedDoltProbeWrites(t, "health-check read-only probe", text)
 	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
@@ -1558,7 +1642,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
     echo 'probe exploded' >&2
     exit 1
     ;;

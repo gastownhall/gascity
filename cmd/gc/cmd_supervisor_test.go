@@ -2149,12 +2149,7 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 
 	ops := readOpLog(t, logFile)
-	if len(ops) != 1 {
-		t.Fatalf("expected bead provider stop, got %v", ops)
-	}
-	if !strings.HasPrefix(ops[0], "stop") {
-		t.Fatalf("unexpected bead provider op: %v", ops)
-	}
+	assertSingleStopWithBenignNoise(t, ops)
 }
 
 func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
@@ -2201,12 +2196,7 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	}
 
 	ops := readOpLog(t, logFile)
-	if len(ops) != 1 {
-		t.Fatalf("expected bead provider stop, got %v", ops)
-	}
-	if !strings.HasPrefix(ops[0], "stop") {
-		t.Fatalf("unexpected bead provider op: %v", ops)
-	}
+	assertSingleStopWithBenignNoise(t, ops)
 }
 
 // TestStopSupervisorWithWaitBlocksUntilSocketStops exercises the --wait

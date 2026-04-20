@@ -56,9 +56,15 @@ type agentBuildParams struct {
 	// fingerprints or PreStart injection. The load error is logged to
 	// stderr at params-construction time.
 	skillCatalog *materialize.CityCatalog
+	// skillCatalogFromCache reports whether skillCatalog came from the
+	// last-good cache rather than the current LoadCityCatalog result.
+	skillCatalogFromCache bool
 	// rigSkillCatalogs caches rig-specific shared catalogs. Each entry
 	// includes city-shared skills plus any rig-import shared catalogs.
 	rigSkillCatalogs map[string]*materialize.CityCatalog
+	// rigSkillCatalogsFromCache reports which rig entries came from the
+	// last-good cache rather than the current LoadCityCatalog result.
+	rigSkillCatalogsFromCache map[string]bool
 	// failedRigSkillCatalogs tracks rig scopes whose shared catalog
 	// failed to load for this build. Agents in those rigs must not
 	// fall back to the city catalog or they will inject stage-2 skill
@@ -97,41 +103,88 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
 	}
-	// Load the shared skill catalog once per build cycle. Errors are
-	// non-fatal — the build continues without skills participating in
-	// fingerprints or PreStart, which matches the spec's "no spurious
-	// drain-restart cycles on remote-runtime agents" principle when
-	// discovery breaks transiently.
-	cat, err := loadSharedSkillCatalog(cfg, "")
-	if err != nil {
-		if stderr != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (skills will not contribute to fingerprints this tick)\n", err) //nolint:errcheck // best-effort stderr
+	// Load the shared skill catalog once per build cycle. Transient load
+	// failures (filesystem race during dolt sync / heavy I/O) used to
+	// silently set skillCatalog = nil for that tick, which dropped every
+	// `skills:*` entry from FingerprintExtra and flipped CoreFingerprint
+	// for every live session → config-drift drain storm. Fall back to the
+	// last successfully cached catalog for this exact input set so the
+	// fingerprint stays stable across transient failures. A truly empty
+	// catalog still propagates; bootstrap-backed empty successes get one
+	// grace tick before the empty result replaces the cache so stale skill
+	// sources do not stick around forever.
+	cityCatalog := loadSharedSkillCatalogWithFallback(cityPath, cfg, "")
+	if cityCatalog.Err != nil {
+		if cityCatalog.Mode == sharedCatalogLoadCachedOnError {
+			catCopy := cityCatalog.Catalog
+			params.skillCatalog = &catCopy
+			params.skillCatalogFromCache = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (using cached catalog to avoid drift)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+			}
+		} else if stderr != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
 		}
 	} else {
-		params.skillCatalog = &cat
+		catCopy := cityCatalog.Catalog
+		params.skillCatalog = &catCopy
+		if cityCatalog.Mode == sharedCatalogLoadCachedOnEmptyGrace {
+			params.skillCatalogFromCache = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog returned empty while bootstrap skills were unavailable (using cached catalog to avoid drift)\n") //nolint:errcheck // best-effort stderr
+			}
+		}
 	}
 	for rigName := range cfg.RigPackSkills {
-		cat, err := loadSharedSkillCatalog(cfg, rigName)
-		if err != nil {
-			if stderr != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog rig %q %v (skills will not contribute to fingerprints this tick)\n", rigName, err) //nolint:errcheck // best-effort stderr
+		rigCatalog := loadSharedSkillCatalogWithFallback(cityPath, cfg, rigName)
+		if rigCatalog.Err != nil {
+			if rigCatalog.Mode == sharedCatalogLoadCachedOnError {
+				if params.rigSkillCatalogs == nil {
+					params.rigSkillCatalogs = make(map[string]*materialize.CityCatalog)
+				}
+				if params.rigSkillCatalogsFromCache == nil {
+					params.rigSkillCatalogsFromCache = make(map[string]bool)
+				}
+				catCopy := rigCatalog.Catalog
+				params.rigSkillCatalogs[rigName] = &catCopy
+				params.rigSkillCatalogsFromCache[rigName] = true
+				if stderr != nil {
+					fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog rig %q %v (using cached catalog to avoid drift)\n", rigName, rigCatalog.Err) //nolint:errcheck // best-effort stderr
+				}
+				continue
 			}
 			if params.failedRigSkillCatalogs == nil {
 				params.failedRigSkillCatalogs = make(map[string]bool)
 			}
 			params.failedRigSkillCatalogs[rigName] = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog rig %q %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", rigName, rigCatalog.Err) //nolint:errcheck // best-effort stderr
+			}
 			continue
 		}
 		if params.rigSkillCatalogs == nil {
 			params.rigSkillCatalogs = make(map[string]*materialize.CityCatalog)
 		}
-		catCopy := cat
+		catCopy := rigCatalog.Catalog
 		params.rigSkillCatalogs[rigName] = &catCopy
+		if rigCatalog.Mode == sharedCatalogLoadCachedOnEmptyGrace {
+			if params.rigSkillCatalogsFromCache == nil {
+				params.rigSkillCatalogsFromCache = make(map[string]bool)
+			}
+			params.rigSkillCatalogsFromCache[rigName] = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog rig %q returned empty while bootstrap skills were unavailable (using cached catalog to avoid drift)\n", rigName) //nolint:errcheck // best-effort stderr
+			}
+		}
 	}
 	return params
 }
 
 func (p *agentBuildParams) sharedSkillCatalogForAgent(agent *config.Agent) *materialize.CityCatalog {
+	return p.sharedSkillCatalogSnapshotForAgent(agent)
+}
+
+func (p *agentBuildParams) sharedSkillCatalogSnapshotForAgent(agent *config.Agent) *materialize.CityCatalog {
 	if p == nil || agent == nil {
 		return nil
 	}

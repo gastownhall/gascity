@@ -2,6 +2,7 @@ package docgen
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,81 @@ func TestCitySchemaDescriptions(t *testing.T) {
 	if !ok || desc == "" {
 		t.Error("Agent.name has no description — AddGoComments may not be extracting comments")
 	}
+}
+
+func TestCitySchemaCommandTemplateDescriptions(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	agentProps := defProperties(t, raw, "Agent")
+	for field, want := range map[string]string{
+		"scale_check": "Go template placeholders",
+		"on_boot":     "Go template placeholders",
+		"on_death":    "Go template placeholders",
+		"work_query":  "Go template placeholders",
+		"sling_query": "Go template placeholders",
+	} {
+		prop, ok := agentProps[field].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Agent.%s property not a map", field)
+		}
+		desc, _ := prop["description"].(string)
+		normalized := strings.Join(strings.Fields(desc), " ")
+		if !strings.Contains(normalized, want) {
+			t.Fatalf("Agent.%s description = %q, want substring %q", field, desc, want)
+		}
+		if !strings.Contains(normalized, "AgentBase") {
+			t.Fatalf("Agent.%s description = %q, want PathContext fields surfaced", field, desc)
+		}
+	}
+}
+
+func TestCitySchemaAttachmentListFieldsRemainTombstones(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	check := func(defName string, fields ...string) {
+		t.Helper()
+		props := defProperties(t, raw, defName)
+		for _, field := range fields {
+			prop, ok := props[field].(map[string]interface{})
+			if !ok {
+				t.Fatalf("%s.%s property not a map", defName, field)
+			}
+			desc, _ := prop["description"].(string)
+			if !strings.Contains(desc, "accepted but ignored") {
+				t.Fatalf("%s.%s description = %q, want tombstone wording", defName, field, desc)
+			}
+		}
+	}
+
+	check("Agent", "skills", "mcp")
+	check("AgentDefaults", "skills", "mcp")
+	check("AgentOverride", "skills", "mcp", "skills_append", "mcp_append")
 }
 
 func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {

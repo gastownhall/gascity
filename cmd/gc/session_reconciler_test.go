@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -3180,6 +3182,121 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 	}
 	if !sp.IsRunning(sessionName) {
 		t.Fatalf("session %q not running after reconcile — recovery did not trigger start", sessionName)
+	}
+}
+
+// Regression test for #742 follow-up: after the stale-bead reaper closes a
+// dead canonical bead, rediscovery must not also revive a leaked plain open
+// bead for the same backing template alongside the rebuilt named session.
+func TestReconcileSessionBeads_FileStoreAlwaysNamedRecoversWithLeakedDuplicateOpenBead(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsPath := filepath.Join(cityPath, ".gc", "beads.json")
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	if err != nil {
+		t.Fatalf("OpenFileStore: %v", err)
+	}
+	store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
+
+	clk := &clock.Fake{Time: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true", MaxActiveSessions: intPtr(0)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+
+	_, err = store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"template":                   "mayor",
+			"agent_name":                 "mayor",
+			"state":                      "asleep",
+			"generation":                 "1",
+			"continuation_epoch":         "1",
+			"instance_token":             "canonical-token",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+	leaked, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"session_name":       "s-gc-leaked",
+			"template":           "mayor",
+			"agent_name":         "mayor",
+			"state":              "asleep",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "leaked-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(leaked): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+
+	mayorTP, ok := dsResult.State[sessionName]
+	if !ok {
+		t.Fatalf("desired state missing canonical named session %q; keys=%v", sessionName, mapKeys(dsResult.State))
+	}
+	if mayorTP.ConfiguredNamedIdentity != "mayor" {
+		t.Fatalf("ConfiguredNamedIdentity = %q, want mayor", mayorTP.ConfiguredNamedIdentity)
+	}
+	if mayorTP.SessionName != sessionName {
+		t.Fatalf("SessionName = %q, want %q", mayorTP.SessionName, sessionName)
+	}
+	if _, ok := dsResult.State[leaked.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state unexpectedly included leaked duplicate bead %q; keys=%v", leaked.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
+
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+
+	woken := reconcileSessionBeads(
+		context.Background(), sessions, dsResult.State, cfgNames, cfg, sp,
+		store, nil, dsResult.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+		dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("canonical named session %q was not started", sessionName)
+	}
+	if sp.IsRunning(leaked.Metadata["session_name"]) {
+		t.Fatalf("leaked duplicate session %q should not have been started", leaked.Metadata["session_name"])
+	}
+	if strings.Contains(stderr.String(), "session alias already exists") {
+		t.Fatalf("unexpected alias collision during recovery:\n%s", stderr.String())
 	}
 }
 

@@ -92,6 +92,32 @@ func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfig(t *testing.T) {
 	}
 }
 
+func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatabase(t *testing.T) {
+	scopeDir := t.TempDir()
+	metadataPath := filepath.Join(scopeDir, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, metadataPath, contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: strings.ToUpper(managedDoltProbeDatabase),
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata: %v", err)
+	}
+	if err := ensureCanonicalScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
+		t.Fatalf("ensureCanonicalScopeMetadataIfPresent: %v", err)
+	}
+	got, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		t.Fatalf("ReadDoltDatabase: %v", err)
+	}
+	if !ok || got != strings.ToUpper(managedDoltProbeDatabase) {
+		t.Fatalf("dolt_database = %q, ok=%v; want existing reserved name preserved", got, ok)
+	}
+}
+
 func TestDoRigSetEndpointInheritMirrorsExternalCity(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

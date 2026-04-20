@@ -345,6 +345,16 @@ func buildPreparedStart(
 		forceFresh := session.Metadata["wake_mode"] == "fresh"
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart, forceFresh)
 	}
+	firstStart := session.Metadata["started_config_hash"] == ""
+	forceFresh := session.Metadata["wake_mode"] == "fresh"
+	if !firstStart && !forceFresh {
+		agentCfg.PromptSuffix = ""
+		agentCfg.PromptFlag = ""
+		agentCfg.Nudge = tp.Hints.Nudge
+		if agentCfg.Env != nil {
+			delete(agentCfg.Env, startupPromptDeliveredEnv)
+		}
+	}
 	// Initial message: append to prompt on first start only.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema

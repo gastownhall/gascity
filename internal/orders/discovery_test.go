@@ -119,15 +119,63 @@ schedule = "*/5 * * * *"
 `)
 	fs.Errors["/pack/orders/health-check.toml"] = errors.New("boom")
 
-	orders, err := discoverRoot(fs, ScanRoot{
+	logs := captureOrderLogs(t, func() {
+		orders, err := discoverRoot(fs, ScanRoot{
+			Dir:          "/pack/orders",
+			FormulaLayer: "/pack/formulas",
+		})
+		if err != nil {
+			t.Fatalf("discoverRoot: %v", err)
+		}
+		if len(orders) != 0 {
+			t.Fatalf("got %d orders, want 0", len(orders))
+		}
+	})
+	if !strings.Contains(logs, "unreadable order path") {
+		t.Fatalf("logs = %q, want unreadable order path warning", logs)
+	}
+}
+
+func TestDiscoverRootLogsUnreadablePathWhenDeprecatedWarningsSuppressed(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/health-check.toml"] = []byte(`
+[order]
+formula = "health-check"
+trigger = "cron"
+schedule = "*/5 * * * *"
+`)
+	fs.Errors["/pack/orders/health-check.toml"] = errors.New("boom")
+
+	logs := captureOrderLogs(t, func() {
+		orders, err := discoverRootWithOptions(fs, ScanRoot{
+			Dir:          "/pack/orders",
+			FormulaLayer: "/pack/formulas",
+		}, ScanOptions{SuppressDeprecatedPathWarnings: true})
+		if err != nil {
+			t.Fatalf("discoverRootWithOptions: %v", err)
+		}
+		if len(orders) != 0 {
+			t.Fatalf("got %d orders, want 0", len(orders))
+		}
+	})
+	if !strings.Contains(logs, "unreadable order path") {
+		t.Fatalf("logs = %q, want unreadable order path warning", logs)
+	}
+}
+
+func TestDiscoverRootReturnsUnreadableRootError(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Errors["/pack/orders"] = errors.New("permission denied")
+
+	_, err := discoverRoot(fs, ScanRoot{
 		Dir:          "/pack/orders",
 		FormulaLayer: "/pack/formulas",
 	})
-	if err != nil {
-		t.Fatalf("discoverRoot: %v", err)
+	if err == nil {
+		t.Fatal("discoverRoot returned nil error for unreadable root")
 	}
-	if len(orders) != 0 {
-		t.Fatalf("got %d orders, want 0", len(orders))
+	if !strings.Contains(err.Error(), "reading order root") {
+		t.Fatalf("error = %v, want readable root context", err)
 	}
 }
 

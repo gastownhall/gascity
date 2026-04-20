@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/materialize"
 )
 
 // TestInternalMaterializeSkillsMaterializesClaude exercises the happy
@@ -275,6 +277,136 @@ template = "mayor"
 	}
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
 		t.Fatalf("stale shared symlink should be pruned on catalog failure, lstat err=%v", err)
+	}
+}
+
+func TestInternalMaterializeSkillsUsesSharedCatalogSnapshotEnvWhenLiveCatalogFails(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	skillsDir := filepath.Join(cityDir, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+	sharedCat, err := materialize.LoadCityCatalog(skillsDir)
+	if err != nil {
+		t.Fatalf("LoadCityCatalog: %v", err)
+	}
+	snapshot, err := encodeSharedCatalogSnapshot(sharedCat)
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot: %v", err)
+	}
+	t.Setenv(sharedSkillCatalogSnapshotEnvVar, snapshot)
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat(%s): %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+	if strings.Contains(stderr.String(), "shared skill catalog unavailable") {
+		t.Fatalf("snapshot-backed run should not reload the live catalog, stderr=%q", stderr.String())
+	}
+}
+
+func TestInternalMaterializeSkillsInvalidSharedCatalogSnapshotFallsBackToLiveCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(sharedSkillCatalogSnapshotEnvVar, "not-base64")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat(%s): %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+	if !strings.Contains(stderr.String(), "decoding shared catalog snapshot") {
+		t.Fatalf("stderr = %q, want snapshot decode warning", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "shared skill catalog unavailable") {
+		t.Fatalf("invalid snapshot should fall back to live catalog, stderr=%q", stderr.String())
 	}
 }
 

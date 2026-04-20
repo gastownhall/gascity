@@ -3,11 +3,6 @@
 This document turns the reconciled pack/city v.next docs into an
 executable conformance plan for the current Pack/City v2 rollout.
 
-> [!IMPORTANT]
-> This document describes the pre-release Gas City v0.15.0 rollout.
-> Some PackV2 surfaces are still under active development; release-gated
-> caveats below use the form "As of release v0.15.0, ...".
-
 The goal is not to restate the full design. The goal is to answer three
 practical questions:
 
@@ -57,16 +52,15 @@ These are settled enough, and implemented enough, to block CI now.
 | Import target taxonomy | `source` stays the only public locator field; `gc import add` classifies the resolved target as plain directory, tagged git, untagged git, or invalid pack target, then synthesizes `version` accordingly (`none`, semver default, or `sha:`) | Unit + testscript | `cmd/gc/cmd_import.go`, `internal/packman/resolve.go` |
 | Rig imports | `[rigs.imports.<binding>]` in `city.toml` resolves for the targeted rig | Unit + testscript | `internal/config/pack.go`, `internal/config/compose.go` |
 | Agent discovery | `agents/<name>/` creates an agent without requiring `[[agent]]` | Unit | `internal/config/agent_discovery.go` |
-| Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze as of release v0.15.0: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
+| Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze in this release wave: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
 | Provider preset merge and lookup | Imported pack providers merge into the city provider map additively, city/local providers shadow imported ones on name collision, and provider lookup layers city overrides onto builtins when supported | Unit | `internal/config/pack.go`, `internal/config/resolve.go` |
 | Prompt naming | `prompt.md` is inert markdown and `prompt.template.md` enables template processing | Unit + testscript | `internal/config/agent_discovery.go`, `cmd/gc/prompt.go` |
-| Overlay discovery | pack-wide `overlay/` and agent-local `agents/<name>/overlay/` are discovered by convention | Unit | `internal/config/pack.go`, `internal/config/agent_discovery.go`, `internal/overlay/overlay.go` |
+| Overlay discovery | pack-wide `overlay/` and agent-local `agents/<name>/overlay/` are discovered by convention | Unit | `internal/config/agent_discovery.go`, `internal/overlay/overlay.go` |
 | Provider overlay filtering | only `per-provider/<provider>/` content for the effective provider is materialized | Unit | `internal/overlay/overlay.go` |
 | Namepool convention | `agents/<name>/namepool.txt` is discovered by convention | Unit | `internal/config/agent_discovery.go` |
 | Template fragments | `template-fragments/` and `agents/<name>/template-fragments/` are discovered and rendered into template prompts | Unit + testscript | `cmd/gc/prompt.go` |
+| Agent-local auto-append bridge | `append_fragments` declared on an agent applies only to `.template.md` prompts and does nothing to plain `.md` prompts | Unit + testscript | `cmd/gc/prompt.go` |
 | `[agent_defaults]` auto-append bridge | `[agent_defaults].append_fragments` composes and auto-appends only for `.template.md` prompts | Unit + testscript | `internal/config/compose.go`, `cmd/gc/prompt.go` |
-| `[agents]` compatibility alias | `[agents]` still parses as a compatibility alias for `[agent_defaults]`, normalizes to the canonical table, and emits a deprecation warning | Unit | `internal/config/compose.go`, `internal/config/undecoded.go` |
-| Unsupported `AgentDefaults` migration keys | `[agent_defaults].provider`, `.scope`, and `.install_agent_hooks` emit migration-oriented warnings instead of generic unknown-field hints | Unit | `internal/config/undecoded.go` |
 | Agent defaults layering | `[agent_defaults]` is legal in both `pack.toml` and `city.toml`, with city winning on merge; runtime inheritance is gated only for fields the implementation actually applies today | Unit | `internal/config/compose.go`, `internal/config/config.go` |
 | Qualified patch targeting | imported agents can be targeted by qualified name in `[[patches.agent]]` | Unit | `internal/config/patch.go` |
 | Patch prompt template gating | An explicitly patched `prompt_template` path follows the same `.template.` rule as agent prompt files: `.template.md` renders, plain `.md` stays inert | Unit | `internal/config/patch.go`, `cmd/gc/prompt.go` |
@@ -103,8 +97,8 @@ unsettled to be reliable release gates.
 
 | Area | Current status | Why it is non-gating for now |
 |---|---|---|
-| `[defaults.rig.imports]` loader support | documented intent, not implemented | Migration tooling may write it, but the loader does not yet honor it |
-| Agent-local `append_fragments` | documented intent, not implemented | Current runtime only supports `[agent_defaults].append_fragments`; agent-local parity stays tracked in [#671](https://github.com/gastownhall/gascity/issues/671) |
+| `[defaults.rig.imports.<binding>]` loader support | documented intent, not implemented | Migration tooling may write it, but the loader does not yet honor it |
+| `[agent_defaults] provider` driving runtime provider selection | migration target is documented, but runtime behavior is not aligned enough to gate | Current implementation still resolves runtime defaults through `workspace.provider` / `ResolveProvider`; locking in the future rule now would create false failures |
 | `patches/` directory convention for imported prompt replacements | documented in v.next docs, not implemented | Current implementation still relies on explicit patch fields rather than full loader-discovered patch files |
 | Pack `skills/` discovery | documented, not implemented | First slice is current-city-pack only with list-only visibility; imported-pack catalogs are later |
 | `mcp/` TOML abstraction | documented, not implemented | Same first-slice scope as skills: current-city-pack only, list-only visibility first, provider projection later |
@@ -162,7 +156,8 @@ that would materially raise confidence without exploding scope.
 - `internal/config/agent_discovery.go`: `agents/<name>/`, prompt naming,
   overlay and namepool conventions
 - `cmd/gc/prompt.go`: `.template.` gating, fragment lookup, and
-  `[agent_defaults].append_fragments` behavior
+  `append_fragments` behavior for both agent-local and
+  `[agent_defaults]` sources
 - `internal/overlay/overlay.go`: provider filtering and overlay layering
 - `internal/config/patch.go`: qualified-name patch targeting and patched
   prompt-template path handling

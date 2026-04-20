@@ -4,12 +4,7 @@
 > from the release branch Go structs) against the reconciled pack v2 specs.
 > Revised through field-by-field walkthrough to reflect the **current
 > Pack/City v2 desired state** — not the ideal end-state, but what should
-> ship as of release v0.15.0.
-
-> [!IMPORTANT]
-> This document describes the pre-release Gas City v0.15.0 rollout.
-> Some PackV2 surfaces are still under active development; release-gated
-> caveats below use the form "As of release v0.15.0, ...".
+> ship in this release wave.
 
 ## Color key
 
@@ -36,7 +31,7 @@
 
 - `[pack]` (name, version, schema, requires_gc)
 - `[imports]`
-- `[defaults.rig.imports]`
+- `[defaults.rig.imports.<binding>]`
 
 ### Legal in both (city wins on merge)
 
@@ -65,13 +60,13 @@
 |--------|-------|----------|--------------------|
 | 🟢 | `include` | []string, merges fragments | **Keep.** Fragment-only (`-f` path). If a fragment contains `[imports]`, `includes`, or references `pack.toml` → hard error. |
 | 🟢 | `workspace` | Required block | **Keep as container.** Deprecated after this rollout (#600). Sub-fields walked individually below. |
-| 🟡 | `packs` | map[string]PackSource | **Loud warning on schema 2.** V1 mechanism, use `[imports]` + `pack.lock`. |
+| 🟡 | `packs` | map[string]PackSource | **Loud warning on schema 2.** V1 mechanism, use `[imports]` + `packs.lock`. |
 | 🟡 | `agent` | []Agent, required | **Loud warning on schema 2.** Not required for schema 2 — agents discovered from `agents/<name>/`. |
 | 🟢 | `imports` | map[string]Import | **Keep.** V2 mechanism, working. |
 | 🟢 | `named_session` | []NamedSession | **Keep.** Legal in both pack.toml and city.toml, city wins. |
 | 🟢 | `rigs` | []Rig | **Keep in city.toml.** |
 | 🟢 | `patches` | Patches | **Keep.** `[[patches.agent]]` and `[[patches.providers]]` legal in both, city wins. `[[patches.rigs]]` city.toml only. |
-| 🟢 | `agent_defaults` | AgentDefaults | **Keep.** Legal in both pack.toml and city.toml, city wins. As of release v0.15.0, the surface stays as-is (no expansion). |
+| 🟢 | `agent_defaults` | AgentDefaults | **Keep.** Legal in both pack.toml and city.toml, city wins. Surface stays as-is (no expansion in this wave). |
 | 🟢 | `providers` | map[string]ProviderSpec | **Keep.** Legal in both, city wins. |
 | 🟡 | `formulas` | FormulasConfig | See `[formulas].dir` below. |
 | 🟢 | `beads` | BeadsConfig | **Keep in city.toml.** |
@@ -98,10 +93,10 @@
 | 🟡 | `suspended` | Boolean | **Soft warning.** "Use `gc suspend`/`gc resume` instead." | `.gc/` site binding |
 | 🟢 | `max_active_sessions` | Integer | **Keep as-is.** Deployment capacity. | Top-level city.toml field when `[workspace]` is dismantled |
 | 🟢 | `session_template` | String | **Keep as-is.** Deployment. | `[session]` when `[workspace]` is dismantled |
-| 🟢 | `install_agent_hooks` | []string | **Keep.** As of release v0.15.0, no `[agent_defaults]` replacement is implemented yet; `[agent_defaults].install_agent_hooks` still warns. | Later hooks-default redesign |
+| 🟡 | `install_agent_hooks` | []string | **Soft warning.** "Use `[agent_defaults]` instead." | `[agent_defaults]` in pack.toml |
 | 🟡 | `global_fragments` | []string | **Soft warning.** "Use `[agent_defaults] append_fragments` or explicit `{{ template }}` instead." | Removed (replaced by template-fragments) |
 | 🟡 | `includes` | []string | **Loud warning on schema 2.** V1 composition, use `[imports]`. | Removed |
-| 🟡 | `default_rig_includes` | []string | **Loud warning on schema 2.** Use `[defaults.rig.imports]` in pack.toml. | Removed |
+| 🟡 | `default_rig_includes` | []string | **Loud warning on schema 2.** Use `[defaults.rig.imports.<binding>]` in pack.toml. | Removed |
 
 ## Agent fields
 
@@ -126,14 +121,13 @@ In this rollout, `[[agent]]` gets a loud warning on schema 2. Agent fields below
 
 ### Legal in agent.toml
 
-All other agent fields are legal in `agent.toml`. As of release
-v0.15.0, the `[agent_defaults]` surface stays as-is (no expansion).
+All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface stays as-is in this wave (no expansion).
 
 | Status | Field | Notes |
 |--------|-------|-------|
 | 🟢 | `description` | |
 | 🟢 | `scope` | `"city"` or `"rig"` |
-| 🟢 | `suspended` | As of release v0.15.0, stays in agent.toml; moves to `.gc/` post-release |
+| 🟢 | `suspended` | Stays in agent.toml in this wave; moves to `.gc/` post-release |
 | 🟢 | `provider` | |
 | 🟢 | `start_command` | |
 | 🟢 | `args` | |
@@ -159,7 +153,7 @@ v0.15.0, the `[agent_defaults]` surface stays as-is (no expansion).
 | 🟢 | `session_setup` | |
 | 🟢 | `session_setup_script` | Path resolves against pack root |
 | 🟢 | `session_live` | |
-| 🟢 | `install_agent_hooks` | Overrides workspace.install_agent_hooks |
+| 🟢 | `install_agent_hooks` | Overrides agent_defaults |
 | 🟢 | `hooks_installed` | |
 | 🟢 | `idle_timeout` | |
 | 🟢 | `sleep_after_idle` | |
@@ -181,8 +175,7 @@ v0.15.0, the `[agent_defaults]` surface stays as-is (no expansion).
 | 🟢 | `allow_env_override` | Present | **Keep.** Not yet auto-applied at runtime. |
 | 🟢 | `append_fragments` | Present | **Keep.** Migration bridge for global_fragments/inject_fragments. |
 
-As of release v0.15.0, there is no expansion of the
-`[agent_defaults]` surface.
+No expansion of `[agent_defaults]` surface in this wave.
 
 ## FormulasConfig
 
@@ -207,9 +200,9 @@ All Import fields match spec. No changes needed.
 | Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|----|
 | 🟢 | `name` | Required | **Keep in city.toml.** | |
-| 🟢 | `path` | Optional during migration | **Loader/runtime use `.gc/site.toml`; `gc doctor --fix` migrates legacy values out of `city.toml`.** | |
-| 🟢 | `prefix` | String | **Keep in city.toml.** | `.gc/` (post-Phase A only, not in #588) |
-| 🟢 | `suspended` | Boolean | **Keep in city.toml.** | `.gc/` (post-Phase A only, not in #588) |
+| 🟢 | `path` | Required | **Keep in city.toml.** | `.gc/site.toml` (#588) |
+| 🟢 | `prefix` | String | **Keep in city.toml.** | `.gc/` (#588) |
+| 🟢 | `suspended` | Boolean | **Keep in city.toml.** | `.gc/` (#588) |
 | 🟡 | `includes` | []string | **Loud warning on schema 2.** Use `[rigs.imports]`. | Removed |
 | 🟢 | `imports` | map[string]Import | **Keep in city.toml.** | |
 | 🟢 | `max_active_sessions` | Integer | **Keep in city.toml.** | |
@@ -227,16 +220,16 @@ All Import fields match spec. No changes needed.
 |--------|-------|----------|--------------------|
 | 🟡 | `inject_fragments` | Present | **Loud warning.** V1 remnant. |
 | 🟡 | `inject_fragments_append` | Present | **Loud warning.** V1 remnant. |
-| 🟢 | `prompt_template` | Path string | **Keep.** As of release v0.15.0, this remains supported. Post-release: convention-based via `patches/`. |
-| 🟢 | `overlay_dir` | Path string | **Keep.** As of release v0.15.0, this remains supported. Post-release: convention-based. |
-| 🟢 | `dir` + `name` targeting (AgentPatch) | Present | **Keep.** As of release v0.15.0, qualified name targeting already works. |
+| 🟢 | `prompt_template` | Path string | **Keep in this wave.** Post-release: convention-based via `patches/`. |
+| 🟢 | `overlay_dir` | Path string | **Keep in this wave.** Post-release: convention-based. |
+| 🟢 | `dir` + `name` targeting (AgentPatch) | Present | **Keep in this wave.** Qualified name targeting already works. |
 | 🟢 | All other override fields | Present | **Keep.** |
 
 ## PackSource
 
 | Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
-| 🟡 | (entire struct) | Present | **Loud warning on schema 2.** V1 mechanism, use `[imports]` + `pack.lock`. |
+| 🟡 | (entire struct) | Present | **Loud warning on schema 2.** V1 mechanism, use `[imports]` + `packs.lock`. |
 
 ---
 

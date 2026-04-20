@@ -179,14 +179,15 @@ func TestTutorial03Sessions(t *testing.T) {
 			t.Fatalf("cat city.toml: %v\n%s", err, out)
 		}
 		for _, want := range []string{
-			`name = "my-city"`,
-			`name = "mayor"`,
-			`prompt_template = "agents/mayor/prompt.template.md"`,
+			`provider = "claude"`,
 			`name = "my-project"`,
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("city.toml missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, myProject) {
+			t.Fatalf("city.toml should not contain machine-local rig path %q:\n%s", myProject, out)
 		}
 	})
 

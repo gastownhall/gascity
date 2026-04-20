@@ -95,6 +95,7 @@ Check data directory size. Warn if exceeding configured threshold.
 SHOW DATABASES;
 ```
 Count databases matching orphan patterns: testdb_*, beads_t*, beads_pt*, doctest_*.
+Ignore Dolt internals: information_schema, mysql, dolt_cluster, __gc_probe.
 If orphan count > threshold, recommend cleanup:
 ```bash
 gc dolt cleanup

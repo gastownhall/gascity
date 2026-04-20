@@ -80,6 +80,7 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/05-formulas.md",
 		commands: []string{
+			"cat > formulas/pancakes.toml << 'EOF'",
 			"gc formula list",
 			"gc formula show pancakes",
 			"gc agent add --name worker",

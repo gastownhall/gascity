@@ -110,13 +110,8 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("cat city.toml: %v\n%s", err, out)
 			}
-			for _, want := range []string{
-				`name = "my-city"`,
-				`provider = "claude"`,
-			} {
-				if !strings.Contains(out, want) {
-					t.Fatalf("city.toml missing %q:\n%s", want, out)
-				}
+			if !strings.Contains(out, `provider = "claude"`) {
+				t.Fatalf("city.toml missing workspace provider:\n%s", out)
 			}
 			if strings.Contains(out, "[[agent]]") {
 				t.Fatalf("city.toml contains legacy [[agent]] block:\n%s", out)
@@ -181,6 +176,9 @@ func TestTutorial01Cities(t *testing.T) {
 				t.Fatalf("read .gc/site.toml: %v", err)
 			}
 			out := string(data)
+			if !strings.Contains(out, `workspace_name = "my-city"`) {
+				t.Fatalf(".gc/site.toml missing workspace binding:\n%s", out)
+			}
 			if !strings.Contains(out, `name = "my-project"`) {
 				t.Fatalf(".gc/site.toml missing rig entry:\n%s", out)
 			}

@@ -13,9 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -23,11 +21,6 @@ import (
 var (
 	initProbeProvidersReadiness = api.ProbeProviders
 	errInitProviderPreflight    = errors.New("provider readiness preflight failed")
-)
-
-var (
-	initVersionTimeout   = 5 * time.Second
-	initVersionWaitDelay = 250 * time.Millisecond
 )
 
 type initFinalizeOptions struct {
@@ -43,17 +36,8 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
-	// Collision detection: if the city already declares [imports.<name>]
-	// matching a bootstrap pack, refuse to write the implicit-import entry
-	// that would otherwise be silently shadowed. See
-	// engdocs/proposals/skill-materialization.md — "Name-collision with a
-	// user-declared [imports.core]".
-	cityImports := readCityImportsForBootstrap(cityPath)
-	if err := bootstrap.EnsureBootstrapForCity("", cityImports); err != nil {
-		fmt.Fprintf(stderr, "%s: bootstrapping implicit imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
+	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -79,32 +63,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 			logInitProgress(stdout, 6, "Checking provider readiness")
 		}
 	}
-	if err := fetchCityPacksIfNeeded(cityPath); err != nil {
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	// Canonicalize bd-owned store files before any provider-readiness block.
-	// A failed provider auth/login check must not leave the city half-initialized.
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", opts.commandName) //nolint:errcheck // best-effort stderr
-		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", opts.commandName, err)                //nolint:errcheck // best-effort stderr
-		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", opts.commandName)                     //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	emitLoadCityConfigWarnings(stderr, prov)
-	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
-		cityDoltConfigs.Store(cityPath, cfg.Dolt)
-		defer cityDoltConfigs.Delete(cityPath)
-	}
-	prefix := config.EffectiveHQPrefix(cfg)
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	if !opts.skipProviderReadiness {
 		if err := runInitProviderPreflight(cityPath, stdout, stderr, opts.commandName); err != nil {
 			return 1
@@ -112,12 +74,17 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
-	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
+
+	// Load config to resolve explicit HQ prefix (workspace.prefix field).
+	// Config must be loadable at this point — using DeriveBeadsPrefix as a
+	// silent fallback would create a prefix mismatch between init and runtime.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+	prefix := config.EffectiveHQPrefix(cfg)
+	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1
@@ -126,36 +93,6 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		logInitProgress(stdout, 7, "Registering city with supervisor")
 	}
 	return registerCityWithSupervisor(cityPath, stdout, stderr, opts.commandName, opts.showProgress)
-}
-
-// readCityImportsForBootstrap reads the [imports] table from city.toml and
-// from any sibling pack.toml so the bootstrap writer can detect collisions
-// against user-declared imports. Best-effort: parse errors and missing
-// files return an empty map (the composer will surface a clearer error
-// later if the city is malformed). Only the import binding name is used
-// by the collision check — the rest of the Import struct is irrelevant.
-func readCityImportsForBootstrap(cityPath string) map[string]config.Import {
-	merged := make(map[string]config.Import)
-
-	for _, rel := range []string{"city.toml", "pack.toml"} {
-		data, err := os.ReadFile(filepath.Join(cityPath, rel))
-		if err != nil {
-			continue
-		}
-		var doc struct {
-			Imports map[string]config.Import `toml:"imports"`
-		}
-		if _, err := toml.Decode(string(data), &doc); err != nil {
-			continue
-		}
-		for name, imp := range doc.Imports {
-			if _, already := merged[name]; already {
-				continue
-			}
-			merged[name] = imp
-		}
-	}
-	return merged
 }
 
 func maybePrintWizardProviderGuidance(wiz wizardConfig, stdout io.Writer) {
@@ -205,15 +142,20 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 		fmt.Fprintf(stderr, "%s: materializing gastown packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", commandName, err)                //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
-	emitLoadCityConfigWarnings(stderr, prov)
 	ensureInitArtifacts(cityPath, cfg, stderr, commandName)
+	if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by bead store initialization\n", commandName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: initializing canonical bead store files: %v\n", commandName, err)                  //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: fix the bead store issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
+		return errInitProviderPreflight
+	}
 	targets, warnings, err := collectInitProviderTargets(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by provider resolution\n", commandName) //nolint:errcheck // best-effort stderr
@@ -334,6 +276,30 @@ func explicitProviderRefs(cfg *config.City) []string {
 	}
 	sort.Strings(refs)
 	return refs
+}
+
+func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *config.City) error {
+	if cfg == nil {
+		return nil
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	if !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+		return nil
+	}
+	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
+			return err
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+			return fmt.Errorf("rig %q: %w", rig.Name, err)
+		}
+	}
+	return nil
 }
 
 func providerReadinessProbeName(ref string, cfg *config.City) string {
@@ -485,18 +451,21 @@ type missingDep struct {
 // Tests can override this to simulate missing binaries.
 var initLookPath = exec.LookPath
 
+var initRunVersionCommandContext = exec.CommandContext
+
+var initRunVersionTimeout = 2 * time.Second
+
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initVersionTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "version")
-	cmd.WaitDelay = initVersionWaitDelay
-	out, err := cmd.Output()
+
+	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
+	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("%s version: %w", binary, ctx.Err())
-		}
 		return "", err
 	}
 	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
@@ -522,13 +491,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		condition   func() bool // if non-nil, only checked when true
 	}
 
-	needsBd := false
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		resolveRigPaths(cityPath, cfg.Rigs)
-		needsBd = workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
-	} else {
-		needsBd = cityUsesBdStoreContract(cityPath)
-	}
+	needsBd := initNeedsBdTooling(cityPath)
 
 	deps := []dep{
 		{
@@ -594,6 +557,26 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
+}
+
+func initNeedsBdTooling(cityPath string) bool {
+	if providerUsesBdStoreContract(rawBeadsProvider(cityPath)) {
+		return true
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return false
+	}
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, cityPath, cfg); err != nil {
+		return false
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
 // parseDepVersion runs "<binary> version" and extracts a semver-like version string.

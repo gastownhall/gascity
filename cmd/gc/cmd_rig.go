@@ -233,14 +233,15 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		cityDoltConfigs.Store(cityPath, cfg.Dolt)
 		defer cityDoltConfigs.Delete(cityPath)
 	}
-	rootDefaultRigIncludes, err := config.LoadRootPackDefaultRigIncludes(fs, cityPath)
+	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	defaultRigIncludes := append(append([]string{}, rootDefaultRigIncludes...), cfg.Workspace.DefaultRigIncludes...)
+	defaultRigIncludes := append([]string{}, cfg.Workspace.DefaultRigIncludes...)
 
 	var reAdd bool
+	var reAddNeedsConfigWrite bool
 	existingRigIdx := -1
 	var existingRig *config.Rig
 	for i, r := range cfg.Rigs {
@@ -252,6 +253,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		existPath := r.Path
 		if strings.TrimSpace(existPath) == "" {
 			reAdd = true
+			reAddNeedsConfigWrite = true
 			break
 		}
 		if !filepath.IsAbs(existPath) {
@@ -343,8 +345,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		switch {
 		case len(includes) > 0:
 			w(fmt.Sprintf("  Include: %s", strings.Join(includes, ", ")))
-		case len(defaultRigIncludes) > 0:
-			w(fmt.Sprintf("  Include: %s (default)", strings.Join(defaultRigIncludes, ", ")))
+		default:
+			if len(rootDefaultRigImports) > 0 {
+				w(fmt.Sprintf("  Import: %s (default)", formatBoundImports(rootDefaultRigImports)))
+			}
+			if len(defaultRigIncludes) > 0 {
+				w(fmt.Sprintf("  Include: %s (default)", strings.Join(defaultRigIncludes, ", ")))
+			}
 		}
 	}
 
@@ -378,10 +385,14 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 
 	var nextCfg *config.City
 	if reAdd {
-		next := *cfg
-		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
-		next.Rigs[existingRigIdx].Path = rigPath
-		nextCfg = &next
+		if reAddNeedsConfigWrite {
+			next := *cfg
+			next.Rigs = append([]config.Rig{}, cfg.Rigs...)
+			next.Rigs[existingRigIdx].Path = rigPath
+			nextCfg = &next
+		} else {
+			nextCfg = cfg
+		}
 	} else {
 		storedPrefix := ""
 		if prefixOverride != "" {
@@ -396,8 +407,16 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		switch {
 		case len(includes) > 0:
 			rig.Includes = slices.Clone(includes)
-		case len(defaultRigIncludes) > 0:
-			rig.Includes = slices.Clone(defaultRigIncludes)
+		default:
+			if len(rootDefaultRigImports) > 0 {
+				rig.Imports = make(map[string]config.Import, len(rootDefaultRigImports))
+				for _, bound := range rootDefaultRigImports {
+					rig.Imports[bound.Binding] = bound.Import
+				}
+			}
+			if len(defaultRigIncludes) > 0 {
+				rig.Includes = slices.Clone(defaultRigIncludes)
+			}
 		}
 		next := *cfg
 		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
@@ -413,14 +432,16 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fmt.Fprintf(stderr, "gc rig add: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg); err != nil {
-		writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
-		return 1
-	}
+	if !reAdd || reAddNeedsConfigWrite {
+		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg); err != nil {
+			writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
+			return 1
+		}
 
-	if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
-		writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
-		return 1
+		if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
+			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
+			return 1
+		}
 	}
 	cfg = nextCfg
 
@@ -479,6 +500,18 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		w("Rig added.")
 	}
 	return 0
+}
+
+func formatBoundImports(imports []config.BoundImport) string {
+	parts := make([]string, 0, len(imports))
+	for _, bound := range imports {
+		part := bound.Binding
+		if source := strings.TrimSpace(bound.Import.Source); source != "" {
+			part += "=" + source
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {

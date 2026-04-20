@@ -25,7 +25,7 @@ func newSkillCmd(stdout, stderr io.Writer) *cobra.Command {
 Output includes:
   - City pack skills (skills/<name>/SKILL.md under the city root)
   - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
-  - Bootstrap implicit-import pack skills (e.g. core)
+  - Compatibility bootstrap skills, when legacy implicit imports still exist
   - With --agent/--session: that agent's agents/<name>/skills/ catalog
 
 The listing is a diagnostic view of what's *available*. It does not
@@ -96,10 +96,10 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Store, agentName, sessionID string) ([]visibilityEntry, error) {
 	entries := discoverSkillEntries(cityPath, "city")
-	// Per engdocs/proposals/skill-materialization.md: bootstrap implicit-
-	// import pack skills (the `core` catalog) participate in the
-	// materialized skill set. `gc skill list` must surface them so the
-	// listing reflects what the materializer actually delivers.
+	// Legacy implicit-import compatibility packs may still contribute
+	// shared skills on upgraded installs. Keep surfacing them here while
+	// the compatibility path exists; normal launch-time system packs come
+	// from .gc/system/packs and are not part of this listing.
 	entries = append(entries, discoverBootstrapSkillEntries()...)
 	if strings.TrimSpace(agentName) == "" && strings.TrimSpace(sessionID) == "" {
 		entries = append(entries, discoverImportedSkillEntries(sharedSkillCatalogInputs(cfg, currentRigContext(cfg)))...)
@@ -110,31 +110,29 @@ func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Stor
 	if err != nil {
 		return nil, err
 	}
-	// Every agent sees the entire city+bootstrap catalog plus its own
-	// agent-local skills. No attachment filtering.
+	// Every agent sees the entire shared catalog plus its own agent-local
+	// skills. No attachment filtering.
 	entries = append(entries, discoverImportedSkillEntries(sharedSkillCatalogInputs(cfg, agentRigScopeName(agent, cfg.Rigs)))...)
 	entries = append(entries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
 	sortVisibilityEntries(entries)
 	return entries, nil
 }
 
-// discoverBootstrapSkillEntries enumerates skills that come from the
-// bootstrap implicit-import packs (e.g., `core`). Returns an empty
-// slice when no bootstrap pack has a populated skills/ directory or
-// when discovery fails (the listing degrades gracefully — a transient
-// I/O error shouldn't empty the city-pack listing).
+// discoverBootstrapSkillEntries enumerates skills that come from any
+// legacy implicit-import compatibility packs. It normally returns an
+// empty slice on the gc import launch path because BootstrapPacks is
+// empty, but older upgraded installs may still carry compatibility
+// state.
 //
-// Each returned entry's Source field is the bootstrap pack name
-// (e.g., "core") so the display distinguishes city-pack skills from
-// bootstrap-pack skills. Path is the absolute filesystem path to the
-// SKILL.md file because bootstrap packs live under the user-global
-// cache, not the city directory — there is no shared relative base.
+// Each returned entry's Source field is the compatibility pack name.
+// Path is the absolute filesystem path to the SKILL.md file because
+// compatibility packs live under the user-global cache, not the city
+// directory.
 func discoverBootstrapSkillEntries() []visibilityEntry {
-	// LoadCityCatalog("") skips the city-pack walk and returns just the
-	// bootstrap implicit-import entries. The full LoadCityCatalog call
-	// also lives in cmd/gc/cmd_internal_materialize_skills.go and
-	// BuildDesiredState; using it here keeps the one-source-of-truth
-	// discovery rule the spec establishes.
+	// LoadCityCatalog("") skips the city-pack walk and returns only the
+	// compatibility bootstrap entries plus any explicit imported
+	// catalogs passed by the caller. Using it here keeps the listing in
+	// sync with the materializer's shared-catalog discovery.
 	cat, err := materialize.LoadCityCatalog("")
 	if err != nil {
 		return nil

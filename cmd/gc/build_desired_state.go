@@ -656,6 +656,12 @@ func discoverSessionBeadsWithRoots(
 			continue
 		}
 		roots[template] = true
+		if !isManualSessionBead(b) && !isNamedSessionBead(b) && !isPoolManagedSessionBead(b) && desiredHasConfiguredNamedTemplate(desired, template) {
+			// A configured named session already owns this backing template in
+			// desired state. Treat any extra plain open bead as leaked state so
+			// the reconciler can close it as orphaned instead of reviving it.
+			continue
+		}
 		// Pool agents: respect the pool's scaling decision. If the main
 		// config iteration (which ran evaluatePool / scale_check) did not
 		// produce any desired entries for this template, the pool wants 0
@@ -850,6 +856,15 @@ func ensureDependencyOnlyTemplate(
 func desiredHasTemplate(desired map[string]TemplateParams, template string) bool {
 	for _, existing := range desired {
 		if existing.TemplateName == template {
+			return true
+		}
+	}
+	return false
+}
+
+func desiredHasConfiguredNamedTemplate(desired map[string]TemplateParams, template string) bool {
+	for _, existing := range desired {
+		if existing.TemplateName == template && strings.TrimSpace(existing.ConfiguredNamedIdentity) != "" {
 			return true
 		}
 	}

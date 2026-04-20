@@ -82,7 +82,30 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 		}
 		return resolved, nil
 	}
-	return s.resolveSessionIDMaterializingNamedWithContext(ctx, store, recipient)
+	if target, matched, err := s.resolveLiveConfiguredNamedMailTarget(store, recipient); err != nil {
+		return "", err
+	} else if matched {
+		return target.display, nil
+	}
+	if id, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{}); err == nil {
+		bead, getErr := store.Get(id)
+		if getErr != nil {
+			return "", getErr
+		}
+		address := apiSessionMailboxAddress(bead)
+		if address == "" {
+			return "", fmt.Errorf("session %q has no mailbox identity", recipient)
+		}
+		return address, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
+	}
+	if address, ok, err := s.configuredMailRecipientAddress(store, recipient); err != nil {
+		return "", err
+	} else if ok {
+		return address, nil
+	}
+	return "", apiSessionTargetNotFound(recipient)
 }
 
 func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
@@ -142,6 +165,106 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 	}
 	sort.Strings(recipients)
 	return recipients, nil
+}
+
+type apiResolvedMailTarget struct {
+	display    string
+	recipients []string
+}
+
+func apiSessionMailboxAddress(b beads.Bead) string {
+	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
+		return alias
+	}
+	if b.ID != "" {
+		return b.ID
+	}
+	return strings.TrimSpace(b.Metadata["session_name"])
+}
+
+func apiSessionMailboxAddresses(b beads.Bead) []string {
+	seen := map[string]bool{}
+	var addresses []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		addresses = append(addresses, value)
+	}
+	add(apiSessionMailboxAddress(b))
+	add(b.ID)
+	for _, alias := range session.AliasHistory(b.Metadata) {
+		add(alias)
+	}
+	if len(addresses) == 0 {
+		add(strings.TrimSpace(b.Metadata["session_name"]))
+	}
+	return addresses
+}
+
+func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (apiResolvedMailTarget, bool, error) {
+	identifier = apiNormalizeSessionTarget(identifier)
+	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
+		return apiResolvedMailTarget{}, false, nil
+	}
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+	})
+	if err != nil {
+		return apiResolvedMailTarget{}, false, err
+	}
+
+	matches := make(map[string]apiResolvedMailTarget)
+	order := make([]string, 0, 2)
+	for _, b := range all {
+		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+			continue
+		}
+		identity := strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey])
+		if identity == "" || session.TargetBasename(identity) != identifier {
+			continue
+		}
+		addresses := apiSessionMailboxAddresses(b)
+		if len(addresses) == 0 {
+			continue
+		}
+		display := apiSessionMailboxAddress(b)
+		if display == "" {
+			display = addresses[0]
+		}
+		if _, ok := matches[display]; ok {
+			continue
+		}
+		matches[display] = apiResolvedMailTarget{
+			display:    display,
+			recipients: addresses,
+		}
+		order = append(order, display)
+	}
+
+	switch len(order) {
+	case 0:
+		return apiResolvedMailTarget{}, false, nil
+	case 1:
+		return matches[order[0]], true, nil
+	default:
+		sort.Strings(order)
+		return apiResolvedMailTarget{}, false, fmt.Errorf("%w: %q matches multiple configured named session mailboxes: %s", session.ErrAmbiguous, identifier, strings.Join(order, ", "))
+	}
+}
+
+func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier string) (string, bool, error) {
+	identifier = apiNormalizeSessionTarget(identifier)
+	if identifier == "" || identifier == "human" {
+		return "", false, nil
+	}
+	spec, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	return spec.Identity, true, nil
 }
 
 func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {

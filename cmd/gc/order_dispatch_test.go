@@ -265,6 +265,13 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	var rec memRecorder
 	var stderr bytes.Buffer
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:fail-exec",
+		Labels: []string{"order-run:fail-exec", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
 		return []byte("error output\n"), fmt.Errorf("exit status 1")
@@ -280,8 +287,9 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
 
-	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	logs := captureCmdOrderLogs(t, func() {
+		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
+	})
 
 	// Check tracking bead has exec-failed label.
 	all := trackingBeads(t, store, "order-run:fail-exec")
@@ -300,6 +308,9 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	// Check order.failed event.
 	if !rec.hasType(events.OrderFailed) {
 		t.Error("missing order.failed event")
+	}
+	if !strings.Contains(logs, "order exec fail-exec failed") {
+		t.Fatalf("logs = %q, want exec failure warning", logs)
 	}
 }
 

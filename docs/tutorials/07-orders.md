@@ -32,8 +32,8 @@ orders/
   review-check.toml
   dep-update.toml
 formulas/
-  pancakes.formula.toml
-  review.formula.toml
+  pancakes.toml
+  review.toml
 ```
 
 Here's a minimal order that dispatches the `review` formula from Tutorial 04
@@ -376,7 +376,7 @@ packs/dev-ops/
   orders/
     test-suite.toml         # trigger = "cooldown", interval = "5m", pool = "worker"
   formulas/
-    test-suite.formula.toml
+    test-suite.toml
 ```
 
 And your city applies that pack to two rigs:
@@ -485,7 +485,7 @@ pool = "worker"
 ```
 
 ```toml
-# formulas/release-notes.formula.toml
+# formulas/release-notes.toml
 formula = "release-notes"
 
 [[steps]]

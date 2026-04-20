@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -302,6 +303,76 @@ includes = ["../mypk"]
 	}
 }
 
+func TestAgentDiscovery_ExplicitTomlAgentGetsConventionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "mypk")
+	agentDir := filepath.Join(packDir, "agents", "mayor")
+
+	if err := os.MkdirAll(filepath.Join(agentDir, "overlay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agentDir, "skills", "private"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agentDir, "mcp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "mypk"
+schema = 1
+
+[[agent]]
+name = "mayor"
+prompt_template = "custom/prompt.md"
+`)
+	writeTestFile(t, packDir, "custom/prompt.md", `Custom prompt.`)
+	writeTestFile(t, agentDir, "prompt.template.md", `Convention prompt should be ignored.`)
+	writeTestFile(t, agentDir, "overlay/CLAUDE.md", `# overlay`)
+	writeTestFile(t, agentDir, "namepool.txt", "Ada\nGrace\n")
+	writeTestFile(t, agentDir, "skills/private/SKILL.md", `# private skill`)
+	writeTestFile(t, agentDir, "mcp/private.toml", `command = ["helper-mcp"]`)
+
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["../mypk"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.Name != "mayor" {
+			continue
+		}
+		if !strings.HasSuffix(a.PromptTemplate, filepath.Join("mypk", "custom", "prompt.md")) {
+			t.Fatalf("mayor PromptTemplate = %q, want explicit custom prompt path", a.PromptTemplate)
+		}
+		if !strings.HasSuffix(a.OverlayDir, filepath.Join("agents", "mayor", "overlay")) {
+			t.Fatalf("mayor OverlayDir = %q, want convention overlay path", a.OverlayDir)
+		}
+		if !reflect.DeepEqual(a.NamepoolNames, []string{"Ada", "Grace"}) {
+			t.Fatalf("mayor NamepoolNames = %v, want [Ada Grace]", a.NamepoolNames)
+		}
+		if !strings.HasSuffix(a.SkillsDir, filepath.Join("agents", "mayor", "skills")) {
+			t.Fatalf("mayor SkillsDir = %q, want convention skills dir", a.SkillsDir)
+		}
+		if !strings.HasSuffix(a.MCPDir, filepath.Join("agents", "mayor", "mcp")) {
+			t.Fatalf("mayor MCPDir = %q, want convention mcp dir", a.MCPDir)
+		}
+		return
+	}
+	t.Fatal("mayor explicit agent not loaded")
+}
+
 func TestAgentDiscovery_WithOverlay(t *testing.T) {
 	// agents/<name>/overlay/ is discovered as the per-agent overlay dir.
 	dir := t.TempDir()
@@ -517,4 +588,68 @@ schema = 2
 		}
 	}
 	t.Fatalf("ada agent not discovered from root city-pack agents/ directory: %+v", explicit)
+}
+
+func TestAgentDiscovery_RootCityPackExplicitAgentGetsConventionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "ada")
+	if err := os.MkdirAll(filepath.Join(agentDir, "overlay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agentDir, "skills", "private"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agentDir, "mcp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, dir, "city.toml", `
+[workspace]
+name = "backstage"
+`)
+	writeTestFile(t, dir, "pack.toml", `
+[pack]
+name = "backstage"
+schema = 2
+
+[[agent]]
+name = "ada"
+provider = "claude"
+`)
+	writeTestFile(t, agentDir, "prompt.template.md", `You are {{ .AgentName }}.`)
+	writeTestFile(t, agentDir, "overlay/CLAUDE.md", `# overlay`)
+	writeTestFile(t, agentDir, "namepool.txt", "Ada\nGrace\n")
+	writeTestFile(t, agentDir, "skills/private/SKILL.md", `# private skill`)
+	writeTestFile(t, agentDir, "mcp/private.toml", `command = ["helper-mcp"]`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.Name != "ada" {
+			continue
+		}
+		if a.Provider != "claude" {
+			t.Fatalf("ada Provider = %q, want claude", a.Provider)
+		}
+		if !strings.HasSuffix(a.PromptTemplate, filepath.Join("agents", "ada", "prompt.template.md")) {
+			t.Fatalf("ada PromptTemplate = %q, want convention prompt path", a.PromptTemplate)
+		}
+		if !strings.HasSuffix(a.OverlayDir, filepath.Join("agents", "ada", "overlay")) {
+			t.Fatalf("ada OverlayDir = %q, want convention overlay path", a.OverlayDir)
+		}
+		if !reflect.DeepEqual(a.NamepoolNames, []string{"Ada", "Grace"}) {
+			t.Fatalf("ada NamepoolNames = %v, want [Ada Grace]", a.NamepoolNames)
+		}
+		if !strings.HasSuffix(a.SkillsDir, filepath.Join("agents", "ada", "skills")) {
+			t.Fatalf("ada SkillsDir = %q, want convention skills dir", a.SkillsDir)
+		}
+		if !strings.HasSuffix(a.MCPDir, filepath.Join("agents", "ada", "mcp")) {
+			t.Fatalf("ada MCPDir = %q, want convention mcp dir", a.MCPDir)
+		}
+		return
+	}
+	t.Fatal("ada explicit root city-pack agent not loaded")
 }

@@ -707,8 +707,14 @@ func (cr *CityRuntime) tick(
 	if store := cr.cityBeadStore(); cr.wg != nil && store != nil && cr.wg.shouldRun(time.Now()) {
 		purged, gcErr := cr.wg.runGC(store, time.Now())
 		if gcErr != nil {
-			fmt.Fprintf(cr.stderr, "%s: wisp gc: %v\n", cr.logPrefix, gcErr) //nolint:errcheck // best-effort stderr
-		} else if purged > 0 {
+			for _, line := range strings.Split(gcErr.Error(), "\n") {
+				if line == "" {
+					continue
+				}
+				fmt.Fprintf(cr.stderr, "%s: wisp gc: %s\n", cr.logPrefix, line) //nolint:errcheck // best-effort stderr
+			}
+		}
+		if purged > 0 {
 			fmt.Fprintf(cr.stdout, "Bead GC: purged %d expired bead(s)\n", purged) //nolint:errcheck // best-effort stdout
 		}
 	}
@@ -925,18 +931,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	// Resolve script symlinks for newly activated packs.
-	if len(nextCfg.ScriptLayers.City) > 0 {
-		if err := ResolveScripts(cityRoot, nextCfg.ScriptLayers.City); err != nil {
-			appendWarning(fmt.Sprintf("config reload: city scripts: %v", err))
-		}
-	}
-	for _, r := range nextCfg.Rigs {
-		if layers, ok := nextCfg.ScriptLayers.Rigs[r.Name]; ok && len(layers) > 0 {
-			if err := ResolveScripts(r.Path, layers); err != nil {
-				appendWarning(fmt.Sprintf("config reload: rig %q scripts: %v", r.Name, err))
-			}
-		}
-	}
+	resolveConfiguredScripts(cityRoot, nextCfg, func(scope string, err error) {
+		appendWarning(fmt.Sprintf("config reload: %s scripts: %v", scope, err))
+	})
 
 	if providerChanged {
 		running, lErr := cr.sp.ListRunning("")

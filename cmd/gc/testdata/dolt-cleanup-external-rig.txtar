@@ -449,7 +449,7 @@ orphan_count=0
 for d in "$data_dir"/*/; do
   [ ! -d "$d/.dolt" ] && continue
   name="$(basename "$d")"
-  case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
   case "$referenced" in *" $name "*) continue ;; esac
   size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
   size="${size_bytes} B"
@@ -589,6 +589,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$(printf '%s' "$db_filter" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" = "__gc_probe" ]; then
+  echo "gc dolt sync: reserved Dolt database name: __gc_probe (used internally by gc)" >&2
+  exit 1
+fi
+
 is_running() {
   [ -n "${GC_DOLT_PORT:-}" ] || return 1
   lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
@@ -631,7 +636,7 @@ if [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
-    case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
 
     remote=""

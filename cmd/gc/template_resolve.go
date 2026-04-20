@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,6 +32,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+)
+
+const (
+	startupPromptDeliveredEnv = "GC_STARTUP_PROMPT_DELIVERED"
+	managedSessionHookEnv     = "GC_MANAGED_SESSION_HOOK"
 )
 
 // TemplateParams holds all resolved values needed to start a session.
@@ -319,7 +325,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 						agentCat = c
 					}
 				}
-				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.skillCatalog, agentCat); frag != "" {
+				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.sharedSkillCatalogForAgent(cfgAgent), agentCat); frag != "" {
 					prompt = prompt + "\n\n" + frag
 				}
 			}
@@ -370,7 +376,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
 		}
-		desired := effectiveSkillsForAgent(p.skillCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
+		sharedCatalog := p.sharedSkillCatalogSnapshotForAgent(cfgAgent)
+		desired := effectiveSkillsForAgent(sharedCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
 		if len(desired) > 0 {
 			fpExtra = mergeSkillFingerprintEntries(fpExtra, desired)
 			if canonWorkDir != scopeRoot {
@@ -381,6 +388,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				// templateNameFor returns cfgAgent.PoolName for pool
 				// instances and qualifiedName for singletons.
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
+				if sharedCatalog != nil {
+					if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
+						if env == nil {
+							env = map[string]string{}
+						}
+						env[sharedSkillCatalogSnapshotEnvVar] = snapshot
+					}
+				}
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
 			}
 		}
@@ -516,13 +531,15 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
-// needed by Provider.Start. This mirrors managed.SessionConfig() at
-// internal/agent/agent.go:292-315 — for the same inputs, both must
-// produce identical output.
+// needed by Provider.Start. When it materializes the rendered prompt into the
+// launch or nudge path, it marks the runtime env so SessionStart hooks can add
+// context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
 	var promptFlag string
 	nudge := tp.Hints.Nudge
+	env := maps.Clone(tp.Env)
+	startupPromptDelivered := false
 	if tp.Prompt != "" {
 		// SessionStart hooks can enrich context, but the startup prompt still
 		// needs a first-turn delivery mechanism. Without argv/flag/nudge
@@ -533,18 +550,30 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 			} else {
 				nudge = tp.Prompt
 			}
+			startupPromptDelivered = true
 		} else {
 			promptSuffix = shellquote.Quote(tp.Prompt)
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
-				promptFlag = tp.ResolvedProvider.PromptFlag
+			startupPromptDelivered = promptSuffix != ""
+			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
+				if tp.ResolvedProvider.PromptFlag != "" {
+					promptFlag = tp.ResolvedProvider.PromptFlag
+				} else {
+					startupPromptDelivered = false
+				}
 			}
 		}
+	}
+	if startupPromptDelivered {
+		if env == nil {
+			env = map[string]string{}
+		}
+		env[startupPromptDeliveredEnv] = "1"
 	}
 	return runtime.Config{
 		Command:                tp.Command,
 		PromptSuffix:           promptSuffix,
 		PromptFlag:             promptFlag,
-		Env:                    tp.Env,
+		Env:                    env,
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,

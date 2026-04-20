@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -1000,6 +1001,34 @@ func TestBdStoreListByLabel(t *testing.T) {
 	}
 	if len(got[0].Labels) != 1 || got[0].Labels[0] != "order-run:digest" {
 		t.Errorf("got[0].Labels = %v, want [order-run:digest]", got[0].Labels)
+	}
+}
+
+func TestBdStoreListCreatedBeforeForwardsFilter(t *testing.T) {
+	before := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	wantCmd := `bd list --json --label=order-run:digest --all --created-before ` +
+		before.Format(time.RFC3339Nano) + ` --include-infra --include-gates --limit 1`
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		wantCmd: {
+			out: []byte(`[{"id":"bd-old","title":"digest wisp","status":"closed","issue_type":"task","created_at":"2026-04-20T11:59:00Z","labels":["order-run:digest"]}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Label:         "order-run:digest",
+		CreatedBefore: before,
+		Limit:         1,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-old" {
+		t.Fatalf("List returned %+v, want bd-old", got)
 	}
 }
 

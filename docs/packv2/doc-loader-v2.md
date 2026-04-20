@@ -6,11 +6,6 @@
 > design captured here.
 > Read them side-by-side to see the diff.
 
-> [!IMPORTANT]
-> This document describes the pre-release Gas City v0.15.0 rollout.
-> Some PackV2 surfaces are still under active development; release-gated
-> caveats below use the form "As of release v0.15.0, ...".
-
 ## Conceptual overview
 
 V2 reframes loading around five ideas, all of which are missing or weak in
@@ -146,7 +141,7 @@ The contents of `pack.toml`:
 type Pack struct {
     Meta             PackMeta
     Imports          map[string]Import
-    DefaultRig       DefaultRigPolicy   // [defaults.rig.imports]
+    DefaultRig       DefaultRigPolicy   // [defaults.rig.imports.<binding>]
     AgentDefaults    AgentDefaults      // [agent_defaults]
     Providers        map[string]ProviderSpec
     NamedSessions    []NamedSession
@@ -210,9 +205,9 @@ type DeploymentRig struct {
 }
 ```
 
-Notably absent from `city.toml`: identity (`workspace.name`), the
-machine-local `rig.path` binding, or any `[pack]` content. In the current
-Phase A rollout, `rig.prefix` and `rig.suspended` remain in `city.toml`.
+Notably absent from `city.toml`: identity (`workspace.name`), site
+binding (`rig.path`, `rig.prefix`, `rig.suspended`), or any `[pack]`
+content.
 
 ### `SiteBinding` (`.gc/`)
 
@@ -228,6 +223,8 @@ type SiteBinding struct {
 type RigBinding struct {
     Name      string
     Path      string
+    Prefix    string
+    Suspended bool
 }
 ```
 
@@ -265,6 +262,8 @@ type Rig struct {
 
     // From .gc/ site binding
     Path       string
+    Prefix     string
+    Suspended  bool
     Bound      bool   // true if .gc/ has a binding for this rig
 
     // Derived
@@ -369,8 +368,8 @@ version = "^1.4"
 source = "./packs/gastown"
 
 [agent_defaults]
-default_sling_formula = "mol-do-work"
-append_fragments = ["operational-awareness"]
+provider = "claude"
+scope    = "rig"
 
 [providers.claude]
 model = "claude-sonnet-4"
@@ -386,8 +385,8 @@ standard subdirectories.
 |---|---|---|
 | Agents | `[[agent]]` tables | `agents/<name>/` directories |
 | Agent prompts | `prompt_template = "prompts/x.md"` | `agents/<name>/prompt.md` |
-| Per-agent overlays | `overlay_dir = "overlays/x"` | `agents/<name>/overlay/` |
-| Pack-wide overlays | `overlay_dir = "overlays/default"` | `overlay/` directory |
+| Per-agent overlays | `overlay_dir = "overlay/x"` | `agents/<name>/overlay/` |
+| Pack-wide overlays | `overlay_dir = "overlay/default"` | `overlay/` directory |
 | Formulas | `[[formula]].path` + dir scan | `formulas/*.toml` directly |
 | Orders | inside formulas | `orders/*.toml` (top-level, convention-discovered) |
 | Scripts | `scripts_dir = "scripts"` | **Gone.** Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
@@ -440,7 +439,7 @@ The actual fetch / cache mechanism is owned by `gc import`
 ([doc-packman.md](doc-packman.md)), not the loader. The loader assumes
 imports have already been resolved into local directories under the
 hidden cache (`~/.gc/cache/repos/<sha256(url+commit)>/`) and reads the
-lock file (`pack.lock`) to know which commit to use.
+lock file (`packs.lock`) to know which commit to use.
 
 This is a significant separation-of-concerns change. In V1, the loader
 itself clones git repos. In V2, that responsibility moves to
@@ -449,7 +448,7 @@ itself clones git repos. In V2, that responsibility moves to
 ## Lock file consumption
 
 The loader reads, but does not write, the lock file produced by
-`gc import install`. `pack.lock` is part of config/import management,
+`gc import install`. `packs.lock` is part of config/import management,
 not a loader concern — the loader assumes composed config is correct
 ([#583](https://github.com/gastownhall/gascity/issues/583)). Each `[imports.X]` block in `pack.toml` (or
 `[rigs.imports.X]` in `city.toml`) is paired with a `[packs.X]` block
@@ -463,7 +462,7 @@ version = "^1.2"
 ```
 
 ```toml
-# pack.lock
+# packs.lock
 [packs.gastown]
 source  = "github.com/gastownhall/gastown"
 commit  = "abc123..."
@@ -473,12 +472,11 @@ parent  = "(root)"
 
 For each declared import, the loader looks up the matching `[packs.X]`
 record, finds the cached directory under the corresponding sha256 key,
-and proceeds. If no match exists, that's a load-time error telling the
-user to run `gc import install`.
+and proceeds. If no match exists, or the cache entry is missing, that's
+a load-time error telling the user to run `gc import install`.
 
 The `parent` field records who introduced this pack into the graph
-(`(root)` for direct imports, `(implicit)` for system packs spliced via
-`~/.gc/implicit-import.toml`, or another binding name for transitive
+(`(root)` for direct imports, or another binding name for transitive
 imports).
 
 ## Composition pipeline
@@ -517,8 +515,9 @@ folded into the in-memory `Pack` using the same per-section rules as V1
 (concat for slices, deep merge for maps, last-writer-wins for scalars
 with warnings).
 
-System packs are no longer injected here. They flow through the
-implicit-imports mechanism (see step 9 below).
+System packs are no longer injected here or anywhere else in the launch
+contract. Import composition starts from the user's declared
+`[imports.<binding>]` entries.
 
 ### 7. Validate self-containment of the root pack
 
@@ -538,13 +537,17 @@ For each entry in `Pack.Imports`:
    warn if the binding name aliases it).
 6. Create an `ImportNode` and attach it as a child of the root.
 
-### 9. Splice implicit imports
+### 9. Admit only declared imports
 
-Read `~/.gc/implicit-import.toml` (managed by `gc import`). For each
-implicit binding not already imported by the root, splice it into the
-root's import set with `parent = "(implicit)"` recorded in provenance.
-This is how `import` and `registry` themselves end up loaded for every
-city without the city declaring them.
+There is no loader-owned implicit-import stage in the launch contract.
+The import graph consists only of:
+
+- direct imports declared by the root city
+- transitive imports declared by imported packs
+
+If a city depends on a pack, that dependency must be declared somewhere
+in authored config and materialized ahead of time by `gc import
+install`.
 
 ### 10. Resolve transitive imports
 
@@ -573,10 +576,7 @@ visible to the city scope, including transitive re-exports):
    it under) and `PackName`.
 4. Filter by `scope`: keep `scope="city"` and unscoped agents; drop
    `scope="rig"`.
-5. Compose the pack's `[agent_defaults]` defaults onto its own agents.
-   As of release v0.15.0, the actively-applied defaults are narrow:
-   `default_sling_formula` plus `append_fragments` during prompt
-   rendering.
+5. Apply the pack's `[agent_defaults]` defaults to its own agents.
 6. Add to `City.Agents`.
 
 The city pack itself is processed last so its agents win against any
@@ -663,18 +663,14 @@ explicitly configured or referenced. This logic is unchanged from V1.
 
 ### 18. Apply agent defaults
 
-Same as V1 step 11, but only for the currently implemented
-`[agent_defaults]` behavior: city-pack defaults apply to all agents that
-don't override, and imported-pack defaults apply only to that pack's own
-agents (already handled in step 11). As of release v0.15.0, the
-actively-applied defaults are still narrow: `default_sling_formula` plus
-`append_fragments` during prompt rendering.
+Same as V1 step 11: `[agent_defaults]` defaults from the city pack apply to all
+agents that don't override. Imported pack `[agent_defaults]` defaults apply only
+to that pack's own agents (already handled in step 11).
 
 ### 19. Bind site state
 
 For each declared rig, look up its binding in `SiteBinding`. Populate
-`Path` and set `Bound = true`. In the current Phase A rollout,
-`Prefix` and `Suspended` still come from `city.toml`. Unbound rigs get
+`Path`, `Prefix`, `Suspended`, set `Bound = true`. Unbound rigs get
 `Bound = false` and a warning.
 
 For workspace identity: `City.ResolvedWorkspaceName = SiteBinding.WorkspaceName`
@@ -784,10 +780,9 @@ The migration is sequenced in two steps matching the implementation order:
      sources are pinned with an exact SHA (`version = "sha:<commit>"`).
 2. **`workspace.name` → `.gc/`.** Run `gc init` against the existing
    directory; populate `.gc/` with the workspace name and prefix.
-3. **`rig.path` → `.gc/site.toml`.** For each rig, move the machine-local
-   path binding into `.gc/site.toml`. `rig.prefix` and `rig.suspended`
-   stay in `city.toml` in the current Phase A rollout.
-4. **`workspace.default_rig_includes` → `[defaults.rig.imports]`.** Same
+3. **`rig.path`, `rig.prefix`, `rig.suspended` → `.gc/`.** For each
+   rig, write a binding file under `.gc/rigs/<name>.toml`.
+4. **`workspace.default_rig_includes` → `[defaults.rig.imports.<binding>]`.** Same
    mapping as `includes` → `[imports]`.
 5. **`fallback = true` agents.** Drop the field; warn the user about
    any agents that previously relied on fallback shadowing and may need
@@ -817,7 +812,7 @@ warnings the user must review or leave for manual follow-up.
 6. Apply CLI fragments to `Pack` (per-section merge).
 7. Validate root pack self-containment (no path escapes).
 8. Resolve direct imports against lock file → cache directories.
-9. Splice implicit imports from `~/.gc/implicit-import.toml`.
+9. Admit only declared imports to the graph.
 10. Resolve transitive imports DFS, honoring `export = true`.
 11. Compose city-scope agents from imported + city packs (qualified names).
 12. Detect ambiguous bare names; record but do not error.

@@ -169,7 +169,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command whose output determines desired session count.\nOptional override — when set, its output is the desired count (still clamped\nby all cap levels)."
+          "description": "ScaleCheck is a shell command template whose output determines desired\nsession count. Optional override — when set, its output is the desired\ncount (still clamped by all cap levels). If it contains Go template\nplaceholders, gc expands them using the same PathContext fields as\nwork_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,\nCityName) before running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -178,11 +178,11 @@
         },
         "on_boot": {
           "type": "string",
-          "description": "OnBoot is a shell command run once at controller startup for this agent."
+          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running\nthe command."
         },
         "on_death": {
           "type": "string",
-          "description": "OnDeath is a shell command run when a session dies unexpectedly."
+          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before running the command."
         },
         "namepool": {
           "type": "string",
@@ -190,11 +190,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this session config.\nUsed by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
         },
         "idle_timeout": {
           "type": "string",
@@ -216,14 +216,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Accepted during parse for migration visibility, but\nattachment-list fields are accepted but ignored by the active\nmaterializer."
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nAccepted during parse for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
         },
         "hooks_installed": {
           "type": "boolean",
@@ -264,7 +264,7 @@
         },
         "inject_assigned_skills": {
           "type": "boolean",
-          "description": "InjectAssignedSkills controls whether gc appends an\n\"assigned skills\" appendix to the agent's rendered prompt. The\nappendix lists every skill visible to this agent, partitioned\ninto (assigned-to-you, shared-with-every-agent), so agents\nsharing a scope-root sink can tell which skills are their\nspecialisation vs which are the city-wide set.\n\nPointer tri-state:\n  nil  → inherit: inject when the agent has a vendor sink\n  *true  → explicitly inject (equivalent to the default)\n  *false → disable; the template is responsible for rendering\n           any skill guidance itself\n\nSee engdocs/proposals/skill-materialization.md."
+          "description": "InjectAssignedSkills controls whether gc appends an\n\"assigned skills\" appendix to the agent's rendered prompt. The\nappendix lists every skill visible to this agent, partitioned\ninto (assigned-to-you, shared-with-every-agent), so agents\nsharing a scope-root sink can tell which skills are their\nspecialization vs which are the city-wide set.\n\nPointer tri-state:\n  nil   -\u003e inherit: inject when the agent has a vendor sink\n  *true -\u003e explicitly inject (equivalent to the default)\n  *false -\u003e disable; the template is responsible for rendering\n            any skill guidance itself"
         },
         "attach": {
           "type": "boolean",
@@ -345,14 +345,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed and composed for migration visibility, but\nattachment-list fields are accepted but ignored by the active\nmaterializer."
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nParsed and composed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
         }
       },
       "additionalProperties": false,
@@ -446,14 +446,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nParsed for migration visibility, but attachment-list fields are\naccepted but ignored by the active materializer."
         },
         "hooks_installed": {
           "type": "boolean",
@@ -529,14 +529,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SkillsAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "SkillsAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
         },
         "mcp_append": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCPAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
+          "description": "MCPAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
         },
         "attach": {
           "type": "boolean",
@@ -814,7 +814,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+          "description": "ScaleCheck overrides the command template whose output determines desired\nsession count. Supports the same Go template placeholders as\nAgent.scale_check."
         },
         "option_defaults": {
           "additionalProperties": {
@@ -971,7 +971,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula plus shared skill/MCP\nattachment baselines; other fields are parsed/composed but not yet\ninherited automatically."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
         }
       },
       "additionalProperties": false,
@@ -1056,7 +1056,7 @@
         },
         "max_wakes_per_tick": {
           "type": "integer",
-          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Raise this on cities with slow cold-starts (e.g. opus\ncold-start ~60s) where the default of 5 starves the rest of the\ncandidate queue for minutes. Nil (unset) defaults to 5. Values \u003c= 0\nare treated as the default — set a positive integer to override.\n\nTradeoff: the default of 5 also bounds the process-spawn burst after a\ncontroller restart (thundering-herd protection). Raising it trades\nrestart burst for steady-state throughput; keep within what the host\ncan absorb.",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
           "default": 5
         }
       },
@@ -1201,7 +1201,7 @@
         },
         "template": {
           "type": "string",
-          "description": "Template is the referenced agent template name."
+          "description": "Template is the referenced agent template name. Root declarations may\ntarget imported PackV2 agents via \"binding.agent\"."
         },
         "scope": {
           "type": "string",
@@ -1400,7 +1400,7 @@
         },
         "check": {
           "type": "string",
-          "description": "Check overrides the session scale check command."
+          "description": "Check overrides the session scale check command template. Supports the\nsame Go template placeholders as Agent.scale_check."
         },
         "drain_timeout": {
           "type": "string",
@@ -1408,11 +1408,11 @@
         },
         "on_death": {
           "type": "string",
-          "description": "OnDeath overrides the on_death command."
+          "description": "OnDeath overrides the on_death command template. Supports the same Go\ntemplate placeholders as Agent.on_death."
         },
         "on_boot": {
           "type": "string",
-          "description": "OnBoot overrides the on_boot command."
+          "description": "OnBoot overrides the on_boot command template. Supports the same Go\ntemplate placeholders as Agent.on_boot."
         }
       },
       "additionalProperties": false,
@@ -1686,7 +1686,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Path is the effective filesystem path to the rig's repository. New\nwrites persist it to .gc/site.toml; legacy city.toml paths are accepted\nonly so edit/migration flows can move them into site binding state."
+          "description": "Path is the absolute filesystem path to the rig's repository."
         },
         "prefix": {
           "type": "string",
@@ -1932,7 +1932,7 @@
         },
         "socket": {
           "type": "string",
-          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the effective city name\n(site binding, legacy config, or basename) — giving every city its own tmux server\nautomatically. Set explicitly to override."
+          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
         },
         "remote_match": {
           "type": "string",
@@ -1966,7 +1966,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Name is the legacy checked-in city name. Runtime identity now resolves\nfrom site binding, legacy config, and basename precedence instead."
+          "description": "Name is the human-readable name for this city."
         },
         "prefix": {
           "type": "string",
@@ -2023,6 +2023,9 @@
       },
       "additionalProperties": false,
       "type": "object",
+      "required": [
+        "name"
+      ],
       "description": "Workspace holds city-level metadata and optional defaults that apply to all agents unless overridden per-agent."
     }
   },

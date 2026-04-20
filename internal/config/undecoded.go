@@ -26,13 +26,15 @@ var agentDefaultsCompatibilityOverlapKeys = []string{
 // computes edit distance against known field names and suggests the closest
 // match if one is within 2 edits. Returns a list of human-readable warnings.
 func CheckUndecodedKeys(md toml.MetaData, source string) []string {
+	var warnings []string
+	warnings = append(warnings, agentDefaultsCompatibilityWarnings(md, source)...)
+
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {
-		return nil
+		return warnings
 	}
 
 	known := knownTOMLKeys()
-	var warnings []string
 	for _, key := range undecoded {
 		keyStr := key.String()
 		if special, ok := specializedUndecodedWarning(source, keyStr); ok {
@@ -49,6 +51,7 @@ func fatalUndecodedWarnings(md toml.MetaData, source string) []string {
 	if len(undecoded) == 0 {
 		return nil
 	}
+
 	known := knownTOMLKeys()
 	var warnings []string
 	for _, key := range undecoded {
@@ -74,6 +77,7 @@ func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []strin
 	if !md.IsDefined("agents") {
 		return nil
 	}
+
 	warnings := []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
 	if md.IsDefined("agent_defaults") && agentDefaultsTablesOverlap(md) {
 		warnings = append(warnings, fmt.Sprintf("%s: both [agent_defaults] and [agents] are present; canonical [agent_defaults] wins for overlapping keys", source))

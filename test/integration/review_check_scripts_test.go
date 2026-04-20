@@ -232,7 +232,7 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 func createJSONBead(t *testing.T, cityDir, title string) string {
 	t.Helper()
 
-	out, err := bd(cityDir, "create", "--json", title)
+	out, err := reviewCheckBD(t, cityDir, "create", "--json", title)
 	if err != nil {
 		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
@@ -250,10 +250,20 @@ func updateBeadMetadata(t *testing.T, cityDir, beadID string, pairs ...string) {
 	for _, pair := range pairs {
 		args = append(args, "--set-metadata", pair)
 	}
-	out, err := bd(cityDir, args...)
+	out, err := reviewCheckBD(t, cityDir, args...)
 	if err != nil {
 		t.Fatalf("bd update %s failed: %v\noutput: %s", beadID, err, out)
 	}
+}
+
+func reviewCheckBD(t *testing.T, cityDir string, args ...string) (string, error) {
+	t.Helper()
+
+	out, err := bd(cityDir, args...)
+	if err == nil || !managedDoltTransportRetryable(out) {
+		return out, err
+	}
+	return bdDolt(cityDir, args...)
 }
 
 func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {

@@ -3,6 +3,7 @@ package extmsg
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,8 +109,15 @@ func copyMetadata(in map[string]string) map[string]string {
 	return out
 }
 
+func encodedMetadataFieldCapacity(fieldCount, metaCount int) int {
+	if metaCount > 0 && fieldCount <= math.MaxInt-metaCount {
+		return fieldCount + metaCount
+	}
+	return fieldCount
+}
+
 func encodeMetadataFields(meta map[string]string, fields map[string]string) map[string]string {
-	out := make(map[string]string, len(fields)+len(meta))
+	out := make(map[string]string, encodedMetadataFieldCapacity(len(fields), len(meta)))
 	for k, v := range fields {
 		if strings.TrimSpace(k) == "" {
 			continue

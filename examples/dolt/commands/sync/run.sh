@@ -41,6 +41,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$(printf '%s' "$db_filter" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" = "__gc_probe" ]; then
+  echo "gc dolt sync: reserved Dolt database name: __gc_probe (used internally by gc)" >&2
+  exit 1
+fi
+
 # Check if server is running.
 is_running() {
   lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
@@ -77,7 +82,7 @@ if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
-    case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
     beads_dir=""
     # Find the .beads directory for this database.
@@ -115,7 +120,7 @@ if [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
-    case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
 
     # Check for remote.

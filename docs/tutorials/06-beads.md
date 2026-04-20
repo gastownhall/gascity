@@ -34,12 +34,10 @@ mode = "always"
 ~/my-city
 $ cat city.toml
 [workspace]
-name = "my-city"
 provider = "claude"
 
 [[rigs]]
 name = "my-project"
-path = "/Users/csells/my-project"
 
 ~/my-city
 $ cat agents/reviewer/agent.toml
@@ -48,6 +46,15 @@ provider = "codex"
 ```
 
 The corresponding prompt files live under `agents/<name>/prompt.template.md`.
+The machine-local workspace identity and rig binding live in `.gc/site.toml`:
+
+```toml
+workspace_name = "my-city"
+
+[[rig]]
+name = "my-project"
+path = "/Users/csells/my-project"
+```
 
 Beads are fundamental to the system. You're going to be working with crew to
 turn plans into beads that can be executed in parallel by polecats.

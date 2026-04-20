@@ -72,7 +72,7 @@ source = "../helper"
 	}
 }
 
-func TestLoadWithIncludes_ComposesImportedPackSkills(t *testing.T) {
+func TestLoadWithIncludes_RootPackImportedSharedSkillsCompose(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "helper")
 	cityDir := filepath.Join(dir, "city")
@@ -80,16 +80,21 @@ func TestLoadWithIncludes_ComposesImportedPackSkills(t *testing.T) {
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
 name = "helper"
-schema = 1
+schema = 2
 `)
-	writeTestFile(t, packDir, "skills/code-review/SKILL.md", "# imported skill\n")
+	writeTestFile(t, packDir, "skills/plan/SKILL.md", "# helper plan\n")
 
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
 
 [imports.helper]
 source = "../helper"
+`)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
@@ -101,11 +106,10 @@ source = "../helper"
 		t.Fatalf("got %d PackSkills, want 1", len(cfg.PackSkills))
 	}
 	if cfg.PackSkills[0].BindingName != "helper" {
-		t.Fatalf("BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "helper")
+		t.Fatalf("skill BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "helper")
 	}
-	if !strings.HasSuffix(cfg.PackSkills[0].SourceDir, filepath.ToSlash(filepath.Join("helper", "skills"))) &&
-		!strings.HasSuffix(filepath.ToSlash(cfg.PackSkills[0].SourceDir), "helper/skills") {
-		t.Fatalf("SourceDir = %q, want helper skills dir", cfg.PackSkills[0].SourceDir)
+	if cfg.PackSkills[0].SourceDir != filepath.Join(packDir, "skills") {
+		t.Fatalf("skill SourceDir = %q, want %q", cfg.PackSkills[0].SourceDir, filepath.Join(packDir, "skills"))
 	}
 }
 
@@ -136,36 +140,6 @@ includes = ["../helper"]
 	}
 	if cfg.PackCommands[0].BindingName != "helper" {
 		t.Fatalf("BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "helper")
-	}
-}
-
-func TestLoadWithIncludes_CityPackSkillsUsePackNameBinding(t *testing.T) {
-	dir := t.TempDir()
-	packDir := filepath.Join(dir, "helper")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, packDir, "pack.toml", `
-[pack]
-name = "helper"
-schema = 1
-`)
-	writeTestFile(t, packDir, "skills/code-review/SKILL.md", "# city include skill\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-includes = ["../helper"]
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	if len(cfg.PackSkills) != 1 {
-		t.Fatalf("got %d PackSkills, want 1", len(cfg.PackSkills))
-	}
-	if cfg.PackSkills[0].BindingName != "helper" {
-		t.Fatalf("BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "helper")
 	}
 }
 
@@ -297,7 +271,7 @@ includes = ["../legacy"]
 func TestLoadWithIncludes_TransitiveFalseFiltersNestedCommandsAndDoctors(t *testing.T) {
 	dir := t.TempDir()
 	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(parentDir, "child")
+	childDir := filepath.Join(dir, "child")
 	cityDir := filepath.Join(dir, "city")
 
 	writeTestFile(t, childDir, "pack.toml", `
@@ -314,7 +288,7 @@ name = "parent"
 schema = 1
 
 [imports.child]
-source = "./child"
+source = "../child"
 `)
 	writeTestFile(t, parentDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
 	writeTestFile(t, parentDir, "doctor/parent-check/run.sh", "#!/bin/sh\nexit 0\n")
@@ -351,28 +325,28 @@ transitive = false
 	}
 }
 
-func TestLoadWithIncludes_TransitiveFalseFiltersNestedPackSkills(t *testing.T) {
+func TestLoadWithIncludes_TransitiveFalseFiltersNestedSharedSkills(t *testing.T) {
 	dir := t.TempDir()
 	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(parentDir, "child")
+	childDir := filepath.Join(dir, "child")
 	cityDir := filepath.Join(dir, "city")
 
 	writeTestFile(t, childDir, "pack.toml", `
 [pack]
 name = "child"
-schema = 1
+schema = 2
 `)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
+	writeTestFile(t, childDir, "skills/child-plan/SKILL.md", "# child plan\n")
 
 	writeTestFile(t, parentDir, "pack.toml", `
 [pack]
 name = "parent"
-schema = 1
+schema = 2
 
 [imports.child]
-source = "./child"
+source = "../child"
 `)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
+	writeTestFile(t, parentDir, "skills/parent-plan/SKILL.md", "# parent plan\n")
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -392,175 +366,14 @@ transitive = false
 		t.Fatalf("got %d PackSkills, want 1", len(cfg.PackSkills))
 	}
 	if cfg.PackSkills[0].BindingName != "ops" {
-		t.Fatalf("BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "ops")
+		t.Fatalf("skill BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "ops")
 	}
-	if !strings.HasSuffix(filepath.ToSlash(cfg.PackSkills[0].SourceDir), "parent/skills") {
-		t.Fatalf("SourceDir = %q, want parent skills dir", cfg.PackSkills[0].SourceDir)
-	}
-}
-
-func TestLoadWithIncludes_TransitivePackSkillsPreserveNestedBindings(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(dir, "child")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-`)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "../child"
-`)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[imports.ops]
-source = "../parent"
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	got := map[string]string{}
-	for _, catalog := range cfg.PackSkills {
-		got[filepath.Base(filepath.Dir(catalog.SourceDir))] = catalog.BindingName
-	}
-
-	if got["parent"] != "ops" {
-		t.Fatalf("parent BindingName = %q, want %q (all bindings: %v)", got["parent"], "ops", got)
-	}
-	if got["child"] != "child" {
-		t.Fatalf("child BindingName = %q, want %q (all bindings: %v)", got["child"], "child", got)
+	if cfg.PackSkills[0].SourceDir != filepath.Join(parentDir, "skills") {
+		t.Fatalf("skill SourceDir = %q, want %q", cfg.PackSkills[0].SourceDir, filepath.Join(parentDir, "skills"))
 	}
 }
 
-func TestLoadWithIncludes_ExportedTransitivePackSkillsUseImportBinding(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(dir, "child")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-`)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "../child"
-`)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[imports.ops]
-source = "../parent"
-export = true
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	got := map[string]string{}
-	for _, catalog := range cfg.PackSkills {
-		got[filepath.Base(filepath.Dir(catalog.SourceDir))] = catalog.BindingName
-	}
-
-	if got["parent"] != "ops" {
-		t.Fatalf("parent BindingName = %q, want %q (all bindings: %v)", got["parent"], "ops", got)
-	}
-	if got["child"] != "ops" {
-		t.Fatalf("child BindingName = %q, want %q when export=true (all bindings: %v)", got["child"], "ops", got)
-	}
-}
-
-func TestLoadWithIncludes_RecursiveExportedPackSkillsUseInnerImportBinding(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(dir, "child")
-	grandchildDir := filepath.Join(dir, "grandchild")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, grandchildDir, "pack.toml", `
-[pack]
-name = "grandchild"
-schema = 1
-`)
-	writeTestFile(t, grandchildDir, "skills/grandchild-skill/SKILL.md", "# grandchild\n")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-
-[imports.grandchild]
-source = "../grandchild"
-`)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "../child"
-export = true
-`)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-includes = ["../parent"]
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	got := map[string]string{}
-	for _, catalog := range cfg.PackSkills {
-		got[filepath.Base(filepath.Dir(catalog.SourceDir))] = catalog.BindingName
-	}
-
-	if got["parent"] != "parent" {
-		t.Fatalf("parent BindingName = %q, want %q (all bindings: %v)", got["parent"], "parent", got)
-	}
-	if got["child"] != "child" {
-		t.Fatalf("child BindingName = %q, want %q (all bindings: %v)", got["child"], "child", got)
-	}
-	if got["grandchild"] != "child" {
-		t.Fatalf("grandchild BindingName = %q, want %q from recursive export=true (all bindings: %v)", got["grandchild"], "child", got)
-	}
-}
-
-func TestExpandPacks_RigImportsContributeDoctorsAndCommands(t *testing.T) {
+func TestExpandPacks_RigImportsContributeDoctorsButNotCommands(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "helper")
 	cityDir := filepath.Join(dir, "city")
@@ -590,14 +403,8 @@ source = "../helper"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if len(cfg.PackCommands) != 1 {
-		t.Fatalf("got %d PackCommands, want 1 for rig import commands", len(cfg.PackCommands))
-	}
-	if !reflect.DeepEqual(cfg.PackCommands[0].Command, []string{"status"}) {
-		t.Fatalf("command words = %#v, want %#v", cfg.PackCommands[0].Command, []string{"status"})
-	}
-	if cfg.PackCommands[0].BindingName != "helper" {
-		t.Fatalf("command BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "helper")
+	if len(cfg.PackCommands) != 0 {
+		t.Fatalf("got %d PackCommands, want 0 for rig import commands", len(cfg.PackCommands))
 	}
 	if len(cfg.PackDoctors) != 1 {
 		t.Fatalf("got %d PackDoctors, want 1 for rig import doctors", len(cfg.PackDoctors))
@@ -607,140 +414,7 @@ source = "../helper"
 	}
 }
 
-func TestExpandPacks_RigImportTransitiveFalseFiltersNestedCommandsAndDoctors(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(parentDir, "child")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-
-[[agent]]
-name = "nested"
-scope = "rig"
-`)
-	writeTestFile(t, childDir, "commands/repo/sync/run.sh", "#!/bin/sh\nexit 0\n")
-	writeTestFile(t, childDir, "doctor/child-check/run.sh", "#!/bin/sh\nexit 0\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "./child"
-
-[[agent]]
-name = "direct"
-scope = "rig"
-`)
-	writeTestFile(t, parentDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
-	writeTestFile(t, parentDir, "doctor/parent-check/run.sh", "#!/bin/sh\nexit 0\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "frontend"
-path = "../rig"
-
-[rigs.imports.ops]
-source = "../parent"
-transitive = false
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	if len(cfg.PackCommands) != 1 {
-		t.Fatalf("got %d PackCommands, want 1 direct rig import command", len(cfg.PackCommands))
-	}
-	if !reflect.DeepEqual(cfg.PackCommands[0].Command, []string{"status"}) {
-		t.Fatalf("command words = %#v, want %#v", cfg.PackCommands[0].Command, []string{"status"})
-	}
-	if cfg.PackCommands[0].BindingName != "ops" {
-		t.Fatalf("command BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "ops")
-	}
-
-	if len(cfg.PackDoctors) != 1 {
-		t.Fatalf("got %d PackDoctors, want 1 direct rig import doctor", len(cfg.PackDoctors))
-	}
-	if cfg.PackDoctors[0].Name != "parent-check" {
-		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "parent-check")
-	}
-
-	explicit := explicitAgents(cfg.Agents)
-	found := map[string]bool{}
-	for _, a := range explicit {
-		found[a.QualifiedName()] = true
-	}
-	if !found["frontend/ops.direct"] {
-		t.Errorf("missing frontend/ops.direct; got: %v", found)
-	}
-	if found["frontend/child.nested"] || found["frontend/ops.nested"] {
-		t.Errorf("nested transitive rig import agent should not appear; got: %v", found)
-	}
-}
-
-func TestExpandPacks_RigImportTransitiveFalseFiltersNestedSharedSkills(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(parentDir, "child")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-`)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "./child"
-`)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "frontend"
-path = "../rig"
-
-[rigs.imports.ops]
-source = "../parent"
-transitive = false
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	if len(cfg.RigPackSkills["frontend"]) != 1 {
-		t.Fatalf("got %d rig PackSkills, want 1", len(cfg.RigPackSkills["frontend"]))
-	}
-	if cfg.RigPackSkills["frontend"][0].BindingName != "ops" {
-		t.Fatalf("BindingName = %q, want %q", cfg.RigPackSkills["frontend"][0].BindingName, "ops")
-	}
-	if !strings.HasSuffix(filepath.ToSlash(cfg.RigPackSkills["frontend"][0].SourceDir), "parent/skills") {
-		t.Fatalf("SourceDir = %q, want parent skills dir", cfg.RigPackSkills["frontend"][0].SourceDir)
-	}
-}
-
-func TestExpandPacks_RigIncludesContributePackNameBoundCommands(t *testing.T) {
+func TestExpandPacks_RigImportsContributeSharedSkillsOnce(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "helper")
 	cityDir := filepath.Join(dir, "city")
@@ -748,89 +422,9 @@ func TestExpandPacks_RigIncludesContributePackNameBoundCommands(t *testing.T) {
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
 name = "helper"
-schema = 1
+schema = 2
 `)
-	writeTestFile(t, packDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
-	writeTestFile(t, packDir, "doctor/binaries/run.sh", "#!/bin/sh\nexit 0\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "frontend"
-path = "../rig"
-includes = ["../helper"]
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	if len(cfg.PackCommands) != 1 {
-		t.Fatalf("got %d PackCommands, want 1 for rig include commands", len(cfg.PackCommands))
-	}
-	if !reflect.DeepEqual(cfg.PackCommands[0].Command, []string{"status"}) {
-		t.Fatalf("command words = %#v, want %#v", cfg.PackCommands[0].Command, []string{"status"})
-	}
-	if cfg.PackCommands[0].BindingName != "helper" {
-		t.Fatalf("command BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "helper")
-	}
-	if len(cfg.PackDoctors) != 1 {
-		t.Fatalf("got %d PackDoctors, want 1 for rig include doctors", len(cfg.PackDoctors))
-	}
-	if cfg.PackDoctors[0].Name != "binaries" {
-		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "binaries")
-	}
-}
-
-func TestExpandPacks_RigIncludesContributeSharedSkills(t *testing.T) {
-	dir := t.TempDir()
-	packDir := filepath.Join(dir, "helper")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, packDir, "pack.toml", `
-[pack]
-name = "helper"
-schema = 1
-`)
-	writeTestFile(t, packDir, "skills/code-review/SKILL.md", "# rig include skill\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "frontend"
-path = "../rig"
-includes = ["../helper"]
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	if len(cfg.RigPackSkills["frontend"]) != 1 {
-		t.Fatalf("got %d rig PackSkills, want 1", len(cfg.RigPackSkills["frontend"]))
-	}
-	if cfg.RigPackSkills["frontend"][0].BindingName != "helper" {
-		t.Fatalf("BindingName = %q, want %q", cfg.RigPackSkills["frontend"][0].BindingName, "helper")
-	}
-}
-
-func TestExpandPacks_RigImportsContributeSharedSkills(t *testing.T) {
-	dir := t.TempDir()
-	packDir := filepath.Join(dir, "helper")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, packDir, "pack.toml", `
-[pack]
-name = "helper"
-schema = 1
-`)
-	writeTestFile(t, packDir, "skills/code-review/SKILL.md", "# imported skill\n")
+	writeTestFile(t, packDir, "skills/plan/SKILL.md", "# helper plan\n")
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -849,118 +443,21 @@ source = "../helper"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if len(cfg.RigPackSkills["frontend"]) != 1 {
-		t.Fatalf("got %d rig PackSkills, want 1", len(cfg.RigPackSkills["frontend"]))
+	if len(cfg.PackSkills) != 0 {
+		t.Fatalf("got %d PackSkills, want 0 for rig import shared skills", len(cfg.PackSkills))
 	}
-	if cfg.RigPackSkills["frontend"][0].BindingName != "helper" {
-		t.Fatalf("BindingName = %q, want %q", cfg.RigPackSkills["frontend"][0].BindingName, "helper")
+	if cfg.RigPackSkills == nil {
+		t.Fatal("RigPackSkills is nil")
 	}
-}
-
-func TestExpandPacks_RigExportedTransitivePackSkillsUseImportBinding(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(dir, "child")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-`)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "../child"
-`)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "frontend"
-path = "../rig"
-
-[rigs.imports.ops]
-source = "../parent"
-export = true
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
+	skills := cfg.RigPackSkills["frontend"]
+	if len(skills) != 1 {
+		t.Fatalf("got %d rig shared skill catalogs, want 1", len(skills))
 	}
-
-	got := map[string]string{}
-	for _, catalog := range cfg.RigPackSkills["frontend"] {
-		got[filepath.Base(filepath.Dir(catalog.SourceDir))] = catalog.BindingName
+	if skills[0].BindingName != "helper" {
+		t.Fatalf("rig skill BindingName = %q, want %q", skills[0].BindingName, "helper")
 	}
-
-	if got["parent"] != "ops" {
-		t.Fatalf("parent BindingName = %q, want %q (all bindings: %v)", got["parent"], "ops", got)
-	}
-	if got["child"] != "ops" {
-		t.Fatalf("child BindingName = %q, want %q when export=true (all bindings: %v)", got["child"], "ops", got)
-	}
-}
-
-func TestExpandPacks_RigTransitivePackSkillsPreserveNestedBindings(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(dir, "child")
-	cityDir := filepath.Join(dir, "city")
-
-	writeTestFile(t, childDir, "pack.toml", `
-[pack]
-name = "child"
-schema = 1
-`)
-	writeTestFile(t, childDir, "skills/child-skill/SKILL.md", "# child\n")
-
-	writeTestFile(t, parentDir, "pack.toml", `
-[pack]
-name = "parent"
-schema = 1
-
-[imports.child]
-source = "../child"
-`)
-	writeTestFile(t, parentDir, "skills/parent-skill/SKILL.md", "# parent\n")
-
-	writeTestFile(t, cityDir, "city.toml", `
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "frontend"
-path = "../rig"
-
-[rigs.imports.ops]
-source = "../parent"
-`)
-
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	got := map[string]string{}
-	for _, catalog := range cfg.RigPackSkills["frontend"] {
-		got[filepath.Base(filepath.Dir(catalog.SourceDir))] = catalog.BindingName
-	}
-
-	if got["parent"] != "ops" {
-		t.Fatalf("parent BindingName = %q, want %q (all bindings: %v)", got["parent"], "ops", got)
-	}
-	if got["child"] != "child" {
-		t.Fatalf("child BindingName = %q, want %q (all bindings: %v)", got["child"], "child", got)
+	if skills[0].SourceDir != filepath.Join(packDir, "skills") {
+		t.Fatalf("rig skill SourceDir = %q, want %q", skills[0].SourceDir, filepath.Join(packDir, "skills"))
 	}
 }
 
@@ -974,11 +471,12 @@ func TestLoadWithIncludes_DiamondImportDedupsCommandsAndDoctors(t *testing.T) {
 
 	writeTestFile(t, dDir, "pack.toml", `
 [pack]
-name = "shared"
-schema = 1
+	name = "shared"
+	schema = 1
 `)
 	writeTestFile(t, dDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
 	writeTestFile(t, dDir, "doctor/shared-check/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, dDir, "skills/plan/SKILL.md", "# shared plan\n")
 
 	writeTestFile(t, bDir, "pack.toml", `
 [pack]
@@ -1022,6 +520,7 @@ source = "../a"
 
 	commandCount := 0
 	doctorCount := 0
+	skillCount := 0
 	for _, cmd := range cfg.PackCommands {
 		if reflect.DeepEqual(cmd.Command, []string{"status"}) && cmd.BindingName == "shared" {
 			commandCount++
@@ -1032,26 +531,34 @@ source = "../a"
 			doctorCount++
 		}
 	}
+	for _, skill := range cfg.PackSkills {
+		if skill.BindingName == "shared" && skill.SourceDir == filepath.Join(dDir, "skills") {
+			skillCount++
+		}
+	}
 	if commandCount != 1 {
 		t.Fatalf("got %d shared status commands, want 1", commandCount)
 	}
 	if doctorCount != 1 {
 		t.Fatalf("got %d shared doctor checks, want 1", doctorCount)
 	}
+	if skillCount != 1 {
+		t.Fatalf("got %d shared skill catalogs, want 1", skillCount)
+	}
 }
 
-func TestLoadWithIncludes_ImplicitImportsComposeCommandsAndDoctors(t *testing.T) {
+func TestLoadWithIncludes_ImplicitImportsDoNotComposeCommandsAndDoctors(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
-	cacheDir := GlobalRepoCachePath(gcHome, "github.com/example/ops-pack", "abc123")
+	cacheDir := GlobalRepoCachePath(gcHome, "github.com/gastownhall/gc-import", "abc123")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	writeTestFile(t, cacheDir, "pack.toml", `
 [pack]
-name = "ops-pack"
+name = "gc-import"
 schema = 1
 `)
 	writeTestFile(t, cacheDir, "commands/list/run.sh", "#!/bin/sh\nexit 0\n")
@@ -1060,9 +567,9 @@ schema = 1
 	writeTestFile(t, gcHome, "implicit-import.toml", `
 schema = 1
 
-[imports.ops]
-source = "github.com/example/ops-pack"
-version = "1.0.0"
+[imports.import]
+source = "github.com/gastownhall/gc-import"
+version = "0.2.0"
 commit = "abc123"
 `)
 
@@ -1077,27 +584,15 @@ name = "test-city"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if got := prov.Imports["ops"]; got != "(implicit)" {
-		t.Fatalf("prov.Imports[ops] = %q, want %q", got, "(implicit)")
+	if _, ok := prov.Imports["import"]; ok {
+		t.Fatalf("prov.Imports[import] should not be populated when implicit imports are ignored")
 	}
 
-	if len(cfg.PackCommands) != 1 {
-		t.Fatalf("got %d PackCommands, want 1", len(cfg.PackCommands))
-	}
-	if !reflect.DeepEqual(cfg.PackCommands[0].Command, []string{"list"}) {
-		t.Fatalf("command words = %#v, want %#v", cfg.PackCommands[0].Command, []string{"list"})
-	}
-	if cfg.PackCommands[0].BindingName != "ops" {
-		t.Fatalf("command BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "ops")
+	if len(cfg.PackCommands) != 0 {
+		t.Fatalf("got %d PackCommands, want 0", len(cfg.PackCommands))
 	}
 
-	if len(cfg.PackDoctors) != 1 {
-		t.Fatalf("got %d PackDoctors, want 1", len(cfg.PackDoctors))
-	}
-	if cfg.PackDoctors[0].Name != "cache" {
-		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "cache")
-	}
-	if cfg.PackDoctors[0].BindingName != "ops" {
-		t.Fatalf("doctor BindingName = %q, want %q", cfg.PackDoctors[0].BindingName, "ops")
+	if len(cfg.PackDoctors) != 0 {
+		t.Fatalf("got %d PackDoctors, want 0", len(cfg.PackDoctors))
 	}
 }

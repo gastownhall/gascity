@@ -357,6 +357,33 @@ func claudeFileNeedsUpgrade(existing []byte) bool {
 	if err != nil {
 		return false
 	}
-	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
-	return string(existing) == stale
+	transforms := []func(string) string{
+		func(s string) string {
+			return strings.Replace(s, `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+		},
+		func(s string) string {
+			return strings.Replace(s, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, `gc prime --hook`, 1)
+		},
+		func(s string) string {
+			return strings.Replace(s, `"matcher": "startup"`, `"matcher": ""`, 1)
+		},
+	}
+
+	known := make(map[string]struct{})
+	var enumerate func(int, string, bool)
+	enumerate = func(idx int, candidate string, changed bool) {
+		if idx == len(transforms) {
+			if changed {
+				known[candidate] = struct{}{}
+			}
+			return
+		}
+		enumerate(idx+1, candidate, changed)
+		next := transforms[idx](candidate)
+		enumerate(idx+1, next, changed || next != candidate)
+	}
+	enumerate(0, string(current), false)
+
+	_, ok := known[string(existing)]
+	return ok
 }

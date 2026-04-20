@@ -3,6 +3,7 @@
 package workerinference_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -4762,7 +4763,72 @@ func bdCmdWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args 
 		bdPath = path
 	}
 
-	return runExternalWithTimeout(timeout, env, dir, bdPath, args...)
+	return runJSONCommandWithTimeout(timeout, env, dir, bdPath, args...)
+}
+
+func runJSONCommandWithTimeout(timeout time.Duration, env *helpers.Env, dir, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = env.List()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return combineJSONCommandOutput(stdout.String(), stderr.String(), err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	var waitErr error
+	timedOut := false
+	timer := time.NewTimer(timeout)
+	select {
+	case waitErr = <-done:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	case <-timer.C:
+		timedOut = true
+		killTimedCommand(cmd)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	if timedOut {
+		out, _ := combineJSONCommandOutput(stdout.String(), stderr.String(), fmt.Errorf("timed out after %s", timeout))
+		return out, fmt.Errorf("timed out after %s", timeout)
+	}
+	if waitErr != nil {
+		return combineJSONCommandOutput(stdout.String(), stderr.String(), waitErr)
+	}
+
+	// All current worker_inference bdCmd callers pass --json and decode stdout
+	// directly. Preserve clean stdout on success and keep stderr for failures.
+	return stdout.String(), nil
+}
+
+func combineJSONCommandOutput(stdoutText, stderrText string, err error) (string, error) {
+	if stdoutText == "" {
+		return stderrText, err
+	}
+	if stderrText == "" {
+		return stdoutText, err
+	}
+	if strings.HasSuffix(stdoutText, "\n") || strings.HasPrefix(stderrText, "\n") {
+		return stdoutText + stderrText, err
+	}
+	return stdoutText + "\n" + stderrText, err
 }
 
 func supervisorLogs(cityDir string) string {

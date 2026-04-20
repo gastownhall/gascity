@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // ResolveScripts computes per-relative-path winners from layered script
@@ -17,10 +20,6 @@ import (
 // and symlinks for scripts no longer in any layer are removed. Real files
 // (non-symlinks) in the target directory are never overwritten.
 func ResolveScripts(targetDir string, layers []string) error {
-	if len(layers) == 0 {
-		return nil
-	}
-
 	// Build winner map: relative path → absolute source path.
 	// Later layers overwrite earlier ones (higher priority).
 	winners := make(map[string]string)
@@ -85,6 +84,24 @@ func ResolveScripts(targetDir string, layers []string) error {
 	}
 
 	return cleanStaleScriptSymlinks(symlinkDir, winners)
+}
+
+func resolveConfiguredScripts(cityPath string, cfg *config.City, handleErr func(scope string, err error)) {
+	if err := ResolveScripts(cityPath, cfg.ScriptLayers.City); err != nil {
+		handleErr("city", err)
+	}
+	for _, r := range cfg.Rigs {
+		rigPath := strings.TrimSpace(r.Path)
+		if rigPath == "" {
+			continue
+		}
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if err := ResolveScripts(rigPath, cfg.ScriptLayers.Rigs[r.Name]); err != nil {
+			handleErr(fmt.Sprintf("rig %q", r.Name), err)
+		}
+	}
 }
 
 // cleanStaleScriptSymlinks removes symlinks in symlinkDir that are not in

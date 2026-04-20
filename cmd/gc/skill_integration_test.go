@@ -252,6 +252,82 @@ func TestSharedSkillCatalogForAgentDoesNotFallBackWhenRigCatalogFails(t *testing
 	}
 }
 
+func TestSharedSkillCatalogForAgentUsesCachedRigCatalogAfterFailure(t *testing.T) {
+	resetSkillCatalogCache()
+
+	cityPath := t.TempDir()
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "city-shared"))
+	realRigCatalog := filepath.Join(cityPath, "real-rig-skills")
+	rigCatalog := filepath.Join(cityPath, "rig-skills-link")
+	writeSkillSource(t, filepath.Join(realRigCatalog, "ops"))
+	symlinkOrSkip(t, realRigCatalog, rigCatalog)
+
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Rigs:          []config.Rig{{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   rigCatalog,
+				BindingName: "ops",
+				PackName:    "helper",
+			}},
+		},
+	}
+	agent := &config.Agent{Name: "rig-agent", Scope: "rig", Dir: "fe"}
+
+	params := newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, nil)
+	if got := params.sharedSkillCatalogForAgent(agent); got == nil || len(got.Entries) == 0 {
+		t.Fatalf("baseline sharedSkillCatalogForAgent() = %+v, want non-empty rig catalog", got)
+	}
+
+	replaceWithSelfSymlink(t, rigCatalog)
+	var stderr strings.Builder
+	params = newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, &stderr)
+	got := params.sharedSkillCatalogForAgent(agent)
+	if got == nil || len(got.Entries) == 0 {
+		t.Fatalf("sharedSkillCatalogForAgent() = %+v, want cached rig catalog after transient failure", got)
+	}
+	if !strings.Contains(stderr.String(), `LoadCityCatalog rig "fe"`) {
+		t.Errorf("stderr = %q, want rig catalog load error", stderr.String())
+	}
+}
+
+func TestNewAgentBuildParams_EmptyRigCatalogClearsLastGoodCatalog(t *testing.T) {
+	resetSkillCatalogCache()
+
+	cityPath := t.TempDir()
+	realRigCatalog := filepath.Join(cityPath, "rig-skills")
+	writeSkillSource(t, filepath.Join(realRigCatalog, "ops"))
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   realRigCatalog,
+				BindingName: "ops",
+				PackName:    "helper",
+			}},
+		},
+	}
+	agent := &config.Agent{Name: "rig-agent", Scope: "rig", Dir: "fe"}
+
+	params := newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, nil)
+	if got := params.sharedSkillCatalogForAgent(agent); got == nil || len(got.Entries) == 0 {
+		t.Fatalf("baseline sharedSkillCatalogForAgent() = %+v, want non-empty rig catalog", got)
+	}
+
+	if err := os.RemoveAll(filepath.Join(realRigCatalog, "ops")); err != nil {
+		t.Fatal(err)
+	}
+	params = newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, nil)
+	got := params.sharedSkillCatalogForAgent(agent)
+	if got == nil {
+		t.Fatal("empty successful rig catalog should be represented as an empty catalog, not nil")
+	}
+	if len(got.Entries) != 0 {
+		t.Fatalf("empty successful rig catalog reused stale cache with %d entries", len(got.Entries))
+	}
+}
+
 func TestMergeSkillFingerprintEntries(t *testing.T) {
 	t.Parallel()
 
@@ -462,6 +538,9 @@ func TestAppendMaterializeSkillsPreStart(t *testing.T) {
 	}
 	if !strings.Contains(last, "--workdir") || !strings.Contains(last, "/worktrees/polecat-1") {
 		t.Errorf("--workdir flag missing: %q", last)
+	}
+	if strings.Contains(last, "--shared-catalog-snapshot") {
+		t.Errorf("materialize-skills command should not carry snapshot flags: %q", last)
 	}
 	// gc binary reference must go through ${GC_BIN:-gc} so the runtime
 	// env provides the authoritative binary path.
