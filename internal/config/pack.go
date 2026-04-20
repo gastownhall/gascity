@@ -1386,11 +1386,9 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 			agents[i].PromptTemplate = adjustFragmentPath(
 				agents[i].PromptTemplate, topoDir, cityRoot)
 		}
-		// Resolve session_setup_script paths relative to pack directory.
-		if agents[i].SessionSetupScript != "" {
-			agents[i].SessionSetupScript = adjustFragmentPath(
-				agents[i].SessionSetupScript, topoDir, cityRoot)
-		}
+		// Leave session_setup_script as-authored and resolve it at runtime
+		// against SourceDir so pack-local script paths do not collapse back
+		// into city-root-relative strings.
 		// Resolve overlay_dir paths relative to pack directory.
 		if agents[i].OverlayDir != "" {
 			agents[i].OverlayDir = adjustFragmentPath(
@@ -2150,13 +2148,15 @@ func resolveConfigDirInCommands(cmds []string, configDir string) []string {
 }
 
 // adjustPackPatchPaths resolves file-path fields in patches relative to
-// the pack directory, matching how agent fields are resolved during
-// pack loading.
+// the pack directory. session_setup_script is resolved all the way to an
+// absolute path because patches do not retain independent source provenance
+// after application; prompt_template and overlay_dir keep the existing
+// city-root-relative representation used elsewhere in composition.
 func adjustPackPatchPaths(patches *Patches, topoDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
 		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {
-			v := adjustFragmentPath(*p.SessionSetupScript, topoDir, cityRoot)
+			v := resolveConfigPath(*p.SessionSetupScript, topoDir, cityRoot)
 			p.SessionSetupScript = &v
 		}
 		if p.PromptTemplate != nil && *p.PromptTemplate != "" {

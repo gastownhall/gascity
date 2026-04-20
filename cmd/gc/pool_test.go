@@ -511,21 +511,35 @@ func TestExpandSessionSetup_Empty(t *testing.T) {
 }
 
 func TestResolveSetupScript_Relative(t *testing.T) {
-	got := resolveSetupScript("scripts/setup.sh", "/home/user/city")
-	if got != "/home/user/city/scripts/setup.sh" {
+	got := resolveSetupScript("scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
 		t.Errorf("got %q, want absolute path", got)
 	}
 }
 
+func TestResolveSetupScript_DoubleSlashUsesCityRoot(t *testing.T) {
+	got := resolveSetupScript("//scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/scripts/setup.sh" {
+		t.Errorf("got %q, want city-root path", got)
+	}
+}
+
+func TestResolveSetupScript_LegacyCityRelativeStillWorks(t *testing.T) {
+	got := resolveSetupScript("packs/gastown/scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
+		t.Errorf("got %q, want legacy city-root-relative path to remain supported", got)
+	}
+}
+
 func TestResolveSetupScript_Absolute(t *testing.T) {
-	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city")
+	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
 	if got != "/usr/local/bin/setup.sh" {
 		t.Errorf("got %q, want unchanged absolute path", got)
 	}
 }
 
 func TestResolveSetupScript_Empty(t *testing.T) {
-	got := resolveSetupScript("", "/home/user/city")
+	got := resolveSetupScript("", "/home/user/city/packs/gastown", "/home/user/city")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}

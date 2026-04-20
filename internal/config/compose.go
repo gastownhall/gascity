@@ -288,6 +288,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Adjust fragment agent paths to be city-root-relative.
 		fragDir := filepath.Dir(fragPath)
 		adjustAgentPaths(frag.Agents, fragDir, cityRoot)
+		adjustFragmentPatchPaths(&frag.Patches, fragDir, cityRoot)
 
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
@@ -521,6 +522,22 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// explicitly-declared agent. Populate the fields here so the
 	// convention works uniformly.
 	return root, prov, nil
+}
+
+// adjustFragmentPatchPaths resolves fragment patch session_setup_script values
+// to absolute paths rooted at the fragment directory. Patches do not retain
+// independent source provenance after merge, so runtime cannot otherwise
+// distinguish whether a relative override came from the target agent's source
+// or from the patch file itself.
+func adjustFragmentPatchPaths(patches *Patches, fragDir, cityRoot string) {
+	for i := range patches.Agents {
+		p := &patches.Agents[i]
+		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
+			continue
+		}
+		v := resolveConfigPath(*p.SessionSetupScript, fragDir, cityRoot)
+		p.SessionSetupScript = &v
+	}
 }
 
 // populateAgentLocalAssetDirs fills Agent.SkillsDir and Agent.MCPDir for
@@ -992,20 +1009,18 @@ func resolveConfigPath(p, declDir, cityRoot string) string {
 	return filepath.Join(declDir, p)
 }
 
-// adjustAgentPaths converts relative prompt_template and session_setup_script
-// paths in fragment agents to be city-root-relative, based on the fragment's
-// directory. Also sets SourceDir so session_setup templates can reference
-// scripts relative to their source directory.
+// adjustAgentPaths converts relative prompt_template, overlay_dir, and
+// namepool paths in fragment agents to be city-root-relative, based on the
+// fragment's directory. session_setup_script is left as-authored so runtime
+// resolution can interpret it relative to SourceDir. SourceDir is always set
+// so session_setup templates and runtime path resolution know the declaring
+// config directory.
 func adjustAgentPaths(agents []Agent, fragDir, cityRoot string) {
 	for i := range agents {
 		agents[i].SourceDir = fragDir
 		if agents[i].PromptTemplate != "" {
 			agents[i].PromptTemplate = adjustFragmentPath(
 				agents[i].PromptTemplate, fragDir, cityRoot)
-		}
-		if agents[i].SessionSetupScript != "" {
-			agents[i].SessionSetupScript = adjustFragmentPath(
-				agents[i].SessionSetupScript, fragDir, cityRoot)
 		}
 		if agents[i].OverlayDir != "" {
 			agents[i].OverlayDir = adjustFragmentPath(

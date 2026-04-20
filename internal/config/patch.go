@@ -84,7 +84,8 @@ type AgentPatch struct {
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	SessionSetupScript *string `toml:"session_setup_script,omitempty"`
 	// SessionLive overrides the agent's session_live commands.
 	SessionLive []string `toml:"session_live,omitempty"`
