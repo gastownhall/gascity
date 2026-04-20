@@ -879,9 +879,15 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["continuation_epoch"] == "" {
 			queueMeta("continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch))
 		}
-		// Backfill command and resume fields for beads created before
-		// these fields were persisted. Required for gc session attach.
-		if b.Metadata["command"] == "" && tp.Command != "" {
+		// Refresh command and resume fields. The stored command is used for
+		// `gc session attach` and — on legacy code paths — can act as the
+		// authoritative command source for respawn. If agent config changes
+		// (e.g., adding `[option_defaults] model = "opus"`), the freshly
+		// resolved tp.Command will differ from the stored value; sync here
+		// so the bead matches the current config. An empty tp.Command is
+		// ignored to avoid clobbering the stored value when resolution fails
+		// transiently.
+		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
 		if tp.ResolvedProvider != nil {
