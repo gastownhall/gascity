@@ -3136,6 +3136,26 @@ func TestSourceTemplatePackSchemaFSUsesProvidedFS(t *testing.T) {
 	}
 }
 
+func TestInitFromSkipForSourceFSUsesProvidedLegacyOrigins(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(srcDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shimTarget := filepath.Join(srcDir, "assets", "scripts", "run.sh")
+	if err := os.Symlink(shimTarget, filepath.Join(srcDir, "scripts", "run.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := fsys.NewFake()
+	fs.Files[filepath.Join(srcDir, "pack.toml")] = []byte("[pack]\nname = \"modern\"\nschema = 2\n")
+	fs.Dirs[filepath.Join(srcDir, "assets")] = true
+	fs.Dirs[filepath.Join(srcDir, "assets", "scripts")] = true
+
+	if got := initFromSkipForSourceFS(fs, srcDir)("scripts", true); !got {
+		t.Fatalf("initFromSkipForSourceFS() should skip legacy shim scripts when assets/scripts only exists in provided FS")
+	}
+}
+
 // --- gc stop (doStop with runtime.Fake) ---
 
 func TestDoStopOneAgentRunning(t *testing.T) {

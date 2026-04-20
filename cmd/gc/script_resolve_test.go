@@ -181,6 +181,48 @@ func TestPruneLegacyConfiguredScripts_PrunesCityAndRigOnly(t *testing.T) {
 	}
 }
 
+func TestPruneLegacyConfiguredScripts_FallsBackToScopeAssetsWhenPackDirsMissing(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	rigPath := filepath.Join(cityPath, "rig")
+
+	cityAsset := filepath.Join(cityPath, "assets", "scripts", "city.sh")
+	if err := os.MkdirAll(filepath.Dir(cityAsset), 0o755); err != nil {
+		t.Fatalf("MkdirAll city assets: %v", err)
+	}
+	if err := os.WriteFile(cityAsset, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile city asset: %v", err)
+	}
+	rigAsset := filepath.Join(rigPath, "assets", "scripts", "rig.sh")
+	if err := os.MkdirAll(filepath.Dir(rigAsset), 0o755); err != nil {
+		t.Fatalf("MkdirAll rig assets: %v", err)
+	}
+	if err := os.WriteFile(rigAsset, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile rig asset: %v", err)
+	}
+
+	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", cityAsset)
+	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigAsset)
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "app", Path: rigPath}},
+	}
+
+	var warnings []string
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		warnings = append(warnings, scope+": "+err.Error())
+	})
+	if len(warnings) > 0 {
+		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("city scripts/ should be pruned via local assets fallback, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("rig scripts/ should be pruned via local assets fallback, err=%v", err)
+	}
+}
+
 func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")

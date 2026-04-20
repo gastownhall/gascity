@@ -9,13 +9,14 @@ import (
 	"syscall"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // pruneLegacyConfiguredScripts removes symlink-only top-level scripts/
 // directories left behind by the old ResolveScripts compatibility shim.
 // Real user-authored files are preserved.
 func pruneLegacyConfiguredScripts(cityPath string, cfg *config.City, handleErr func(scope string, err error)) {
-	cityOrigins := legacyScriptSourceDirs(cfg.PackDirs)
+	cityOrigins := legacyScriptOriginsForScope(cityPath, cfg.PackDirs)
 	if err := pruneLegacyScripts(cityPath, cityOrigins); err != nil {
 		handleErr("city", err)
 	}
@@ -28,7 +29,7 @@ func pruneLegacyConfiguredScripts(cityPath string, cfg *config.City, handleErr f
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
 		rigOrigins := append([]string{}, cityOrigins...)
-		rigOrigins = append(rigOrigins, legacyScriptSourceDirs(cfg.RigPackDirs[r.Name])...)
+		rigOrigins = append(rigOrigins, legacyScriptOriginsForScope(rigPath, cfg.RigPackDirs[r.Name])...)
 		if err := pruneLegacyScripts(rigPath, rigOrigins); err != nil {
 			handleErr(fmt.Sprintf("rig %q", r.Name), err)
 		}
@@ -99,6 +100,18 @@ func legacyShimLinks(targetDir string, legacySourceDirs []string) ([]string, boo
 }
 
 func legacyScriptSourceDirs(packDirs []string) []string {
+	return legacyScriptSourceDirsFS(fsys.OSFS{}, packDirs)
+}
+
+func legacyScriptOriginsForScope(scopeRoot string, packDirs []string) []string {
+	dirs := legacyScriptSourceDirs(packDirs)
+	if len(dirs) > 0 {
+		return dirs
+	}
+	return legacyScriptSourceDirs([]string{scopeRoot})
+}
+
+func legacyScriptSourceDirsFS(fs fsys.FS, packDirs []string) []string {
 	if len(packDirs) == 0 {
 		return nil
 	}
@@ -107,7 +120,7 @@ func legacyScriptSourceDirs(packDirs []string) []string {
 	for _, packDir := range packDirs {
 		for _, rel := range []string{"scripts", filepath.Join("assets", "scripts")} {
 			dir := filepath.Join(packDir, rel)
-			info, err := os.Stat(dir)
+			info, err := fs.Stat(dir)
 			if err != nil || !info.IsDir() {
 				continue
 			}

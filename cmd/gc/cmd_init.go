@@ -976,21 +976,21 @@ func shouldSkipLegacyTopLevelScripts(srcFS fsys.FS, srcDir string) bool {
 	if sourceTemplatePackSchemaFS(srcFS, srcDir) < initPackSchemaVersion {
 		return false
 	}
-	_, ok, err := legacyShimLinks(srcDir, sourceTemplateLegacyScriptOrigins(srcDir))
+	_, ok, err := legacyShimLinks(srcDir, sourceTemplateLegacyScriptOriginsFS(srcFS, srcDir))
 	return err == nil && ok
 }
 
 func sourceTemplateLegacyScriptOrigins(srcDir string) []string {
+	return sourceTemplateLegacyScriptOriginsFS(fsys.OSFS{}, srcDir)
+}
+
+func sourceTemplateLegacyScriptOriginsFS(srcFS fsys.FS, srcDir string) []string {
 	dir := filepath.Join(srcDir, "assets", "scripts")
-	info, err := os.Stat(dir)
+	info, err := srcFS.Stat(dir)
 	if err != nil || !info.IsDir() {
 		return nil
 	}
 	return []string{filepath.Clean(dir)}
-}
-
-func sourceTemplatePackSchema(srcDir string) int {
-	return sourceTemplatePackSchemaFS(fsys.OSFS{}, srcDir)
 }
 
 func sourceTemplatePackSchemaFS(srcFS fsys.FS, srcDir string) int {
