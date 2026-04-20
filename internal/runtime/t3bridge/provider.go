@@ -8,11 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,6 +24,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
+
+var authMu sync.Mutex
 
 // Provider wraps an exec.Provider, moving the T3-specific lifecycle and turn
 // operations into native Go WebSocket calls while leaving a small helper
@@ -107,38 +108,57 @@ func resolveT3BaseDir() string {
 	if v := os.Getenv("T3_BASE_DIR"); strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}
+	if v := os.Getenv("T3CODE_HOME"); strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
 	t3Home := os.Getenv("T3_HOME")
 	if strings.TrimSpace(t3Home) == "" {
 		t3Home = filepath.Join(os.Getenv("HOME"), ".t3")
 	}
-	return filepath.Join(t3Home, "dev")
+	return t3Home
 }
 
-func issueT3BearerSession() (string, error) {
-	if token := strings.TrimSpace(os.Getenv("T3_BEARER_TOKEN")); token != "" {
-		return token, nil
+func decodeIssuedBearerSessionToken(output []byte) (string, error) {
+	var payload struct {
+		Token        string `json:"token"`
+		SessionToken string `json:"sessionToken"`
 	}
-	if token := strings.TrimSpace(os.Getenv("GC_T3_BEARER_TOKEN")); token != "" {
-		return token, nil
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return "", fmt.Errorf("decode json: %w", err)
 	}
-	cmd := exec.Command("node", "src/cli.ts", "auth", "session", "issue", "--base-dir", resolveT3BaseDir(), "--token-only")
-	cmd.Dir = resolveT3ServerDir()
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("issue bearer session: %w", err)
-	}
-	token := strings.TrimSpace(string(output))
+	token := strings.TrimSpace(payload.Token)
 	if token == "" {
-		return "", fmt.Errorf("issue bearer session: empty token")
+		token = strings.TrimSpace(payload.SessionToken)
+	}
+	if token == "" {
+		return "", fmt.Errorf("empty token")
 	}
 	return token, nil
 }
 
-func issueT3WebSocketToken(wsURL string) (string, error) {
-	bearer, err := issueT3BearerSession()
+func resolveT3HTTPURL() (string, error) {
+	wsURL := resolveWsURL()
+	parsed, err := url.Parse(wsURL)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("parse ws url: %w", err)
 	}
+	switch parsed.Scheme {
+	case "ws":
+		parsed.Scheme = "http"
+	case "wss":
+		parsed.Scheme = "https"
+	default:
+		return "", fmt.Errorf("unsupported websocket scheme: %s", parsed.Scheme)
+	}
+	parsed.Path = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func issueT3WebSocketToken(wsURL string) (string, error) {
+	authMu.Lock()
+	defer authMu.Unlock()
 
 	parsed, err := url.Parse(wsURL)
 	if err != nil {
@@ -152,25 +172,24 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported websocket scheme: %s", parsed.Scheme)
 	}
-	parsed.Path = "/api/auth/ws-token"
+	parsed.Path = "/api/auth/bridge-ws-token"
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 
 	req, err := http.NewRequest(http.MethodPost, parsed.String(), bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return "", fmt.Errorf("build ws-token request: %w", err)
+		return "", fmt.Errorf("build bridge ws-token request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request ws token: %w", err)
+		return "", fmt.Errorf("request bridge ws token: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("request ws token: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("request bridge ws token: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var payload struct {
@@ -247,6 +266,36 @@ func ensureNativeStateDir() error {
 func metaFilePath(name, key string) string {
 	safeKey := strings.NewReplacer("/", "_", string(filepath.Separator), "_").Replace(key)
 	return filepath.Join(resolveNativeStateDir(), fmt.Sprintf("%s.meta.%s", name, safeKey))
+}
+
+func bearerSessionTokenPath() string {
+	return filepath.Join(resolveNativeStateDir(), "auth-bearer-session-token")
+}
+
+func writeCachedBearerSessionToken(token string) error {
+	if err := ensureNativeStateDir(); err != nil {
+		return err
+	}
+	return os.WriteFile(bearerSessionTokenPath(), []byte(token), 0o600)
+}
+
+func readCachedBearerSessionToken() (string, error) {
+	data, err := os.ReadFile(bearerSessionTokenPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func removeCachedBearerSessionToken() error {
+	err := os.Remove(bearerSessionTokenPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func writeMetaValue(name, key, value string) error {
@@ -946,28 +995,6 @@ func threadHasRequiredGCMetadata(snapshot map[string]interface{}, threadID strin
 		}
 		if strings.TrimSpace(meta["gc.sessionName"]) == "" {
 			return false
-		}
-		sessionEnv := ParseSessionEnv(meta["gc.sessionEnv"])
-		if len(sessionEnv) == 0 {
-			return false
-		}
-		required := []string{
-			"GC_SESSION_NAME",
-			"GC_AGENT",
-			"GC_ALIAS",
-			"GC_CITY",
-			"GC_CITY_PATH",
-			"GC_TEMPLATE",
-		}
-		for _, key := range required {
-			if strings.TrimSpace(sessionEnv[key]) == "" {
-				return false
-			}
-		}
-		if strings.TrimSpace(meta["gc.rig"]) != "" {
-			if strings.TrimSpace(sessionEnv["GC_RIG"]) == "" || strings.TrimSpace(sessionEnv["GC_RIG_ROOT"]) == "" {
-				return false
-			}
 		}
 		return true
 	}
@@ -1790,12 +1817,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		"sessionName": name,
 	})
 	p.ensureEventWatcher(name, cfg, binding, envelope, providerName)
-	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) waiting for gc metadata thread=%s\n", name, threadID) //nolint:errcheck
-	if err := p.waitForThreadGCMetadata(threadID, 5*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) metadata wait failed thread=%s err=%v\n", name, threadID, err) //nolint:errcheck
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) metadata ready thread=%s\n", name, threadID) //nolint:errcheck
 
 	if prompt := strings.TrimSpace(envelope.Startup.StartupPrompt); prompt != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending startup prompt thread=%s len=%d\n", name, threadID, len(prompt)) //nolint:errcheck

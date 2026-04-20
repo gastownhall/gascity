@@ -86,6 +86,23 @@ func TestResolveProviderModel_DefaultsCodexToGPT54WhenModelMissing(t *testing.T)
 	}
 }
 
+func TestDecodeIssuedBearerSessionToken(t *testing.T) {
+	token, err := decodeIssuedBearerSessionToken([]byte(`{"sessionId":"session-1","token":"test-bearer","role":"owner"}`))
+	if err != nil {
+		t.Fatalf("decodeIssuedBearerSessionToken: %v", err)
+	}
+	if token != "test-bearer" {
+		t.Fatalf("token = %q, want test-bearer", token)
+	}
+}
+
+func TestDecodeIssuedBearerSessionToken_EmptyToken(t *testing.T) {
+	_, err := decodeIssuedBearerSessionToken([]byte(`{"sessionId":"session-1","token":"","role":"owner"}`))
+	if err == nil || !strings.Contains(err.Error(), "empty token") {
+		t.Fatalf("err = %v, want empty token", err)
+	}
+}
+
 func TestProcessAlive_ReadyCountsAsAlive(t *testing.T) {
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"threads": []interface{}{
