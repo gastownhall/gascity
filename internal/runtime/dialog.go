@@ -69,7 +69,13 @@ func AcceptStartupDialogsFromStreamWithStatus(
 ) (bool, error) {
 	stream := newReplayableSnapshotCursor(snapshots)
 	observed := false
-	phaseObserved, err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, sendKeys)
+	handledDialog := false
+	trackingSendKeys := func(keys ...string) error {
+		handledDialog = true
+		return sendKeys(keys...)
+	}
+
+	phaseObserved, err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
 	}
@@ -80,7 +86,7 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	if err := ctx.Err(); err != nil {
 		return observed, err
 	}
-	phaseObserved, err = acceptBypassPermissionsWarningFromStream(ctx, timeout, stream, sendKeys)
+	phaseObserved, err = acceptBypassPermissionsWarningFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("bypass permissions warning: %w", err)
 	}
@@ -91,7 +97,7 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	if err := ctx.Err(); err != nil {
 		return observed, err
 	}
-	phaseObserved, err = acceptCustomAPIKeyDialogFromStream(ctx, timeout, stream, sendKeys)
+	phaseObserved, err = acceptCustomAPIKeyDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("custom API key dialog: %w", err)
 	}
@@ -102,11 +108,23 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	if err := ctx.Err(); err != nil {
 		return observed, err
 	}
-	phaseObserved, err = dismissRateLimitDialogFromStream(ctx, timeout, stream, sendKeys)
+	phaseObserved, err = dismissRateLimitDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("rate limit dialog: %w", err)
 	}
 	observed = observed || phaseObserved
+	if handledDialog {
+		promptObserved, err := acceptDialogFromStream(ctx, startupDialogStreamReadyGrace, stream, nil, streamDialogSpec{
+			ready: containsPromptIndicator,
+		})
+		if err != nil {
+			return observed, fmt.Errorf("startup readiness: %w", err)
+		}
+		if !promptObserved {
+			return false, nil
+		}
+		observed = true
+	}
 	return observed, nil
 }
 

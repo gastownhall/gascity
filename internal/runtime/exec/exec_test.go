@@ -183,9 +183,7 @@ esac
 		t.Fatalf("Start: %v", err)
 	}
 
-	if data, err := os.ReadFile(peekFile); err == nil && strings.TrimSpace(string(data)) != "" {
-		t.Fatalf("peek should not be called when watch-startup stays healthy, got %q", string(data))
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.ReadFile(peekFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read peek log: %v", err)
 	}
 
@@ -196,6 +194,65 @@ esac
 	if !strings.Contains(string(data), "send-keys test-sess Down") ||
 		!strings.Contains(string(data), "send-keys test-sess Enter") {
 		t.Fatalf("send-keys log = %q, want delayed bypass dismissal", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenStartupWatchClosesBeforeReadinessAfterDialog(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    ;;
+  peek)
+    echo "$*" >> "`+peekFile+`"
+    if [ "$(wc -l < "`+sendKeysFile+`" 2>/dev/null || echo 0)" -ge 2 ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+	`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	peekData, err := os.ReadFile(peekFile)
+	if err != nil {
+		t.Fatalf("read peek log: %v", err)
+	}
+	if strings.TrimSpace(string(peekData)) == "" {
+		t.Fatalf("peek log = %q, want fallback peek calls after watch closes early", string(peekData))
+	}
+
+	sendData, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	for _, want := range []string{
+		"send-keys test-sess Enter",
+		"send-keys test-sess Down",
+	} {
+		if !strings.Contains(string(sendData), want) {
+			t.Fatalf("send-keys log = %q, want %q", string(sendData), want)
+		}
 	}
 }
 

@@ -92,9 +92,11 @@ func (p *Provider) Stop(name string) error {
 	primaryLabel := "default"
 	otherLabel := "acp"
 	primaryRunning := primary.IsRunning(name)
-	primaryExplicitRoute := false
+	p.mu.RLock()
+	primaryExplicitRoute := p.routes[name]
+	p.mu.RUnlock()
 	err := primary.Stop(name)
-	if err == nil && primaryRunning {
+	if err == nil && (primaryRunning || primaryExplicitRoute) {
 		p.Unroute(name)
 		return nil
 	}
@@ -105,7 +107,6 @@ func (p *Provider) Stop(name string) error {
 	var other runtime.Provider
 	p.mu.RLock()
 	if p.routes[name] {
-		primaryExplicitRoute = true
 		primaryLabel = "acp"
 		otherLabel = "default"
 		other = p.defaultSP

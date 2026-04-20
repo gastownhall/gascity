@@ -13,6 +13,15 @@ import (
 
 var _ runtime.Provider = (*Provider)(nil)
 
+type falseNegativeStopProvider struct {
+	*runtime.Fake
+	stopErr error
+}
+
+func (p *falseNegativeStopProvider) Stop(name string) error { return p.stopErr }
+
+func (p *falseNegativeStopProvider) IsRunning(string) bool { return false }
+
 func TestRouteDefaultAndACP(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
@@ -242,6 +251,26 @@ func TestStopReturnsPrimaryFailureWhenPrimaryCannotConfirmLiveness(t *testing.T)
 	}
 	if got := p.route("agent-fail"); got != acpSP {
 		t.Fatal("route should be preserved when the routed backend stop failed")
+	}
+}
+
+func TestStopTrustsExplicitRouteSuccessWhenLivenessProbeIsFalseNegative(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	if err := defaultSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	acpSP := &falseNegativeStopProvider{Fake: runtime.NewFake()}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	if err := p.Stop("agent-fail"); err != nil {
+		t.Fatalf("Stop error = %v, want nil for explicit-route success", err)
+	}
+	if !defaultSP.IsRunning("agent-fail") {
+		t.Fatal("same-named fallback session should remain running when routed stop succeeds")
+	}
+	if got := p.route("agent-fail"); got != defaultSP {
+		t.Fatal("route should be cleared after explicit-route stop success")
 	}
 }
 
