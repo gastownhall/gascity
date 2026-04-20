@@ -940,8 +940,11 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	if providerChanged {
 		running, lErr := cr.sp.ListRunning("")
-		if runtime.IsPartialListError(lErr) {
-			err := fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+		if lErr != nil {
+			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
+			if runtime.IsPartialListError(lErr) {
+				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+			}
 			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 			if trace != nil {
@@ -953,7 +956,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
-		if lErr == nil && len(running) > 0 {
+		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
 				displayProviderName(*lastProviderName), displayProviderName(pendingProviderName), len(running))
 			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
