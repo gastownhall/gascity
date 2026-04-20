@@ -56,18 +56,14 @@ func preWakeCommit(
 		sleepReason = "idle-timeout"
 	}
 
-	// Use one batched metadata update to avoid paying multiple bd update
-	// round-trips before every wake.
-	batch := map[string]string{
-		"instance_token":             token,
-		"continuation_epoch":         strconv.Itoa(continuationEpoch),
-		"continuation_reset_pending": "",
-		"detached_at":                "",
-		"last_woke_at":               clk.Now().UTC().Format(time.RFC3339),
-		"sleep_reason":               sleepReason,
-		"sleep_intent":               "",
-		"generation":                 strconv.Itoa(newGen),
-	}
+	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+		Generation:        newGen,
+		InstanceToken:     token,
+		ContinuationEpoch: continuationEpoch,
+		Now:               clk.Now(),
+		SleepReason:       sleepReason,
+		FreshWake:         session.Metadata["wake_mode"] == "fresh",
+	})
 	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}

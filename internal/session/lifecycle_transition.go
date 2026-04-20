@@ -38,6 +38,40 @@ func RequestWakePatch(reason string) MetadataPatch {
 	}
 }
 
+// PreWakePatch records the metadata transition for a concrete runtime wake
+// attempt. The caller computes generation, token, and continuation epoch; the
+// patch owns keeping all persisted lifecycle fields consistent for that
+// transition.
+type PreWakePatchInput struct {
+	Generation        int
+	InstanceToken     string
+	ContinuationEpoch int
+	Now               time.Time
+	SleepReason       string
+	FreshWake         bool
+}
+
+func PreWakePatch(input PreWakePatchInput) MetadataPatch {
+	patch := MetadataPatch{
+		"instance_token":             input.InstanceToken,
+		"continuation_epoch":         fmt.Sprintf("%d", input.ContinuationEpoch),
+		"continuation_reset_pending": "",
+		"detached_at":                "",
+		"last_woke_at":               input.Now.UTC().Format(time.RFC3339),
+		"sleep_reason":               input.SleepReason,
+		"sleep_intent":               "",
+		"generation":                 fmt.Sprintf("%d", input.Generation),
+	}
+	if input.FreshWake {
+		patch["session_key"] = ""
+		patch["started_config_hash"] = ""
+		patch["started_live_hash"] = ""
+		patch["live_hash"] = ""
+		patch[startupDialogVerifiedKey] = ""
+	}
+	return patch
+}
+
 // ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
 // selected by the normal wake path.
 func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {

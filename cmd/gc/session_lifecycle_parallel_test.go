@@ -620,8 +620,22 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 	if startCfg == nil {
 		t.Fatalf("expected Start call for mayor, calls=%#v", sp.Calls)
 	}
-	if got := startCfg.Command; got != "claude --dangerously-skip-permissions --session-id fresh-key-123" {
-		t.Fatalf("Start command = %q, want fresh session-id launch", got)
+	if !strings.HasPrefix(startCfg.Command, "claude --dangerously-skip-permissions --session-id ") {
+		t.Fatalf("Start command = %q, want fresh session-id launch", startCfg.Command)
+	}
+	gotSessionKey := strings.TrimPrefix(startCfg.Command, "claude --dangerously-skip-permissions --session-id ")
+	if gotSessionKey == "" {
+		t.Fatalf("Start command = %q, want non-empty generated session key", startCfg.Command)
+	}
+	if gotSessionKey == "fresh-key-123" {
+		t.Fatalf("Start command reused stale session key %q", gotSessionKey)
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if updated.Metadata["session_key"] != gotSessionKey {
+		t.Fatalf("stored session_key = %q, want generated key from command %q", updated.Metadata["session_key"], gotSessionKey)
 	}
 	if startCfg.Nudge != "Check mail and hook status, then act accordingly." {
 		t.Fatalf("Start nudge = %q, want startup nudge preserved", startCfg.Nudge)

@@ -166,6 +166,100 @@ func TestPreWakeCommit_BumpsContinuationEpochForFreshWake(t *testing.T) {
 	}
 }
 
+func TestPreWakeCommit_FreshModeClearsPreviousConversationMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Title: "fresh-session",
+		Metadata: map[string]string{
+			"session_name":               "fresh-worker",
+			"template":                   "worker",
+			"generation":                 "2",
+			"continuation_epoch":         "3",
+			"continuation_reset_pending": "true",
+			"wake_mode":                  "fresh",
+			"session_key":                "old-provider-conversation",
+			"started_config_hash":        "old-core-hash",
+			"started_live_hash":          "old-live-hash",
+			"live_hash":                  "old-live-hash",
+			"startup_dialog_verified":    "true",
+			"last_woke_at":               now.Add(-time.Minute).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	got, _ := store.Get(b.ID)
+	for _, key := range []string{
+		"session_key",
+		"started_config_hash",
+		"started_live_hash",
+		"live_hash",
+		"startup_dialog_verified",
+	} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s = %q, want cleared for wake_mode=fresh", key, got.Metadata[key])
+		}
+		if b.Metadata[key] != "" {
+			t.Errorf("in-memory %s = %q, want cleared for wake_mode=fresh", key, b.Metadata[key])
+		}
+	}
+	if got.Metadata["continuation_epoch"] != "4" {
+		t.Fatalf("continuation_epoch = %q, want bumped to 4", got.Metadata["continuation_epoch"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want consumed", got.Metadata["continuation_reset_pending"])
+	}
+}
+
+func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Title: "resume-session",
+		Metadata: map[string]string{
+			"session_name":            "resume-worker",
+			"template":                "worker",
+			"generation":              "2",
+			"continuation_epoch":      "3",
+			"wake_mode":               "resume",
+			"session_key":             "resume-conversation",
+			"started_config_hash":     "resume-core-hash",
+			"started_live_hash":       "resume-live-hash",
+			"live_hash":               "resume-live-hash",
+			"startup_dialog_verified": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	got, _ := store.Get(b.ID)
+	want := map[string]string{
+		"session_key":             "resume-conversation",
+		"started_config_hash":     "resume-core-hash",
+		"started_live_hash":       "resume-live-hash",
+		"live_hash":               "resume-live-hash",
+		"startup_dialog_verified": "true",
+	}
+	for key, value := range want {
+		if got.Metadata[key] != value {
+			t.Errorf("%s = %q, want preserved %q", key, got.Metadata[key], value)
+		}
+	}
+}
+
 func TestPreWakeCommit_BumpsContinuationEpochForPendingReset(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
