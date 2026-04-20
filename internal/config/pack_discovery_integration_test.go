@@ -72,6 +72,47 @@ source = "../helper"
 	}
 }
 
+func TestLoadWithIncludes_RootPackImportedSharedSkillsCompose(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "helper")
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "helper"
+schema = 2
+`)
+	writeTestFile(t, packDir, "skills/plan/SKILL.md", "# helper plan\n")
+
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+
+[imports.helper]
+source = "../helper"
+`)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if len(cfg.PackSkills) != 1 {
+		t.Fatalf("got %d PackSkills, want 1", len(cfg.PackSkills))
+	}
+	if cfg.PackSkills[0].BindingName != "helper" {
+		t.Fatalf("skill BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "helper")
+	}
+	if cfg.PackSkills[0].SourceDir != filepath.Join(packDir, "skills") {
+		t.Fatalf("skill SourceDir = %q, want %q", cfg.PackSkills[0].SourceDir, filepath.Join(packDir, "skills"))
+	}
+}
+
 func TestLoadWithIncludes_CityPackCommandsUsePackNameBinding(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "helper")
@@ -284,6 +325,54 @@ transitive = false
 	}
 }
 
+func TestLoadWithIncludes_TransitiveFalseFiltersNestedSharedSkills(t *testing.T) {
+	dir := t.TempDir()
+	parentDir := filepath.Join(dir, "parent")
+	childDir := filepath.Join(dir, "child")
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, childDir, "pack.toml", `
+[pack]
+name = "child"
+schema = 2
+`)
+	writeTestFile(t, childDir, "skills/child-plan/SKILL.md", "# child plan\n")
+
+	writeTestFile(t, parentDir, "pack.toml", `
+[pack]
+name = "parent"
+schema = 2
+
+[imports.child]
+source = "../child"
+`)
+	writeTestFile(t, parentDir, "skills/parent-plan/SKILL.md", "# parent plan\n")
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.ops]
+source = "../parent"
+transitive = false
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if len(cfg.PackSkills) != 1 {
+		t.Fatalf("got %d PackSkills, want 1", len(cfg.PackSkills))
+	}
+	if cfg.PackSkills[0].BindingName != "ops" {
+		t.Fatalf("skill BindingName = %q, want %q", cfg.PackSkills[0].BindingName, "ops")
+	}
+	if cfg.PackSkills[0].SourceDir != filepath.Join(parentDir, "skills") {
+		t.Fatalf("skill SourceDir = %q, want %q", cfg.PackSkills[0].SourceDir, filepath.Join(parentDir, "skills"))
+	}
+}
+
 func TestExpandPacks_RigImportsContributeDoctorsButNotCommands(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "helper")
@@ -325,6 +414,53 @@ source = "../helper"
 	}
 }
 
+func TestExpandPacks_RigImportsContributeSharedSkillsOnce(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "helper")
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "helper"
+schema = 2
+`)
+	writeTestFile(t, packDir, "skills/plan/SKILL.md", "# helper plan\n")
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "../rig"
+
+[rigs.imports.helper]
+source = "../helper"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if len(cfg.PackSkills) != 0 {
+		t.Fatalf("got %d PackSkills, want 0 for rig import shared skills", len(cfg.PackSkills))
+	}
+	if cfg.RigPackSkills == nil {
+		t.Fatal("RigPackSkills is nil")
+	}
+	skills := cfg.RigPackSkills["frontend"]
+	if len(skills) != 1 {
+		t.Fatalf("got %d rig shared skill catalogs, want 1", len(skills))
+	}
+	if skills[0].BindingName != "helper" {
+		t.Fatalf("rig skill BindingName = %q, want %q", skills[0].BindingName, "helper")
+	}
+	if skills[0].SourceDir != filepath.Join(packDir, "skills") {
+		t.Fatalf("rig skill SourceDir = %q, want %q", skills[0].SourceDir, filepath.Join(packDir, "skills"))
+	}
+}
+
 func TestLoadWithIncludes_DiamondImportDedupsCommandsAndDoctors(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
@@ -335,11 +471,12 @@ func TestLoadWithIncludes_DiamondImportDedupsCommandsAndDoctors(t *testing.T) {
 
 	writeTestFile(t, dDir, "pack.toml", `
 [pack]
-name = "shared"
-schema = 1
+	name = "shared"
+	schema = 1
 `)
 	writeTestFile(t, dDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
 	writeTestFile(t, dDir, "doctor/shared-check/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, dDir, "skills/plan/SKILL.md", "# shared plan\n")
 
 	writeTestFile(t, bDir, "pack.toml", `
 [pack]
@@ -383,6 +520,7 @@ source = "../a"
 
 	commandCount := 0
 	doctorCount := 0
+	skillCount := 0
 	for _, cmd := range cfg.PackCommands {
 		if reflect.DeepEqual(cmd.Command, []string{"status"}) && cmd.BindingName == "shared" {
 			commandCount++
@@ -393,11 +531,19 @@ source = "../a"
 			doctorCount++
 		}
 	}
+	for _, skill := range cfg.PackSkills {
+		if skill.BindingName == "shared" && skill.SourceDir == filepath.Join(dDir, "skills") {
+			skillCount++
+		}
+	}
 	if commandCount != 1 {
 		t.Fatalf("got %d shared status commands, want 1", commandCount)
 	}
 	if doctorCount != 1 {
 		t.Fatalf("got %d shared doctor checks, want 1", doctorCount)
+	}
+	if skillCount != 1 {
+		t.Fatalf("got %d shared skill catalogs, want 1", skillCount)
 	}
 }
 

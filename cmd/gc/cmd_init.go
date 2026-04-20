@@ -219,11 +219,21 @@ func resolveAgentChoice(input string, order []string, builtins map[string]config
 
 const initProgressSteps = 6
 
+// initExitAlreadyInitialized is the process exit code for an init request
+// that targets an already-initialized city. The supervisor API depends on
+// this value to translate gc init conflicts into HTTP 409.
+const initExitAlreadyInitialized = 2
+
 func logInitProgress(stdout io.Writer, step int, msg string) {
 	if stdout == nil {
 		return
 	}
 	fmt.Fprintf(stdout, "[%d/%d] %s\n", step, initProgressSteps, msg) //nolint:errcheck // best-effort stdout
+}
+
+func initAlreadyInitialized(stderr io.Writer) int {
+	fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
+	return initExitAlreadyInitialized
 }
 
 func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -253,21 +263,12 @@ non-interactively, or --file to initialize from an existing TOML config file.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if fromFlag != "" {
-				if cmdInitFromDirWithOptions(fromFlag, args, nameFlag, stdout, stderr, skipProviderReadiness) != 0 {
-					return errExit
-				}
-				return nil
+				return exitForCode(cmdInitFromDirWithOptions(fromFlag, args, nameFlag, stdout, stderr, skipProviderReadiness))
 			}
 			if fileFlag != "" {
-				if cmdInitFromFileWithOptions(fileFlag, args, nameFlag, stdout, stderr, skipProviderReadiness) != 0 {
-					return errExit
-				}
-				return nil
+				return exitForCode(cmdInitFromFileWithOptions(fileFlag, args, nameFlag, stdout, stderr, skipProviderReadiness))
 			}
-			if cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, nameFlag, stdout, stderr, skipProviderReadiness) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, nameFlag, stdout, stderr, skipProviderReadiness))
 		},
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
@@ -646,8 +647,7 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 
 	// Create directory structure.
 	if cityAlreadyInitializedFS(fs, cityPath) {
-		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return 1
+		return initAlreadyInitialized(stderr)
 	}
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -728,13 +728,11 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
-		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return 1
+		return initAlreadyInitialized(stderr)
 	}
 	if _, err := fs.Stat(tomlPath); err == nil {
 		if !canBootstrapExistingCity(wiz) {
-			fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-			return 1
+			return initAlreadyInitialized(stderr)
 		}
 		if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1014,8 +1012,7 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 
 	// Check target not already initialized.
 	if cityAlreadyInitializedFS(fs, cityPath) {
-		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return 1
+		return initAlreadyInitialized(stderr)
 	}
 
 	// Create target directory if needed.

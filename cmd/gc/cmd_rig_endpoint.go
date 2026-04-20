@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -603,7 +605,7 @@ func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSna
 func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
 			return fileSnapshot{path: path}, nil
 		}
 		return fileSnapshot{}, err

@@ -84,7 +84,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
 		}
 		normalizePackAgentDefaultsAlias(&pc, md)
-		if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
+		prov.Warnings = append(prov.Warnings, CheckUndecodedKeys(md, packPath)...)
+		if warnings := fatalUndecodedWarnings(md, packPath); len(warnings) > 0 {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
 		}
 		if err := validatePackMeta(&pc.Pack); err != nil {
@@ -863,7 +864,7 @@ func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, 
 	if err != nil {
 		return nil, fmt.Errorf("parsing city pack.toml: %w", err)
 	}
-	if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
+	if warnings := fatalUndecodedWarnings(md, packPath); len(warnings) > 0 {
 		return nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
 	}
 	return defaultRigImportsFromPackDefaults(pc.Defaults, md)

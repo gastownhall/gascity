@@ -1530,8 +1530,8 @@ func TestDoInitAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInit(f, "/city", defaultWizardConfig(), "", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("doInit = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("doInit = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2381,8 +2381,8 @@ func TestCmdInitFromTOMLFileAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2401,11 +2401,44 @@ func TestCmdInitFromTOMLFileAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := cmdInitFromTOMLFile(f, src, "/city", &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
+	}
+}
+
+func TestRunInitFromFileAlreadyInitializedPropagatesExitCode(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte("[workspace]\nname = \"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "events.jsonl"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--file", src, cityPath}, &stdout, &stderr)
+	if code != initExitAlreadyInitialized {
+		t.Fatalf("run(init --file ...) = %d, want %d; stderr=%s", code, initExitAlreadyInitialized, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already initialized") {
+		t.Fatalf("stderr = %q, want already initialized message", stderr.String())
 	}
 }
 
@@ -2783,8 +2816,8 @@ func TestDoInitFromDirAlreadyInitialized(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())
@@ -2814,8 +2847,8 @@ func TestDoInitFromDirAlreadyInitializedByCityToml(t *testing.T) {
 
 	var stderr bytes.Buffer
 	code := doInitFromDir(srcDir, cityPath, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
+	if code != initExitAlreadyInitialized {
+		t.Errorf("code = %d, want %d", code, initExitAlreadyInitialized)
 	}
 	if !strings.Contains(stderr.String(), "already initialized") {
 		t.Errorf("stderr = %q, want 'already initialized'", stderr.String())

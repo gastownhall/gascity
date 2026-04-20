@@ -31,7 +31,7 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 
 	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS", "bd")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
@@ -57,6 +57,150 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "my-frontend") {
 		t.Errorf("city.toml should contain rig name:\n%s", data)
+	}
+}
+
+func TestResolveRigAddPath(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	setCwd(t, cwd)
+	absPath := filepath.Join(t.TempDir(), "frontend")
+
+	tests := []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{
+			name: "bare relative resolves against city",
+			arg:  "frontend",
+			want: filepath.Join(cityPath, "frontend"),
+		},
+		{
+			name: "dot-prefixed resolves against cwd",
+			arg:  "./frontend",
+			want: filepath.Join(cwd, "frontend"),
+		},
+		{
+			name: "absolute path stays absolute",
+			arg:  absPath,
+			want: absPath,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveRigAddPath(cityPath, tt.arg)
+			if err != nil {
+				t.Fatalf("resolveRigAddPath(%q): %v", tt.arg, err)
+			}
+			if got != filepath.Clean(tt.want) {
+				t.Fatalf("resolveRigAddPath(%q) = %q, want %q", tt.arg, got, filepath.Clean(tt.want))
+			}
+		})
+	}
+}
+
+func TestDoRigAddWritesSiteBindingInsteadOfPath(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cityData), rigPath) {
+		t.Fatalf("city.toml should not persist rig path after writeCityConfigForEditFS:\n%s", cityData)
+	}
+
+	siteData, err := os.ReadFile(config.SiteBindingPath(cityPath))
+	if err != nil {
+		t.Fatalf("reading .gc/site.toml: %v", err)
+	}
+	if !strings.Contains(string(siteData), "my-frontend") || !strings.Contains(string(siteData), rigPath) {
+		t.Fatalf(".gc/site.toml = %q, want rig binding for %q", siteData, rigPath)
+	}
+}
+
+func TestDoRigAddRouteFailureRollsBackConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	brokenRigFile := filepath.Join(t.TempDir(), "broken-rig")
+	if err := os.WriteFile(brokenRigFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := strings.Join([]string{
+		"[workspace]",
+		`name = "test-city"`,
+		"",
+		"[[agent]]",
+		`name = "mayor"`,
+		"",
+		"[[rigs]]",
+		`name = "broken"`,
+		`path = "` + brokenRigFile + `"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "new-rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigAdd = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "writing routes") {
+		t.Fatalf("stderr = %q, want route failure context", stderr.String())
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cityData), "new-rig") {
+		t.Fatalf("city.toml should roll back the new rig after route failure:\n%s", cityData)
+	}
+	if !strings.Contains(string(cityData), brokenRigFile) {
+		t.Fatalf("city.toml should restore the original broken rig binding after rollback:\n%s", cityData)
+	}
+	if _, err := os.Stat(config.SiteBindingPath(cityPath)); err == nil {
+		t.Fatalf(".gc/site.toml should not be left behind after rollback")
 	}
 }
 
@@ -142,7 +286,7 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_WritesPortFileForExternalRig(t *testing.T) {
+func TestDoRigAdd_DoesNotWritePortFileForFileBackedExternalRig(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -184,12 +328,8 @@ func TestDoRigAdd_WritesPortFileForExternalRig(t *testing.T) {
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
-	data, err := os.ReadFile(filepath.Join(rigPath, ".beads", "dolt-server.port"))
-	if err != nil {
-		t.Fatalf("reading rig port file: %v", err)
-	}
-	if got := strings.TrimSpace(string(data)); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
-		t.Fatalf("rig port file = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("file-backed external rig should not get dolt-server.port, stat err = %v", err)
 	}
 }
 

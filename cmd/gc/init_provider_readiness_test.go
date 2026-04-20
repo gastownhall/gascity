@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -502,6 +503,41 @@ func TestShellQuotePathForOSWindows(t *testing.T) {
 	if got != want {
 		t.Fatalf("shellQuotePathForOS windows = %q, want %q", got, want)
 	}
+}
+
+func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
+	oldCommandContext := initRunVersionCommandContext
+	oldTimeout := initRunVersionTimeout
+	initRunVersionTimeout = 50 * time.Millisecond
+	initRunVersionCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcessInitRunVersionHang", "--")
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		initRunVersionCommandContext = oldCommandContext
+		initRunVersionTimeout = oldTimeout
+	})
+
+	start := time.Now()
+	line, err := initRunVersion("hung-binary")
+	if err == nil {
+		t.Fatal("initRunVersion error = nil, want timeout")
+	}
+	if line != "" {
+		t.Fatalf("initRunVersion line = %q, want empty on timeout", line)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("initRunVersion elapsed = %v, want timeout-bound execution", elapsed)
+	}
+}
+
+func TestHelperProcessInitRunVersionHang(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	time.Sleep(10 * time.Second)
+	os.Exit(0)
 }
 
 func initBareProviderPackRepo(t *testing.T, name, provider string) string {

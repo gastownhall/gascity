@@ -308,52 +308,20 @@ func TestRunStage1IdempotentConverges(t *testing.T) {
 	}
 }
 
-// TestRunStage1MaterializesBootstrapPackSkills is the regression for
-// Phase 4 pass-1 Claude finding: stage-1 materialization must
-// surface bootstrap implicit-import pack skills (e.g. `core`) into
-// the agent sink, not just city-pack skills. LoadCityCatalog already
-// folds bootstrap entries into its return, but a test pins the
-// wiring so a future refactor can't silently drop it.
-func TestRunStage1MaterializesBootstrapPackSkills(t *testing.T) {
+func TestRunStage1MaterializesImportedPackSkills(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
-
-	// Stand up a fake GC_HOME with a bootstrap-named implicit
-	// import that resolves to a cache dir containing one skill.
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
-
-	// Use the first real bootstrap pack name so the materializer's
-	// bootstrap-name filter lets the entry through.
-	bootstrapName := bootstrapPackNameForTest(t)
-	source := "github.com/example/" + bootstrapName
-	commit := bootstrapName + "-commit"
-	cacheDir := globalRepoCachePathForTest(gcHome, source, commit)
-	if err := os.MkdirAll(filepath.Join(cacheDir, "skills", bootstrapName+"-sample"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(cacheDir, "skills", bootstrapName+"-sample", "SKILL.md"),
-		[]byte("---\nname: "+bootstrapName+"-sample\ndescription: test\n---\nbody\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Pack.toml at the cache root so LoadCityCatalog's discovery
-	// path doesn't reject the pack as malformed.
-	if err := os.WriteFile(
-		filepath.Join(cacheDir, "pack.toml"),
-		[]byte("[pack]\nname = \""+bootstrapName+"\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// implicit-import.toml pointing at the cache.
-	if err := os.WriteFile(
-		filepath.Join(gcHome, "implicit-import.toml"),
-		[]byte("schema = 1\n\n[imports.\""+bootstrapName+"\"]\nsource = \""+source+"\"\nversion = \"0.1.0\"\ncommit = \""+commit+"\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	helperDir := filepath.Join(cityPath, "imports", "helper")
+	writeSkillSource(t, filepath.Join(helperDir, "skills", "plan"))
 
 	cfg := &config.City{
-		// No city pack skills — bootstrap-only case.
 		Session: config.SessionConfig{Provider: "tmux"},
+		PackSkills: []config.DiscoveredSkillCatalog{{
+			SourceDir:   filepath.Join(helperDir, "skills"),
+			PackDir:     helperDir,
+			PackName:    "helper",
+			BindingName: "helper",
+		}},
 		Agents: []config.Agent{
 			{Name: "mayor", Scope: "city", Provider: "claude"},
 		},
@@ -364,14 +332,17 @@ func TestRunStage1MaterializesBootstrapPackSkills(t *testing.T) {
 		t.Fatalf("runStage1SkillMaterialization: %v", err)
 	}
 
-	// Bootstrap skill symlink lands in the claude sink.
-	link := filepath.Join(cityPath, ".claude", "skills", bootstrapName+"-sample")
+	link := filepath.Join(cityPath, ".claude", "skills", "helper.plan")
 	info, err := os.Lstat(link)
 	if err != nil {
-		t.Fatalf("bootstrap skill symlink missing at %q: %v", link, err)
+		t.Fatalf("imported skill symlink missing at %q: %v", link, err)
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("%q is not a symlink", link)
+	}
+	tgt, _ := os.Readlink(link)
+	if want := filepath.Join(helperDir, "skills", "plan"); tgt != want {
+		t.Fatalf("symlink target = %q, want %q", tgt, want)
 	}
 }
 

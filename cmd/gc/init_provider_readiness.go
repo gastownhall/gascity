@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
@@ -419,10 +420,20 @@ type missingDep struct {
 // Tests can override this to simulate missing binaries.
 var initLookPath = exec.LookPath
 
+var initRunVersionCommandContext = exec.CommandContext
+
+var initRunVersionTimeout = 2 * time.Second
+
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	out, err := exec.Command(binary, "version").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
+	defer cancel()
+
+	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
+	}
 	if err != nil {
 		return "", err
 	}

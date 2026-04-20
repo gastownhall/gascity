@@ -295,8 +295,8 @@ func effectiveInjectAssignedSkills(agent *config.Agent) bool {
 //
 // The fragment uses the SKILL.md frontmatter description for each
 // entry so agents see both the name and a one-line purpose. Origin
-// tags identify whether a shared skill came from the city pack or a
-// bootstrap implicit-import pack (e.g. `core`).
+// tags identify where a shared skill came from: the city pack, an
+// imported pack binding, or a legacy compatibility bootstrap pack.
 func buildAssignedSkillsPromptFragment(
 	agent *config.Agent,
 	city *materialize.CityCatalog,
@@ -348,8 +348,8 @@ func buildAssignedSkillsPromptFragment(
 
 // writeSkillBullets renders a bullet list of skill entries. When
 // originTag is non-empty, each bullet trails with " *(origin)*" so
-// shared entries can show whether they came from the city pack or a
-// bootstrap pack (e.g. `core`). Descriptions are included when the
+// shared entries can show whether they came from the city pack, an
+// import binding, or a compatibility bootstrap pack. Descriptions are included when the
 // SKILL.md frontmatter provided one.
 func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
 	for _, e := range entries {
