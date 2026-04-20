@@ -862,13 +862,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// Write pack.toml + city.toml in the transitional v2 split: pack.toml
 	// owns portable definition, while city.toml keeps deployment/runtime
 	// state. We intentionally retain current compatibility fields such as
-	// workspace.name/prefix/provider in city.toml until the runtime cutover is
-	// complete.
+	// workspace.provider in city.toml until the runtime cutover is complete.
 	rewriteInitPromptTemplates(&cfg)
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 	packCfg, cityCfg := splitInitConfig(cityName, &cfg)
-	cityCfg.Workspace.Name = strings.TrimSpace(cityName)
-	cityCfg.Workspace.Prefix = cityPrefix
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

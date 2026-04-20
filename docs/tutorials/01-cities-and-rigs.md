@@ -124,14 +124,12 @@ At the top level of the city directory:
 This city comes with a built-in `mayor` agent. The mayor's prompt lives at
 `agents/mayor/prompt.template.md`, and `pack.toml` defines the always-on mayor
 session that uses it. Assuming you chose the default `tutorial` config
-template and default provider, `city.toml` keeps the city-local runtime
-settings:
+template and default provider, `city.toml` keeps the shared runtime settings:
 
 ```shell
 ~/my-city
 $ cat city.toml
 [workspace]
-name = "my-city"
 provider = "claude"
 ```
 
@@ -153,7 +151,10 @@ template = "mayor"
 mode = "always"
 ```
 
-The `[workspace]` section names your city and sets the default provider.
+The `[workspace]` section in `city.toml` sets shared runtime defaults such as
+the provider. The machine-local workspace identity lives in `.gc/site.toml`
+instead, which is how `gc cities`, `gc status`, and other commands still know
+this city is named `my-city`.
 
 The `[[agent]]` entry in `pack.toml` defines the built-in `mayor`, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
@@ -207,7 +208,6 @@ up work tracking in it. The shared rig declaration lives in `city.toml`:
 ~/my-city
 $ cat city.toml
 [workspace]
-name = "my-city"
 provider = "claude"
 
 ... # content elided
@@ -216,9 +216,11 @@ provider = "claude"
 name = "my-project"
 ```
 
-The machine-local path binding lives in `.gc/site.toml`:
+The machine-local workspace identity and path binding live in `.gc/site.toml`:
 
 ```toml
+workspace_name = "my-city"
+
 [[rig]]
 name = "my-project"
 path = "/Users/csells/my-project"

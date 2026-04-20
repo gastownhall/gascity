@@ -32,7 +32,6 @@ mode = "always"
 ~/my-city
 $ cat city.toml
 [workspace]
-name = "my-city"
 provider = "claude"
 
 [[rigs]]
@@ -44,9 +43,12 @@ dir = "my-project"
 provider = "codex"
 ```
 
-The rig's machine-local path binding now lives in `.gc/site.toml` instead:
+The city's machine-local identity and the rig's path binding now live in
+`.gc/site.toml` instead:
 
 ```toml
+workspace_name = "my-city"
+
 [[rig]]
 name = "my-project"
 path = "/Users/csells/my-project"

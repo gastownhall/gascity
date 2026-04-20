@@ -2706,9 +2706,6 @@ func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
 	}
-	if cfg.Workspace.Name != "hosted-city" {
-		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "hosted-city")
-	}
 	if cfg.Workspace.Provider != "codex" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "codex")
 	}
