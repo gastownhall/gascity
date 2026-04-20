@@ -109,13 +109,15 @@ func copyMetadata(in map[string]string) map[string]string {
 	return out
 }
 
-func encodeMetadataFields(meta map[string]string, fields map[string]string) map[string]string {
-	capHint := len(fields)
-	if len(meta) > 0 && capHint <= math.MaxInt-len(meta) {
-		// Preserve the prior sizing intent without risking overflow in the hint.
-		capHint += len(meta)
+func encodedMetadataFieldCapacity(fieldCount, metaCount int) int {
+	if metaCount > 0 && fieldCount <= math.MaxInt-metaCount {
+		return fieldCount + metaCount
 	}
-	out := make(map[string]string, capHint)
+	return fieldCount
+}
+
+func encodeMetadataFields(meta map[string]string, fields map[string]string) map[string]string {
+	out := make(map[string]string, encodedMetadataFieldCapacity(len(fields), len(meta)))
 	for k, v := range fields {
 		if strings.TrimSpace(k) == "" {
 			continue

@@ -1,6 +1,38 @@
 package extmsg
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
+
+func TestEncodedMetadataFieldCapacity(t *testing.T) {
+	tests := []struct {
+		name       string
+		fieldCount int
+		metaCount  int
+		want       int
+	}{
+		{
+			name:       "adds safe metadata capacity",
+			fieldCount: 2,
+			metaCount:  3,
+			want:       5,
+		},
+		{
+			name:       "skips addition when it would overflow",
+			fieldCount: math.MaxInt,
+			metaCount:  1,
+			want:       math.MaxInt,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := encodedMetadataFieldCapacity(tt.fieldCount, tt.metaCount); got != tt.want {
+				t.Fatalf("encodedMetadataFieldCapacity(%d, %d) = %d, want %d", tt.fieldCount, tt.metaCount, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestEncodeMetadataFieldsPrefixesMetadataAndSkipsBlankFieldKeys(t *testing.T) {
 	meta := map[string]string{
