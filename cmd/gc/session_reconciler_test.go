@@ -3300,6 +3300,173 @@ func TestReconcileSessionBeads_FileStoreAlwaysNamedRecoversWithLeakedDuplicateOp
 	}
 }
 
+func TestReconcileSessionBeads_FreshAlwaysNamedWithPoolDemandMaterializesNamedDespitePoolBead(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+
+	var stdout, stderr bytes.Buffer
+	dsResult, sessions, woken := reconcileConfiguredSessionsOnce(t, cityPath, store, cfg, sp, clk, &stdout, &stderr)
+
+	if _, ok := dsResult.State[sessionName]; !ok {
+		t.Fatalf("desired state missing canonical named session %q; keys=%v", sessionName, mapKeys(dsResult.State))
+	}
+	if woken != 2 {
+		t.Fatalf("woken = %d, want 2; sessions=%v stderr:\n%s", woken, sessionBeadDebug(sessions), stderr.String())
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("canonical named session %q was not started; stderr:\n%s", sessionName, stderr.String())
+	}
+	if _, ok := findTestSessionBeadByName(sessions, sessionName); !ok {
+		t.Fatalf("canonical named session bead %q was not materialized; sessions=%v stderr:\n%s", sessionName, sessionBeadDebug(sessions), stderr.String())
+	}
+	if !testHasRunningPoolSessionForTemplate(sessions, sp, "mayor") {
+		t.Fatalf("same-template pool session was not started; sessions=%v stderr:\n%s", sessionBeadDebug(sessions), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "session_name \"mayor\"") {
+		t.Fatalf("unexpected named-session reservation conflict:\n%s", stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_ExistingAlwaysNamedStillAllowsSameTemplatePoolDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"template":                   "mayor",
+			"agent_name":                 "mayor",
+			"state":                      "asleep",
+			"generation":                 "1",
+			"continuation_epoch":         "1",
+			"instance_token":             "canonical-token",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	}); err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	_, sessions, woken := reconcileConfiguredSessionsOnce(t, cityPath, store, cfg, sp, clk, &stdout, &stderr)
+
+	if woken != 2 {
+		t.Fatalf("woken = %d, want 2; sessions=%v stderr:\n%s", woken, sessionBeadDebug(sessions), stderr.String())
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("canonical named session %q was not started; stderr:\n%s", sessionName, stderr.String())
+	}
+	if !testHasRunningPoolSessionForTemplate(sessions, sp, "mayor") {
+		t.Fatalf("same-template pool session was not started; sessions=%v stderr:\n%s", sessionBeadDebug(sessions), stderr.String())
+	}
+}
+
+func reconcileConfiguredSessionsOnce(
+	t *testing.T,
+	cityPath string,
+	store beads.Store,
+	cfg *config.City,
+	sp *runtime.Fake,
+	clk *clock.Fake,
+	stdout, stderr *bytes.Buffer,
+) (DesiredStateResult, []beads.Bead, int) {
+	t.Helper()
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, stderr)
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, stderr, true)
+
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+
+	woken := reconcileSessionBeads(
+		context.Background(), sessions, dsResult.State, cfgNames, cfg, sp,
+		store, nil, dsResult.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+		dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, stdout, stderr,
+	)
+
+	sessions, err = loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads after reconcile: %v", err)
+	}
+	return dsResult, sessions, woken
+}
+
+func findTestSessionBeadByName(sessions []beads.Bead, sessionName string) (beads.Bead, bool) {
+	for _, sessionBead := range sessions {
+		if sessionBead.Metadata["session_name"] == sessionName {
+			return sessionBead, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+func testHasRunningPoolSessionForTemplate(sessions []beads.Bead, sp *runtime.Fake, template string) bool {
+	for _, sessionBead := range sessions {
+		if sessionBead.Metadata["template"] != template || !isPoolManagedSessionBead(sessionBead) {
+			continue
+		}
+		sessionName := sessionBead.Metadata["session_name"]
+		if sessionName != "" && sp.IsRunning(sessionName) {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionBeadDebug(sessions []beads.Bead) []string {
+	out := make([]string, 0, len(sessions))
+	for _, sessionBead := range sessions {
+		out = append(out, fmt.Sprintf("%s:name=%s template=%s named=%t pool=%t state=%s status=%s",
+			sessionBead.ID,
+			sessionBead.Metadata["session_name"],
+			sessionBead.Metadata["template"],
+			isNamedSessionBead(sessionBead),
+			isPoolManagedSessionBead(sessionBead),
+			sessionBead.Metadata["state"],
+			sessionBead.Status,
+		))
+	}
+	return out
+}
+
 // TestReconcileSessionBeads_PoolRecoveryAfterClosedBead verifies the full
 // recovery cycle for a managed pool session after its bead is closed.
 // When a pool session's bead is closed (crash, drain, quota exhaustion),

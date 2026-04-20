@@ -353,6 +353,11 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 		// "<rig>/control-dispatcher", since configured multi-rig dispatchers
 		// occupy distinct namespaces by design.
 		if sessionNameConflictsWithExistingIdentifier(b, name) {
+			// Configured named sessions reserve their exact runtime name in
+			// config, so a pool-managed backing-template bead must not squat it.
+			if configuredOwnerCanReusePoolIdentifier(b, name, selfOwner) {
+				continue
+			}
 			if continuityIneligibleConfiguredOwner(b, selfOwner) {
 				continue
 			}
@@ -383,6 +388,21 @@ func sessionNameConflictsWithExistingIdentifier(b beads.Bead, name string) bool 
 		}
 	}
 	return false
+}
+
+func configuredOwnerCanReusePoolIdentifier(b beads.Bead, name, selfOwner string) bool {
+	name = strings.TrimSpace(name)
+	selfOwner = strings.TrimSpace(selfOwner)
+	if name == "" || selfOwner == "" {
+		return false
+	}
+	if name != selfOwner && !strings.HasSuffix(selfOwner, "/"+name) {
+		return false
+	}
+	if strings.TrimSpace(b.Metadata["pool_managed"]) == "true" {
+		return true
+	}
+	return strings.TrimSpace(b.Metadata["pool_slot"]) != ""
 }
 
 func configuredNamedSessionOwnerForBead(b beads.Bead, reserved string) string {
@@ -425,7 +445,7 @@ func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, n
 		if !isConfiguredNamedSessionRuntimeName(cfg, name, selfOwner) {
 			return err
 		}
-		if !noLiveSessionNameCollisions(store, name, selfID) {
+		if !noLiveSessionNameCollisions(store, name, selfID, selfOwner) {
 			return err
 		}
 		// All holders are closed and the name belongs to a configured named
@@ -475,7 +495,7 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // fields. This mirrors the full collision check in
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
-func noLiveSessionNameCollisions(store beads.Store, name, selfID string) bool {
+func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
 	all, err := store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: true,
@@ -502,6 +522,9 @@ func noLiveSessionNameCollisions(store beads.Store, name, selfID string) bool {
 		// namespace for new session-name claims.
 		// Live identifier collision blocks.
 		if sessionNameConflictsWithExistingIdentifier(b, name) {
+			if configuredOwnerCanReusePoolIdentifier(b, name, selfOwner) {
+				continue
+			}
 			return false
 		}
 	}
