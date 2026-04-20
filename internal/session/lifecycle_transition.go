@@ -5,10 +5,25 @@ import (
 	"time"
 )
 
+var freshWakeConversationResetKeys = []string{
+	"session_key",
+	"started_config_hash",
+	"started_live_hash",
+	"live_hash",
+	startupDialogVerifiedKey,
+}
+
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
 // implementations.
 type MetadataPatch map[string]string
+
+// FreshWakeConversationResetKeys returns the metadata fields that define
+// provider-conversation identity and are reset when a wake or restart must
+// start fresh.
+func FreshWakeConversationResetKeys() []string {
+	return append([]string(nil), freshWakeConversationResetKeys...)
+}
 
 // Apply returns a merged copy of meta with the patch applied.
 func (p MetadataPatch) Apply(meta map[string]string) map[string]string {
@@ -20,6 +35,17 @@ func (p MetadataPatch) Apply(meta map[string]string) map[string]string {
 		merged[k] = v
 	}
 	return merged
+}
+
+// applyFreshWakeConversationReset keeps all fresh-wake paths aligned on the
+// same provider-identity field set. PreWakePatch remains the authoritative
+// final reset immediately before command preparation; drain/config-drift paths
+// reuse the same cleared fields so fresh-wake semantics do not drift.
+func applyFreshWakeConversationReset(patch MetadataPatch) {
+	patch["started_config_hash"] = ""
+	patch["started_live_hash"] = ""
+	patch["live_hash"] = ""
+	patch[startupDialogVerifiedKey] = ""
 }
 
 // RequestWakePatch records a controller-owned one-shot create claim.
@@ -51,6 +77,8 @@ type PreWakePatchInput struct {
 	FreshWake         bool
 }
 
+// PreWakePatch records the metadata transition for a concrete runtime wake
+// attempt.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	patch := MetadataPatch{
 		"instance_token":             input.InstanceToken,
@@ -64,10 +92,7 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	}
 	if input.FreshWake {
 		patch["session_key"] = ""
-		patch["started_config_hash"] = ""
-		patch["started_live_hash"] = ""
-		patch["live_hash"] = ""
-		patch[startupDialogVerifiedKey] = ""
+		applyFreshWakeConversationReset(patch)
 	}
 	return patch
 }
@@ -220,7 +245,7 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	}
 	if freshWake {
 		patch["session_key"] = ""
-		patch["started_config_hash"] = ""
+		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
 	}
 	return patch
@@ -231,7 +256,7 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 	patch := SleepPatch(now, reason)
 	if freshWake {
 		patch["session_key"] = ""
-		patch["started_config_hash"] = ""
+		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
 	}
 	return patch
@@ -259,14 +284,12 @@ func RestartRequestPatch(sessionKey string) MetadataPatch {
 func ConfigDriftResetPatch(nextState State, sessionKey string) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
-		"started_config_hash":        "",
-		"started_live_hash":          "",
-		"live_hash":                  "",
 		"last_woke_at":               "",
 		"restart_requested":          "",
 		"continuation_reset_pending": "true",
 		"pending_create_claim":       "",
 	}
+	applyFreshWakeConversationReset(patch)
 	if nextState == StateCreating {
 		patch["pending_create_claim"] = "true"
 	}

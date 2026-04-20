@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,11 @@ type countingWakeMetadataStore struct {
 	*beads.MemStore
 	singleCalls int
 	batchCalls  int
+}
+
+type failingWakeMetadataStore struct {
+	*beads.MemStore
+	err error
 }
 
 func makeWakeBead(id string, meta map[string]string) beads.Bead {
@@ -41,6 +49,10 @@ func (s *countingWakeMetadataStore) SetMetadata(id, key, value string) error {
 func (s *countingWakeMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	s.batchCalls++
 	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *failingWakeMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	return s.err
 }
 
 func TestPreWakeCommit(t *testing.T) {
@@ -242,21 +254,261 @@ func TestPreWakeCommit_ResumeModePreservesPreviousConversationMetadata(t *testin
 		t.Fatal(err)
 	}
 
-	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+	newGen, token, err := preWakeCommit(&b, store, clk)
+	if err != nil {
 		t.Fatalf("preWakeCommit: %v", err)
 	}
 	got, _ := store.Get(b.ID)
+	if newGen != 3 {
+		t.Fatalf("newGen = %d, want 3", newGen)
+	}
+	if token == "" {
+		t.Fatal("expected non-empty token")
+	}
 	want := map[string]string{
-		"session_key":             "resume-conversation",
-		"started_config_hash":     "resume-core-hash",
-		"started_live_hash":       "resume-live-hash",
-		"live_hash":               "resume-live-hash",
-		"startup_dialog_verified": "true",
+		"session_key":                "resume-conversation",
+		"started_config_hash":        "resume-core-hash",
+		"started_live_hash":          "resume-live-hash",
+		"live_hash":                  "resume-live-hash",
+		"startup_dialog_verified":    "true",
+		"instance_token":             token,
+		"generation":                 "3",
+		"continuation_epoch":         "3",
+		"continuation_reset_pending": "",
+		"detached_at":                "",
+		"last_woke_at":               now.UTC().Format(time.RFC3339),
+		"sleep_reason":               "",
+		"sleep_intent":               "",
 	}
 	for key, value := range want {
 		if got.Metadata[key] != value {
 			t.Errorf("%s = %q, want preserved %q", key, got.Metadata[key], value)
 		}
+	}
+}
+
+func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	t.Setenv("GC_TMUX_TRACE", "1")
+
+	b, err := store.Create(beads.Bead{
+		Title: "fresh-session",
+		Metadata: map[string]string{
+			"session_name":            "fresh-worker",
+			"template":                "worker",
+			"generation":              "2",
+			"wake_mode":               "fresh",
+			"session_key":             "old-provider-conversation",
+			"started_config_hash":     "old-core-hash",
+			"started_live_hash":       "old-live-hash",
+			"live_hash":               "old-live-hash",
+			"startup_dialog_verified": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	prevPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+
+	gotLog := strings.TrimSpace(logBuf.String())
+	if !strings.Contains(gotLog, "[WAKE-TRACE] preWakeCommit session=fresh-worker wake_mode=fresh cleared_provider_metadata=") {
+		t.Fatalf("trace log = %q, want fresh-wake trace prefix", gotLog)
+	}
+	for _, key := range sessionpkg.FreshWakeConversationResetKeys() {
+		if !strings.Contains(gotLog, key) {
+			t.Fatalf("trace log = %q, want key %q present", gotLog, key)
+		}
+	}
+}
+
+func TestPreWakeCommit_FreshModeTraceSilentWhenTraceDisabled(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title: "fresh-session",
+		Metadata: map[string]string{
+			"session_name":            "fresh-worker",
+			"template":                "worker",
+			"generation":              "2",
+			"wake_mode":               "fresh",
+			"session_key":             "old-provider-conversation",
+			"started_config_hash":     "old-core-hash",
+			"started_live_hash":       "old-live-hash",
+			"live_hash":               "old-live-hash",
+			"startup_dialog_verified": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	prevPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	if strings.TrimSpace(logBuf.String()) != "" {
+		t.Fatalf("trace log = %q, want empty when GC_TMUX_TRACE is unset", logBuf.String())
+	}
+}
+
+func TestPreWakeCommit_FreshModeTraceSilentWhenNothingCleared(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	t.Setenv("GC_TMUX_TRACE", "1")
+	b, err := store.Create(beads.Bead{
+		Title: "fresh-session",
+		Metadata: map[string]string{
+			"session_name": "fresh-worker",
+			"template":     "worker",
+			"generation":   "2",
+			"wake_mode":    "fresh",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	prevPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	if strings.TrimSpace(logBuf.String()) != "" {
+		t.Fatalf("trace log = %q, want empty when no provider metadata is cleared", logBuf.String())
+	}
+}
+
+func TestPreWakeCommit_ResumeModeTraceSilent(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	t.Setenv("GC_TMUX_TRACE", "1")
+	b, err := store.Create(beads.Bead{
+		Title: "resume-session",
+		Metadata: map[string]string{
+			"session_name":            "resume-worker",
+			"template":                "worker",
+			"generation":              "2",
+			"wake_mode":               "resume",
+			"session_key":             "resume-conversation",
+			"started_config_hash":     "resume-core-hash",
+			"started_live_hash":       "resume-live-hash",
+			"live_hash":               "resume-live-hash",
+			"startup_dialog_verified": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	prevPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+
+	if _, _, err := preWakeCommit(&b, store, clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	if strings.TrimSpace(logBuf.String()) != "" {
+		t.Fatalf("trace log = %q, want empty for resume wake", logBuf.String())
+	}
+}
+
+func TestPreWakeCommit_FreshModeTraceSilentOnStoreFailure(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := &failingWakeMetadataStore{
+		MemStore: beads.NewMemStore(),
+		err:      os.ErrPermission,
+	}
+	t.Setenv("GC_TMUX_TRACE", "1")
+	b, err := store.Create(beads.Bead{
+		Title: "fresh-session",
+		Metadata: map[string]string{
+			"session_name":            "fresh-worker",
+			"template":                "worker",
+			"generation":              "2",
+			"wake_mode":               "fresh",
+			"session_key":             "old-provider-conversation",
+			"started_config_hash":     "old-core-hash",
+			"started_live_hash":       "old-live-hash",
+			"live_hash":               "old-live-hash",
+			"startup_dialog_verified": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	prevPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+
+	if _, _, err := preWakeCommit(&b, store, clk); err == nil {
+		t.Fatal("preWakeCommit: expected error")
+	}
+	if strings.TrimSpace(logBuf.String()) != "" {
+		t.Fatalf("trace log = %q, want empty when metadata commit fails", logBuf.String())
 	}
 }
 

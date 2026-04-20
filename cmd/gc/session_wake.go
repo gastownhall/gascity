@@ -56,17 +56,19 @@ func preWakeCommit(
 		sleepReason = "idle-timeout"
 	}
 
+	freshWake := session.Metadata["wake_mode"] == "fresh"
 	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
 		Now:               clk.Now(),
 		SleepReason:       sleepReason,
-		FreshWake:         session.Metadata["wake_mode"] == "fresh",
+		FreshWake:         freshWake,
 	})
 	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
+	traceFreshWakeMetadataReset(name, session.Metadata, batch, freshWake)
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
 	}
@@ -75,6 +77,27 @@ func preWakeCommit(
 	}
 
 	return newGen, token, nil
+}
+
+func traceFreshWakeMetadataReset(name string, before map[string]string, batch sessions.MetadataPatch, freshWake bool) {
+	if !freshWake || os.Getenv("GC_TMUX_TRACE") != "1" {
+		return
+	}
+	cleared := make([]string, 0, len(sessions.FreshWakeConversationResetKeys()))
+	for _, key := range sessions.FreshWakeConversationResetKeys() {
+		if strings.TrimSpace(before[key]) == "" || batch[key] != "" {
+			continue
+		}
+		cleared = append(cleared, key)
+	}
+	if len(cleared) == 0 {
+		return
+	}
+	log.Printf(
+		"[WAKE-TRACE] preWakeCommit session=%s wake_mode=fresh cleared_provider_metadata=%s",
+		name,
+		strings.Join(cleared, ","),
+	)
 }
 
 func shouldBumpContinuationEpoch(meta map[string]string) bool {
