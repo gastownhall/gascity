@@ -68,6 +68,41 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+func TestFilterReleasedAssignedWorkBeads_PreservesSameIDUnreleasedWork(t *testing.T) {
+	assigned := []beads.Bead{
+		{ID: "gc-1", Title: "released city work"},
+		{ID: "gc-1", Title: "live rig work"},
+		{ID: "gc-2", Title: "unrelated work"},
+	}
+
+	got := filterReleasedAssignedWorkBeads(assigned, []releasedPoolAssignment{{ID: "gc-1", Index: 0}})
+
+	if len(got) != 2 {
+		t.Fatalf("filtered length = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].Title != "live rig work" || got[1].Title != "unrelated work" {
+		t.Fatalf("filtered = %#v, want live same-ID work and unrelated work", got)
+	}
+}
+
+func TestFilterReleasedAssignedWorkBeads_IgnoresMismatchedReleasedIndex(t *testing.T) {
+	assigned := []beads.Bead{
+		{ID: "gc-1", Title: "first work"},
+		{ID: "gc-2", Title: "second work"},
+	}
+
+	got := filterReleasedAssignedWorkBeads(assigned, []releasedPoolAssignment{{ID: "gc-2", Index: 0}})
+
+	if len(got) != len(assigned) {
+		t.Fatalf("filtered length = %d, want %d: %#v", len(got), len(assigned), got)
+	}
+	for i := range assigned {
+		if got[i].ID != assigned[i].ID {
+			t.Fatalf("filtered[%d] = %q, want %q", i, got[i].ID, assigned[i].ID)
+		}
+	}
+}
+
 func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	cr := &CityRuntime{
 		sessionDrains: newDrainTracker(),

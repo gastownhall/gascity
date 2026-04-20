@@ -23,15 +23,16 @@ import (
 // can pass ScaleCheckCounts to ComputePoolDesiredStates without re-running
 // scale_check commands.
 type DesiredStateResult struct {
-	State              map[string]TemplateParams
-	BaseState          map[string]TemplateParams
-	ScaleCheckCounts   map[string]int // nil when store is nil or scale_check not run
-	PoolDesiredCounts  map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
-	WorkSet            map[string]bool
-	AssignedWorkBeads  []beads.Bead // actionable assigned work: in_progress or ready+assigned
-	// AssignedWorkStores maps AssignedWorkBeads IDs to the store that produced
-	// them, so later mutation paths update rig-owned work in the right store.
-	AssignedWorkStores map[string]beads.Store
+	State             map[string]TemplateParams
+	BaseState         map[string]TemplateParams
+	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
+	PoolDesiredCounts map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
+	WorkSet           map[string]bool
+	AssignedWorkBeads []beads.Bead // actionable assigned work: in_progress or ready+assigned
+	// AssignedWorkStores is aligned by index with AssignedWorkBeads, so later
+	// mutation paths update rig-owned work in the right store even when
+	// independent stores produce overlapping bead IDs.
+	AssignedWorkStores []beads.Store
 	// NamedSessionDemand records which named-session identities have active
 	// demand — either direct assignee demand (Assignee == identity) or
 	// work_query-detected ready work. The reconciler merges this into
@@ -241,7 +242,7 @@ func buildDesiredStateWithSessionBeads(
 	// named session on_demand wake. Hoisted out of the store block so
 	// the named session section can also use it.
 	var assignedWorkBeads []beads.Bead
-	var assignedWorkStores map[string]beads.Store
+	var assignedWorkStores []beads.Store
 	var storePartial bool
 	if store != nil {
 		assignedWorkBeads, assignedWorkStores, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths)
@@ -493,10 +494,8 @@ func refreshDesiredStateWithSessionBeads(
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
-	rigStores map[string]beads.Store,
-	suspendedRigPaths map[string]bool,
 ) ([]beads.Bead, bool) {
-	result, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, rigStores, suspendedRigPaths)
+	result, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil)
 	return result, partial
 }
 
@@ -505,7 +504,7 @@ func collectAssignedWorkBeadsWithStores(
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-) ([]beads.Bead, map[string]beads.Store, bool) {
+) ([]beads.Bead, []beads.Store, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
 	stores := []beads.Store{cityStore}
@@ -519,13 +518,13 @@ func collectAssignedWorkBeadsWithStores(
 	}
 
 	var result []beads.Bead
-	resultStores := make(map[string]beads.Store)
+	var resultStores []beads.Store
 	var partial bool
-	seen := make(map[string]struct{})
 	for _, s := range stores {
+		seen := make(map[string]struct{})
 		// In-progress beads with an assignee (active work).
 		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress"}); err == nil {
-			appendAssignedUnique(&result, resultStores, inProgress, seen, s)
+			appendAssignedUnique(&result, &resultStores, inProgress, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
@@ -533,7 +532,7 @@ func collectAssignedWorkBeadsWithStores(
 		// Ready beads with an assignee (queued direct handoff work that is
 		// actually runnable, not merely open).
 		if ready, err := s.Ready(); err == nil {
-			appendAssignedUnique(&result, resultStores, ready, seen, s)
+			appendAssignedUnique(&result, &resultStores, ready, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
 			partial = true
@@ -567,7 +566,7 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, stores map[string]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
@@ -586,7 +585,7 @@ func appendAssignedUnique(dst *[]beads.Bead, stores map[string]beads.Store, bead
 		seen[b.ID] = struct{}{}
 		*dst = append(*dst, b)
 		if stores != nil {
-			stores[b.ID] = store
+			*stores = append(*stores, store)
 		}
 	}
 }

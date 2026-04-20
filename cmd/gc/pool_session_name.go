@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"path"
 	"strings"
 	"time"
@@ -9,6 +10,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+type releasedPoolAssignment struct {
+	ID    string
+	Index int
+}
 
 // PoolSessionName derives the tmux session name for a pool worker session.
 // Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
@@ -47,10 +53,14 @@ func releaseOrphanedPoolAssignments(
 	cfg *config.City,
 	openSessionBeads []beads.Bead,
 	assignedWorkBeads []beads.Bead,
-	assignedWorkStores map[string]beads.Store,
-) []string {
+	assignedWorkStores []beads.Store,
+) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
+	}
+	storeAware := len(assignedWorkStores) > 0
+	if storeAware && len(assignedWorkStores) != len(assignedWorkBeads) {
+		log.Printf("releaseOrphanedPoolAssignments: assigned work/store length mismatch: work=%d stores=%d", len(assignedWorkBeads), len(assignedWorkStores))
 	}
 
 	openIdentifiers := make(map[string]struct{}, len(openSessionBeads)*3)
@@ -69,9 +79,8 @@ func releaseOrphanedPoolAssignments(
 		}
 	}
 
-	var released []string
-	seen := make(map[string]struct{}, len(assignedWorkBeads))
-	for _, wb := range assignedWorkBeads {
+	var released []releasedPoolAssignment
+	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
@@ -93,21 +102,19 @@ func releaseOrphanedPoolAssignments(
 		if assigneePreservesNamedSessionRoute(cfg, template, assignee) {
 			continue
 		}
-		if _, ok := seen[wb.ID]; ok {
-			continue
-		}
-		seen[wb.ID] = struct{}{}
 
 		ownerStore := store
-		if assignedWorkStores != nil {
-			if s, ok := assignedWorkStores[wb.ID]; ok {
-				ownerStore = s
+		if storeAware {
+			if i >= len(assignedWorkStores) || assignedWorkStores[i] == nil {
+				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
+				continue
 			}
+			ownerStore = assignedWorkStores[i]
 		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID) {
 			continue
 		}
-		released = append(released, wb.ID)
+		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
 }

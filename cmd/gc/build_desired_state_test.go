@@ -47,7 +47,7 @@ func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T)
 		t.Fatalf("create queued bead: %v", err)
 	}
 
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1: %#v", len(got), got)
 	}
@@ -82,7 +82,7 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 		t.Fatalf("add blocking dep: %v", err)
 	}
 
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
 	}
@@ -106,7 +106,7 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}); err != nil {
 		t.Fatalf("create unrouted bead: %v", err)
 	}
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0", len(got))
 	}
@@ -144,7 +144,7 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task bead: %v", err)
 	}
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1 (task only): %#v", len(got), got)
 	}
@@ -185,8 +185,70 @@ func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 	if len(got) != 1 || got[0].ID != work.ID {
 		t.Fatalf("collectAssignedWorkBeadsWithStores returned %#v, want [%s]", got, work.ID)
 	}
-	if stores[work.ID] != rigStore {
-		t.Fatalf("store for %s = %#v, want rig store", work.ID, stores[work.ID])
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("stores = %#v, want [rig store]", stores)
+	}
+}
+
+func TestCollectAssignedWorkBeadsWithStores_PreservesCrossStoreIDCollisions(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cityWork, err := cityStore.Create(beads.Bead{
+		Title:    "assigned city work",
+		Type:     "task",
+		Assignee: "worker-city",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create city work bead: %v", err)
+	}
+	if err := cityStore.Update(cityWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set city work in_progress: %v", err)
+	}
+	cityWork, err = cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("reload city work bead: %v", err)
+	}
+	rigWork, err := rigStore.Create(beads.Bead{
+		Title:    "assigned rig work",
+		Type:     "task",
+		Assignee: "worker-rig",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(rigWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set rig work in_progress: %v", err)
+	}
+	rigWork, err = rigStore.Get(rigWork.ID)
+	if err != nil {
+		t.Fatalf("reload rig work bead: %v", err)
+	}
+	if cityWork.ID != rigWork.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
+	}
+
+	got, stores, partial := collectAssignedWorkBeadsWithStores(
+		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
+		cityStore,
+		map[string]beads.Store{"repo": rigStore},
+		nil,
+	)
+	if partial {
+		t.Fatal("partial = true, want false")
+	}
+	if len(got) != 2 {
+		t.Fatalf("collectAssignedWorkBeadsWithStores returned %d beads, want 2: %#v", len(got), got)
+	}
+	if len(stores) != len(got) {
+		t.Fatalf("stores length = %d, want %d", len(stores), len(got))
+	}
+	if got[0].ID != cityWork.ID || stores[0] != cityStore {
+		t.Fatalf("first collected work = (%s, %#v), want city work/store", got[0].ID, stores[0])
+	}
+	if got[1].ID != rigWork.ID || stores[1] != rigStore {
+		t.Fatalf("second collected work = (%s, %#v), want rig work/store", got[1].ID, stores[1])
 	}
 }
 
