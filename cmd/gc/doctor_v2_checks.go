@@ -256,9 +256,22 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	}
 	if len(realFiles) == 0 {
 		if sawSymlink {
+			legacyShim, provenanceErr := legacyTopLevelScriptsShim(ctx.CityPath)
+			if provenanceErr != nil {
+				return warnCheck("v2-scripts-layout",
+					fmt.Sprintf("inspecting top-level scripts/ provenance: %v", provenanceErr),
+					"fix the config load error or inspect scripts/ manually before rerunning gc doctor",
+					[]string{"scripts/"})
+			}
+			if legacyShim {
+				return warnCheck("v2-scripts-layout",
+					"top-level scripts/ only contains stale legacy symlinks",
+					"delete scripts/ or rerun gc start/gc supervisor so runtime pruning can remove the old shim",
+					[]string{"scripts/"})
+			}
 			return warnCheck("v2-scripts-layout",
-				"top-level scripts/ only contains stale legacy symlinks",
-				"delete scripts/ or rerun gc start/gc supervisor so runtime pruning can remove the old shim",
+				"top-level scripts/ only contains user-managed symlinks; runtime pruning will not remove them",
+				"move scripts to commands/ or assets/, or remove the user-managed symlinks manually",
 				[]string{"scripts/"})
 		}
 		return okCheck("v2-scripts-layout", "no legacy top-level scripts found")
@@ -303,6 +316,19 @@ func inspectTopLevelScripts(dir string) ([]string, bool, error) {
 	}
 	sort.Strings(real)
 	return real, sawSymlink, nil
+}
+
+func legacyTopLevelScriptsShim(cityPath string) (bool, error) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false, err
+	}
+	origins := legacyScriptSourceDirs(cfg.PackDirs)
+	if len(origins) == 0 {
+		origins = legacyScriptSourceDirs([]string{cityPath})
+	}
+	_, ok, err := legacyShimLinks(cityPath, origins)
+	return ok, err
 }
 
 type v2WorkspaceNameCheck struct{}

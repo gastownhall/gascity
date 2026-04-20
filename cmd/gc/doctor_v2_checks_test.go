@@ -76,8 +76,19 @@ func TestV2ScriptsLayoutWarnsForSymlinkOnlyDir(t *testing.T) {
 	t.Parallel()
 
 	cityDir := t.TempDir()
-	srcDir := t.TempDir()
-	srcFile := filepath.Join(srcDir, "helper.sh")
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcFile := filepath.Join(cityDir, "assets", "scripts", "helper.sh")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -100,12 +111,60 @@ func TestV2ScriptsLayoutWarnsForSymlinkOnlyDir(t *testing.T) {
 	}
 }
 
+func TestV2ScriptsLayoutWarnsForUserManagedSymlinkOnlyDir(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("user-managed symlink-only scripts/ should still warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "user-managed symlinks") {
+		t.Fatalf("user-managed symlink-only scripts/ should report preserved symlink state, got %q", res.Message)
+	}
+}
+
 func TestV2ScriptsLayoutWarnsOnRealFilesAlongsideSymlinks(t *testing.T) {
 	t.Parallel()
 
 	cityDir := t.TempDir()
-	srcDir := t.TempDir()
-	srcFile := filepath.Join(srcDir, "resolved.sh")
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcFile := filepath.Join(cityDir, "assets", "scripts", "resolved.sh")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
