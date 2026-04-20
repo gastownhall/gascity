@@ -530,6 +530,8 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 		if stderr.Len() == 0 {
 			return stdout.String(), err
 		}
+		// Preserve both streams on failure while avoiding an unreadable fused line
+		// when stdout lacks a trailing newline and stderr starts mid-line.
 		stdoutText := stdout.String()
 		stderrText := stderr.String()
 		if strings.HasSuffix(stdoutText, "\n") || strings.HasPrefix(stderrText, "\n") {
@@ -537,8 +539,9 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 		}
 		return stdoutText + "\n" + stderrText, err
 	}
-	// Keep successful JSON callers isolated from non-fatal bd warnings emitted
-	// on stderr; CombinedOutput corrupts stdout payloads that expect pure JSON.
+	// All current tier_c callers pass --json and unmarshal stdout directly.
+	// Keep successful JSON callers isolated from non-fatal bd warnings emitted on
+	// stderr; CombinedOutput corrupts stdout payloads that expect pure JSON.
 	return stdout.String(), nil
 }
 

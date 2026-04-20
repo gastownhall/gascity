@@ -3,8 +3,7 @@
 package tutorialgoldens
 
 import (
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,17 +25,15 @@ EOF`
 	}
 }
 
-func TestWriteTutorialPancakesFormulaMatchesTutorialSnippet(t *testing.T) {
-	cityRoot := t.TempDir()
-	writeTutorialPancakesFormula(t, cityRoot)
-
-	got, err := os.ReadFile(filepath.Join(cityRoot, "formulas", "pancakes.toml"))
-	if err != nil {
-		t.Fatalf("read pancakes formula: %v", err)
-	}
-
-	want := loadTutorialPancakesFormula(t)
-	if string(got) != want {
-		t.Fatalf("seeded pancakes formula drifted from docs snippet\nwant:\n%s\ngot:\n%s", want, string(got))
+func TestLoadTutorialPancakesFormulaFromDocs(t *testing.T) {
+	got := loadTutorialPancakesFormula(t)
+	for _, want := range []string{
+		`formula = "pancakes"`,
+		`description = "Make pancakes from scratch"`,
+		`needs = ["cook"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("loadTutorialPancakesFormula missing %q:\n%s", want, got)
+		}
 	}
 }

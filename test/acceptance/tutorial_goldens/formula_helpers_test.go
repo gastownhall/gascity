@@ -3,7 +3,6 @@
 package tutorialgoldens
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -45,27 +44,17 @@ func extractShellHeredocBody(shellSnippet, command, terminator string) (string, 
 	body := make([]string, 0, len(lines))
 
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
 		if !started {
-			if trimmed == wantCommand {
+			if line == wantCommand {
 				started = true
 			}
 			continue
 		}
-		if trimmed == terminator {
+		if line == terminator {
 			return strings.Join(body, "\n") + "\n", true
 		}
 		body = append(body, line)
 	}
 
 	return "", false
-}
-
-func writeTutorialPancakesFormula(t *testing.T, cityRoot string) {
-	t.Helper()
-	formula := loadTutorialPancakesFormula(t)
-	if formula == "" {
-		t.Fatal("tutorial pancakes formula should not be empty")
-	}
-	writeFile(t, filepath.Join(cityRoot, "formulas", "pancakes.toml"), formula, 0o644)
 }
