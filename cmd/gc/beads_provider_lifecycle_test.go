@@ -5869,6 +5869,176 @@ sleep 1
 	}
 }
 
+func TestGcBeadsBdStartConcurrentWaitPassesRemainingExistingManagedBudget(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.LockFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fakeGC := filepath.Join(binDir, "gc")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+invocation_file=%q
+subcmd="$1 $2"
+shift 2
+case "$subcmd" in
+  "dolt-state runtime-layout")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state runtime-layout\n' >> "$invocation_file"
+    printf 'GC_PACK_STATE_DIR\t%%s\n' %q
+    printf 'GC_DOLT_DATA_DIR\t%%s\n' %q
+    printf 'GC_DOLT_LOG_FILE\t%%s\n' %q
+    printf 'GC_DOLT_STATE_FILE\t%%s\n' %q
+    printf 'GC_DOLT_PID_FILE\t%%s\n' %q
+    printf 'GC_DOLT_LOCK_FILE\t%%s\n' %q
+    printf 'GC_DOLT_CONFIG_FILE\t%%s\n' %q
+    ;;
+  "dolt-state existing-managed")
+    timeout_ms=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port|--user)
+          shift 2
+          ;;
+        --timeout-ms)
+          timeout_ms="$2"
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state existing-managed timeout=%%s\n' "$timeout_ms" >> "$invocation_file"
+    if [ "${timeout_ms:-0}" -gt 1500 ]; then
+      sleep 2
+    fi
+    printf 'managed_pid\t4242\n'
+    printf 'managed_owned\ttrue\n'
+    printf 'deleted_inodes\tfalse\n'
+    printf 'state_port\t3311\n'
+    printf 'ready\tfalse\n'
+    printf 'reusable\tfalse\n'
+    ;;
+  "dolt-state probe-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state probe-managed\n' >> "$invocation_file"
+    printf 'running\tfalse\n'
+    printf 'port_holder_pid\t0\n'
+    printf 'port_holder_owned\tfalse\n'
+    printf 'port_holder_deleted_inodes\tfalse\n'
+    printf 'tcp_reachable\tfalse\n'
+    ;;
+  *)
+    echo "unexpected gc args: $subcmd $*" >&2
+    exit 64
+    ;;
+esac
+`, invocationFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nset -eu\ncase \"${1:-}\" in\n  config)\n    exit 0\n    ;;\n  *)\n    exit 1\n    ;;\nesac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	readyFile := filepath.Join(t.TempDir(), "holder-ready")
+	holder := exec.Command("sh", "-c", `
+set -eu
+lock_file="$1"
+ready_file="$2"
+: > "$lock_file"
+exec 9>"$lock_file"
+flock 9
+printf 'ready\n' > "$ready_file"
+sleep 5
+`, "sh", layout.LockFile, readyFile)
+	holder.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start lock holder: %v", err)
+	}
+	defer func() {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for lock holder to acquire flock")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_PORT=3311",
+		"GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS=1000",
+		"GC_BIN="+fakeGC,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("gc-beads-bd start unexpected error: %v", err)
+		}
+	}
+	if exitCode != 1 {
+		t.Fatalf("gc-beads-bd start exit %d, want 1\n%s", exitCode, out)
+	}
+	if !strings.Contains(string(out), "could not acquire dolt start lock") {
+		t.Fatalf("gc-beads-bd start output = %q, want lock acquisition failure", out)
+	}
+	invocation := string(mustReadFile(t, invocationFile))
+	if strings.Contains(invocation, "timeout=45000") {
+		t.Fatalf("existing-managed should not receive the default 45s timeout inside concurrent wait:\n%s", invocation)
+	}
+	if !strings.Contains(invocation, "timeout=1000") {
+		t.Fatalf("existing-managed should receive the remaining wait budget on the first attempt:\n%s", invocation)
+	}
+}
+
 func TestGcBeadsBdStartUsesGCBinManagedConfigWriter(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

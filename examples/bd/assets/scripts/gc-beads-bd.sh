@@ -16,6 +16,7 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in milliseconds (default: 45000)
 
 set -e
 
@@ -27,7 +28,7 @@ DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
-CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-30000}"
+CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-45000}"
 
 # Derived paths (set after GC_CITY_PATH validation).
 GC_DIR=""
@@ -440,7 +441,15 @@ EOF
 }
 
 load_existing_managed_from_gc() {
-    local gc_bin host output key value status parsed=false
+    local gc_bin host output key value status parsed=false timeout_ms="${1:-45000}"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=45000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 1 ]; then
+        timeout_ms=1
+    fi
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     GC_EXISTING_USED="false"
@@ -452,7 +461,7 @@ load_existing_managed_from_gc() {
     GC_EXISTING_REUSABLE="false"
     [ -n "$gc_bin" ] || return 1
     GC_EXISTING_USED="true"
-    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms 30000 </dev/null 2>/dev/null)
+    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms "$timeout_ms" </dev/null 2>/dev/null)
     status=$?
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
@@ -936,11 +945,11 @@ EOF
 }
 
 wait_for_concurrent_start_ready() {
-    local existing_pid="" existing_port="" holder="" waited=0 timeout_ms max_attempts
+    local existing_pid="" existing_port="" holder="" waited=0 timeout_ms max_attempts attempt_timeout_ms
     timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
     case "$timeout_ms" in
         ''|*[!0-9]*)
-            timeout_ms=30000
+            timeout_ms=45000
             ;;
     esac
     if [ "$timeout_ms" -lt 500 ]; then
@@ -948,7 +957,11 @@ wait_for_concurrent_start_ready() {
     fi
     max_attempts=$(( (timeout_ms + 499) / 500 ))
     while [ "$waited" -lt "$max_attempts" ]; do
-        if load_existing_managed_from_gc; then
+        attempt_timeout_ms=$((timeout_ms - (waited * 500)))
+        if [ "$attempt_timeout_ms" -lt 1 ]; then
+            attempt_timeout_ms=1
+        fi
+        if load_existing_managed_from_gc "$attempt_timeout_ms"; then
             existing_pid="$GC_EXISTING_MANAGED_PID"
             if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
                 DOLT_PORT="$GC_EXISTING_STATE_PORT"
