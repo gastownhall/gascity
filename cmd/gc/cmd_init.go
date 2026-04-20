@@ -218,7 +218,7 @@ func resolveAgentChoice(input string, order []string, builtins map[string]config
 	return ""
 }
 
-const initProgressSteps = 8
+const initProgressSteps = 9
 
 // initExitAlreadyInitialized is the process exit code for an init request
 // that targets an already-initialized city. The supervisor API depends on

@@ -225,7 +225,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 	}
 	if supervisorAliveHook() != 0 {
 		if showProgress {
-			logInitProgress(stdout, 8, "Waiting for supervisor to start city")
+			logInitProgress(stdout, 9, "Waiting for supervisor to start city")
 		} else if stdout != nil {
 			fmt.Fprintln(stdout, "Waiting for supervisor to start city...") //nolint:errcheck // best-effort stdout
 		}

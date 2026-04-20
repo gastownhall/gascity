@@ -357,7 +357,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "[8/8]") {
+	if strings.Contains(stdout.String(), "[9/9]") {
 		t.Fatalf("stdout = %q, want no progress counter", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "Waiting for supervisor to start city...") {
