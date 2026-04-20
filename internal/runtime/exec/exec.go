@@ -153,14 +153,14 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 		return err
 	}
 	if ok {
-		streamErr := runtime.AcceptStartupDialogsFromStream(ctx, dialogTimeout, snapshots,
+		streamObserved, streamErr := runtime.AcceptStartupDialogsFromStreamWithStatus(ctx, dialogTimeout, snapshots,
 			func(keys ...string) error { return p.SendKeys(name, keys...) },
 		)
 		closeErr := closeWatch()
 		switch {
 		case streamErr != nil:
 			return streamErr
-		case closeErr == nil:
+		case closeErr == nil && streamObserved:
 			return nil
 		default:
 			return runtime.AcceptStartupDialogs(ctx,

@@ -244,7 +244,7 @@ func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testin
 	stream.finish()
 
 	var sent []string
-	err := acceptWorkspaceTrustDialogFromStream(
+	_, err := acceptWorkspaceTrustDialogFromStream(
 		context.Background(),
 		time.Second,
 		newReplayableSnapshotCursorFromStream(stream),
@@ -331,7 +331,7 @@ func TestAcceptBypassPermissionsWarningFromStreamSendsKeysSeparately(t *testing.
 
 	var calls []string
 	var callTimes []time.Time
-	err := acceptBypassPermissionsWarningFromStream(
+	_, err := acceptBypassPermissionsWarningFromStream(
 		context.Background(),
 		time.Second,
 		newReplayableSnapshotCursorFromStream(stream),
@@ -436,7 +436,7 @@ func TestAcceptStartupDialogsFromStreamTimesOutDespiteContinuousIrrelevantSnapsh
 	}()
 
 	start := time.Now()
-	err := acceptWorkspaceTrustDialogFromStream(
+	_, err := acceptWorkspaceTrustDialogFromStream(
 		context.Background(),
 		30*time.Millisecond,
 		newReplayableSnapshotCursorFromStream(stream),
@@ -449,6 +449,26 @@ func TestAcceptStartupDialogsFromStreamTimesOutDespiteContinuousIrrelevantSnapsh
 		t.Fatalf("acceptWorkspaceTrustDialogFromStream() took %s, want timeout-bounded exit", elapsed)
 	}
 	<-donePublishing
+}
+
+func TestAcceptStartupDialogsFromStreamWithStatusReturnsFalseAfterIrrelevantSnapshots(t *testing.T) {
+	observed, err := AcceptStartupDialogsFromStreamWithStatus(
+		context.Background(),
+		30*time.Millisecond,
+		func() <-chan string {
+			snapshots := make(chan string, 1)
+			snapshots <- "starting up"
+			close(snapshots)
+			return snapshots
+		}(),
+		func(keys ...string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStreamWithStatus() error = %v", err)
+	}
+	if observed {
+		t.Fatal("AcceptStartupDialogsFromStreamWithStatus() observed = true, want false")
+	}
 }
 
 func TestContainsPromptIndicator(t *testing.T) {

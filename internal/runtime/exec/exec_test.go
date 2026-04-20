@@ -451,6 +451,71 @@ esac
 	}
 }
 
+func TestStartFallsBackToPeekWhenWatchStartupOnlyEmitsIrrelevantSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"starting up"}'
+    sleep 5
+    ;;
+  peek)
+    echo "$*" >> "`+peekFile+`"
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung while falling back from an irrelevant watch-startup snapshot")
+	}
+
+	peekData, err := os.ReadFile(peekFile)
+	if err != nil {
+		t.Fatalf("read peek log: %v", err)
+	}
+	if strings.TrimSpace(string(peekData)) == "" {
+		t.Fatalf("peek log = %q, want fallback peek call", string(peekData))
+	}
+
+	sendData, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(sendData), "send-keys test-sess Down") ||
+		!strings.Contains(string(sendData), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want fallback dismissal", string(sendData))
+	}
+}
+
 func TestStartDoesNotHangWhenWatchStartupKeepsStreamingPromptSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, `
