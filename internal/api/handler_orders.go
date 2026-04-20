@@ -23,7 +23,8 @@ type orderResponse struct {
 	ScopedName    string `json:"scoped_name"`
 	Description   string `json:"description,omitempty"`
 	Type          string `json:"type"`
-	Gate          string `json:"gate"`
+	Trigger       string `json:"trigger,omitempty"`
+	Gate          string `json:"gate,omitempty" deprecated:"true"`
 	Interval      string `json:"interval,omitempty"`
 	Schedule      string `json:"schedule,omitempty"`
 	Check         string `json:"check,omitempty"`
@@ -76,7 +77,8 @@ func toOrderResponse(a orders.Order) orderResponse {
 		ScopedName:    a.ScopedName(),
 		Description:   a.Description,
 		Type:          typ,
-		Gate:          a.Gate,
+		Trigger:       a.Trigger,
+		Gate:          a.Trigger, // Deprecated alias: mirror trigger during the migration window.
 		Interval:      a.Interval,
 		Schedule:      a.Schedule,
 		Check:         a.Check,

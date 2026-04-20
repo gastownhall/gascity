@@ -13,6 +13,34 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+const (
+	legacyRigPathSiteBindingWarningFragment = "still declares path in city.toml; move it to .gc/site.toml"
+	unknownRigSiteBindingWarningPrefix      = ".gc/site.toml declares a binding for unknown rig "
+)
+
+// IsNonFatalSiteBindingWarning reports whether warning is migration guidance
+// that should stay non-fatal in strict mode.
+func IsNonFatalSiteBindingWarning(warning string) bool {
+	return strings.Contains(warning, legacyRigPathSiteBindingWarningFragment) ||
+		strings.HasPrefix(warning, unknownRigSiteBindingWarningPrefix)
+}
+
+func legacyRigPathSiteBindingWarning(name string) string {
+	return fmt.Sprintf("rig %q %s (run `gc doctor --fix`)", name, legacyRigPathSiteBindingWarningFragment)
+}
+
+func missingRigSiteBindingWarning(name string) string {
+	return fmt.Sprintf(
+		"rig %q is declared in city.toml but has no path binding in .gc/site.toml; run `gc rig add <dir> --name %s` to bind it",
+		name,
+		name,
+	)
+}
+
+func unknownRigSiteBindingWarning(name string) string {
+	return fmt.Sprintf("%s%q", unknownRigSiteBindingWarningPrefix, name)
+}
+
 // SiteBindingPath returns the machine-local site binding file for a city.
 func SiteBindingPath(cityRoot string) string {
 	return filepath.Join(cityRoot, citylayout.RuntimeRoot, "site.toml")
@@ -91,22 +119,20 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 		if keepLegacy || legacyPath != "" {
 			cfg.Rigs[i].Path = legacyPath
 			if legacyPath != "" && !keepLegacy {
-				warnings = append(warnings,
-					fmt.Sprintf("rig %q still declares path in city.toml; move it to .gc/site.toml (run `gc doctor --fix`)", name))
+				warnings = append(warnings, legacyRigPathSiteBindingWarning(name))
 			}
 			continue
 		}
 		cfg.Rigs[i].Path = ""
 		if !keepLegacy {
-			warnings = append(warnings,
-				fmt.Sprintf("rig %q is declared in city.toml but has no path binding in .gc/site.toml; run `gc rig add <dir> --name %s` to bind it", name, name))
+			warnings = append(warnings, missingRigSiteBindingWarning(name))
 		}
 	}
 	for name := range paths {
 		if _, ok := seen[name]; ok {
 			continue
 		}
-		warnings = append(warnings, fmt.Sprintf(".gc/site.toml declares a binding for unknown rig %q", name))
+		warnings = append(warnings, unknownRigSiteBindingWarning(name))
 	}
 	sort.Strings(warnings)
 	return warnings, nil

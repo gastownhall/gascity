@@ -22,14 +22,51 @@ json_payload() {
 bd_json() {
     local attempt=0
     local output=""
+    local stderr_file=""
+    local last_stderr=""
     while [ "$attempt" -lt 10 ]; do
-        if output=$(bd "$@" 2>/dev/null | json_payload) && [ -n "$output" ]; then
+        stderr_file=$(mktemp)
+        if output=$(bd "$@" 2>"$stderr_file" | json_payload) && [ -n "$output" ]; then
+            rm -f "$stderr_file"
             printf '%s\n' "$output"
             return 0
+        fi
+        if [ -s "$stderr_file" ]; then
+            last_stderr=$(cat "$stderr_file")
+        fi
+        rm -f "$stderr_file"
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if [ -n "$last_stderr" ]; then
+        printf '%s\n' "$last_stderr" >&2
+    fi
+    return 1
+}
+
+load_bead_context() {
+    local bead_id="$1"
+    local bead_json=""
+    local attempt=0
+
+    ATTEMPT=""
+    ROOT_ID=""
+
+    while [ "$attempt" -lt 5 ]; do
+        bead_json=$(bd_json show "$bead_id" --json) || bead_json=""
+        if [ -n "$bead_json" ]; then
+            ATTEMPT=$(printf '%s\n' "$bead_json" | jq -r 'if type == "array" then (.[0].metadata["gc.attempt"] // "") else (.metadata["gc.attempt"] // "") end' 2>/dev/null || printf '')
+            ROOT_ID=$(printf '%s\n' "$bead_json" | jq -r 'if type == "array" then (.[0].metadata["gc.root_bead_id"] // "") else (.metadata["gc.root_bead_id"] // "") end' 2>/dev/null || printf '')
+            if [ -n "$ATTEMPT" ] && [ -n "$ROOT_ID" ]; then
+                return 0
+            fi
         fi
         attempt=$((attempt + 1))
         sleep 0.2
     done
+
+    ATTEMPT=""
+    ROOT_ID=""
     return 1
 }
 
@@ -81,7 +118,7 @@ load_verdict() {
         printf '%s\n' "$current"
         return 0
     fi
-    printf 'iterate\n'
+    return 1
 }
 
 BEAD_ID="${GC_BEAD_ID:-}"
@@ -90,16 +127,16 @@ if [ -z "$BEAD_ID" ]; then
     exit 1
 fi
 
-BEAD_JSON=$(bd_json show "$BEAD_ID" --json)
-ATTEMPT=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.attempt"] // "") else (.metadata["gc.attempt"] // "") end' 2>/dev/null || printf '')
-ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.root_bead_id"] // "") else (.metadata["gc.root_bead_id"] // "") end' 2>/dev/null || printf '')
-if [ -z "$ATTEMPT" ] || [ -z "$ROOT_ID" ]; then
+if ! load_bead_context "$BEAD_ID"; then
     echo "ERROR: missing gc.attempt or gc.root_bead_id on $BEAD_ID" >&2
     exit 1
 fi
 
 APPLY_REF="mol-personal-work-v2.code-review-loop.run.${ATTEMPT}.apply-code-fixes"
-VERDICT=$(load_verdict "$APPLY_REF" "$ROOT_ID")
+if ! VERDICT=$(load_verdict "$APPLY_REF" "$ROOT_ID"); then
+    echo "ERROR: unable to determine code review verdict" >&2
+    exit 2
+fi
 
 case "$VERDICT" in
     done|approved|pass)

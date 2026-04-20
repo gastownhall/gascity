@@ -3805,7 +3805,7 @@
         "additionalProperties": false,
         "properties": {
           "checks": {
-            "description": "Order gate evaluations.",
+            "description": "Order trigger evaluations.",
             "items": {
               "$ref": "#/components/schemas/OrderCheckResponse"
             },
@@ -4003,6 +4003,7 @@
             "type": "string"
           },
           "gate": {
+            "deprecated": true,
             "type": "string"
           },
           "interval": {
@@ -4033,6 +4034,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "trigger": {
+            "type": "string"
+          },
           "type": {
             "type": "string"
           }
@@ -4041,7 +4045,6 @@
           "name",
           "scoped_name",
           "type",
-          "gate",
           "timeout_ms",
           "enabled",
           "capture_output"

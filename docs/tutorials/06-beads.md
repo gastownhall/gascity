@@ -463,5 +463,5 @@ Gas City — sessions, mail, formulas, convoys — is built on top of them.
 
 ## What's next
 
-- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, gated
+- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, triggered
   by time, schedule, conditions, or events

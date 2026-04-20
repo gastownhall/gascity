@@ -15,14 +15,14 @@ func TestDiscoverRootPrefersFlatFiles(t *testing.T) {
 	fs.Files["/pack/orders/health-check.toml"] = []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 	fs.Dirs["/pack/orders/health-check"] = true
 	fs.Files["/pack/orders/health-check/order.toml"] = []byte(`
 [order]
 formula = "legacy-health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "0 * * * *"
 `)
 
@@ -53,7 +53,7 @@ func TestDiscoverRootFallsBackToSubdirectoryFormatWithWarning(t *testing.T) {
 	fs.Files["/pack/orders/health-check/order.toml"] = []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
@@ -84,7 +84,7 @@ func TestDiscoverRootFallsBackToLegacyFormulaOrdersWithWarning(t *testing.T) {
 	fs.Files["/pack/formulas/orders/health-check/order.toml"] = []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
@@ -114,7 +114,7 @@ func TestDiscoverRootSkipsUnreadableFlatFile(t *testing.T) {
 	fs.Files["/pack/orders/health-check.toml"] = []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 	fs.Errors["/pack/orders/health-check.toml"] = errors.New("boom")

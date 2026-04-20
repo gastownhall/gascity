@@ -10,7 +10,7 @@ func TestParse(t *testing.T) {
 [order]
 description = "Generate daily digest"
 formula = "mol-digest-generate"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
@@ -21,8 +21,8 @@ pool = "dog"
 	if a.Formula != "mol-digest-generate" {
 		t.Errorf("Formula = %q, want %q", a.Formula, "mol-digest-generate")
 	}
-	if a.Gate != "cooldown" {
-		t.Errorf("Gate = %q, want %q", a.Gate, "cooldown")
+	if a.Trigger != "cooldown" {
+		t.Errorf("Trigger = %q, want %q", a.Trigger, "cooldown")
 	}
 	if a.Interval != "24h" {
 		t.Errorf("Interval = %q, want %q", a.Interval, "24h")
@@ -39,7 +39,7 @@ func TestParseEnabledDefault(t *testing.T) {
 	data := []byte(`
 [order]
 formula = "test"
-gate = "manual"
+trigger = "manual"
 `)
 	a, err := Parse(data)
 	if err != nil {
@@ -54,7 +54,7 @@ func TestParseEnabledExplicitFalse(t *testing.T) {
 	data := []byte(`
 [order]
 formula = "test"
-gate = "manual"
+trigger = "manual"
 enabled = false
 `)
 	a, err := Parse(data)
@@ -74,77 +74,77 @@ func TestParseInvalid(t *testing.T) {
 }
 
 func TestValidateCooldown(t *testing.T) {
-	a := Order{Name: "digest", Formula: "mol-digest", Gate: "cooldown", Interval: "24h"}
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
 }
 
 func TestValidateCooldownMissingInterval(t *testing.T) {
-	a := Order{Name: "digest", Formula: "mol-digest", Gate: "cooldown"}
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: cooldown without interval")
 	}
 }
 
 func TestValidateCooldownBadInterval(t *testing.T) {
-	a := Order{Name: "digest", Formula: "mol-digest", Gate: "cooldown", Interval: "not-a-duration"}
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "not-a-duration"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: invalid interval")
 	}
 }
 
 func TestValidateCron(t *testing.T) {
-	a := Order{Name: "cleanup", Formula: "mol-cleanup", Gate: "cron", Schedule: "0 3 * * *"}
+	a := Order{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
 }
 
 func TestValidateCronMissingSchedule(t *testing.T) {
-	a := Order{Name: "cleanup", Formula: "mol-cleanup", Gate: "cron"}
+	a := Order{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: cron without schedule")
 	}
 }
 
 func TestValidateCondition(t *testing.T) {
-	a := Order{Name: "check", Formula: "mol-check", Gate: "condition", Check: "test -f /tmp/flag"}
+	a := Order{Name: "check", Formula: "mol-check", Trigger: "condition", Check: "test -f /tmp/flag"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
 }
 
 func TestValidateConditionMissingCheck(t *testing.T) {
-	a := Order{Name: "check", Formula: "mol-check", Gate: "condition"}
+	a := Order{Name: "check", Formula: "mol-check", Trigger: "condition"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: condition without check")
 	}
 }
 
 func TestValidateManual(t *testing.T) {
-	a := Order{Name: "deploy", Formula: "mol-deploy", Gate: "manual"}
+	a := Order{Name: "deploy", Formula: "mol-deploy", Trigger: "manual"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
 }
 
 func TestValidateMissingFormulaAndExec(t *testing.T) {
-	a := Order{Name: "bad", Gate: "manual"}
+	a := Order{Name: "bad", Trigger: "manual"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: missing formula and exec")
 	}
 }
 
 func TestValidateExecOrder(t *testing.T) {
-	a := Order{Name: "poller", Exec: "scripts/poll.sh", Gate: "cooldown", Interval: "2m"}
+	a := Order{Name: "poller", Exec: "scripts/poll.sh", Trigger: "cooldown", Interval: "2m"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
 }
 
 func TestValidateExecAndFormulaMutuallyExclusive(t *testing.T) {
-	a := Order{Name: "both", Formula: "mol-x", Exec: "scripts/x.sh", Gate: "manual"}
+	a := Order{Name: "both", Formula: "mol-x", Exec: "scripts/x.sh", Trigger: "manual"}
 	err := Validate(a)
 	if err == nil {
 		t.Error("Validate should fail: formula and exec both set")
@@ -152,7 +152,7 @@ func TestValidateExecAndFormulaMutuallyExclusive(t *testing.T) {
 }
 
 func TestValidateExecWithPool(t *testing.T) {
-	a := Order{Name: "bad", Exec: "scripts/x.sh", Gate: "manual", Pool: "worker"}
+	a := Order{Name: "bad", Exec: "scripts/x.sh", Trigger: "manual", Pool: "worker"}
 	err := Validate(a)
 	if err == nil {
 		t.Error("Validate should fail: exec with pool")
@@ -160,14 +160,14 @@ func TestValidateExecWithPool(t *testing.T) {
 }
 
 func TestValidateTimeout(t *testing.T) {
-	a := Order{Name: "t", Formula: "mol-t", Gate: "manual", Timeout: "90s"}
+	a := Order{Name: "t", Formula: "mol-t", Trigger: "manual", Timeout: "90s"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
 }
 
 func TestValidateTimeoutInvalid(t *testing.T) {
-	a := Order{Name: "t", Formula: "mol-t", Gate: "manual", Timeout: "not-a-duration"}
+	a := Order{Name: "t", Formula: "mol-t", Trigger: "manual", Timeout: "not-a-duration"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: invalid timeout")
 	}
@@ -210,7 +210,7 @@ func TestParseExecOrder(t *testing.T) {
 [order]
 description = "Poll wasteland"
 exec = "$ORDER_DIR/scripts/poll.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "2m"
 timeout = "90s"
 `)
@@ -229,22 +229,22 @@ timeout = "90s"
 	}
 }
 
-func TestValidateMissingGate(t *testing.T) {
+func TestValidateMissingTrigger(t *testing.T) {
 	a := Order{Name: "bad", Formula: "mol-bad"}
 	if err := Validate(a); err == nil {
-		t.Error("Validate should fail: missing gate")
+		t.Error("Validate should fail: missing trigger")
 	}
 }
 
-func TestValidateUnknownGate(t *testing.T) {
-	a := Order{Name: "bad", Formula: "mol-bad", Gate: "random"}
+func TestValidateUnknownTrigger(t *testing.T) {
+	a := Order{Name: "bad", Formula: "mol-bad", Trigger: "random"}
 	if err := Validate(a); err == nil {
-		t.Error("Validate should fail: unknown gate type")
+		t.Error("Validate should fail: unknown trigger type")
 	}
 }
 
 func TestValidateEvent(t *testing.T) {
-	a := Order{Name: "convoy-check", Formula: "mol-convoy-check", Gate: "event", On: "bead.closed"}
+	a := Order{Name: "convoy-check", Formula: "mol-convoy-check", Trigger: "event", On: "bead.closed"}
 	if err := Validate(a); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestScopedNameRigLevel(t *testing.T) {
 }
 
 func TestValidateEventMissingOn(t *testing.T) {
-	a := Order{Name: "convoy-check", Formula: "mol-convoy-check", Gate: "event"}
+	a := Order{Name: "convoy-check", Formula: "mol-convoy-check", Trigger: "event"}
 	if err := Validate(a); err == nil {
 		t.Error("Validate should fail: event without on")
 	}
@@ -277,20 +277,54 @@ func TestParseEventOrder(t *testing.T) {
 [order]
 description = "Auto-close convoys where all children are closed"
 formula = "mol-convoy-check"
-gate = "event"
+trigger = "event"
 on = "bead.closed"
 `)
 	a, err := Parse(data)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if a.Gate != "event" {
-		t.Errorf("Gate = %q, want %q", a.Gate, "event")
+	if a.Trigger != "event" {
+		t.Errorf("Trigger = %q, want %q", a.Trigger, "event")
 	}
 	if a.On != "bead.closed" {
 		t.Errorf("On = %q, want %q", a.On, "bead.closed")
 	}
 	if a.Formula != "mol-convoy-check" {
 		t.Errorf("Formula = %q, want %q", a.Formula, "mol-convoy-check")
+	}
+}
+
+func TestParseLegacyGateAlias(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-digest-generate"
+gate = "cooldown"
+interval = "24h"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Trigger != "cooldown" {
+		t.Fatalf("Trigger = %q, want %q", a.Trigger, "cooldown")
+	}
+}
+
+func TestParseTriggerWinsOverLegacyGate(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-digest-generate"
+trigger = "cron"
+gate = "cooldown"
+schedule = "0 3 * * *"
+interval = "24h"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Trigger != "cron" {
+		t.Fatalf("Trigger = %q, want %q", a.Trigger, "cron")
 	}
 }

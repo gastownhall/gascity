@@ -157,15 +157,22 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 	return registerCityWithSupervisorNamed(cityPath, "", stdout, stderr, commandName, showProgress)
 }
 
+func supervisorAlreadyManagesCity(cityPath string) bool {
+	running, _, known := supervisorCityRunningHook(cityPath)
+	return known && running
+}
+
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
-	if pid, err := ensureNoStandaloneController(cityPath); err != nil {
-		if errors.Is(err, errControllerAlreadyRunning) {
-			writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
-		} else {
-			fmt.Fprintf(stderr, "%s: probing standalone controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+	if !supervisorAlreadyManagesCity(cityPath) {
+		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
+			if errors.Is(err, errControllerAlreadyRunning) {
+				writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
+			} else {
+				fmt.Fprintf(stderr, "%s: probing standalone controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+			}
+			return 1
 		}
-		return 1
 	}
 	// Materialize gastown packs before config load if the city references them.
 	// This must succeed — without packs, config.LoadWithIncludes will fail

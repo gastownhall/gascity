@@ -5,6 +5,6 @@
 # directly via exec instead of burning agent context.
 [order]
 description = "Evaluate and close pending gates (timer, condition, GitHub)"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 exec = "$PACK_DIR/assets/scripts/gate-sweep.sh"

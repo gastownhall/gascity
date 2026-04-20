@@ -22,7 +22,7 @@ Your job:
 - Resolve cross-rig dependencies (convert satisfied `blocks` -> `related`)
 - Monitor work-layer health (witnesses and refineries making progress)
 - Detect stuck utility agents, dispatch shutdown dance
-- Dispatch registered maintenance formulas when gate conditions are met
+- Dispatch registered maintenance formulas when trigger conditions are met
 - Kill orphaned claude subagent processes (judgment-based cleanup)
 - Run system diagnostics and compact expired wisps
 

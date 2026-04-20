@@ -103,10 +103,13 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	// its real socket. Together these prove the full stack wires through
 	// the typed API for both supervisor-scope and per-city commands.
 
-	// 1) `gc cities` — supervisor scope, no city required.
+	// 1) `gc cities list` — supervisor scope, no city required.
+	runCLI(t, bin, env, "gc cities list", "cities", "list")
+
+	// 2) `gc cities` (default action) — legacy alias still must work.
 	runCLI(t, bin, env, "gc cities", "cities")
 
-	// 2) Create a minimal city the supervisor can register without relying on
+	// 3) Create a minimal city the supervisor can register without relying on
 	// any real provider or agent runtime.
 	if err := os.MkdirAll(cityRoot, 0o755); err != nil {
 		t.Fatalf("create city root: %v", err)
@@ -122,11 +125,13 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	cityListURL := baseURL + "/v0/cities"
 	waitForCityRegistered(t, cityListURL, "humatest", 5*time.Second)
 
-	// 3) `gc status` — per-city status against the supervisor-managed city path.
+	// 4) `gc city status --city <path>` — resolves the city path and calls the
+	// per-city status endpoint through the supervisor.
 	runCLI(t, bin, env, "gc status", "--city", cityRoot, "status")
 
-	// 4) `gc session list` — per-city, exercises a different domain handler.
-	runCLI(t, bin, env, "gc session list", "--city", cityRoot, "session", "list")
+	// 5) `gc session list --city <path>` — per-city, exercises a different
+	// domain handler through the supervisor.
+	runCLI(t, bin, env, "gc session list", "--city", cityRoot, "session", "list", "--state", "all")
 }
 
 // runCLI executes a gc subcommand against the live supervisor and fails

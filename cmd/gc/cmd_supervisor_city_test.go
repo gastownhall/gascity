@@ -492,6 +492,245 @@ func TestSupervisorRetryCommand(t *testing.T) {
 	}
 }
 
+func TestRegisterCityWithSupervisorAllowsAlreadyManagedCity(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 4242 },
+		func(path string) (bool, string, bool) {
+			return canonicalTestPath(path) == canonicalTestPath(cityPath), "", true
+		},
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisorNamed(cityPath, "new-name", &stdout, &stderr, "gc register", true)
+	if code != 0 {
+		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
+	}
+	if reloads != 1 {
+		t.Fatalf("reloadSupervisorHook called %d times, want 1", reloads)
+	}
+	if !strings.Contains(stdout.String(), "Registered city 'new-name'") {
+		t.Fatalf("stdout = %q, want updated registration message", stdout.String())
+	}
+
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 registered city, got %v", entries)
+	}
+	if entries[0].Name != "new-name" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "new-name")
+	}
+}
+
+func TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedCity(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	root := shortSocketTempDir(t, "gc-ctl-")
+
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		buf := make([]byte, 32)
+		n, _ := conn.Read(buf)
+		if strings.Contains(string(buf[:n]), "ping") {
+			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
+		}
+	}()
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 9999 },
+		func(path string) (bool, string, bool) {
+			return false, "", canonicalTestPath(path) == canonicalTestPath(cityPath)
+		},
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisorNamed(cityPath, "new-name", &stdout, &stderr, "gc register", true)
+	if code != 1 {
+		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "standalone controller already running") {
+		t.Fatalf("stderr = %q, want standalone-controller error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "PID 4242") {
+		t.Fatalf("stderr = %q, want controller PID", stderr.String())
+	}
+}
+
+func TestRegisterCityWithSupervisorAllowsCityStartingUnderSupervisor(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	runningChecks := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 4242 },
+		func(path string) (bool, string, bool) {
+			if canonicalTestPath(path) != canonicalTestPath(cityPath) {
+				return false, "", false
+			}
+			runningChecks++
+			if runningChecks == 1 {
+				return false, "starting_bead_store", true
+			}
+			return true, "", true
+		},
+		100*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisorNamed(cityPath, "new-name", &stdout, &stderr, "gc register", true)
+	if code != 0 {
+		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
+	}
+	if reloads != 1 {
+		t.Fatalf("reloadSupervisorHook called %d times, want 1", reloads)
+	}
+	if !strings.Contains(stdout.String(), "Registered city 'new-name'") {
+		t.Fatalf("stdout = %q, want updated registration message", stdout.String())
+	}
+}
+
+func TestRegisterCityWithSupervisorRejectsStandaloneControllerDuringSupervisorStartupPhase(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	root := shortSocketTempDir(t, "gc-ctl-")
+
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		buf := make([]byte, 32)
+		n, _ := conn.Read(buf)
+		if strings.Contains(string(buf[:n]), "ping") {
+			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
+		}
+	}()
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 9999 },
+		func(path string) (bool, string, bool) {
+			return false, "starting_bead_store", canonicalTestPath(path) == canonicalTestPath(cityPath)
+		},
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisorNamed(cityPath, "new-name", &stdout, &stderr, "gc register", true)
+	if code != 1 {
+		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "standalone controller already running") {
+		t.Fatalf("stderr = %q, want standalone-controller error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "PID 4242") {
+		t.Fatalf("stderr = %q, want controller PID", stderr.String())
+	}
+}
+
 func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)

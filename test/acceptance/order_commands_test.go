@@ -27,7 +27,7 @@ func TestOrderGastownCity(t *testing.T) {
 		}
 
 		// Gastown ships orders — verify at least one appears.
-		if !strings.Contains(out, "NAME") && !strings.Contains(out, "GATE") {
+		if !strings.Contains(out, "NAME") || !strings.Contains(out, "TRIGGER") {
 			// Could be "No orders found." if discovery fails, which is also informative.
 			if strings.Contains(out, "No orders") {
 				t.Log("gc order list found no orders in gastown (may be expected if order discovery requires running city)")

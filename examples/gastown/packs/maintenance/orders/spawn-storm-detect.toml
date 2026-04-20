@@ -7,6 +7,6 @@
 # any single bead exceeds the threshold.
 [order]
 description = "Detect beads repeatedly bouncing back to pool (spawn storm)"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 exec = "$PACK_DIR/assets/scripts/spawn-storm-detect.sh"

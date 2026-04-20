@@ -1373,10 +1373,10 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/*.toml files. Each order pairs a gate
+Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a trigger
 condition (cooldown, cron, condition, event, or manual) with an action
-(a formula or an exec script). The controller evaluates gates on each
-tick and dispatches work when a gate opens.
+(a formula or an exec script). The controller evaluates triggers on each
+tick and dispatches work when a trigger opens.
 
 ```
 gc order
@@ -1392,9 +1392,9 @@ gc order
 
 ## gc order check
 
-Evaluate gate conditions for all orders and show which are due.
+Evaluate trigger conditions for all orders and show which are due.
 
-Prints a table with each order's gate, due status, and reason. Returns
+Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.
 
 ```
@@ -1418,9 +1418,9 @@ gc order history [name] [flags]
 
 ## gc order list
 
-List all available orders with their gate type, schedule, and target.
+List all available orders with their trigger type, schedule, and target.
 
-Scans orders/ directories for flat .toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.
 
 ```
@@ -1429,7 +1429,7 @@ gc order list
 
 ## gc order run
 
-Execute an order manually, bypassing its gate conditions.
+Execute an order manually, bypassing its trigger conditions.
 
 Instantiates a wisp from the order's formula and routes it to the
 configured target (if any). Useful for testing orders or triggering
@@ -1448,7 +1448,7 @@ gc order run <name> [flags]
 
 Display detailed information about a named order.
 
-Shows the order name, description, formula reference, gate type,
+Shows the order name, description, formula reference, trigger type,
 scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.
 

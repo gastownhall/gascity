@@ -1079,20 +1079,36 @@ type OrderOverride struct {
 	Rig string `toml:"rig,omitempty"`
 	// Enabled overrides whether the order is active.
 	Enabled *bool `toml:"enabled,omitempty"`
-	// Gate overrides the gate type.
-	Gate *string `toml:"gate,omitempty"`
+	// Trigger overrides the trigger type.
+	Trigger *string `toml:"trigger,omitempty"`
+	// Gate is a deprecated alias for Trigger accepted during the
+	// gate->trigger migration. Parsed inputs are normalized to Trigger.
+	Gate *string `toml:"gate,omitempty" jsonschema_extras:"deprecated=true"`
 	// Interval overrides the cooldown interval. Go duration string.
 	Interval *string `toml:"interval,omitempty"`
 	// Schedule overrides the cron expression.
 	Schedule *string `toml:"schedule,omitempty"`
-	// Check overrides the condition gate check command.
+	// Check overrides the condition trigger check command.
 	Check *string `toml:"check,omitempty"`
-	// On overrides the event gate event type.
+	// On overrides the event trigger event type.
 	On *string `toml:"on,omitempty"`
 	// Pool overrides the target session config.
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+}
+
+func (o *OrderOverride) normalizeLegacyAliases() {
+	if o.Trigger == nil {
+		o.Trigger = o.Gate
+	}
+	o.Gate = nil
+}
+
+func normalizeLegacyOrderOverrideAliases(cfg *City) {
+	for i := range cfg.Orders.Overrides {
+		cfg.Orders.Overrides[i].normalizeLegacyAliases()
+	}
 }
 
 // MaxTimeoutDuration parses MaxTimeout as a Go duration.
@@ -2720,6 +2736,7 @@ func Parse(data []byte) (*City, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
 	// Backwards compat: promote deprecated graph_workflows → formula_v2.
 	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {

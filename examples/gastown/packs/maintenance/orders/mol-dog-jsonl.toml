@@ -4,5 +4,5 @@
 [order]
 description = "Export Dolt databases to JSONL git archive"
 exec = "$PACK_DIR/assets/scripts/jsonl-export.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "15m"

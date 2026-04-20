@@ -1,6 +1,6 @@
 [order]
 description = "Check beads provider health and recover on failure"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 exec = "gc beads health --quiet"
 timeout = "60s"

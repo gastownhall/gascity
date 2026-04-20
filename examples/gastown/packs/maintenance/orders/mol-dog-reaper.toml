@@ -4,5 +4,5 @@
 [order]
 description = "Reap stale wisps and purge closed molecules"
 exec = "$PACK_DIR/assets/scripts/reaper.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30m"

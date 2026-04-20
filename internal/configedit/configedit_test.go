@@ -1305,12 +1305,25 @@ func TestSetOrderOverride(t *testing.T) {
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	enabled := false
+	trigger := "cooldown"
 	err := ed.SetOrderOverride(config.OrderOverride{
 		Name:    "health-check",
 		Enabled: &enabled,
+		Trigger: &trigger,
 	})
 	if err != nil {
 		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got := string(raw); got != "" && strings.Contains(got, "gate =") {
+		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	}
+	if !strings.Contains(string(raw), `trigger = "cooldown"`) {
+		t.Fatalf("city.toml missing canonical trigger key:\n%s", string(raw))
 	}
 
 	cfg := readTOML(t, path)
@@ -1324,6 +1337,9 @@ func TestSetOrderOverride(t *testing.T) {
 	if ov.Enabled == nil || *ov.Enabled {
 		t.Error("expected enabled=false")
 	}
+	if ov.Trigger == nil || *ov.Trigger != "cooldown" {
+		t.Fatalf("override trigger = %#v, want cooldown", ov.Trigger)
+	}
 }
 
 func TestSetOrderOverride_UpdateExisting(t *testing.T) {
@@ -1332,9 +1348,11 @@ func TestSetOrderOverride_UpdateExisting(t *testing.T) {
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	disabled := false
+	trigger := "cooldown"
 	_ = ed.SetOrderOverride(config.OrderOverride{
 		Name:    "health-check",
 		Enabled: &disabled,
+		Trigger: &trigger,
 	})
 
 	enabled := true
@@ -1350,8 +1368,47 @@ func TestSetOrderOverride_UpdateExisting(t *testing.T) {
 	if len(cfg.Orders.Overrides) != 1 {
 		t.Fatalf("expected 1 override, got %d", len(cfg.Orders.Overrides))
 	}
-	if cfg.Orders.Overrides[0].Enabled == nil || !*cfg.Orders.Overrides[0].Enabled {
+	ov := cfg.Orders.Overrides[0]
+	if ov.Enabled == nil || !*ov.Enabled {
 		t.Error("expected enabled=true after update")
+	}
+	if ov.Trigger != nil {
+		t.Fatalf("expected trigger to be replaced away, got %#v", ov.Trigger)
+	}
+}
+
+func TestMergeOrderOverridePreservesExistingTriggerOnPartialUpdate(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	disabled := false
+	trigger := "cooldown"
+	_ = ed.SetOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &disabled,
+		Trigger: &trigger,
+	})
+
+	enabled := true
+	err := ed.MergeOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("MergeOrderOverride (partial update): %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(cfg.Orders.Overrides))
+	}
+	ov := cfg.Orders.Overrides[0]
+	if ov.Enabled == nil || !*ov.Enabled {
+		t.Fatal("expected enabled=true after partial update")
+	}
+	if ov.Trigger == nil || *ov.Trigger != "cooldown" {
+		t.Fatalf("trigger = %#v, want cooldown", ov.Trigger)
 	}
 }
 
@@ -1384,5 +1441,38 @@ func TestDeleteOrderOverride_NotFound(t *testing.T) {
 	err := ed.DeleteOrderOverride("nonexistent", "")
 	if err == nil {
 		t.Fatal("expected error for deleting nonexistent override")
+	}
+}
+
+func TestMergeOrderOverrideNormalizesLegacyGateToTriggerOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity()+`
+[orders]
+
+[[orders.overrides]]
+name = "health-check"
+gate = "cooldown"
+`)
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	enabled := true
+	err := ed.MergeOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(raw)
+	if strings.Contains(got, "gate =") {
+		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	}
+	if !strings.Contains(got, `trigger = "cooldown"`) {
+		t.Fatalf("city.toml missing canonical trigger after enabled-only update:\n%s", got)
 	}
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
@@ -41,6 +42,20 @@ type cityNamer interface {
 // registers under.
 const cityScopePrefix = "/v0/city/{cityName}"
 
+const cityNotFoundOrNotRunningDetailPrefix = "not_found: city not found or not running: "
+
+// CityNotFoundOrNotRunningDetail returns the stable 404 detail used when a
+// city-scoped route targets a city that is not currently running.
+func CityNotFoundOrNotRunningDetail(name string) string {
+	return cityNotFoundOrNotRunningDetailPrefix + name
+}
+
+// IsCityNotFoundOrNotRunningDetail reports whether detail is the stable 404
+// payload used for city-scoped requests when the target city is not running.
+func IsCityNotFoundOrNotRunningDetail(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), cityNotFoundOrNotRunningDetailPrefix)
+}
+
 // bindCity wraps a per-city handler method expression as a Huma
 // handler registered on the supervisor API. The returned function
 // resolves the per-city Server for input.GetCityName() and delegates.
@@ -57,7 +72,7 @@ func bindCity[I any, O any](
 		name := named.GetCityName()
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
-			return nil, huma.Error404NotFound("not_found: city not found or not running: " + name)
+			return nil, huma.Error404NotFound(CityNotFoundOrNotRunningDetail(name))
 		}
 		return fn(srv, ctx, input)
 	}
@@ -121,7 +136,7 @@ func sseCityPrecheck[I any](sm *SupervisorMux,
 		name := cityScopeName(input)
 		srv := sm.resolveCityServer(name)
 		if srv == nil {
-			return huma.Error404NotFound("not_found: city not found or not running: " + name)
+			return huma.Error404NotFound(CityNotFoundOrNotRunningDetail(name))
 		}
 		return fn(srv, ctx, input)
 	}

@@ -167,6 +167,6 @@ Migration note:
 gc order list                     # List order rules
 gc order show <name>              # Show order definition
 gc order run <name>               # Manually trigger an order
-gc order check <name>             # Check if gate conditions are met
+gc order check <name>             # Check if trigger conditions are met
 gc order history <name>           # Show order run history
 ```

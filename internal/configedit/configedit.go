@@ -878,22 +878,78 @@ func (e *Editor) DeleteProviderPatch(name string) error {
 	})
 }
 
-// SetOrderOverride creates or updates an order override in
+// SetOrderOverride creates or replaces an order override in
 // [orders.overrides]. Matches by name and rig.
 func (e *Editor) SetOrderOverride(ov config.OrderOverride) error {
+	return e.setOrderOverride(ov, false)
+}
+
+// MergeOrderOverride creates or updates an order override in
+// [orders.overrides], preserving existing fields when the incoming
+// override leaves them unset. Matches by name and rig.
+func (e *Editor) MergeOrderOverride(ov config.OrderOverride) error {
+	return e.setOrderOverride(ov, true)
+}
+
+func (e *Editor) setOrderOverride(ov config.OrderOverride, merge bool) error {
 	return e.Edit(func(cfg *config.City) error {
 		if ov.Name == "" {
 			return fmt.Errorf("order override: name is required")
 		}
+		normalizeOrderOverrideForWrite(&ov)
 		for i := range cfg.Orders.Overrides {
 			if cfg.Orders.Overrides[i].Name == ov.Name && cfg.Orders.Overrides[i].Rig == ov.Rig {
-				cfg.Orders.Overrides[i] = ov
+				if merge {
+					mergeOrderOverride(&cfg.Orders.Overrides[i], ov)
+				} else {
+					cfg.Orders.Overrides[i] = ov
+				}
 				return nil
 			}
 		}
 		cfg.Orders.Overrides = append(cfg.Orders.Overrides, ov)
 		return nil
 	})
+}
+
+func normalizeOrderOverrideForWrite(ov *config.OrderOverride) {
+	if ov == nil {
+		return
+	}
+	if ov.Trigger == nil {
+		ov.Trigger = ov.Gate
+	}
+	ov.Gate = nil
+}
+
+func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
+	if dst == nil {
+		return
+	}
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if src.Trigger != nil {
+		dst.Trigger = src.Trigger
+	}
+	if src.Interval != nil {
+		dst.Interval = src.Interval
+	}
+	if src.Schedule != nil {
+		dst.Schedule = src.Schedule
+	}
+	if src.Check != nil {
+		dst.Check = src.Check
+	}
+	if src.On != nil {
+		dst.On = src.On
+	}
+	if src.Pool != nil {
+		dst.Pool = src.Pool
+	}
+	if src.Timeout != nil {
+		dst.Timeout = src.Timeout
+	}
 }
 
 // DeleteOrderOverride removes an order override by name and rig.

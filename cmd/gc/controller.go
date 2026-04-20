@@ -803,7 +803,8 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 			warnings: reloadWarnings,
 		}
 	}
-	if fatalWarnings := strictFatalLoadConfigWarnings(reloadWarnings); strictMode && len(fatalWarnings) > 0 {
+	fatalWarnings, _ := splitStrictConfigWarnings(reloadWarnings)
+	if strictMode && len(fatalWarnings) > 0 {
 		warnings := append(append([]string(nil), reloadWarnings...), reloadStrictWarningHint)
 		result := resultWithWarnings(warnings)
 		return result, reloadWarningError{

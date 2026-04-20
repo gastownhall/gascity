@@ -493,5 +493,5 @@ and Check.
 
 - **[Beads](/tutorials/06-beads)** — the universal work primitive underneath
   formulas, sessions, and everything else
-- **[Orders](/tutorials/07-orders)** — formulas with scheduling gates for
+- **[Orders](/tutorials/07-orders)** — formulas with scheduling triggers for
   periodic dispatch

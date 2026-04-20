@@ -135,23 +135,6 @@ func strictFatalLoadConfigWarnings(warnings []string) []string {
 	return fatal
 }
 
-func emitNonFatalLoadConfigWarnings(w io.Writer, prov *config.Provenance) {
-	if w == nil || prov == nil || len(prov.Warnings) == 0 {
-		return
-	}
-	seen := make(map[string]struct{}, len(prov.Warnings))
-	for _, warning := range prov.Warnings {
-		if !isNonFatalLoadConfigWarning(warning) {
-			continue
-		}
-		if _, dup := seen[warning]; dup {
-			continue
-		}
-		seen[warning] = struct{}{}
-		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
-	}
-}
-
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
 // expansion. Use for commands that modify city.toml and write it back —
 // preserves include directives, pack references, and patches.

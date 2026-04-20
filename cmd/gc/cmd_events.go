@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -19,9 +22,55 @@ import (
 )
 
 type eventsAPIScope struct {
-	apiURL   string
-	cityName string
+	apiURL             string
+	cityName           string
+	cityPath           string
+	explicitAPI        bool
+	localOnly          bool
+	localSupervisorAPI bool
 }
+
+type eventsAPIError struct {
+	statusCode int
+	title      string
+	detail     string
+}
+
+type eventsAPITransportError struct {
+	err error
+}
+
+func (e *eventsAPIError) Error() string {
+	if e == nil {
+		return "request failed"
+	}
+	if e.detail != "" {
+		return e.detail
+	}
+	if e.title != "" {
+		return e.title
+	}
+	if e.statusCode == 0 {
+		return "request failed"
+	}
+	return fmt.Sprintf("API returned HTTP %d", e.statusCode)
+}
+
+func (e *eventsAPITransportError) Error() string {
+	if e == nil || e.err == nil {
+		return "request failed"
+	}
+	return fmt.Sprintf("request failed: %v", e.err)
+}
+
+func (e *eventsAPITransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+var eventsControllerAliveHook = controllerAlive
 
 func (s eventsAPIScope) isSupervisor() bool { return s.cityName == "" }
 
@@ -190,13 +239,19 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 
 	cityName := resolvedEventsCityName(cityPath, cfg)
 	if override := strings.TrimSpace(apiURLOverride); override != "" {
+		localSupervisorAPI := matchesLocalSupervisorAPI(override)
+		cityName = resolvedExplicitEventsCityName(override, cityPath, cityName)
 		return eventsAPIScope{
-			apiURL:   strings.TrimRight(override, "/"),
-			cityName: cityName,
+			apiURL:             strings.TrimRight(override, "/"),
+			cityName:           cityName,
+			cityPath:           cityPath,
+			explicitAPI:        true,
+			localSupervisorAPI: localSupervisorAPI,
 		}, nil
 	}
 
 	if supervisorAliveHook() != 0 {
+		cityName = resolvedManagedEventsCityName(cityPath, cityName)
 		baseURL, err := supervisorAPIBaseURL()
 		if err != nil {
 			return eventsAPIScope{}, err
@@ -204,6 +259,7 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 		return eventsAPIScope{
 			apiURL:   strings.TrimRight(baseURL, "/"),
 			cityName: cityName,
+			cityPath: cityPath,
 		}, nil
 	}
 
@@ -218,9 +274,17 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 	// can target it directly. Fall through to auto-discovery instead
 	// of rejecting.
 	if hasStandaloneDashboardAPI(cfg) {
+		if eventsControllerAliveHook(cityPath) == 0 {
+			return eventsAPIScope{
+				cityName:  cityName,
+				cityPath:  cityPath,
+				localOnly: true,
+			}, nil
+		}
 		return eventsAPIScope{
 			apiURL:   strings.TrimRight(standaloneAPIBaseURL(cfg), "/"),
 			cityName: cityName,
+			cityPath: cityPath,
 		}, nil
 	}
 	return eventsAPIScope{}, fmt.Errorf(
@@ -228,6 +292,89 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 		cityPath,
 		"gc supervisor start",
 	)
+}
+
+func resolvedExplicitEventsCityName(apiURLOverride, cityPath, fallback string) string {
+	if !matchesLocalSupervisorAPI(apiURLOverride) {
+		return fallback
+	}
+	return resolvedManagedEventsCityName(cityPath, fallback)
+}
+
+func matchesLocalSupervisorAPI(apiURLOverride string) bool {
+	baseURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		return false
+	}
+	return sameEventsAPIEndpoint(baseURL, apiURLOverride)
+}
+
+func sameEventsAPIEndpoint(a, b string) bool {
+	left, err := url.Parse(strings.TrimSpace(a))
+	if err != nil {
+		return false
+	}
+	right, err := url.Parse(strings.TrimSpace(b))
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(left.Scheme, right.Scheme) {
+		return false
+	}
+	if normalizedURLPort(left) != normalizedURLPort(right) {
+		return false
+	}
+	if !sameEventsAPIHost(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return strings.TrimRight(left.EscapedPath(), "/") == strings.TrimRight(right.EscapedPath(), "/")
+}
+
+func normalizedURLPort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	default:
+		return "80"
+	}
+}
+
+func sameEventsAPIHost(a, b string) bool {
+	a = strings.ToLower(strings.Trim(a, "[]"))
+	b = strings.ToLower(strings.Trim(b, "[]"))
+	if a == b {
+		return true
+	}
+	return isLoopbackEventsHost(a) && isLoopbackEventsHost(b)
+}
+
+func isLoopbackEventsHost(host string) bool {
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolvedManagedEventsCityName(cityPath, fallback string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		return fallback
+	}
+	entry, registered, err := registeredCityEntry(cityPath)
+	if err != nil || !registered {
+		return fallback
+	}
+	if name := strings.TrimSpace(entry.EffectiveName()); name != "" {
+		return name
+	}
+	return fallback
 }
 
 func resolvedEventsCityName(cityPath string, cfg *config.City) string {
@@ -261,6 +408,16 @@ func validateEventsSince(sinceFlag string) error {
 }
 
 func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) int {
+	if scope.localOnly {
+		fallback, _, fallbackErr := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, stderr)
+		if fallbackErr != nil {
+			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+			return 1
+		}
+		fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
+		return printJSONLines(fallback, stdout, stderr)
+	}
+
 	client, err := scope.client()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -282,6 +439,14 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 
 	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag)
 	if err != nil {
+		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
+			if fallbackErr != nil {
+				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+				return 1
+			}
+			fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
+			return printJSONLines(fallback, stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -290,6 +455,16 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 }
 
 func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
+	if scope.localOnly {
+		fallback, _, fallbackErr := readLocalCityHeadIndex(scope, stoppedCityLocalFallbackError(scope))
+		if fallbackErr != nil {
+			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+			return 1
+		}
+		fmt.Fprintln(stdout, fallback) //nolint:errcheck
+		return 0
+	}
+
 	client, err := scope.client()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -314,6 +489,14 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 
 	index, err := fetchCityHeadIndex(ctx, client, scope.cityName)
 	if err != nil {
+		if fallback, ok, fallbackErr := readLocalCityHeadIndex(scope, err); ok {
+			if fallbackErr != nil {
+				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
+				return 1
+			}
+			fmt.Fprintln(stdout, fallback) //nolint:errcheck
+			return 0
+		}
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -321,7 +504,141 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer) ([]genclient.WireEvent, bool, error) {
+	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
+		return nil, false, nil
+	}
+	filter := events.Filter{Type: strings.TrimSpace(typeFilter)}
+	if cutoff, err := eventsSinceCutoff(sinceFlag); err != nil {
+		return nil, true, err
+	} else if !cutoff.IsZero() {
+		filter.Since = cutoff
+	}
+	all, err := events.ReadFiltered(filepath.Join(scope.cityPath, ".gc", "events.jsonl"), filter)
+	if err != nil {
+		return nil, true, fmt.Errorf("reading local city events: %w", err)
+	}
+	items := make([]genclient.WireEvent, 0, len(all))
+	for _, item := range all {
+		items = append(items, localWireEvent(item, warningWriter))
+	}
+	return items, true, nil
+}
+
+func readLocalCityHeadIndex(scope eventsAPIScope, apiErr error) (string, bool, error) {
+	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
+		return "", false, nil
+	}
+	seq, err := events.ReadLatestSeq(filepath.Join(scope.cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		return "", true, fmt.Errorf("reading local city event head: %w", err)
+	}
+	return strconv.FormatUint(seq, 10), true, nil
+}
+
+func shouldUseLocalCityEventsFallback(scope eventsAPIScope, apiErr error) bool {
+	if strings.TrimSpace(scope.cityPath) == "" || apiErr == nil {
+		return false
+	}
+	if scope.explicitAPI && !scope.localSupervisorAPI {
+		return false
+	}
+	var problem *eventsAPIError
+	if errors.As(apiErr, &problem) {
+		if problem.statusCode != http.StatusNotFound {
+			return false
+		}
+		return gcapi.IsCityNotFoundOrNotRunningDetail(problem.detail)
+	}
+	if scope.explicitAPI && scope.localSupervisorAPI {
+		var transport *eventsAPITransportError
+		return errors.As(apiErr, &transport)
+	}
+	return false
+}
+
+func printStreamingCityAPIRequirement(mode string, stderr io.Writer) {
+	_, _ = fmt.Fprintf(
+		stderr,
+		"gc events: %s requires a running city API; local fallback only supports `gc events` and `gc events --seq` when the city is stopped\n",
+		mode,
+	)
+}
+
+func requireStreamingCityAPI(ctx context.Context, client *genclient.ClientWithResponses, scope eventsAPIScope, mode string, stderr io.Writer) (string, bool) {
+	head, err := fetchCityHeadIndex(ctx, client, scope.cityName)
+	if err == nil {
+		return head, true
+	}
+	if shouldUseLocalCityEventsFallback(scope, err) {
+		printStreamingCityAPIRequirement(mode, stderr)
+		return "", false
+	}
+	fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+	return "", false
+}
+
+func requireStreamingCityEventsReachable(ctx context.Context, client *genclient.ClientWithResponses, scope eventsAPIScope, mode string, stderr io.Writer) bool {
+	if err := probeCityEventsReachable(ctx, client, scope.cityName); err != nil {
+		if shouldUseLocalCityEventsFallback(scope, err) {
+			printStreamingCityAPIRequirement(mode, stderr)
+			return false
+		}
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return false
+	}
+	return true
+}
+
+func stoppedCityLocalFallbackError(scope eventsAPIScope) error {
+	return &eventsAPIError{
+		statusCode: http.StatusNotFound,
+		detail:     gcapi.CityNotFoundOrNotRunningDetail(scope.cityName),
+	}
+}
+
+func eventsSinceCutoff(sinceFlag string) (time.Time, error) {
+	sinceFlag = strings.TrimSpace(sinceFlag)
+	if sinceFlag == "" {
+		return time.Time{}, nil
+	}
+	d, err := time.ParseDuration(sinceFlag)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid --since %q: %w", sinceFlag, err)
+	}
+	return time.Now().Add(-d), nil
+}
+
+func localWireEvent(e events.Event, warningWriter io.Writer) genclient.WireEvent {
+	item := genclient.WireEvent{
+		Actor: e.Actor,
+		Seq:   int64(e.Seq),
+		Ts:    e.Ts,
+		Type:  e.Type,
+	}
+	if e.Subject != "" {
+		item.Subject = &e.Subject
+	}
+	if e.Message != "" {
+		item.Message = &e.Message
+	}
+	if len(e.Payload) > 0 && string(e.Payload) != "null" {
+		var payload genclient.EventPayload
+		if err := payload.UnmarshalJSON(e.Payload); err == nil {
+			item.Payload = &payload
+		} else if warningWriter != nil {
+			fmt.Fprintf(warningWriter, "gc events: warning: decoding local event payload for seq %d type %s: %v\n", e.Seq, e.Type, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return item
+}
+
 func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, afterCursor string, stdout, stderr io.Writer) int {
+	if scope.localOnly {
+		printStreamingCityAPIRequirement("--follow", stderr)
+		return 1
+	}
+
 	client, err := scope.client()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -343,9 +660,8 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 
 	resumeSeq := afterSeq
 	if resumeSeq == 0 {
-		head, err := fetchCityHeadIndex(ctx, client, scope.cityName)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		head, ok := requireStreamingCityAPI(ctx, client, scope, "--follow", stderr)
+		if !ok {
 			return 1
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)
@@ -353,11 +669,18 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 			fmt.Fprintf(stderr, "gc events: invalid X-GC-Index %q\n", head) //nolint:errcheck
 			return 1
 		}
+	} else if !requireStreamingCityEventsReachable(ctx, client, scope, "--follow", stderr) {
+		return 1
 	}
 	return streamCityEvents(ctx, client, scope.cityName, resumeSeq, typeFilter, payloadMatch, false, stdout, stderr)
 }
 
 func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, afterCursor string, timeout time.Duration, stdout, stderr io.Writer) int {
+	if scope.localOnly {
+		printStreamingCityAPIRequirement("--watch", stderr)
+		return 1
+	}
+
 	client, err := scope.client()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -393,6 +716,10 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	if resumeSeq > 0 {
 		items, err := fetchCityEvents(ctx, client, scope.cityName, "", "")
 		if err != nil {
+			if shouldUseLocalCityEventsFallback(scope, err) {
+				printStreamingCityAPIRequirement("--watch", stderr)
+				return 1
+			}
 			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -401,9 +728,8 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 			return printJSONLines(cityEnvelopesFor(matches), stdout, stderr)
 		}
 	} else {
-		head, err := fetchCityHeadIndex(ctx, client, scope.cityName)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		head, ok := requireStreamingCityAPI(ctx, client, scope, "--watch", stderr)
+		if !ok {
 			return 1
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)
@@ -414,6 +740,17 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	}
 
 	return streamCityEvents(ctx, client, scope.cityName, resumeSeq, typeFilter, payloadMatch, true, stdout, stderr)
+}
+
+func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithResponses, cityName string) error {
+	limit := int64(1)
+	resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, &genclient.GetV0CityByCityNameEventsParams{
+		Limit: &limit,
+	})
+	if err != nil {
+		return &eventsAPITransportError{err: err}
+	}
+	return eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault)
 }
 
 func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]genclient.WireEvent, error) {
@@ -434,7 +771,7 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		}
 		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
 		if err != nil {
-			return nil, fmt.Errorf("request failed: %w", err)
+			return nil, &eventsAPITransportError{err: err}
 		}
 		if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 			return nil, err
@@ -456,7 +793,7 @@ func fetchCityHeadIndex(ctx context.Context, client *genclient.ClientWithRespons
 		Limit: &limit,
 	})
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", &eventsAPITransportError{err: err}
 	}
 	if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return "", err
@@ -532,16 +869,17 @@ func eventsListError(statusCode int, problem *genclient.ErrorModel) error {
 	if statusCode >= 200 && statusCode < 300 {
 		return nil
 	}
-	if problem != nil && problem.Detail != nil && strings.TrimSpace(*problem.Detail) != "" {
-		return errors.New(strings.TrimSpace(*problem.Detail))
+
+	err := &eventsAPIError{statusCode: statusCode}
+	if problem != nil {
+		if problem.Detail != nil {
+			err.detail = strings.TrimSpace(*problem.Detail)
+		}
+		if problem.Title != nil {
+			err.title = strings.TrimSpace(*problem.Title)
+		}
 	}
-	if problem != nil && problem.Title != nil && strings.TrimSpace(*problem.Title) != "" {
-		return errors.New(strings.TrimSpace(*problem.Title))
-	}
-	if statusCode == 0 {
-		return fmt.Errorf("request failed")
-	}
-	return fmt.Errorf("API returned HTTP %d", statusCode)
+	return err
 }
 
 func printJSONLines(items any, stdout, stderr io.Writer) int {

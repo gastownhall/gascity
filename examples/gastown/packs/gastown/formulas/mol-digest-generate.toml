@@ -2,13 +2,13 @@ description = """
 Generate activity digest for the mayor.
 
 This is a **periodic formula** — dispatched by the deacon's
-`periodic-formulas` step when the cooldown gate elapses. Configured
+`periodic-formulas` step when the cooldown trigger elapses. Configured
 in `city.toml` under `[formulas]`:
 
 ```toml
 [[formulas.periodic]]
 formula = "mol-digest-generate"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 ```

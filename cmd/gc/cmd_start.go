@@ -399,13 +399,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
-	// Strict mode keeps composition collisions and mixed canonical/compat
-	// default tables fatal. Alias-only, unsupported-key, and deprecation
-	// migration warnings remain soft so legacy compatibility paths still boot.
-	if fatalWarnings := strictFatalLoadConfigWarnings(prov.Warnings); strictMode && len(fatalWarnings) > 0 {
-		emitNonFatalLoadConfigWarnings(stderr, prov)
+	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
+	// Strict mode (default) promotes strict-eligible config warnings to errors.
+	if strictMode && len(fatalWarnings) > 0 {
 		for _, w := range fatalWarnings {
 			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
+		for _, w := range nonFatalWarnings {
+			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
 		return 1

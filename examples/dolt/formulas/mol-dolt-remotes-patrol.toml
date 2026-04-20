@@ -2,7 +2,7 @@ description = """
 Push dolt databases to configured remotes.
 
 This is an **order formula** — dispatched by the order system on a cooldown
-gate (default: 15m, matching gastown). Configured in
+trigger (default: 15m, matching gastown). Configured in
 `orders/dolt-remotes-patrol.toml`.
 
 Stages, commits, and pushes each dolt database to its configured remote."""

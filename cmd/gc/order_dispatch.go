@@ -20,11 +20,11 @@ import (
 
 const labelOrderTracking = "order-tracking"
 
-// orderDispatcher evaluates order gate conditions and dispatches due
+// orderDispatcher evaluates order trigger conditions and dispatches due
 // orders as wisps or exec scripts. Follows the nil-guard tracker pattern:
 // nil means no auto-dispatchable orders exist.
 //
-// dispatch is fire-and-forget: gate evaluation is synchronous, but each due
+// dispatch is fire-and-forget: trigger evaluation is synchronous, but each due
 // order's dispatch action runs in its own goroutine. The tracking bead
 // is created before the goroutine launches to prevent re-fire on the next tick.
 type orderDispatcher interface {
@@ -74,10 +74,10 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 		}
 	}
 
-	// Filter out manual-gate orders — they are never auto-dispatched.
+	// Filter out manual-trigger orders — they are never auto-dispatched.
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Gate != "manual" {
+		if a.Trigger != "manual" {
 			auto = append(auto, a)
 		}
 	}
@@ -156,7 +156,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			return last, err
 		}
 		cursorFn := bdCursorFuncAcrossStores(storesForGate...)
-		if a.Gate == "event" {
+		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
 				fmt.Fprintf(m.stderr, "gc: order dispatch: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
@@ -166,7 +166,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				return cursor
 			}
 		}
-		result := orders.CheckGate(a, now, lastRunFn, m.ep, cursorFn)
+		result := orders.CheckTrigger(a, now, lastRunFn, m.ep, cursorFn)
 		if lastRunErr != nil {
 			fmt.Fprintf(m.stderr, "gc: order dispatch: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck
 			continue
@@ -187,7 +187,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Create tracking bead synchronously BEFORE dispatch goroutine.
-		// This prevents the cooldown gate from re-firing on the next tick.
+		// This prevents the cooldown trigger from re-firing on the next tick.
 		trackingBead, err := store.Create(beads.Bead{
 			Title:  "order:" + scoped,
 			Labels: []string{"order-run:" + scoped, labelOrderTracking},
@@ -361,9 +361,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	// Capture event head before wisp creation for event gates.
+	// Capture event head before wisp creation for event triggers.
 	var headSeq uint64
-	if a.Gate == "event" && m.ep != nil {
+	if a.Trigger == "event" && m.ep != nil {
 		headSeq, _ = m.ep.LatestSeq()
 	}
 
@@ -409,7 +409,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// Stamp the created wisp through the store contract rather than a raw
 	// bd subprocess so controller dispatch stays provider-aware.
 	update := beads.UpdateOpts{Labels: []string{"order-run:" + scoped}}
-	if a.Gate == "event" && m.ep != nil {
+	if a.Trigger == "event" && m.ep != nil {
 		update.Labels = append(update.Labels,
 			fmt.Sprintf("order:%s", scoped),
 			fmt.Sprintf("seq:%d", headSeq),
@@ -593,7 +593,7 @@ func convertOverrides(cfgOvs []config.OrderOverride) []orders.Override {
 			Name:     c.Name,
 			Rig:      c.Rig,
 			Enabled:  c.Enabled,
-			Gate:     c.Gate,
+			Trigger:  c.Trigger,
 			Interval: c.Interval,
 			Schedule: c.Schedule,
 			Check:    c.Check,

@@ -1032,6 +1032,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
+	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return &cfg, md, warnings, nil
 }

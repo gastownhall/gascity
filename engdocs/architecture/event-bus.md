@@ -12,7 +12,7 @@ pub/sub log of all system activity -- the universal observation substrate.
 Every state change in the system (agent started, bead created, order
 fired, controller lifecycle) is recorded as an immutable event with a
 monotonically increasing sequence number. The event bus enables
-infrastructure mechanisms like order gate evaluation, CLI event
+infrastructure mechanisms like order trigger evaluation, CLI event
 tailing, and audit logging without coupling producers to consumers.
 
 ## Key Concepts
@@ -231,7 +231,7 @@ are enforced by the conformance suite in
 | `cmd/gc/cmd_suspend.go` | Records `city.suspended` and `city.resumed` events |
 | `cmd/gc/cmd_mail.go` | Records `mail.sent` and `mail.read` events |
 | `cmd/gc/cmd_convoy.go` | Records `convoy.created` and `convoy.closed` events |
-| `internal/orders/gates.go` | Event gates query the Provider via `List(Filter{Type, AfterSeq})` to check if matching events exist since the last cursor position |
+| `internal/orders/triggers.go` | Event triggers query the Provider via `List(Filter{Type, AfterSeq})` to check if matching events exist since the last cursor position |
 
 ## Code Map
 
@@ -275,7 +275,7 @@ All event type constants are defined in `internal/events/events.go`:
 | `ControllerStopped` | `controller.stopped` | Controller shutdown |
 | `CitySuspended` | `city.suspended` | City suspend command |
 | `CityResumed` | `city.resumed` | City resume command |
-| `AutomationFired` | `order.fired` | Order dispatch when gate is due |
+| `AutomationFired` | `order.fired` | Order dispatch when a trigger is due |
 | `AutomationCompleted` | `order.completed` | Order dispatch on successful completion |
 | `AutomationFailed` | `order.failed` | Order dispatch on failure |
 
@@ -415,7 +415,7 @@ suite against a stateful jq-based mock script.
 ## See Also
 
 - [Architecture glossary](glossary.md) -- authoritative definitions of
-  event bus, order, gate, and other terms used in this document
+  event bus, order, trigger, and other terms used in this document
 - [Health Patrol architecture](health-patrol.md) -- how the controller
   reconciliation loop records agent lifecycle events on every tick
 - [Bead Store architecture](beads.md) -- the other Layer 0-1 primitive;

@@ -10,7 +10,7 @@ type Override struct {
 	Name     string
 	Rig      string
 	Enabled  *bool
-	Gate     *string
+	Trigger  *string
 	Interval *string
 	Schedule *string
 	Check    *string
@@ -56,8 +56,8 @@ func applyOverride(a *Order, ov *Override) {
 	if ov.Enabled != nil {
 		a.Enabled = ov.Enabled
 	}
-	if ov.Gate != nil {
-		a.Gate = *ov.Gate
+	if ov.Trigger != nil {
+		a.Trigger = *ov.Trigger
 	}
 	if ov.Interval != nil {
 		a.Interval = *ov.Interval

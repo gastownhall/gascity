@@ -492,11 +492,13 @@ func TestCitiesListSubcommandAliasesDefaultAction(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newCitiesCmd(&stdout, &stderr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"list"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("gc cities list failed: %v\nstderr: %s", err, stderr.String())
+		t.Fatalf("gc cities list: %v; stderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "bright-lights") {
-		t.Errorf("expected 'bright-lights' in output, got: %s", stdout.String())
+		t.Fatalf("stdout = %q, want bright-lights listing", stdout.String())
 	}
 }

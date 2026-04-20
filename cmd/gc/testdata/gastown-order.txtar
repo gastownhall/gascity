@@ -91,7 +91,7 @@ title = "Scan for expired wisps"
 [order]
 description = "Generate daily code digest"
 formula = "mol-digest-generate"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 
@@ -99,5 +99,5 @@ pool = "dog"
 [order]
 description = "TTL-based wisp cleanup"
 formula = "mol-wisp-compact"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1h"

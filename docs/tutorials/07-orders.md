@@ -1,17 +1,17 @@
 ---
 title: Tutorial 07 - Orders
 sidebarTitle: 07 - Orders
-description: Schedule formulas and scripts to run automatically using gate conditions — cooldowns, cron schedules, shell checks, and events.
+description: Schedule formulas and scripts to run automatically using trigger conditions — cooldowns, cron schedules, shell checks, and events.
 ---
 
 Formulas describe _what_ work looks like. Orders describe _when_ it should
-happen. An order pairs a gate condition with an action — either a formula or a
-shell script — and the controller checks those gates automatically. When a gate
+happen. An order pairs a trigger condition with an action — either a formula or a
+shell script — and the controller checks those triggers automatically. When a trigger
 opens, the order fires. No human dispatch needed.
 
 When you run `gc start`, you launch a _controller_ — a background process that
 wakes up every 30 seconds (a _tick_), checks the state of the city, and takes
-action. One of the things it does on each tick is evaluate the gates that
+action. One of the things it does on each tick is evaluate the triggers that
 unblock an order from running. That periodic check is what makes orders work.
 
 We'll pick up where [Tutorial 06](/tutorials/06-beads) left off. You should
@@ -44,7 +44,7 @@ every five minutes:
 [order]
 description = "Check for PRs that need review"
 formula = "review"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "worker"
 ```
@@ -55,7 +55,7 @@ introduced them briefly. When an order fires, the controller creates a wisp from
 the formula and routes it to the named pool. Any agent in that pool can pick it
 up.
 
-The controller evaluates gate conditions on every tick. When five minutes have
+The controller evaluates trigger conditions on every tick. When five minutes have
 passed since the last run, it instantiates the `review` formula as a wisp and
 routes it to the `worker` pool. The order name comes from the file basename
 (`review-check.toml` → `review-check`), not from anything in the TOML.
@@ -67,7 +67,7 @@ orders directory.
 ## Inspecting orders
 
 Once you've defined some orders, you'll want to see what the controller sees —
-which orders exist, what their gates look like, and whether any are due. Three
+which orders exist, what their triggers look like, and whether any are due. Three
 commands give you that view.
 
 `gc order list` shows every enabled order in your city — whether or not it has
@@ -76,7 +76,7 @@ ever fired:
 ```shell
 ~/my-city
 $ gc order list
-NAME            TYPE     GATE      INTERVAL/SCHED  TARGET
+NAME            TYPE     TRIGGER      INTERVAL/SCHED  TARGET
 review-check    formula  cooldown  5m              worker
 dep-update      formula  cooldown  1h              worker
 release-notes   formula  cooldown  24h             worker
@@ -93,7 +93,7 @@ $ gc order show review-check
 Order:  review-check
 Description: Check for PRs that need review
 Formula:     review
-Gate:        cooldown
+Trigger:        cooldown
 Interval:    5m
 Target:      worker
 Source:      /Users/you/my-city/orders/review-check.toml
@@ -104,7 +104,7 @@ To check which orders are due right now:
 ```shell
 ~/my-city
 $ gc order check
-NAME            GATE      DUE  REASON
+NAME            TRIGGER      DUE  REASON
 review-check    cooldown  yes  never run
 dep-update      cooldown  no   cooldown: 14m remaining
 release-notes   cooldown  no   cooldown: 18h remaining
@@ -112,7 +112,7 @@ release-notes   cooldown  no   cooldown: 18h remaining
 
 ## Running an order manually
 
-Any order can be triggered by hand, bypassing its gate:
+Any order can be triggered by hand, bypassing its trigger:
 
 ```shell
 ~/my-city
@@ -125,14 +125,14 @@ For exec orders, the output is simpler — `Order "<name>" executed (exec)`.
 This is useful for testing a new order or for kicking off work that's almost due
 anyway.
 
-## Gate types
+## Trigger types
 
-The gate is what makes an order tick. It controls _when_ the order fires. There
-are five gate types.
+The trigger is what makes an order tick. It controls _when_ the order fires. There
+are five trigger types.
 
 ### Cooldown
 
-The most common gate. The name comes from the idea of a cooldown timer — after
+The most common trigger. The name comes from the idea of a cooldown timer — after
 the order fires, it has to cool down for a set interval before it can fire
 again:
 
@@ -140,7 +140,7 @@ again:
 [order]
 description = "Check for stale feature branches"
 formula = "stale-branches"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "worker"
 ```
@@ -157,7 +157,7 @@ Fires on an absolute schedule, like Unix cron job:
 [order]
 description = "Generate release notes from yesterday's merges"
 formula = "release-notes"
-gate = "cron"
+trigger = "cron"
 schedule = "0 3 * * *"
 pool = "worker"
 ```
@@ -171,7 +171,7 @@ The difference from cooldown: a cooldown fires _relative_ to the last run
 Cooldown drifts — if the last run was at 3:02, the next is at 3:07. Cron hits
 the same wall-clock times every day.
 
-Cron gates fire at most once per minute — if the order already ran during the
+Cron triggers fire at most once per minute — if the order already ran during the
 current minute, it waits for the next match.
 
 ### Condition
@@ -182,17 +182,17 @@ Fires when a shell command exits 0:
 [order]
 description = "Deploy when the flag file appears"
 formula = "deploy"
-gate = "condition"
+trigger = "condition"
 check = "test -f /tmp/deploy-flag"
 pool = "worker"
 ```
 
 The controller runs `sh -c "<check>"` with a 10-second timeout on each tick. If
 the command exits 0, the order fires. Any other exit code, and it doesn't. This
-is the gate for dynamic, external triggers — check a file, ping an endpoint,
+is the trigger for dynamic, external triggers — check a file, ping an endpoint,
 query a database.
 
-One caveat: the check runs synchronously during gate evaluation. A slow check
+One caveat: the check runs synchronously during trigger evaluation. A slow check
 delays evaluation of subsequent orders on that tick. Keep checks fast.
 
 ### Event
@@ -203,12 +203,12 @@ Fires in response to system events:
 [order]
 description = "Check if all PR reviews are done and merge is ready"
 formula = "merge-ready"
-gate = "event"
+trigger = "event"
 on = "bead.closed"
 pool = "worker"
 ```
 
-This fires whenever a `bead.closed` event appears on the event bus. Event gates
+This fires whenever a `bead.closed` event appears on the event bus. Event triggers
 use cursor-based tracking — each firing advances a sequence marker so the same
 event isn't processed twice.
 
@@ -220,7 +220,7 @@ Never auto-fires. Only triggered by `gc order run`:
 [order]
 description = "Full test suite — expensive, run only when needed"
 formula = "full-test-suite"
-gate = "manual"
+trigger = "manual"
 pool = "worker"
 ```
 
@@ -235,7 +235,7 @@ shell scripts directly:
 ```toml
 [order]
 description = "Delete branches already merged to main"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 exec = "scripts/prune-merged.sh"
 ```
@@ -263,7 +263,7 @@ Each order can set a timeout:
 [order]
 description = "Run the linter on changed files"
 formula = "lint-check"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 pool = "worker"
 timeout = "60s"
@@ -291,7 +291,7 @@ An order can be disabled in its own definition:
 [order]
 description = "Temporarily disabled"
 formula = "nightly-bench"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 enabled = false
@@ -326,7 +326,7 @@ pool = "mayor"
 schedule = "0 6 * * *"
 ```
 
-Overrides can change `enabled`, `gate`, `interval`, `schedule`, `check`, `on`,
+Overrides can change `enabled`, `trigger`, `interval`, `schedule`, `check`, `on`,
 `pool`, and `timeout`. The override matches by order name — if no order with
 that name exists, it's an error (fail-fast, not silent).
 
@@ -353,14 +353,14 @@ review-check    mc-9p8   2026-04-08T07:26:18Z
 ```
 
 The tracking bead is created synchronously _before_ the dispatch goroutine
-launches. This is what prevents the cooldown gate from re-firing on the very
-next tick — the gate checks for recent tracking beads when deciding if the order
+launches. This is what prevents the cooldown trigger from re-firing on the very
+next tick — the trigger checks for recent tracking beads when deciding if the order
 is due.
 
 ## Duplicate prevention
 
 Before dispatching, the controller checks whether the order already has open
-(non-closed) work. If it does, the order is skipped even if the gate says it's
+(non-closed) work. If it does, the order is skipped even if the trigger says it's
 due. This prevents pileup — if an agent is still working through the last review
 check, the controller won't dispatch another one.
 
@@ -374,7 +374,7 @@ Say you have a pack called `dev-ops` that includes a `test-suite` order:
 ```
 packs/dev-ops/
   orders/
-    test-suite.toml         # gate = "cooldown", interval = "5m", pool = "worker"
+    test-suite.toml         # trigger = "cooldown", interval = "5m", pool = "worker"
   formulas/
     test-suite.formula.toml
 ```
@@ -403,7 +403,7 @@ Now the city has the same order running independently for each rig:
 ```shell
 ~/my-city
 $ gc order list
-NAME        TYPE     GATE      INTERVAL/SCHED  TARGET
+NAME        TYPE     TRIGGER      INTERVAL/SCHED  TARGET
 test-suite  formula  cooldown  5m              worker
 test-suite  formula  cooldown  5m              my-api/worker
 test-suite  formula  cooldown  5m              my-frontend/worker
@@ -459,7 +459,7 @@ files and the formula they dispatch.
 # orders/lint-check.toml
 [order]
 description = "Run the linter on changed files"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 exec = "scripts/lint-changed.sh"
 timeout = "60s"
@@ -470,7 +470,7 @@ timeout = "60s"
 [order]
 description = "Generate release notes from the week's merges"
 formula = "release-notes"
-gate = "cron"
+trigger = "cron"
 schedule = "0 9 * * 1"
 pool = "worker"
 ```
@@ -501,18 +501,18 @@ City 'my-city' started
 
 ~/my-city
 $ gc order list
-NAME           TYPE     GATE      INTERVAL/SCHED  TARGET
+NAME           TYPE     TRIGGER      INTERVAL/SCHED  TARGET
 lint-check     exec     cooldown  30s             -
 release-notes  formula  cron      0 9 * * 1       worker
 
 ~/my-city
 $ gc order check
-NAME           GATE      DUE  REASON
+NAME           TRIGGER      DUE  REASON
 lint-check     cooldown  yes  never run
 release-notes  cron      no   next fire in 3d 14h
 ```
 
-The lint check fires immediately (never run + cooldown gate = due), then every
+The lint check fires immediately (never run + cooldown trigger = due), then every
 30 seconds after that. The release notes fire Monday at 9 AM, dispatching a
 three-step formula wisp to the `worker` pool. Neither requires anyone to type
 `gc sling`.

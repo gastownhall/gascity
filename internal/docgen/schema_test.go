@@ -85,6 +85,32 @@ func TestCitySchemaDescriptions(t *testing.T) {
 	}
 }
 
+func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	props := defProperties(t, raw, "OrderOverride")
+	gateField, ok := props["gate"].(map[string]interface{})
+	if !ok {
+		t.Fatal("OrderOverride.gate property missing from schema")
+	}
+	if deprecated, ok := gateField["deprecated"].(bool); !ok || !deprecated {
+		t.Fatalf("OrderOverride.gate deprecated = %v, want true", gateField["deprecated"])
+	}
+}
+
 func TestCitySchemaAgentDefinition(t *testing.T) {
 	s, err := GenerateCitySchema()
 	if err != nil {

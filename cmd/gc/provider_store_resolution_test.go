@@ -140,7 +140,7 @@ name = "demo"
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest", "order.toml"), []byte(`[order]
 formula = "mol-digest"
-gate = "manual"
+trigger = "manual"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ name = "demo"
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "orders", "poll", "order.toml"), []byte(`[order]
 exec = "printf 'exec ok\\n'"
-gate = "manual"
+trigger = "manual"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ name = "demo"
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest", "order.toml"), []byte(`[order]
 formula = "mol-digest"
-gate = "manual"
+trigger = "manual"
 pool = "dog"
 `), 0o644); err != nil {
 		t.Fatal(err)

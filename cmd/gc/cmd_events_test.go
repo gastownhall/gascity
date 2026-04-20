@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -120,6 +121,438 @@ func TestDoEventsSeqSupervisorPrintsCompositeCursor(t *testing.T) {
 	}
 }
 
+func TestDoEventsFallsBackToLocalCityEventsWhenCityStopped(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   "gc",
+		Subject: "worker",
+		Message: "stopped",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, map[string]any{
+				"status": http.StatusNotFound,
+				"title":  "Not Found",
+				"detail": "not_found: city not found or not running: mc-city",
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got genclient.WireEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Type != events.SessionStopped || got.Seq != 1 {
+		t.Fatalf("fallback event = %+v, want session.stopped seq=1", got)
+	}
+}
+
+func TestDoEventsFallsBackToLocalCityEventsOnTypedStoppedCityNotFound(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   "gc",
+		Subject: "worker",
+		Message: "stopped",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr("not_found: city not found or not running: mc-city"),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got genclient.WireEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Type != events.SessionStopped || got.Seq != 1 {
+		t.Fatalf("fallback event = %+v, want session.stopped seq=1", got)
+	}
+}
+
+func TestDoEventsDoesNotFallbackToLocalCityEventsForGeneric404(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   "gc",
+		Subject: "worker",
+		Message: "stopped",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr("city is unavailable"),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEvents = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty when fallback is disabled", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "city is unavailable") {
+		t.Fatalf("stderr = %q, want original API error", stderr.String())
+	}
+}
+
+func TestDoEventsDoesNotFallbackToLocalCityEventsForExplicitAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   "gc",
+		Subject: "worker",
+		Message: "stopped",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr("not_found: city not found or not running: mc-city"),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:      server.URL,
+		cityName:    "mc-city",
+		cityPath:    cityDir,
+		explicitAPI: true,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEvents = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty when explicit API disables fallback", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not_found: city not found or not running: mc-city") {
+		t.Fatalf("stderr = %q, want original API error", stderr.String())
+	}
+}
+
+func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   "gc",
+		Subject: "worker",
+		Message: "stopped",
+	})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr("not_found: city not found or not running: mc-city"),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:             server.URL,
+		cityName:           "mc-city",
+		cityPath:           cityDir,
+		explicitAPI:        true,
+		localSupervisorAPI: true,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got genclient.WireEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Type != events.SessionStopped || got.Seq != 1 {
+		t.Fatalf("fallback event = %+v, want session.stopped seq=1", got)
+	}
+}
+
+func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPITransportError(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{
+		Type:    events.SessionStopped,
+		Actor:   "gc",
+		Subject: "worker",
+		Message: "stopped",
+	})
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	apiURL := server.URL
+	server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{
+		apiURL:             apiURL,
+		cityName:           "mc-city",
+		cityPath:           cityDir,
+		explicitAPI:        true,
+		localSupervisorAPI: true,
+	}, events.SessionStopped, "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEvents = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got genclient.WireEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Type != events.SessionStopped || got.Seq != 1 {
+		t.Fatalf("fallback event = %+v, want session.stopped seq=1", got)
+	}
+}
+
+func TestDoEventsSeqFallsBackToLocalCityEventHeadWhenCityStopped(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc"})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, map[string]any{
+				"status": http.StatusNotFound,
+				"title":  "Not Found",
+				"detail": "not_found: city not found or not running: mc-city",
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsSeq(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsSeq = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "2" {
+		t.Fatalf("seq = %q, want 2", got)
+	}
+}
+
+func TestDoEventsSeqFallsBackToLocalCityEventHeadForExplicitLocalSupervisorAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc"})
+
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, map[string]any{
+				"status": http.StatusNotFound,
+				"title":  "Not Found",
+				"detail": "not_found: city not found or not running: mc-city",
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsSeq(eventsAPIScope{
+		apiURL:             server.URL,
+		cityName:           "mc-city",
+		cityPath:           cityDir,
+		explicitAPI:        true,
+		localSupervisorAPI: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsSeq = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "2" {
+		t.Fatalf("seq = %q, want 2", got)
+	}
+}
+
+func TestDoEventsSeqFallsBackToLocalCityEventHeadForExplicitLocalSupervisorAPITransportError(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc"})
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	apiURL := server.URL
+	server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsSeq(eventsAPIScope{
+		apiURL:             apiURL,
+		cityName:           "mc-city",
+		cityPath:           cityDir,
+		explicitAPI:        true,
+		localSupervisorAPI: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsSeq = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "2" {
+		t.Fatalf("seq = %q, want 2", got)
+	}
+}
+
+func TestDoEventsFollowStoppedCityRequiresRunningAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr(gcapi.CityNotFoundOrNotRunningDetail("mc-city")),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsFollow(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, "", nil, 0, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsFollow = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--follow requires a running city API") {
+		t.Fatalf("stderr = %q, want explicit follow limitation", stderr.String())
+	}
+}
+
+func TestDoEventsFollowStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr(gcapi.CityNotFoundOrNotRunningDetail("mc-city")),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsFollow(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, "", nil, 5, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsFollow = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--follow requires a running city API") {
+		t.Fatalf("stderr = %q, want explicit follow limitation", stderr.String())
+	}
+}
+
+func TestDoEventsWatchStoppedCityRequiresRunningAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr(gcapi.CityNotFoundOrNotRunningDetail("mc-city")),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, "", nil, 0, "", 50*time.Millisecond, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsWatch = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--watch requires a running city API") {
+		t.Fatalf("stderr = %q, want explicit watch limitation", stderr.String())
+	}
+}
+
+func TestDoEventsWatchStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponse(t, w, genclient.ErrorModel{
+				Status: notFoundStatusPtr(),
+				Title:  stringPtr("Not Found"),
+				Detail: stringPtr(gcapi.CityNotFoundOrNotRunningDetail("mc-city")),
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(eventsAPIScope{
+		apiURL:   server.URL,
+		cityName: "mc-city",
+		cityPath: cityDir,
+	}, "", nil, 5, "", 50*time.Millisecond, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsWatch = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--watch requires a running city API") {
+		t.Fatalf("stderr = %q, want explicit watch limitation", stderr.String())
+	}
+}
+
 func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
 	items := []genclient.WireEvent{
 		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
@@ -128,6 +561,39 @@ func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-GC-Index", "2")
+			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", 50*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("got %d JSON lines, want 1; output=%q", len(lines), stdout.String())
+	}
+	var envelope genclient.EventStreamEnvelope
+	if err := json.Unmarshal([]byte(lines[0]), &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if envelope.Seq != 2 || envelope.Type != "mail.sent" {
+		t.Fatalf("envelope = %+v, want seq=2 type=mail.sent", envelope)
+	}
+}
+
+func TestDoEventsWatchCityBufferedReplayAfterSeqSkipsHeadProbe(t *testing.T) {
+	items := []genclient.WireEvent{
+		{Actor: "human", Seq: 1, Subject: stringPtr("gc-1"), Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		{Actor: "human", Message: stringPtr("hello"), Seq: 2, Subject: stringPtr("gc-2"), Ts: time.Unix(1700000010, 0).UTC(), Type: "mail.sent"},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			// Buffered replay for --after only needs the JSON body; a missing
+			// X-GC-Index header should not block replay.
 			writeJSONResponse(t, w, genclient.ListBodyWireEvent{Items: &items, Total: int64(len(items))})
 		},
 	})
@@ -326,7 +792,21 @@ func writeJSONResponse(t *testing.T, w http.ResponseWriter, body any) {
 	}
 }
 
+func writeProblemResponse(t *testing.T, w http.ResponseWriter, body any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(http.StatusNotFound)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Fatalf("encode problem response: %v", err)
+	}
+}
+
 var _ = context.Background
+
+func notFoundStatusPtr() *int64 {
+	x := int64(http.StatusNotFound)
+	return &x
+}
 
 func newTestProvider(t *testing.T, dir string) *events.FileRecorder {
 	t.Helper()

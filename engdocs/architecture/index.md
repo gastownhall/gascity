@@ -50,7 +50,7 @@ Each is provably composable from the primitives.
 
 12. **[Controller](./controller.md)** — the main loop: config watch,
     reconciliation tick, order dispatch
-13. **[Orders](./orders.md)** — gate-conditioned formula/exec
+13. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
 
 ### End-to-End Traces

@@ -448,7 +448,7 @@ func (cs *controllerState) Orders() []orders.Order {
 // EnableOrder creates or updates an override with enabled=true.
 func (cs *controllerState) EnableOrder(name, rig string) error {
 	enabled := true
-	return cs.editor.SetOrderOverride(config.OrderOverride{
+	return cs.editor.MergeOrderOverride(config.OrderOverride{
 		Name:    name,
 		Rig:     rig,
 		Enabled: &enabled,
@@ -458,7 +458,7 @@ func (cs *controllerState) EnableOrder(name, rig string) error {
 // DisableOrder creates or updates an override with enabled=false.
 func (cs *controllerState) DisableOrder(name, rig string) error {
 	enabled := false
-	return cs.editor.SetOrderOverride(config.OrderOverride{
+	return cs.editor.MergeOrderOverride(config.OrderOverride{
 		Name:    name,
 		Rig:     rig,
 		Enabled: &enabled,

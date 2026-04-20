@@ -119,14 +119,14 @@ Mail + nudge. No new primitive needed.
 
 Formula = TOML discovered through formula layers. Molecule = provider-backed
 runtime bead tree. Wisps = ephemeral molecules. Orders =
-formulas with gate conditions on Event Bus.
+formulas with trigger conditions on Event Bus.
 
 - **Formula derivation**: Config (primitive 4) resolves formula layers and
   active files.
 - **Molecule derivation**: Bead Store (primitive 2) holds the root bead and
   any provider-created step beads.
 - **Wisp derivation**: Molecule + TTL + garbage collection.
-- **Order derivation**: Formula + Event Bus (primitive 3) gate
+- **Order derivation**: Formula + Event Bus (primitive 3) trigger
   evaluation + Config (primitive 4) scheduling.
 - **Proof**: Uses Config, Bead Store, and Event Bus. No new
   infrastructure.

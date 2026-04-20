@@ -69,7 +69,7 @@ func TestBuildOrderDispatcherNoOrders(t *testing.T) {
 
 func TestOrderDispatchManualFiltered(t *testing.T) {
 	ad := buildOrderDispatcherFromList(
-		[]orders.Order{{Name: "manual-only", Gate: "manual", Formula: "noop"}},
+		[]orders.Order{{Name: "manual-only", Trigger: "manual", Formula: "noop"}},
 		beads.NewMemStore(), nil,
 	)
 	if ad != nil {
@@ -82,7 +82,7 @@ func TestOrderDispatchCooldownDue(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "test-order",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Formula:      "test-formula",
 		Pool:         "worker",
@@ -138,7 +138,7 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "test-order",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1h", // 1 hour — far in the future
 		Formula:  "test-formula",
 	}}
@@ -172,8 +172,8 @@ func TestOrderDispatchMultiple(t *testing.T) {
 	}
 
 	aa := []orders.Order{
-		{Name: "order-a", Gate: "cooldown", Interval: "1m", Formula: "formula-a"},
-		{Name: "order-b", Gate: "cooldown", Interval: "1h", Formula: "formula-b"},
+		{Name: "order-a", Trigger: "cooldown", Interval: "1m", Formula: "formula-a"},
+		{Name: "order-b", Trigger: "cooldown", Interval: "1h", Formula: "formula-b"},
 	}
 	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
@@ -214,7 +214,7 @@ func TestOrderDispatchExecDue(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "wasteland-poll",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "2m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
 		Source:   "/city/formulas/orders/wasteland-poll/order.toml",
@@ -272,7 +272,7 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "fail-exec",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "2m",
 		Exec:     "scripts/fail.sh",
 	}}
@@ -309,7 +309,7 @@ func TestOrderDispatchFormulaCookFailureLabelsTrackingBead(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "fail-formula",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "2m",
 		Formula:      "missing-formula",
 		FormulaLayer: sharedTestFormulaDir,
@@ -349,7 +349,7 @@ func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "fail-label",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "2m",
 		Formula:      "test-formula",
 		FormulaLayer: sharedTestFormulaDir,
@@ -403,7 +403,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "wasteland-poll",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1h",
 		Exec:     "scripts/poll.sh",
 	}}
@@ -428,7 +428,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "poll",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
 		Source:   "/city/formulas/orders/poll/order.toml",
@@ -481,7 +481,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "gate-sweep",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Exec:         "$PACK_DIR/scripts/gate-sweep.sh",
 		Source:       "/city/packs/maintenance/formulas/orders/gate-sweep/order.toml",
@@ -536,7 +536,7 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "no-layer",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "scripts/test.sh",
 		Source:   "/city/formulas/orders/no-layer/order.toml",
@@ -576,7 +576,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 	aa := []orders.Order{{
 		Name:     "poll",
 		Rig:      "frontend",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
 		Source:   "/city/formulas/orders/poll/order.toml",
@@ -629,7 +629,7 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "slow-exec",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "scripts/slow.sh",
 		Timeout:  "100ms",
@@ -675,7 +675,7 @@ func TestOrderDispatchSkipsSuspendedRig(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "rig-order",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Formula:      "test-formula",
 		Rig:          "demo",
@@ -708,7 +708,7 @@ func TestOrderDispatchSkipsSuspendedRigQualifiedPool(t *testing.T) {
 	// City-level order with a qualified pool targeting a suspended rig.
 	aa := []orders.Order{{
 		Name:         "city-order",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Formula:      "test-formula",
 		Pool:         "demo/polecat",
@@ -738,7 +738,7 @@ func TestOrderDispatchAllowsNonSuspendedRig(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "rig-order",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Formula:      "test-formula",
 		Rig:          "demo",
@@ -769,7 +769,7 @@ func TestOrderDispatchSkipsCitySuspended(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "city-order",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Formula:      "test-formula",
 		Pool:         "polecat",
@@ -800,7 +800,7 @@ func TestOrderDispatchSkipsSuspendedRigExec(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "exec-order",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "echo hello",
 		Rig:      "demo",
@@ -988,7 +988,7 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "test-order",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Formula:  "test-formula",
 	}}
@@ -1145,7 +1145,7 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 	cfg := &config.City{}
 	seenRigs := make(map[string]bool)
 	for _, a := range aa {
-		if a.Gate != "manual" {
+		if a.Trigger != "manual" {
 			auto = append(auto, a)
 		}
 		if a.Rig != "" && !seenRigs[a.Rig] {
@@ -1196,7 +1196,7 @@ func TestBuildOrderDispatcherWithRigs(t *testing.T) {
 	}
 	writeFile(t, orderDir+"/order.toml", `[order]
 formula = "mol-rig-health"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "polecat"
 `)
@@ -1233,7 +1233,7 @@ func TestOrderDispatchRigScoped(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:         "db-health",
-		Gate:         "cooldown",
+		Trigger:      "cooldown",
 		Interval:     "1m",
 		Formula:      "mol-db-health",
 		Pool:         "polecat",
@@ -1270,8 +1270,8 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	}
 
 	aa := []orders.Order{
-		{Name: "db-health", Gate: "cooldown", Interval: "1h", Formula: "mol-db-health", Rig: "rig-a"},
-		{Name: "db-health", Gate: "cooldown", Interval: "1h", Formula: "mol-db-health", Rig: "rig-b"},
+		{Name: "db-health", Trigger: "cooldown", Interval: "1h", Formula: "mol-db-health", Rig: "rig-a"},
+		{Name: "db-health", Trigger: "cooldown", Interval: "1h", Formula: "mol-db-health", Rig: "rig-b"},
 	}
 	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
@@ -1364,7 +1364,7 @@ func TestBuildOrderDispatcherUsesProviderAwareFileStore(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
 formula = "test-formula"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
@@ -1414,7 +1414,7 @@ func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
 formula = "test-formula"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
@@ -1491,7 +1491,7 @@ func TestBuildOrderDispatcherRigOrderHonorsLegacyCityRunHistory(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
 formula = "test-formula"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "worker"
 `)
@@ -1562,7 +1562,7 @@ func TestOrderDispatchSkipsRigOrderWhenLegacyCityFallbackUnavailable(t *testing.
 		aa: []orders.Order{{
 			Name:         "rig-digest",
 			Rig:          "frontend",
-			Gate:         "cooldown",
+			Trigger:      "cooldown",
 			Interval:     "1m",
 			Formula:      "test-formula",
 			Pool:         "worker",
@@ -1612,7 +1612,7 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 		aa: []orders.Order{{
 			Name:    "release-watch",
 			Rig:     "frontend",
-			Gate:    "event",
+			Trigger: "event",
 			On:      events.BeadClosed,
 			Exec:    "true",
 			Pool:    "worker",
@@ -1660,7 +1660,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 		aa: []orders.Order{{
 			Name:    "rig-digest",
 			Rig:     "frontend",
-			Gate:    "condition",
+			Trigger: "condition",
 			Check:   "true",
 			Exec:    "true",
 			Pool:    "worker",
@@ -1707,7 +1707,7 @@ func TestOrderDispatchSkipsRigCooldownWhenLegacyLastRunReadFails(t *testing.T) {
 		aa: []orders.Order{{
 			Name:         "rig-digest",
 			Rig:          "frontend",
-			Gate:         "cooldown",
+			Trigger:      "cooldown",
 			Interval:     "1m",
 			Formula:      "test-formula",
 			Pool:         "worker",
@@ -1754,7 +1754,7 @@ func TestBuildOrderDispatcherReopensStoreForScopedFileReads(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
 formula = "test-formula"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
@@ -1813,7 +1813,7 @@ func TestBuildOrderDispatcherCityPackLayers(t *testing.T) {
 	}
 	writeFile(t, sysAutoDir+"/order.toml", `[order]
 exec = "scripts/beads-health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 `)
 
@@ -1824,7 +1824,7 @@ interval = "30s"
 	}
 	writeFile(t, topoAutoDir+"/order.toml", `[order]
 exec = "scripts/wasteland-poll.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "2m"
 `)
 
@@ -1868,7 +1868,7 @@ func TestBuildOrderDispatcherCityPackWithOverride(t *testing.T) {
 	}
 	writeFile(t, sysAutoDir+"/order.toml", `[order]
 exec = "scripts/beads-health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 `)
 
@@ -1878,7 +1878,7 @@ interval = "30s"
 	}
 	writeFile(t, topoAutoDir+"/order.toml", `[order]
 exec = "scripts/wasteland-poll.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "2m"
 `)
 
@@ -1929,7 +1929,7 @@ func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	}
 	writeFile(t, sysAutoDir+"/order.toml", `[order]
 exec = "scripts/beads-health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "30s"
 `)
 
@@ -2017,7 +2017,7 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "health-check",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "scripts/health.sh",
 	}}
@@ -2061,7 +2061,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "my-auto",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1s", // short cooldown — would fire if not deduped
 		Exec:     "scripts/run.sh",
 	}}
@@ -2104,13 +2104,13 @@ func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 
 	aa := []orders.Order{{
 		Name:     "my-auto",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1s",
 		Exec:     "scripts/run.sh",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
-	// Use a future "now" so cooldown gate sees the seed bead as old enough.
+	// Use a future "now" so cooldown trigger sees the seed bead as old enough.
 	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
 	time.Sleep(100 * time.Millisecond)
 

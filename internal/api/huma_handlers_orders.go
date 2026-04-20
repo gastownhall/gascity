@@ -54,7 +54,7 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 
 // OrderCheckListBody is the response body for GET /v0/orders/check.
 type OrderCheckListBody struct {
-	Checks []orderCheckResponse `json:"checks" doc:"Order gate evaluations."`
+	Checks []orderCheckResponse `json:"checks" doc:"Order trigger evaluations."`
 }
 
 // OrderCheckListOutput is the response envelope for GET /v0/orders/check.
@@ -94,7 +94,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, _ *OrderCheckInput) (*O
 	now := time.Now()
 	checks := make([]orderCheckResponse, 0, len(aa))
 	for _, a := range aa {
-		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 		cr := orderCheckResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),

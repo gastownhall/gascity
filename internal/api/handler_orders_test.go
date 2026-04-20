@@ -42,14 +42,14 @@ func TestHandleOrderList(t *testing.T) {
 			Name:        "dolt-health",
 			Description: "Check dolt status",
 			Exec:        "dolt status",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "5m",
 			Enabled:     &enabled,
 		},
 		{
 			Name:    "deploy",
 			Formula: "deploy-steps",
-			Gate:    "manual",
+			Trigger: "manual",
 			Pool:    "workers",
 			Rig:     "myrig",
 		},
@@ -81,8 +81,8 @@ func TestHandleOrderList(t *testing.T) {
 	if a0.Type != "exec" {
 		t.Errorf("type = %q, want %q", a0.Type, "exec")
 	}
-	if a0.Gate != "cooldown" {
-		t.Errorf("gate = %q, want %q", a0.Gate, "cooldown")
+	if a0.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", a0.Trigger, "cooldown")
 	}
 	if a0.Interval != "5m" {
 		t.Errorf("interval = %q, want %q", a0.Interval, "5m")
@@ -113,7 +113,7 @@ func TestHandleOrderGet(t *testing.T) {
 			Name:        "dolt-health",
 			Description: "Check dolt status",
 			Exec:        "dolt status",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "5m",
 		},
 	}
@@ -139,14 +139,46 @@ func TestHandleOrderGet(t *testing.T) {
 	}
 }
 
+func TestHandleOrderGet_ExposesTriggerAndLegacyGateAlias(t *testing.T) {
+	fs := newFakeState(t)
+	fs.autos = []orders.Order{
+		{
+			Name:     "dolt-health",
+			Exec:     "dolt status",
+			Trigger:  "cooldown",
+			Interval: "5m",
+		},
+	}
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/dolt-health"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["trigger"] != "cooldown" {
+		t.Fatalf("trigger = %#v, want %q", resp["trigger"], "cooldown")
+	}
+	if resp["gate"] != "cooldown" {
+		t.Fatalf("gate = %#v, want %q", resp["gate"], "cooldown")
+	}
+}
+
 func TestHandleOrderGet_ScopedName(t *testing.T) {
 	fs := newFakeState(t)
 	fs.autos = []orders.Order{
 		{
-			Name: "health",
-			Exec: "echo ok",
-			Gate: "cooldown",
-			Rig:  "myrig",
+			Name:    "health",
+			Exec:    "echo ok",
+			Trigger: "cooldown",
+			Rig:     "myrig",
 		},
 	}
 	h := newTestCityHandler(t, fs)
@@ -188,7 +220,7 @@ func TestHandleOrderGet_NotFound(t *testing.T) {
 func TestHandleOrderDisable(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -216,7 +248,7 @@ func TestHandleOrderDisable(t *testing.T) {
 func TestHandleOrderEnable(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -241,7 +273,7 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
 	fs.autos = []orders.Order{
-		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Gate: "cron", Pool: "reviewers", Rig: "myrig"},
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Pool: "reviewers", Rig: "myrig"},
 	}
 
 	rigStore := fs.stores["myrig"]
@@ -335,7 +367,7 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
 	fs.autos = []orders.Order{
-		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Gate: "cooldown", Interval: "1h", Rig: "myrig"},
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cooldown", Interval: "1h", Rig: "myrig"},
 	}
 
 	_, err := fs.cityBeadStore.Create(beads.Bead{
@@ -556,8 +588,8 @@ func TestHandleOrdersFeedCityScopeReportsPartialRigFailures(t *testing.T) {
 func TestHandleOrderGet_Ambiguous(t *testing.T) {
 	fs := newFakeState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-a"},
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-b"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-a"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-b"},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -590,8 +622,8 @@ func TestHandleOrderGet_Ambiguous(t *testing.T) {
 func TestHandleOrderDisable_Ambiguous(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-a"},
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-b"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-a"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-b"},
 	}
 	h := newTestCityHandler(t, fs)
 
