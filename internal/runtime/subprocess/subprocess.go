@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -519,6 +520,9 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		if err == nil {
 			return nil
 		}
+		if !isUnavailableSocketError(err) {
+			return err
+		}
 		lastErr = err
 	}
 	return lastErr
@@ -532,9 +536,18 @@ func (p *Provider) stopBySocket(name string) error {
 		// Clean up stale socket file if it exists.
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
-		return nil
+		if isUnavailableSocketError(err) {
+			return nil
+		}
+		return err
 	}
 	return nil
+}
+
+func isUnavailableSocketError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // --- In-memory process helpers ---

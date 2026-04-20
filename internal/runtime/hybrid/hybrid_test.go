@@ -66,8 +66,8 @@ func TestListRunning_PartialFailure(t *testing.T) {
 	_ = local.Start(context.Background(), "gc-demo--refinery", runtime.Config{})
 
 	names, err := h.ListRunning("gc-demo-")
-	if err != nil {
-		t.Fatalf("expected nil error on partial failure, got %v", err)
+	if err == nil {
+		t.Fatal("expected error on partial failure")
 	}
 	if len(names) != 1 {
 		t.Fatalf("expected 1 session from healthy backend, got %d", len(names))

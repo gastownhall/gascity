@@ -66,6 +66,31 @@ func TestStart(t *testing.T) {
 	}
 }
 
+func TestStart_ReturnsDialogDismissalError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start) cat > /dev/null ;;
+  peek) echo "Bypass Permissions mode" ;;
+  send-keys) echo "failed to dismiss dialog" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err == nil {
+		t.Fatal("Start succeeded, want dialog dismissal error")
+	}
+	if !strings.Contains(err.Error(), "failed to dismiss dialog") {
+		t.Fatalf("Start error = %v, want dialog dismissal context", err)
+	}
+}
+
 func TestStartWrapsDuplicateSessionError(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

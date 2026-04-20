@@ -809,18 +809,16 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
 		_, err = fmt.Fprintf(conn, "%s\n", command)
 		if err != nil {
-			lastErr = err
-			continue
+			return err
 		}
 		scanner := bufio.NewScanner(conn)
 		if scanner.Scan() && scanner.Text() == "ok" {
 			return nil
 		}
 		if err := scanner.Err(); err != nil {
-			lastErr = err
-			continue
+			return err
 		}
-		lastErr = fmt.Errorf("unexpected response from socket")
+		return fmt.Errorf("unexpected response from socket")
 	}
 	return lastErr
 }
@@ -831,9 +829,18 @@ func (p *Provider) stopBySocket(name string) error {
 	if err != nil {
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
-		return nil
+		if isUnavailableSocketError(err) {
+			return nil
+		}
+		return err
 	}
 	return nil
+}
+
+func isUnavailableSocketError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // Capabilities reports ACP provider capabilities. The ACP provider has

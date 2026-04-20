@@ -121,10 +121,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Dismiss startup dialogs using the same shared Go logic as tmux.
 	if cfg.EmitsPermissionWarning || len(cfg.ProcessNames) > 0 {
-		_ = runtime.AcceptStartupDialogs(ctx,
+		if err := runtime.AcceptStartupDialogs(ctx,
 			func(lines int) (string, error) { return p.Peek(name, lines) },
 			func(keys ...string) error { return p.SendKeys(name, keys...) },
-		)
+		); err != nil {
+			return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+		}
 	}
 
 	return nil

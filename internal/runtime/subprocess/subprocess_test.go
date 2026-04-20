@@ -1,7 +1,9 @@
 package subprocess
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -411,6 +413,53 @@ func TestSocketRemovedAfterStop(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Error("socket file should be removed after Stop")
+}
+
+func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := "reject-stop"
+
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	gotCommand := make(chan string, 1)
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotCommand <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.stopBySocket(name)
+	if err == nil {
+		t.Fatal("stopBySocket succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("stopBySocket error = %v, want unexpected response", err)
+	}
+	if got := <-gotCommand; got != "stop" {
+		t.Fatalf("socket command = %q, want stop", got)
+	}
+	if _, statErr := os.Stat(p.sockPath(name)); !os.IsNotExist(statErr) {
+		t.Fatalf("socket path still exists after failed stop: %v", statErr)
+	}
+	if _, statErr := os.Stat(p.sockNamePath(name)); !os.IsNotExist(statErr) {
+		t.Fatalf("socket name path still exists after failed stop: %v", statErr)
+	}
 }
 
 func TestSocketGoneAfterProcessDeath(t *testing.T) {
