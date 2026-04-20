@@ -95,6 +95,48 @@ func TestBuildResolvedProviderCache_ReportsAllChainErrors(t *testing.T) {
 	}
 }
 
+func TestBuildResolvedProviderCache_RejectsInvalidLegacyBuiltinOptionDefaults(t *testing.T) {
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"codex-fast": {
+				Command: "codex",
+				OptionDefaults: map[string]string{
+					"permission_mode": "typo",
+				},
+			},
+		},
+	}
+
+	err := BuildResolvedProviderCache(cfg)
+	if err == nil {
+		t.Fatal("expected invalid option_defaults to fail cache build")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `provider "codex-fast" option_defaults`) {
+		t.Fatalf("error = %q, want provider option_defaults context", msg)
+	}
+	if !strings.Contains(msg, `"permission_mode"`) || !strings.Contains(msg, `"typo"`) {
+		t.Fatalf("error = %q, want invalid option default details", msg)
+	}
+}
+
+func TestBuildResolvedProviderCache_AllowsValidLegacyBuiltinOptionDefaults(t *testing.T) {
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"codex-fast": {
+				Command: "codex",
+				OptionDefaults: map[string]string{
+					"permission_mode": "unrestricted",
+				},
+			},
+		},
+	}
+
+	if err := BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatalf("unexpected error for valid legacy builtin option defaults: %v", err)
+	}
+}
+
 func TestResolvedProviderCached_DeepCopyIsolatesMutations(t *testing.T) {
 	base := "builtin:codex"
 	cfg := &City{

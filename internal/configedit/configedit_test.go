@@ -1162,6 +1162,25 @@ func TestCreateProvider_NoBaseNoCommandRejected(t *testing.T) {
 	}
 }
 
+func TestCreateProvider_RejectsInvalidLegacyBuiltinOptionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateProvider("codex-fast", config.ProviderSpec{
+		Command: "codex",
+		OptionDefaults: map[string]string{
+			"permission_mode": "typo",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid option_defaults to be rejected")
+	}
+	if !strings.Contains(err.Error(), `option_defaults key "permission_mode"`) {
+		t.Fatalf("error = %v, want option_defaults validation detail", err)
+	}
+}
+
 func TestCreateProvider_Duplicate(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithProvider())

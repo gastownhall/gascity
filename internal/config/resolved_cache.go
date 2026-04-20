@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // BuildResolvedProviderCache walks every custom provider's base chain,
@@ -47,7 +49,72 @@ func BuildResolvedProviderCache(cfg *City) error {
 		// Do not overwrite the existing cache on error.
 		return errors.Join(errs...)
 	}
+	if err := ValidateCustomProviderOptions(cfg.Providers); err != nil {
+		return err
+	}
 	cfg.ResolvedProviders = next
+	return nil
+}
+
+// ValidateCustomProviderOptions validates provider options after applying the
+// same structural inheritance rules the runtime uses for custom providers.
+// This catches invalid schema defaults and option_defaults before they can
+// silently degrade into missing launch flags.
+func ValidateCustomProviderOptions(providers map[string]ProviderSpec) error {
+	if len(providers) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var errs []error
+	for _, name := range names {
+		resolved, err := resolveCustomProviderForValidation(name, providers[name], providers)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolving provider %q: %w", name, err))
+			continue
+		}
+		if err := validateResolvedProviderOptions(name, resolved); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func resolveCustomProviderForValidation(name string, spec ProviderSpec, providers map[string]ProviderSpec) (ResolvedProvider, error) {
+	if spec.Base != nil {
+		if strings.TrimSpace(*spec.Base) == "" {
+			return *specToResolved(name, &spec), nil
+		}
+		return ResolveProviderChain(name, spec, providers)
+	}
+
+	builtins := BuiltinProviders()
+	if base, ok := builtins[name]; ok {
+		merged := MergeProviderOverBuiltin(base, spec)
+		return *specToResolved(name, &merged), nil
+	}
+	if base, ok := builtins[spec.Command]; ok {
+		merged := MergeProviderOverBuiltin(base, spec)
+		return *specToResolved(name, &merged), nil
+	}
+	return *specToResolved(name, &spec), nil
+}
+
+func validateResolvedProviderOptions(name string, resolved ResolvedProvider) error {
+	if err := ValidateOptionsSchema(resolved.OptionsSchema); err != nil {
+		return fmt.Errorf("provider %q options_schema: %w", name, err)
+	}
+	if err := ValidateOptionDefaults(resolved.OptionsSchema, resolved.EffectiveDefaults); err != nil {
+		return fmt.Errorf("provider %q option_defaults: %w", name, err)
+	}
 	return nil
 }
 

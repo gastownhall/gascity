@@ -1010,5 +1010,8 @@ func validateProviders(providers map[string]config.ProviderSpec) error {
 		}
 		return fmt.Errorf("provider %q: command is required (or set base to inherit)", name)
 	}
+	if err := config.ValidateCustomProviderOptions(providers); err != nil {
+		return err
+	}
 	return nil
 }
