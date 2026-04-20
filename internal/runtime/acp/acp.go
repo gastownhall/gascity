@@ -382,13 +382,19 @@ func (p *Provider) Stop(name string) error {
 		}
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc)
-		p.cleanupMeta(name)
+		if err == nil || runtime.IsSessionGone(err) {
+			p.cleanupMeta(name)
+			return nil
+		}
 		return err
 	}
 
 	// Fall back to socket (cross-process case).
 	err := p.stopBySocket(name)
-	p.cleanupMeta(name)
+	if err == nil || runtime.IsSessionGone(err) {
+		p.cleanupMeta(name)
+		return nil
+	}
 	return err
 }
 

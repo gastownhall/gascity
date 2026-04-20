@@ -781,6 +781,51 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 	}
 }
 
+func TestStop_PreservesMetadataWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	if err := p.SetMeta(name, "key1", "val1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.Stop(name)
+	if err == nil {
+		t.Fatal("Stop succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("Stop error = %v, want unexpected response", err)
+	}
+
+	val, err := p.GetMeta(name, "key1")
+	if err != nil {
+		t.Fatalf("GetMeta after failed stop: %v", err)
+	}
+	if val != "val1" {
+		t.Fatalf("GetMeta after failed stop = %q, want val1", val)
+	}
+}
+
 func TestPendingAndRespondUnsupported(t *testing.T) {
 	p := newTestProvider(t)
 
