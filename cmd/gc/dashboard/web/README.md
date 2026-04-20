@@ -9,7 +9,7 @@ The Go service exists only to serve the compiled static bundle.
 
 ## Dev workflow
 
-Requires Node 20+ and npm.
+Requires Node 20, 22, or 24+ and npm.
 
 ```bash
 npm install          # one-time
@@ -19,14 +19,18 @@ npm run build        # Vite production build → dist/
 npm run dev          # Vite dev server with HMR on :5173
 ```
 
+`npm run test`, `npm run typecheck`, `npm run build`, and `npm run dev`
+all regenerate `src/generated/` first so they work from a clean checkout.
+
 `dist/` is git-ignored. It is built fresh by CI and by the pre-commit
 hook (see `.githooks/pre-commit`). Run `npm run build` before handing
 a branch to a reviewer if they don't have Node available — or let the
 hook do it.
 
-`src/generated/` is also git-ignored. `npm run gen` must be run after
-any change to `internal/api/openapi.json`. The pre-commit hook does
-this automatically when the spec regenerates.
+`src/generated/` is also git-ignored. Run `npm run gen` after any change
+to `internal/api/openapi.json`, or rely on the lifecycle hooks baked into
+the main scripts above. The pre-commit hook also regenerates these files
+when the spec changes.
 
 ## Layout
 
