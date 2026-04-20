@@ -3,6 +3,8 @@
 package beads
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -28,6 +30,45 @@ type Bead struct {
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
+}
+
+// UnmarshalJSON tolerates legacy bd-hook event payloads that serialize
+// numeric / boolean metadata values as raw JSON scalars rather than strings.
+// Such payloads used to fail the entire bead decode, causing per-event
+// log spam in the caching store. Values that are already JSON strings are
+// decoded normally; numbers and booleans are stringified; null becomes "";
+// objects and arrays preserve their raw JSON text as a fallback so data is
+// not silently lost.
+func (b *Bead) UnmarshalJSON(data []byte) error {
+	type alias Bead
+	aux := struct {
+		Metadata map[string]json.RawMessage `json:"metadata,omitempty"`
+		*alias
+	}{alias: (*alias)(b)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(aux.Metadata) > 0 {
+		b.Metadata = make(map[string]string, len(aux.Metadata))
+		for k, raw := range aux.Metadata {
+			b.Metadata[k] = coerceMetadataValue(raw)
+		}
+	}
+	return nil
+}
+
+func coerceMetadataValue(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return ""
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err == nil {
+			return s
+		}
+	}
+	return string(trimmed)
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.

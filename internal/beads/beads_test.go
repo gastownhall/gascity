@@ -1,9 +1,54 @@
 package beads
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
+
+// TestBeadUnmarshalJSON_TolerateNumericMetadata reproduces the bd-hook event
+// shape seen in ~/.gc/supervisor.log that was spamming parse failures at
+// ~100/s: a bead.updated payload whose metadata carries JSON numbers (and
+// occasionally booleans/nulls) rather than strings. The custom UnmarshalJSON
+// must coerce these to strings so the caching store can apply the event.
+func TestBeadUnmarshalJSON_TolerateNumericMetadata(t *testing.T) {
+	payload := []byte(`{
+	    "id": "at-tmgg5",
+	    "title": "gastown.mayor",
+	    "status": "open",
+	    "issue_type": "session",
+	    "created_at": "2026-04-17T06:29:26Z",
+	    "metadata": {
+	        "agent_name": "gastown.mayor",
+	        "continuation_epoch": 10,
+	        "generation": 11,
+	        "pool_managed": true,
+	        "closed_at": null
+	    }
+	}`)
+	var b Bead
+	if err := json.Unmarshal(payload, &b); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]string{
+		"agent_name":         "gastown.mayor",
+		"continuation_epoch": "10",
+		"generation":         "11",
+		"pool_managed":       "true",
+		"closed_at":          "",
+	}
+	for k, v := range want {
+		if got := b.Metadata[k]; got != v {
+			t.Errorf("Metadata[%q] = %q, want %q", k, got, v)
+		}
+	}
+	if b.ID != "at-tmgg5" {
+		t.Errorf("ID = %q, want %q", b.ID, "at-tmgg5")
+	}
+	if b.Type != "session" {
+		t.Errorf("Type = %q, want %q", b.Type, "session")
+	}
+}
 
 func TestIsContainerType(t *testing.T) {
 	tests := []struct {
