@@ -420,6 +420,7 @@ ProviderOption declares a single configurable option for a provider.
 | `type` | string | **yes** |  | "select" only (v1) |
 | `default` | string | **yes** |  |  |
 | `choices` | []OptionChoice | **yes** |  |  |
+| `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. |
 
 ## ProviderPatch
 
@@ -428,8 +429,11 @@ ProviderPatch modifies an existing provider identified by Name.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing provider's name. |
+| `base` | string |  |  | Base overrides the provider's inheritance parent (presence-aware). Pointer to a pointer so the patch can distinguish "no change" (double-nil) from "clear to inherit default" (single-nil value in outer pointer) from "set to explicit empty opt-out" (value "" in inner pointer) from "set to &lt;name&gt;". Callers use:   nil          = patch does not touch Base   &(*string)(nil) = patch clears Base to absent   &(&"")       = patch sets Base = "" (explicit opt-out)   &(&"builtin:codex") = patch sets Base to that value |
 | `command` | string |  |  | Command overrides the provider command. |
 | `args` | []string |  |  | Args overrides the provider args. |
+| `args_append` | []string |  |  | ArgsAppend overrides the provider args_append list. |
+| `options_schema_merge` | string |  |  | OptionsSchemaMerge overrides the options_schema merge mode. |
 | `prompt_mode` | string |  |  | PromptMode overrides prompt delivery mode. Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag overrides the prompt flag. |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs overrides the ready delay in milliseconds. |
@@ -443,6 +447,9 @@ ProviderSpec defines a named provider's startup parameters.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `base` | string |  |  | Base names the parent provider this spec inherits from. Supported forms:   "&lt;name&gt;"          - custom first (self-excluded), then built-in   "builtin:&lt;name&gt;"  - force built-in lookup   "provider:&lt;name&gt;" - force custom lookup   ""                - explicit standalone opt-out   nil               - field absent; no explicit declaration |
+| `args_append` | []string |  |  | ArgsAppend accumulates extra args after each layer's Args replacement. |
+| `options_schema_merge` | string |  |  | OptionsSchemaMerge controls OptionsSchema merge mode across the chain: "replace" (default) or "by_key". Enum: `replace`, `by_key` |
 | `display_name` | string |  |  | DisplayName is the human-readable name shown in UI and logs. |
 | `command` | string |  |  | Command is the executable to run for this provider. |
 | `args` | []string |  |  | Args are default command-line arguments passed to the provider. |
@@ -451,7 +458,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs is milliseconds to wait after launch before the provider is considered ready. |
 | `ready_prompt_prefix` | string |  |  | ReadyPromptPrefix is the string prefix that indicates the provider is ready for input. |
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the provider is running. |
-| `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning indicates whether the provider emits permission prompts. |
+| `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning is tri-state: nil = inherit, &true = enable, &false = explicit disable. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the provider process. |
 | `path_check` | string |  |  | PathCheck overrides the binary name used for PATH detection. When set, lookupProvider and detectProviderName use this instead of Command for exec.LookPath checks. Useful when Command is a shell wrapper (e.g. sh -c '...') but we need to verify the real binary is installed. |
 | `supports_acp` | boolean |  |  | SupportsACP indicates the binary speaks the Agent Client Protocol (JSON-RPC 2.0 over stdio). When an agent sets session = "acp", its resolved provider must have SupportsACP = true. |

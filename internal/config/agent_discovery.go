@@ -123,9 +123,3 @@ func applyAgentConventionDefaults(fs fsys.FS, packDir string, agent *Agent) {
 		}
 	}
 }
-
-func applyAgentsConventionDefaults(fs fsys.FS, packDir string, agents []Agent) {
-	for i := range agents {
-		applyAgentConventionDefaults(fs, packDir, &agents[i])
-	}
-}

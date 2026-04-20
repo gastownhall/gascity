@@ -363,18 +363,14 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 }
 
 func loadCityImportManifestFS(fs fsys.FS, cityPath string) (*config.City, error) {
-	return config.Load(fs, filepath.Join(cityPath, "city.toml"))
+	return loadCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"))
 }
 
 func writeCityImportManifestFS(fs fsys.FS, cityPath string, cfg *config.City) error {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
-	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
-		return fmt.Errorf("encoding city.toml: %w", err)
-	}
-	return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "city.toml"), buf.Bytes(), 0o644)
+	return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 }
 
 func findImportRigIndex(cityPath string, rigs []config.Rig, target string) (int, string, error) {

@@ -66,8 +66,8 @@ scope = "city"
 	if !strings.Contains(out, "gc doctor --fix") || !strings.Contains(out, "gc doctor") {
 		t.Fatalf("doctor output missing doctor migration guidance:\n%s", out)
 	}
-	if !strings.Contains(out, "[rig_defaults] imports = [...]") {
-		t.Fatalf("doctor output missing rig_defaults guidance:\n%s", out)
+	if !strings.Contains(out, "[defaults.rig.imports.<binding>]") {
+		t.Fatalf("doctor output missing rig defaults guidance:\n%s", out)
 	}
 	if !strings.Contains(out, ".template.md") {
 		t.Fatalf("doctor output missing .template.md guidance:\n%s", out)

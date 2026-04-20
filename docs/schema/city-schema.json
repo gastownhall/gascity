@@ -1439,6 +1439,10 @@
             "$ref": "#/$defs/OptionChoice"
           },
           "type": "array"
+        },
+        "omit": {
+          "type": "boolean",
+          "description": "Omit is the removal sentinel for options_schema_merge = \"by_key\".\nWhen set on a child layer's entry, the matching Key inherited from\na parent layer is pruned from the resolved schema."
         }
       },
       "additionalProperties": false,
@@ -1458,6 +1462,10 @@
           "type": "string",
           "description": "Name is the targeting key (required). Must match an existing provider's name."
         },
+        "base": {
+          "type": "string",
+          "description": "Base overrides the provider's inheritance parent (presence-aware).\nPointer to a pointer so the patch can distinguish \"no change\"\n(double-nil) from \"clear to inherit default\" (single-nil value in\nouter pointer) from \"set to explicit empty opt-out\" (value \"\" in\ninner pointer) from \"set to \u003cname\u003e\". Callers use:\n  nil          = patch does not touch Base\n  \u0026(*string)(nil) = patch clears Base to absent\n  \u0026(\u0026\"\")       = patch sets Base = \"\" (explicit opt-out)\n  \u0026(\u0026\"builtin:codex\") = patch sets Base to that value"
+        },
         "command": {
           "type": "string",
           "description": "Command overrides the provider command."
@@ -1468,6 +1476,17 @@
           },
           "type": "array",
           "description": "Args overrides the provider args."
+        },
+        "args_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ArgsAppend overrides the provider args_append list."
+        },
+        "options_schema_merge": {
+          "type": "string",
+          "description": "OptionsSchemaMerge overrides the options_schema merge mode."
         },
         "prompt_mode": {
           "type": "string",
@@ -1515,6 +1534,25 @@
     },
     "ProviderSpec": {
       "properties": {
+        "base": {
+          "type": "string",
+          "description": "Base names the parent provider this spec inherits from. Supported\nforms:\n  \"\u003cname\u003e\"          - custom first (self-excluded), then built-in\n  \"builtin:\u003cname\u003e\"  - force built-in lookup\n  \"provider:\u003cname\u003e\" - force custom lookup\n  \"\"                - explicit standalone opt-out\n  nil               - field absent; no explicit declaration"
+        },
+        "args_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ArgsAppend accumulates extra args after each layer's Args replacement."
+        },
+        "options_schema_merge": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "by_key"
+          ],
+          "description": "OptionsSchemaMerge controls OptionsSchema merge mode across the\nchain: \"replace\" (default) or \"by_key\"."
+        },
         "display_name": {
           "type": "string",
           "description": "DisplayName is the human-readable name shown in UI and logs."
@@ -1562,7 +1600,7 @@
         },
         "emits_permission_warning": {
           "type": "boolean",
-          "description": "EmitsPermissionWarning indicates whether the provider emits permission prompts."
+          "description": "EmitsPermissionWarning is tri-state: nil = inherit, \u0026true = enable,\n\u0026false = explicit disable."
         },
         "env": {
           "additionalProperties": {

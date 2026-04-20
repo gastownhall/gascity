@@ -1022,6 +1022,20 @@ version = "^1.0"
 	if _, ok := cfg.Rigs[0].Imports["local"]; !ok {
 		t.Fatalf("rig imports = %#v, want local", cfg.Rigs[0].Imports)
 	}
+	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	if strings.Contains(string(cityData), "path = ") {
+		t.Fatalf("city.toml should not retain machine-local rig path:\n%s", string(cityData))
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != "./frontend" {
+		t.Fatalf("site binding rigs = %#v, want frontend path", binding.Rigs)
+	}
 
 	packCfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
 	if err != nil {
@@ -1254,6 +1268,61 @@ path = "./frontend"
 	}
 	if _, ok := cfg.Rigs[0].Imports["local"]; !ok {
 		t.Fatalf("rig imports = %#v, want local", cfg.Rigs[0].Imports)
+	}
+}
+
+func TestDoImportAddFindsRigByMigratedSiteBindingPath(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, `
+[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+`)
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, dir, []config.Rig{{
+		Name: "frontend",
+		Path: filepath.Join(dir, "frontend"),
+	}}); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+	localPack := filepath.Join(dir, "packs", "local")
+	if err := os.MkdirAll(localPack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePackToml(t, localPack, "[pack]\nname = \"local\"\nschema = 1\n")
+
+	prevRigFlag := rigFlag
+	prevSync := syncImports
+	rigFlag = "./frontend"
+	t.Cleanup(func() {
+		rigFlag = prevRigFlag
+		syncImports = prevSync
+	})
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "./packs/local", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("Load(city.toml): %v", err)
+	}
+	if _, ok := cfg.Rigs[0].Imports["local"]; !ok {
+		t.Fatalf("rig imports = %#v, want local", cfg.Rigs[0].Imports)
+	}
+	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	if strings.Contains(string(cityData), "path = ") {
+		t.Fatalf("city.toml should not gain machine-local rig path:\n%s", string(cityData))
 	}
 }
 

@@ -318,17 +318,23 @@ gc config
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc config explain](#gc-config-explain) | Show resolved agent config with provenance annotations |
+| [gc config explain](#gc-config-explain) | Show resolved config with provenance annotations |
 | [gc config show](#gc-config-show) | Dump the resolved city configuration as TOML |
 
 ## gc config explain
 
-Show the resolved configuration for each agent with provenance.
+Show the resolved configuration with provenance.
 
-Displays every resolved field with an annotation showing which config
-file provided the value. Use --rig and --agent to filter the output.
-Useful for debugging config composition and understanding override
-resolution.
+For agents (default): displays every resolved field with an annotation
+showing which config file provided the value. Use --rig and --agent to
+filter.
+
+For providers (--provider): displays the resolved ProviderSpec along
+with per-field and per-map-key attribution — which chain layer
+(builtin:X or providers.Y) contributed each value. Useful for
+debugging base-chain inheritance.
+
+Use --json to emit machine-readable output (providers only).
 
 ```
 gc config explain [flags]
@@ -340,6 +346,8 @@ gc config explain [flags]
 gc config explain
   gc config explain --agent mayor
   gc config explain --rig my-project
+  gc config explain --provider codex-max
+  gc config explain --provider codex-max --json
   gc config explain -f overlay.toml --agent polecat
 ```
 
@@ -347,6 +355,8 @@ gc config explain
 |------|------|---------|-------------|
 | `--agent` | string |  | filter to a specific agent name |
 | `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
+| `--json` | bool |  | emit JSON (requires --provider) |
+| `--provider` | string |  | explain a provider's resolved chain instead of agents |
 | `--rig` | string |  | filter to agents in this rig |
 
 ## gc config show
@@ -422,7 +432,7 @@ gc converge create [flags]
 | `--formula` | string |  | Formula to use (required) |
 | `--gate` | string | `manual` | Gate mode: manual, condition, hybrid |
 | `--gate-condition` | string |  | Path to gate condition script |
-| `--gate-timeout` | string | `30s` | Gate execution timeout |
+| `--gate-timeout` | string | `5m0s` | Gate execution timeout |
 | `--gate-timeout-action` | string | `iterate` | Action on gate timeout: iterate, retry, manual, terminate |
 | `--max-iterations` | int | `5` | Maximum iterations |
 | `--target` | string |  | Target agent (required) |
@@ -1177,8 +1187,8 @@ Check for unread mail addressed to a session alias or mailbox.
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a &lt;system-reminder&gt; block suitable for
-hook injection (always exits 0). The recipient defaults to $GC_ALIAS,
-$GC_SESSION_ID, or "human".
+hook injection (always exits 0). The recipient defaults to $GC_SESSION_ID,
+$GC_ALIAS, $GC_AGENT, or "human".
 
 ```
 gc mail check [session] [flags]
@@ -1200,7 +1210,7 @@ gc mail check
 ## gc mail count
 
 Show total and unread message counts for a session alias or human.
-The recipient defaults to $GC_ALIAS, $GC_SESSION_ID, or "human".
+The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".
 
 ```
 gc mail count [session]
@@ -1219,7 +1229,7 @@ gc mail delete <id>
 List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_ALIAS, $GC_SESSION_ID, or "human". Pass a session alias to view another inbox.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
 
 ```
 gc mail inbox [session]
@@ -1285,7 +1295,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_ALIAS or $GC_SESSION_ID (in sessions) or "human". Use --notify to nudge
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -1310,7 +1320,7 @@ gc mail send mayor "Build is green"
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
-| `--from` | string |  | sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or "human") |
+| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | nudge the recipient after sending |
 | `-s`, `--subject` | string |  | message subject line |
@@ -1523,6 +1533,20 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
+Pass --strict to fail on debugging mistakes instead of silently falling
+back to the default prompt. Strict errors on:
+
+  - no city config found
+  - city config fails to load
+  - no agent name given (from args, GC_ALIAS, or GC_AGENT)
+  - agent name not in city config (typo detection — the main use case)
+  - agent's prompt_template points at a file that cannot be read
+
+Strict does NOT error on agents whose config intentionally lacks a
+prompt_template (a supported minimal config), on templates that render
+to empty output from valid conditional logic, or on suspended states
+(city or agent) — those are legitimate quiet states, not mistakes.
+
 ```
 gc prime [agent-name] [flags]
 ```
@@ -1531,6 +1555,7 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 | `--hook-format` | string |  | format hook output for a provider |
+| `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
 
 ## gc register
 
@@ -1539,8 +1564,9 @@ Register a city directory with the machine-wide supervisor.
 If no path is given, registers the current city (discovered from cwd).
 Use --name to set the machine-local registration alias. The alias is stored
 in the machine-local supervisor registry and never written back to city.toml.
-When --name is omitted, workspace.name is used if present, otherwise
-[pack].name is used — in either case city.toml is not modified.
+When --name is omitted, the current effective city identity is used
+(site-bound workspace name if present, otherwise legacy workspace.name,
+otherwise the directory basename) — in every case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 

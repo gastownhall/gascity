@@ -233,13 +233,3 @@ func collectTOMLTags(t reflect.Type, seen map[string]bool) {
 		}
 	}
 }
-
-func parsePackConfigWithMeta(data []byte, source string) (packConfig, []string, error) {
-	var cfg packConfig
-	md, err := toml.Decode(string(data), &cfg)
-	if err != nil {
-		return packConfig{}, nil, err
-	}
-	normalizePackAgentDefaultsAlias(&cfg, md)
-	return cfg, CheckUndecodedKeys(md, source), nil
-}

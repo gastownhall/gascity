@@ -17,18 +17,6 @@ func TestSupervisorCityCreateConflictsWhenTargetAlreadyInitialized(t *testing.T)
 		setup func(t *testing.T, dir string)
 	}{
 		{
-			name: "city_toml_present",
-			setup: func(t *testing.T, dir string) {
-				t.Helper()
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"alpha\"\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
 			name: "scaffold_present",
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
@@ -69,5 +57,16 @@ func TestSupervisorCityCreateConflictsWhenTargetAlreadyInitialized(t *testing.T)
 				t.Fatalf("body = %q, want already initialized detail", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestCityDirAlreadyInitializedAllowsConfigOnlyBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"alpha\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if cityDirAlreadyInitialized(dir) {
+		t.Fatal("config-only city should be left for gc init bootstrap")
 	}
 }

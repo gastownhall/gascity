@@ -339,10 +339,6 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 }
 
 func cityDirAlreadyInitialized(dir string) bool {
-	if info, err := os.Stat(filepath.Join(dir, citylayout.CityConfigFile)); err == nil && !info.IsDir() {
-		return true
-	}
-
 	requiredDirs := []string{
 		filepath.Join(dir, citylayout.RuntimeRoot),
 		filepath.Join(dir, citylayout.RuntimeRoot, "cache"),

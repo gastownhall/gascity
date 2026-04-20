@@ -181,6 +181,9 @@ type City struct {
 	// ResolvedWorkspaceName is the effective city name derived from the
 	// config file path when workspace.name is omitted. Runtime-only.
 	ResolvedWorkspaceName string `toml:"-" json:"-"`
+	// ResolvedWorkspacePrefix is the effective HQ prefix after applying site
+	// binding and declared config. Runtime-only.
+	ResolvedWorkspacePrefix string `toml:"-" json:"-"`
 
 	// FormulaLayers holds the resolved formula directories per scope.
 	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
@@ -288,6 +291,9 @@ type City struct {
 	// DefaultRigImportOrder preserves declaration order for
 	// [defaults.rig.imports]. Runtime-only.
 	DefaultRigImportOrder []string `toml:"-" json:"-"`
+	// ResolvedProviders is the eager-resolution cache populated by
+	// BuildResolvedProviderCache after compose + patch. Runtime-only.
+	ResolvedProviders map[string]ResolvedProvider `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -661,6 +667,9 @@ type PackDoctorEntry struct {
 	Script string `toml:"script" jsonschema:"required"`
 	// Description is an optional human-readable description of the check.
 	Description string `toml:"description,omitempty"`
+	// Fix is an optional path to a remediation script, relative to the pack
+	// directory. When set, the check opts into `gc doctor --fix`.
+	Fix string `toml:"fix,omitempty"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -703,18 +712,19 @@ func (r *Rig) EffectivePrefix() string {
 }
 
 // EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
-// Uses the explicit workspace Prefix if set, otherwise derives one from
-// the city name (falling back to ResolvedWorkspaceName when the TOML
-// name field is omitted).
+// Uses the effective site-bound prefix first, then the declared workspace
+// Prefix, then derives one from the effective city name.
 func EffectiveHQPrefix(cfg *City) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.ResolvedWorkspacePrefix != "" {
+		return cfg.ResolvedWorkspacePrefix
+	}
 	if cfg.Workspace.Prefix != "" {
 		return cfg.Workspace.Prefix
 	}
-	name := cfg.Workspace.Name
-	if name == "" {
-		name = cfg.ResolvedWorkspaceName
-	}
-	return DeriveBeadsPrefix(name)
+	return DeriveBeadsPrefix(cfg.EffectiveCityName())
 }
 
 // DeriveBeadsPrefix computes a short bead ID prefix from a rig/city name.
@@ -2070,7 +2080,7 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.PromptsRoot + "/pool-worker.md"
+	promptTemplate := citylayout.SystemPacksRoot + "/core/assets/prompts/pool-worker.md"
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
@@ -2722,7 +2732,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.ResolvedWorkspaceName = filepath.Base(filepath.Dir(path))
+	if err := ResolveWorkspaceIdentity(fs, filepath.Dir(path), cfg); err != nil {
+		return nil, err
+	}
 	// Load intentionally skips include and pack expansion, so validate the
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.

@@ -175,34 +175,6 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 	return resolveConfigPath(ref, declDir, cityRoot), nil
 }
 
-func resolveImportRef(ref, declDir, cityRoot string) (string, error) {
-	if isGitHubTreeURL(ref) {
-		_, subpath, _ := parseGitHubTreeURL(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
-		if err != nil {
-			return "", err
-		}
-		if subpath != "" {
-			return filepath.Join(cacheDir, subpath), nil
-		}
-		return cacheDir, nil
-	}
-	if isRemoteInclude(ref) {
-		_, subpath, gitRef := parseRemoteInclude(ref)
-		if gitRef == "" {
-			cacheDir, err := resolveInstalledRemoteImport(ref, cityRoot)
-			if err != nil {
-				return "", err
-			}
-			if subpath != "" {
-				return filepath.Join(cacheDir, subpath), nil
-			}
-			return cacheDir, nil
-		}
-	}
-	return resolvePackRef(ref, declDir, cityRoot)
-}
-
 type remoteImportLockfile struct {
 	Packs map[string]remoteImportLockEntry `toml:"packs"`
 }

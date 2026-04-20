@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -217,7 +218,7 @@ func resolveAgentChoice(input string, order []string, builtins map[string]config
 	return ""
 }
 
-const initProgressSteps = 6
+const initProgressSteps = 8
 
 // initExitAlreadyInitialized is the process exit code for an init request
 // that targets an already-initialized city. The supervisor API depends on
@@ -638,6 +639,7 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 
 	// --file creates a new city from a template; default to target dir name.
 	cityName := resolveCityName(nameOverride, "", cityPath)
+	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 	templatePack, err := decodeInitPackTemplate(data, cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -696,6 +698,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 
 	// Write city.toml.
 	if err := fs.WriteFile(filepath.Join(cityPath, "city.toml"), content, 0o644); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := persistInitWorkspaceIdentity(fs, cityPath, filepath.Join(cityPath, "city.toml"), &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -784,6 +790,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
+	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 
 	// Write prompt files only for the agents declared by the init template.
 	logInitProgress(stdout, 3, "Writing default prompts")
@@ -819,6 +826,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	}
 	logInitProgress(stdout, 6, "Writing city configuration")
 	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := persistInitWorkspaceIdentity(fs, cityPath, tomlPath, &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1001,6 +1012,59 @@ func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 	return doInitFromDirWithOptions(srcDir, cityPath, "", stdout, stderr, false)
 }
 
+func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
+	srcToml := filepath.Join(srcDir, "city.toml")
+	if _, err := os.Stat(srcToml); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if cityAlreadyInitializedFS(fs, cityPath) {
+		return initAlreadyInitialized(stderr)
+	}
+	if err := fs.MkdirAll(cityPath, 0o755); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkip, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	copiedToml := filepath.Join(cityPath, "city.toml")
+	data, err := os.ReadFile(copiedToml)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc init: reading copied city.toml: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityName := resolveCityName(nameOverride, cfg.Workspace.Name, cityPath)
+	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	cfg.Workspace.Name = cityName
+	cfg.Workspace.Prefix = cityPrefix
+	content, err := cfg.Marshal()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doInitFromDirWithOptions(srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness)
+}
+
 func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
 	fs := fsys.OSFS{}
 	// Validate source has city.toml.
@@ -1049,6 +1113,10 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, strings.TrimSpace(cfg.Workspace.Prefix)); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Create runtime scaffold.
 	if err := ensureCityScaffold(cityPath); err != nil {
@@ -1092,4 +1160,33 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 	})
+}
+
+func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {
+	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, cityPrefix); err != nil {
+		if restoreErr := restoreLegacyWorkspaceIdentity(fs, cityTomlPath, cfg, cityName, cityPrefix); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restoring legacy workspace identity: %w", restoreErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {
+	if cfg == nil {
+		return nil
+	}
+	restored := *cfg
+	restored.Workspace.Name = strings.TrimSpace(cityName)
+	restored.Workspace.Prefix = strings.TrimSpace(cityPrefix)
+	restored.ResolvedWorkspaceName = ""
+	restored.ResolvedWorkspacePrefix = ""
+	content, err := restored.Marshal()
+	if err != nil {
+		return fmt.Errorf("marshal %q: %w", cityTomlPath, err)
+	}
+	if err := fs.WriteFile(cityTomlPath, content, 0o644); err != nil {
+		return fmt.Errorf("write %q: %w", cityTomlPath, err)
+	}
+	return nil
 }
