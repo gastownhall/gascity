@@ -91,10 +91,7 @@
         },
         "session": {
           "type": "string",
-          "enum": [
-            "acp"
-          ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+          "description": "Session overrides the session provider for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\n\"exec:\u003cscript\u003e\" uses a user-supplied exec provider script,\nenabling per-agent provider selection (e.g., headless workers\nalongside tmux-based interactive agents in the same city)."
         },
         "provider": {
           "type": "string",

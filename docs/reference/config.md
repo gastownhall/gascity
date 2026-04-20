@@ -69,7 +69,7 @@ Agent defines a configured agent in the city.
 | `pre_start` | []string |  |  | PreStart is a list of shell commands run before session creation. Commands run on the target filesystem: locally for tmux, inside the pod/container for exec providers. Template variables same as session_setup. |
 | `prompt_template` | string |  |  | PromptTemplate is the path to this agent's prompt template file. Relative paths resolve against the city directory. |
 | `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
-| `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
+| `session` | string |  |  | Session overrides the session provider for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). "exec:&lt;script&gt;" uses a user-supplied exec provider script, enabling per-agent provider selection (e.g., headless workers alongside tmux-based interactive agents in the same city). |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `args` | []string |  |  | Args overrides the provider's default arguments. |

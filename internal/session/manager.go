@@ -131,7 +131,7 @@ type PruneResult struct {
 }
 
 type acpRouteRegistrar interface {
-	RouteACP(name string)
+	RouteACP(name string) error
 	Unroute(name string)
 }
 
@@ -183,7 +183,10 @@ func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() 
 	if !ok {
 		return nil
 	}
-	router.RouteACP(sessName)
+	if err := router.RouteACP(sessName); err != nil {
+		// ACP backend not registered on the auto provider — skip routing.
+		return nil
+	}
 	return func() { router.Unroute(sessName) }
 }
 

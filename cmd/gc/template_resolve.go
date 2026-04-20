@@ -72,6 +72,10 @@ type TemplateParams struct {
 	WakeMode string
 	// IsACP is true if session = "acp".
 	IsACP bool
+	// SessionOverride is the per-agent session provider name (e.g.,
+	// "acp", "exec:scripts/gc-session-docker-headless"). Empty means
+	// use the city-level default.
+	SessionOverride string
 	// HookEnabled reports whether provider hooks are installed for this agent.
 	// Hooks complement startup delivery but do not replace the initial
 	// user-turn prompt. SessionStart hooks can add context, persist session
@@ -484,6 +488,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
 		IsACP:            cfgAgent.Session == "acp",
+		SessionOverride:  cfgAgent.Session,
 		HookEnabled:      hasHooks,
 	}, nil
 }
