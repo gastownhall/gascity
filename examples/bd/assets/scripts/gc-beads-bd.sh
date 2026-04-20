@@ -500,6 +500,30 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+current_time_ms() {
+    local gc_bin now
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        now=$("$gc_bin" dolt-state now-ms </dev/null 2>/dev/null) || now=""
+        case "$now" in
+            ''|*[!0-9]*)
+                now=""
+                ;;
+        esac
+        if [ -n "$now" ]; then
+            printf '%s\n' "$now"
+            return 0
+        fi
+    fi
+    now=$(date +%s 2>/dev/null) || return 1
+    case "$now" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s000\n' "$now"
+}
+
 run_preflight_cleanup() {
     local gc_bin
     gc_bin=$(resolve_gc_helper_bin)
@@ -945,7 +969,7 @@ EOF
 }
 
 wait_for_concurrent_start_ready() {
-    local existing_pid="" existing_port="" holder="" timeout_ms deadline_sec now_sec remaining_sec remaining_ms
+    local existing_pid="" existing_port="" holder="" timeout_ms deadline_ms now_ms remaining_ms sleep_ms
     timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
     case "$timeout_ms" in
         ''|*[!0-9]*)
@@ -955,14 +979,14 @@ wait_for_concurrent_start_ready() {
     if [ "$timeout_ms" -lt 500 ]; then
         timeout_ms=500
     fi
-    deadline_sec=$(( $(date +%s) + ((timeout_ms + 999) / 1000) ))
+    now_ms=$(current_time_ms) || return 1
+    deadline_ms=$((now_ms + timeout_ms))
     while :; do
-        now_sec=$(date +%s)
-        remaining_sec=$((deadline_sec - now_sec))
-        if [ "$remaining_sec" -le 0 ]; then
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
             return 1
         fi
-        remaining_ms=$((remaining_sec * 1000))
         if load_existing_managed_from_gc "$remaining_ms"; then
             existing_pid="$GC_EXISTING_MANAGED_PID"
             if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
@@ -996,12 +1020,23 @@ wait_for_concurrent_start_ready() {
                 fi
             fi
         fi
-        now_sec=$(date +%s)
-        remaining_sec=$((deadline_sec - now_sec))
-        if [ "$remaining_sec" -le 0 ]; then
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
             return 1
         fi
-        sleep 0.5 2>/dev/null || sleep 1
+        sleep_ms=500
+        if [ "$remaining_ms" -lt "$sleep_ms" ]; then
+            sleep_ms="$remaining_ms"
+        fi
+        if [ "$sleep_ms" -le 0 ]; then
+            return 1
+        fi
+        if [ "$sleep_ms" -lt 500 ]; then
+            sleep "0.$(printf '%03d' "$sleep_ms")" 2>/dev/null || sleep 1
+        else
+            sleep 0.5 2>/dev/null || sleep 1
+        fi
     done
 }
 

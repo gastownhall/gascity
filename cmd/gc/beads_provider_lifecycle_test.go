@@ -5419,14 +5419,25 @@ func TestGcBeadsBdStartWaitsForConcurrentStarterSuccess(t *testing.T) {
 	}
 	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
 	startedFile := filepath.Join(t.TempDir(), "starter-ready")
+	nowFile := filepath.Join(t.TempDir(), "gc-now-ms")
 	fakeGC := filepath.Join(binDir, "gc")
 	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
 invocation_file=%q
 started_file=%q
+now_file=%q
 subcmd="$1 $2"
 shift 2
 case "$subcmd" in
+  "dolt-state now-ms")
+    if [ -f "$now_file" ]; then
+      now=$(cat "$now_file")
+    else
+      now=1000000
+    fi
+    printf '%%s\n' "$now"
+    printf '%%s\n' $((now + 250)) > "$now_file"
+    ;;
   "dolt-state runtime-layout")
     city=""
     while [ "$#" -gt 0 ]; do
@@ -5566,7 +5577,7 @@ case "$subcmd" in
     exit 64
     ;;
 esac
-`, invocationFile, startedFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+`, invocationFile, startedFile, nowFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -5654,14 +5665,25 @@ func TestGcBeadsBdStartWaitsForSlowConcurrentStarterSuccess(t *testing.T) {
 	}
 	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
 	startedFile := filepath.Join(t.TempDir(), "starter-ready")
+	nowFile := filepath.Join(t.TempDir(), "gc-now-ms")
 	fakeGC := filepath.Join(binDir, "gc")
 	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
 invocation_file=%q
 started_file=%q
+now_file=%q
 subcmd="$1 $2"
 shift 2
 case "$subcmd" in
+  "dolt-state now-ms")
+    if [ -f "$now_file" ]; then
+      now=$(cat "$now_file")
+    else
+      now=1000000
+    fi
+    printf '%%s\n' "$now"
+    printf '%%s\n' $((now + 250)) > "$now_file"
+    ;;
   "dolt-state runtime-layout")
     city=""
     while [ "$#" -gt 0 ]; do
@@ -5801,7 +5823,7 @@ case "$subcmd" in
     exit 64
     ;;
 esac
-`, invocationFile, startedFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+`, invocationFile, startedFile, nowFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
