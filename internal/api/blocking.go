@@ -26,8 +26,10 @@ type BlockingParams struct {
 func parseBlockingParams(r *http.Request) BlockingParams {
 	bp := BlockingParams{Wait: defaultWait}
 	if v := r.URL.Query().Get("index"); v != "" {
-		bp.Index, _ = strconv.ParseUint(v, 10, 64)
-		bp.HasIndex = true
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			bp.Index = n
+			bp.HasIndex = true
+		}
 	}
 	if v := r.URL.Query().Get("wait"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
