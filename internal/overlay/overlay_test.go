@@ -99,6 +99,23 @@ func TestCopyDir_OverwriteExisting(t *testing.T) {
 	assertFileContent(t, filepath.Join(dst, "config.toml"), "new content")
 }
 
+func TestCopyFileOrDir_FileIntoExistingDirectoryPreservesBaseName(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	src := filepath.Join(srcDir, "notes.txt")
+	writeFile(t, src, "hello")
+
+	var stderr bytes.Buffer
+	if err := CopyFileOrDir(src, dstDir, &stderr); err != nil {
+		t.Fatalf("CopyFileOrDir: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	assertFileContent(t, filepath.Join(dstDir, "notes.txt"), "hello")
+}
+
 func TestCopyDir_NestedSubdirs(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
