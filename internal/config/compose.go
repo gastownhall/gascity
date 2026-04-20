@@ -439,8 +439,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	cityLocalFormulas := citylayout.ResolveFormulasDir(cityRoot, root.FormulasDir())
 	root.FormulaLayers = ComputeFormulaLayers(
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
-	root.ScriptLayers = ComputeScriptLayers(
-		root.PackScriptDirs, root.RigScriptDirs, root.Rigs)
 
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so

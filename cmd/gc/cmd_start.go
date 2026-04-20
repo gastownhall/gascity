@@ -473,9 +473,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	// Materialize script symlinks before agent startup.
-	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc start: %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc start: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
 	})
 
 	// Validate agents.

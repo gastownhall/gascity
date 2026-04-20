@@ -1,98 +1,21 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// ResolveScripts computes per-relative-path winners from layered script
-// directories and creates symlinks in targetDir/scripts/.
-//
-// Compatibility note: PackV2's desired layout does not define a top-level
-// scripts/ surface. The runtime still materializes this directory so legacy
-// city-root script references continue to work until remaining path consumers
-// migrate to pack-local resolution.
-//
-// Layers are ordered lowest→highest priority. For each file found across
-// all layers, the highest-priority layer wins. Winners are symlinked into
-// targetDir/scripts/ preserving subdirectory structure.
-//
-// Idempotent: correct symlinks are left alone, stale ones are updated,
-// and symlinks for scripts no longer in any layer are removed. Real files
-// (non-symlinks) in the target directory are never overwritten.
-func ResolveScripts(targetDir string, layers []string) error {
-	// Build winner map: relative path → absolute source path.
-	// Later layers overwrite earlier ones (higher priority).
-	winners := make(map[string]string)
-	for _, layerDir := range layers {
-		err := filepath.WalkDir(layerDir, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil // skip unreadable entries
-			}
-			if d.IsDir() {
-				return nil
-			}
-			rel, err := filepath.Rel(layerDir, path)
-			if err != nil {
-				return nil
-			}
-			abs, err := filepath.Abs(path)
-			if err != nil {
-				return nil
-			}
-			winners[rel] = abs
-			return nil
-		})
-		if err != nil {
-			continue // Layer dir doesn't exist — skip.
-		}
-	}
-
-	symlinkDir := filepath.Join(targetDir, "scripts")
-
-	if len(winners) == 0 {
-		return cleanStaleScriptSymlinks(symlinkDir, winners)
-	}
-
-	// Create/update symlinks for winners.
-	for rel, srcPath := range winners {
-		linkPath := filepath.Join(symlinkDir, rel)
-
-		// Ensure parent directory exists.
-		if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
-			return fmt.Errorf("creating script symlink parent dir: %w", err)
-		}
-
-		// Check if a real file (non-symlink) exists — don't overwrite.
-		fi, err := os.Lstat(linkPath)
-		if err == nil && fi.Mode()&os.ModeSymlink == 0 {
-			continue // Real file — leave it alone.
-		}
-
-		// If symlink exists, check if it's correct.
-		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			existing, readErr := os.Readlink(linkPath)
-			if readErr == nil && existing == srcPath {
-				continue // Already correct.
-			}
-			// Stale symlink — remove it.
-			os.Remove(linkPath) //nolint:errcheck // will be recreated
-		}
-
-		if err := os.Symlink(srcPath, linkPath); err != nil {
-			return fmt.Errorf("creating script symlink %q → %q: %w", rel, srcPath, err)
-		}
-	}
-
-	return cleanStaleScriptSymlinks(symlinkDir, winners)
-}
-
-func resolveConfiguredScripts(cityPath string, cfg *config.City, handleErr func(scope string, err error)) {
-	if err := ResolveScripts(cityPath, cfg.ScriptLayers.City); err != nil {
+// pruneLegacyConfiguredScripts removes symlink-only top-level scripts/
+// directories left behind by the old ResolveScripts compatibility shim.
+// Real user-authored files are preserved.
+func pruneLegacyConfiguredScripts(cityPath string, cfg *config.City, handleErr func(scope string, err error)) {
+	if err := pruneLegacyScripts(cityPath); err != nil {
 		handleErr("city", err)
 	}
 	for _, r := range cfg.Rigs {
@@ -103,73 +26,78 @@ func resolveConfiguredScripts(cityPath string, cfg *config.City, handleErr func(
 		if !filepath.IsAbs(rigPath) {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		if err := ResolveScripts(rigPath, cfg.ScriptLayers.Rigs[r.Name]); err != nil {
+		if err := pruneLegacyScripts(rigPath); err != nil {
 			handleErr(fmt.Sprintf("rig %q", r.Name), err)
 		}
 	}
 }
 
-// cleanStaleScriptSymlinks removes symlinks in symlinkDir that are not in
-// winners. Walks recursively and removes empty subdirectories afterward.
-// Skips non-symlinks. No-op if symlinkDir doesn't exist.
-func cleanStaleScriptSymlinks(symlinkDir string, winners map[string]string) error {
-	if _, err := os.Stat(symlinkDir); os.IsNotExist(err) {
+// pruneLegacyScripts removes a top-level scripts/ directory only when it
+// contains compatibility-shim symlinks and no real files.
+func pruneLegacyScripts(targetDir string) error {
+	scriptsDir := filepath.Join(targetDir, "scripts")
+	if _, err := os.Stat(scriptsDir); os.IsNotExist(err) {
 		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat %q: %w", scriptsDir, err)
 	}
 
-	// Collect stale symlinks.
-	var stale []string
-	err := filepath.WalkDir(symlinkDir, func(path string, d os.DirEntry, err error) error {
+	var symlinks []string
+	var sawReal bool
+	err := filepath.WalkDir(scriptsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
-			return nil
+			return err
 		}
 		fi, lErr := os.Lstat(path)
 		if lErr != nil {
+			return lErr
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			symlinks = append(symlinks, path)
 			return nil
 		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			return nil // Real file — skip.
-		}
-		rel, rErr := filepath.Rel(symlinkDir, path)
-		if rErr != nil {
-			return nil
-		}
-		if _, isWinner := winners[rel]; !isWinner {
-			stale = append(stale, path)
-		}
+		sawReal = true
 		return nil
 	})
 	if err != nil {
+		return fmt.Errorf("walking %q: %w", scriptsDir, err)
+	}
+	if sawReal || len(symlinks) == 0 {
 		return nil
 	}
 
-	for _, path := range stale {
-		os.Remove(path) //nolint:errcheck // best-effort cleanup
+	for _, path := range symlinks {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing legacy script symlink %q: %w", path, err)
+		}
 	}
-
-	// Remove empty directories (bottom-up).
-	removeEmptyDirs(symlinkDir)
-
-	return nil
+	return removeEmptyDirsInclusive(scriptsDir)
 }
 
-// removeEmptyDirs walks symlinkDir bottom-up and removes empty directories.
-// The root symlinkDir itself is not removed.
-func removeEmptyDirs(root string) {
-	// Collect all directories.
+// removeEmptyDirsInclusive removes empty directories bottom-up, including root.
+func removeEmptyDirsInclusive(root string) error {
 	var dirs []string
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error { //nolint:errcheck // best-effort
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
-		if d.IsDir() && path != root {
+		if d.IsDir() {
 			dirs = append(dirs, path)
 		}
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("walking empty-dir cleanup for %q: %w", root, err)
+	}
 
 	// Process deepest first.
 	for i := len(dirs) - 1; i >= 0; i-- {
-		os.Remove(dirs[i]) //nolint:errcheck // fails silently if non-empty
+		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) && !isDirectoryNotEmpty(err) {
+			return fmt.Errorf("removing empty dir %q: %w", dirs[i], err)
+		}
 	}
+	return nil
+}
+
+func isDirectoryNotEmpty(err error) bool {
+	return errors.Is(err, syscall.ENOTEMPTY)
 }

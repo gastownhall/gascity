@@ -1177,8 +1177,8 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		}
 	}
 	if loadErr == nil {
-		resolveConfiguredScripts(cityPath, expandedCfg, func(scope string, err error) {
-			fmt.Fprintf(stderr, "gc init: resolving %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+		pruneLegacyConfiguredScripts(cityPath, expandedCfg, func(scope string, err error) {
+			fmt.Fprintf(stderr, "gc init: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
 		})
 	}
 

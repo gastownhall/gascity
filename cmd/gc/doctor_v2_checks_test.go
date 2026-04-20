@@ -72,7 +72,7 @@ scope = "city"
 	}
 }
 
-func TestV2ScriptsLayoutPassesForSymlinkOnlyDir(t *testing.T) {
+func TestV2ScriptsLayoutWarnsForSymlinkOnlyDir(t *testing.T) {
 	t.Parallel()
 
 	cityDir := t.TempDir()
@@ -91,12 +91,12 @@ func TestV2ScriptsLayoutPassesForSymlinkOnlyDir(t *testing.T) {
 	}
 
 	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
-	if res.Status != doctor.StatusOK {
-		t.Fatalf("symlink-only scripts/ should pass; got status=%v message=%q details=%v",
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("symlink-only scripts/ should warn as stale legacy state; got status=%v message=%q details=%v",
 			res.Status, res.Message, res.Details)
 	}
-	if !strings.Contains(res.Message, "pack-resolved symlinks") {
-		t.Fatalf("symlink-only scripts/ should report compatibility shim state, got %q", res.Message)
+	if !strings.Contains(res.Message, "stale legacy symlinks") {
+		t.Fatalf("symlink-only scripts/ should report stale legacy state, got %q", res.Message)
 	}
 }
 

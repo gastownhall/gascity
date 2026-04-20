@@ -256,7 +256,10 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	}
 	if len(realFiles) == 0 {
 		if sawSymlink {
-			return okCheck("v2-scripts-layout", "top-level scripts/ only contains pack-resolved symlinks")
+			return warnCheck("v2-scripts-layout",
+				"top-level scripts/ only contains stale legacy symlinks",
+				"delete scripts/ or rerun gc start/gc supervisor so runtime pruning can remove the old shim",
+				[]string{"scripts/"})
 		}
 		return okCheck("v2-scripts-layout", "no legacy top-level scripts found")
 	}
@@ -268,8 +271,8 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 
 // inspectTopLevelScripts returns relative paths (under "scripts/") of real
 // files plus whether the tree contains any symlinks. Symlinks are treated as
-// compatibility artifacts created by ResolveScripts, while real files indicate
-// the deprecated user-authored top-level scripts layout.
+// stale compatibility artifacts from the removed ResolveScripts shim, while
+// real files indicate the deprecated user-authored top-level scripts layout.
 func inspectTopLevelScripts(dir string) ([]string, bool, error) {
 	var real []string
 	var sawSymlink bool
