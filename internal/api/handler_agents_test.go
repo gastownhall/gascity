@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,21 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+type partialAgentSessionLister struct {
+	running []string
+	err     error
+}
+
+func (p partialAgentSessionLister) ListRunning(prefix string) ([]string, error) {
+	var filtered []string
+	for _, name := range p.running {
+		if len(prefix) == 0 || strings.HasPrefix(name, prefix) {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered, p.err
+}
 
 func TestAgentList(t *testing.T) {
 	state := newFakeState(t)
@@ -126,6 +143,24 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 		if !item.Running {
 			t.Errorf("Items[%d].Running = false, want true", i)
 		}
+	}
+}
+
+func TestDiscoverUnlimitedPoolUsesPartialListResults(t *testing.T) {
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "myrig",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(-1),
+	}
+	sp := partialAgentSessionLister{
+		running: []string{"myrig--polecat-1", "myrig--polecat-2"},
+		err:     &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+
+	got := discoverUnlimitedPool(a, "myrig/polecat", "test-city", "", sp)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2 discovered agents from partial results", len(got))
 	}
 }
 

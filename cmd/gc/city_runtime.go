@@ -931,7 +931,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	if providerChanged {
-		if running, lErr := cr.sp.ListRunning(""); lErr == nil && len(running) > 0 {
+		if running, lErr := cr.sp.ListRunning(""); (lErr == nil || runtime.IsPartialListError(lErr)) && len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
 				displayProviderName(*lastProviderName), displayProviderName(pendingProviderName), len(running))
 			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)

@@ -32,6 +32,8 @@ type startupWatchEvent struct {
 	Content string `json:"content"`
 }
 
+var startupWatchFirstEventTimeout = runtime.StartupDialogTimeout
+
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
@@ -137,13 +139,14 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 		return nil
 	}
 
-	snapshots, closeWatch, ok, err := p.startStartupWatch(ctx, name)
+	dialogTimeout := runtime.StartupDialogTimeout()
+	snapshots, closeWatch, ok, err := p.startStartupWatch(ctx, name, startupWatchFirstEventTimeout())
 	if err != nil {
 		return err
 	}
 	if ok {
 		defer closeWatch()
-		return runtime.AcceptStartupDialogsFromStream(ctx, runtime.StartupDialogTimeout(), snapshots,
+		return runtime.AcceptStartupDialogsFromStream(ctx, dialogTimeout, snapshots,
 			func(keys ...string) error { return p.SendKeys(name, keys...) },
 		)
 	}
@@ -157,10 +160,13 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 func (p *Provider) startStartupWatch(
 	ctx context.Context,
 	name string,
+	firstEventTimeout time.Duration,
 ) (<-chan string, func() error, bool, error) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cmd.WaitDelay = 2 * time.Second
+	// Startup watchers are short-lived probes; tear them down quickly once the
+	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
+	cmd.WaitDelay = 250 * time.Millisecond
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -204,6 +210,10 @@ func (p *Provider) startStartupWatch(
 				emitted = true
 				first <- firstResult{content: event.Content}
 			}
+			if err := watchCtx.Err(); err != nil {
+				done <- formatStartupWatchError(stderr.String(), cmd.Wait())
+				return
+			}
 			select {
 			case events <- event.Content:
 			case <-watchCtx.Done():
@@ -242,7 +252,27 @@ func (p *Provider) startStartupWatch(
 		done <- formatStartupWatchError(stderr.String(), waitErr)
 	}()
 
-	result := <-first
+	var (
+		timeout <-chan time.Time
+		timer   *time.Timer
+	)
+	if firstEventTimeout > 0 {
+		timer = time.NewTimer(firstEventTimeout)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+
+	var result firstResult
+	select {
+	case result = <-first:
+	case <-timeout:
+		cancel()
+		_ = waitStartupWatch(done)
+		return nil, nil, false, nil
+	case <-watchCtx.Done():
+		_ = waitStartupWatch(done)
+		return nil, nil, false, ctx.Err()
+	}
 	if result.unsupported {
 		cancel()
 		_ = waitStartupWatch(done)

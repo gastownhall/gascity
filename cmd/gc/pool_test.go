@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,16 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type partialListPoolProvider struct {
+	*runtime.Fake
+	listErr error
+}
+
+func (p *partialListPoolProvider) ListRunning(prefix string) ([]string, error) {
+	names, _ := p.Fake.ListRunning(prefix)
+	return names, p.listErr
+}
 
 func TestEvaluatePoolSuccess(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: 10, Check: "echo 5"}
@@ -335,6 +346,21 @@ func TestDiscoverPoolInstancesUnlimited(t *testing.T) {
 	}
 }
 
+func TestDiscoverPoolInstancesUnlimitedUsesPartialResults(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+	_ = sp.Start(context.Background(), "myrig--worker-1", runtime.Config{})
+	_ = sp.Start(context.Background(), "myrig--worker-3", runtime.Config{})
+
+	pool := scaleParams{Min: 0, Max: -1}
+	instances := discoverPoolInstances("worker", "myrig", pool, nil, "city", "", sp)
+	if len(instances) != 2 {
+		t.Fatalf("len = %d, want 2 from healthy backend (instances: %v)", len(instances), instances)
+	}
+}
+
 func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
@@ -343,6 +369,20 @@ func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
 	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: -1}, nil, "city", "", sp)
 	if count != 2 {
 		t.Errorf("count = %d, want 2", count)
+	}
+}
+
+func TestCountRunningPoolInstancesUsesPartialListResults(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
+	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
+
+	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
+	if count != 2 {
+		t.Errorf("count = %d, want 2 from partial list results", count)
 	}
 }
 

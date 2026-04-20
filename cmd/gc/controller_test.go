@@ -87,6 +87,25 @@ func TestControllerLoopTick(t *testing.T) {
 	}
 }
 
+func TestRunningSessionSetUsesPartialListResults(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: runtime.ErrSessionNotFound},
+	}
+	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
+
+	got, ok := runningSessionSet(sp, []string{"alpha", "beta"})
+	if !ok {
+		t.Fatal("runningSessionSet should accept partial list results")
+	}
+	if !got["alpha"] {
+		t.Fatalf("runningSessionSet = %v, want alpha to be marked running", got)
+	}
+	if got["beta"] {
+		t.Fatalf("runningSessionSet = %v, want beta absent", got)
+	}
+}
+
 func TestControllerLockExclusion(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-lock-")
 	gcDir := filepath.Join(dir, ".gc")

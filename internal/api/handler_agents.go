@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -120,7 +121,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, sessTmpl)
 
 	running, err := sp.ListRunning(snPrefix)
-	if err != nil || len(running) == 0 {
+	if (err != nil && !runtime.IsPartialListError(err)) || len(running) == 0 {
 		return nil
 	}
 

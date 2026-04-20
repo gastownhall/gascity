@@ -236,6 +236,30 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testing.T) {
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	stream.publish("Do you trust the contents of this directory?")
+	stream.publish("user@host $")
+	stream.finish()
+
+	var sent []string
+	err := acceptWorkspaceTrustDialogFromStream(
+		context.Background(),
+		time.Second,
+		stream,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("acceptWorkspaceTrustDialogFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
 func TestAcceptStartupDialogsFromStreamReplaysBypassDialogAcrossPhases(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 1)

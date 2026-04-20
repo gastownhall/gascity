@@ -553,7 +553,8 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
-	if err != nil {
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("listing sessions: %v", err)
 		return r
@@ -574,12 +575,21 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	if len(orphans) == 0 {
+		if partialList {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
+			return r
+		}
 		r.Status = StatusOK
 		r.Message = "no orphaned sessions"
 		return r
 	}
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
+	if partialList {
+		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible orphaned session(s))", err, len(orphans))
+	} else {
+		r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
+	}
 	r.Details = orphans
 	return r
 }
@@ -591,6 +601,9 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
+	if runtime.IsPartialListError(err) {
+		return fmt.Errorf("listing sessions partially failed: %w", err)
+	}
 	if err != nil {
 		return err
 	}

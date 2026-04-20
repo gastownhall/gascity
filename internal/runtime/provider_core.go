@@ -5,6 +5,29 @@ import (
 	"fmt"
 )
 
+// PartialListError reports that ListRunning returned best-effort results while
+// one or more backends failed. Callers may continue using the returned names
+// slice, but should surface the degraded backend error to operators.
+type PartialListError struct {
+	Err error
+}
+
+// Error returns the aggregated backend failure message.
+func (e *PartialListError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+// Unwrap exposes the aggregated backend failure.
+func (e *PartialListError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // BackendError carries provider/backend context for aggregated failures.
 type BackendError struct {
 	Label string
@@ -18,12 +41,17 @@ type BackendListResult struct {
 	Err   error
 }
 
-// MergeBackendListResults merges provider ListRunning results and preserves
-// best-effort behavior when only some backends fail.
-//
-// Historical callers assume ListRunning still returns any healthy backend's
-// sessions so cleanup, discovery, and accounting can proceed. Only a total
-// failure returns an error.
+// IsPartialListError reports whether err represents a degraded-but-usable
+// ListRunning result from one or more failed backends.
+func IsPartialListError(err error) bool {
+	var target *PartialListError
+	return errors.As(err, &target)
+}
+
+// MergeBackendListResults merges provider ListRunning results. On partial
+// backend failure it returns the best-effort merged names plus a
+// [PartialListError] so callers can continue with partial results while still
+// surfacing backend degradation. Only a total failure returns no names.
 func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	merged := make([]string, 0)
 	failures := make([]error, 0, len(results))
@@ -47,7 +75,7 @@ func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	if failed == len(results) {
 		return nil, errors.Join(failures...)
 	}
-	return merged, nil
+	return merged, &PartialListError{Err: errors.Join(failures...)}
 }
 
 // MergeBackendStopErrors standardizes multi-backend Stop semantics.

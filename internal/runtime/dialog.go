@@ -345,9 +345,7 @@ type streamDialogSpec struct {
 
 type replayableSnapshotStream struct {
 	mu      sync.Mutex
-	latest  string
-	hasData bool
-	version uint64
+	history []string
 	closed  bool
 	update  chan struct{}
 }
@@ -365,9 +363,7 @@ func newReplayableSnapshotStream(src <-chan string) *replayableSnapshotStream {
 
 func (s *replayableSnapshotStream) publish(content string) {
 	s.mu.Lock()
-	s.latest = content
-	s.hasData = true
-	s.version++
+	s.history = append(s.history, content)
 	update := s.update
 	s.update = make(chan struct{})
 	s.mu.Unlock()
@@ -386,10 +382,17 @@ func (s *replayableSnapshotStream) finish() {
 	close(update)
 }
 
-func (s *replayableSnapshotStream) snapshot() (string, bool, uint64, bool, <-chan struct{}) {
+func (s *replayableSnapshotStream) historyFrom(start int) ([]string, bool, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.latest, s.hasData, s.version, s.closed, s.update
+	if start < 0 {
+		start = 0
+	}
+	if start > len(s.history) {
+		start = len(s.history)
+	}
+	snapshots := append([]string(nil), s.history[start:]...)
+	return snapshots, s.closed, s.update
 }
 
 func acceptDialogFromStream(
@@ -401,29 +404,28 @@ func acceptDialogFromStream(
 ) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	var (
-		seenVersion uint64
-		seenData    bool
-	)
+	next := 0
 
 	for {
-		content, hasData, version, closed, updated := snapshots.snapshot()
-		if hasData && (!seenData || version != seenVersion) {
-			seenData = true
-			seenVersion = version
-			if spec.match != nil && spec.match(content) {
-				if err := sendKeys(spec.matchKeys...); err != nil {
-					return err
+		history, closed, updated := snapshots.historyFrom(next)
+		if len(history) > 0 {
+			next += len(history)
+			for _, content := range history {
+				if spec.match != nil && spec.match(content) {
+					if err := sendKeys(spec.matchKeys...); err != nil {
+						return err
+					}
+					sleep(ctx, spec.matchDelay)
+					return nil
 				}
-				sleep(ctx, spec.matchDelay)
-				return nil
+				if spec.ready != nil && spec.ready(content) {
+					return nil
+				}
+				if spec.readyOrNext != nil && spec.readyOrNext(content) {
+					return nil
+				}
 			}
-			if spec.ready != nil && spec.ready(content) {
-				return nil
-			}
-			if spec.readyOrNext != nil && spec.readyOrNext(content) {
-				return nil
-			}
+			continue
 		}
 		if closed {
 			return nil

@@ -167,9 +167,13 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) {
 	running, err := sp.ListRunning("")
-	if err != nil {
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
+	}
+	if partialList {
+		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	var orphans []string
 	for _, name := range running {

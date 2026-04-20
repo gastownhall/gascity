@@ -1164,7 +1164,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 	// Single ListRunning call, then intersect with expected set.
 	// Per-city socket isolation: all sessions belong to this city.
 	running, err := sp.ListRunning("")
-	if err != nil {
+	if err != nil && !runtime.IsPartialListError(err) {
 		// Fallback: individual IsRunning calls (original behavior).
 		count := 0
 		for sn := range expected {

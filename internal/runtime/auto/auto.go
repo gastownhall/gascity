@@ -240,8 +240,8 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	return p.route(name).Peek(name, lines)
 }
 
-// ListRunning queries both backends and preserves best-effort results when
-// one backend fails.
+// ListRunning queries both backends and returns best-effort results plus a
+// partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	defaultList, dErr := p.defaultSP.ListRunning(prefix)
 	acpList, aErr := p.acpSP.ListRunning(prefix)

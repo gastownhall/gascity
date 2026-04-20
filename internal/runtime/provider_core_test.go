@@ -12,8 +12,8 @@ func TestMergeBackendListResultsReturnsBestEffortResultsOnPartialFailure(t *test
 		BackendListResult{Label: "local", Names: []string{"sess-a"}},
 		BackendListResult{Label: "remote", Err: errors.New("backend down")},
 	)
-	if err != nil {
-		t.Fatalf("MergeBackendListResults() error = %v, want nil", err)
+	if !IsPartialListError(err) {
+		t.Fatalf("MergeBackendListResults() error = %v, want partial list error", err)
 	}
 	if len(names) != 1 || names[0] != "sess-a" {
 		t.Fatalf("MergeBackendListResults() names = %v, want [sess-a]", names)
@@ -29,6 +29,9 @@ func TestMergeBackendListResultsFailsWhenAllBackendsFail(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("MergeBackendListResults() error = nil, want joined error")
+	}
+	if IsPartialListError(err) {
+		t.Fatalf("MergeBackendListResults() error = %v, want total failure not partial", err)
 	}
 	if names != nil {
 		t.Fatalf("MergeBackendListResults() names = %v, want nil", names)
