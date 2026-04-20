@@ -290,7 +290,8 @@ func (p *Provider) startStartupWatch(
 		cancel()
 		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 		return nil, nil, false, nil
-	case <-watchCtx.Done():
+	case <-ctx.Done():
+		cancel()
 		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 		return nil, nil, false, ctx.Err()
 	}

@@ -461,6 +461,39 @@ esac
 	}
 }
 
+func TestStartStartupWatchReturnsMalformedFirstEventError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  watch-startup)
+    printf '%s\n' 'not-json'
+    sleep 5
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	snapshots, closeWatch, ok, err := p.startStartupWatch(context.Background(), "test-sess", time.Second)
+	if err == nil {
+		t.Fatal("startStartupWatch succeeded, want malformed first event error")
+	}
+	if !strings.Contains(err.Error(), "startup watcher decode") {
+		t.Fatalf("startStartupWatch error = %v, want startup watcher decode context", err)
+	}
+	if ok {
+		t.Fatal("startStartupWatch ok = true, want false on malformed first event")
+	}
+	if snapshots != nil {
+		t.Fatal("startStartupWatch returned snapshots, want nil on malformed first event")
+	}
+	if closeWatch != nil {
+		t.Fatal("startStartupWatch returned closeWatch, want nil on malformed first event")
+	}
+}
+
 func TestStartFallsBackToPeekWhenWatchStartupFailsAfterFirstEvent(t *testing.T) {
 	dir := t.TempDir()
 	sendKeysFile := filepath.Join(dir, "send-keys.log")
