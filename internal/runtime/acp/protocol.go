@@ -65,13 +65,17 @@ type ServerInfo struct {
 }
 
 // InitializeParams is the params for the "initialize" request.
+// protocolVersion is required by the ACP spec (MUST be included).
+// See https://agentclientprotocol.com/protocol/initialization
 type InitializeParams struct {
-	ClientInfo ClientInfo `json:"clientInfo"`
+	ProtocolVersion int        `json:"protocolVersion"`
+	ClientInfo      ClientInfo `json:"clientInfo"`
 }
 
 // InitializeResult is the result of the "initialize" request.
 type InitializeResult struct {
-	ServerInfo ServerInfo `json:"serverInfo"`
+	ProtocolVersion int        `json:"protocolVersion"`
+	ServerInfo      ServerInfo `json:"serverInfo"`
 }
 
 // SessionNewResult is the result of the "session/new" request.
@@ -123,7 +127,8 @@ func newNotification(method string) JSONRPCMessage {
 // newInitializeRequest creates an "initialize" request.
 func newInitializeRequest() (JSONRPCMessage, int64) {
 	return newRequest("initialize", InitializeParams{
-		ClientInfo: ClientInfo{Name: "gc", Version: "1.0"},
+		ProtocolVersion: 1,
+		ClientInfo:      ClientInfo{Name: "gc", Version: "1.0"},
 	})
 }
 
