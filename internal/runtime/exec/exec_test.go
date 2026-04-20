@@ -243,6 +243,56 @@ esac
 	}
 }
 
+func TestStartReturnsPromptlyWhenWatchStartupFirstEventIsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' 'not-json'
+    sleep 5
+    ;;
+  stop)
+    echo "$*" >> "`+stopFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start succeeded, want startup watcher decode error")
+		}
+		if !strings.Contains(err.Error(), "startup watcher decode") {
+			t.Fatalf("Start error = %v, want startup watcher decode context", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung after malformed first watch-startup event")
+	}
+
+	data, err := os.ReadFile(stopFile)
+	if err != nil {
+		t.Fatalf("read stop log: %v", err)
+	}
+	if !strings.Contains(string(data), "stop test-sess") {
+		t.Fatalf("stop log = %q, want cleanup stop call", string(data))
+	}
+}
+
 func TestStartFallsBackToPeekWhenWatchStartupFailsAfterFirstEvent(t *testing.T) {
 	dir := t.TempDir()
 	sendKeysFile := filepath.Join(dir, "send-keys.log")

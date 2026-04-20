@@ -218,11 +218,13 @@ func (p *Provider) startStartupWatch(
 		for scanner.Scan() {
 			var event startupWatchEvent
 			if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+				decodeErr := fmt.Errorf("startup watcher decode: %w", err)
 				if !emitted {
-					first <- firstResult{err: fmt.Errorf("startup watcher decode: %w", err)}
-				} else {
-					done <- fmt.Errorf("startup watcher decode: %w", err)
+					first <- firstResult{err: decodeErr}
 				}
+				cancel()
+				_ = cmd.Wait()
+				done <- decodeErr
 				return
 			}
 			if !emitted {
