@@ -290,9 +290,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"opencode": {
 		DisplayName:      "OpenCode",
 		Command:          "opencode",
-		Args:             []string{},
+		Args:             []string{"acp"},
 		PromptMode:       "none",
-		ReadyDelayMs:     8000,
 		ProcessNames:     []string{"opencode", "node", "bun"},
 		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
 		SupportsACP:      true,
