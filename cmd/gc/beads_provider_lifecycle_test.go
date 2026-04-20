@@ -5361,6 +5361,7 @@ while [ ! -f "$release_file" ]; do
 	env := sanitizedBaseEnv(
 		"GC_CITY_PATH="+cityPath,
 		"GC_DOLT_PORT=3311",
+		"GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS=1000",
 		"GC_FAKE_DOLT_INVOCATION_FILE="+invocationFile,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)
@@ -5620,6 +5621,242 @@ sleep 1
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd start failed while concurrent starter was making progress: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, layout.PIDFile))); got != "4242" {
+		t.Fatalf("pid file = %q, want 4242", got)
+	}
+	if _, err := os.Stat(startedFile); err != nil {
+		t.Fatalf("concurrent starter success marker missing after start returned: %v", err)
+	}
+	if invocation, err := os.ReadFile(invokedDolt); err == nil && strings.TrimSpace(string(invocation)) != "" {
+		t.Fatalf("dolt should not have been invoked while concurrent starter won:\n%s", string(invocation))
+	}
+}
+
+func TestGcBeadsBdStartWaitsForSlowConcurrentStarterSuccess(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
+	cityPath := t.TempDir()
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.LockFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	startedFile := filepath.Join(t.TempDir(), "starter-ready")
+	fakeGC := filepath.Join(binDir, "gc")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+invocation_file=%q
+started_file=%q
+subcmd="$1 $2"
+shift 2
+case "$subcmd" in
+  "dolt-state runtime-layout")
+    city=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city)
+          city="$2"
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state runtime-layout\n' >> "$invocation_file"
+    printf 'GC_PACK_STATE_DIR\t%%s\n' %q
+    printf 'GC_DOLT_DATA_DIR\t%%s\n' %q
+    printf 'GC_DOLT_LOG_FILE\t%%s\n' %q
+    printf 'GC_DOLT_STATE_FILE\t%%s\n' %q
+    printf 'GC_DOLT_PID_FILE\t%%s\n' %q
+    printf 'GC_DOLT_LOCK_FILE\t%%s\n' %q
+    printf 'GC_DOLT_CONFIG_FILE\t%%s\n' %q
+    ;;
+  "dolt-state existing-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port|--user|--timeout-ms)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state existing-managed\n' >> "$invocation_file"
+    if [ -f "$started_file" ]; then
+      printf 'managed_pid\t4242\n'
+      printf 'managed_owned\ttrue\n'
+      printf 'deleted_inodes\tfalse\n'
+      printf 'state_port\t3311\n'
+      printf 'ready\ttrue\n'
+      printf 'reusable\ttrue\n'
+    else
+      printf 'managed_pid\t0\n'
+      printf 'managed_owned\tfalse\n'
+      printf 'deleted_inodes\tfalse\n'
+      printf 'state_port\t0\n'
+      printf 'ready\tfalse\n'
+      printf 'reusable\tfalse\n'
+    fi
+    ;;
+  "dolt-state probe-managed")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --city|--host|--port)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state probe-managed
+' >> "$invocation_file"
+    printf 'running	true
+'
+    printf 'port_holder_pid	4242
+'
+    printf 'port_holder_owned	true
+'
+    printf 'port_holder_deleted_inodes	false
+'
+    printf 'tcp_reachable	true
+'
+    ;;
+  "dolt-state query-probe")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host|--port|--user)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state query-probe
+' >> "$invocation_file"
+    if [ -f "$started_file" ]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  "dolt-state write-provider")
+    state_file=""
+    pid=""
+    running=""
+    port=""
+    data_dir=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --file)
+          state_file="$2"
+          shift 2
+          ;;
+        --pid)
+          pid="$2"
+          shift 2
+          ;;
+        --running)
+          running="$2"
+          shift 2
+          ;;
+        --port)
+          port="$2"
+          shift 2
+          ;;
+        --data-dir)
+          data_dir="$2"
+          shift 2
+          ;;
+        --started-at)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf 'gc dolt-state write-provider
+' >> "$invocation_file"
+    mkdir -p "$(dirname "$state_file")"
+    printf '{"running":%%s,"pid":%%s,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}
+' "$running" "$pid" "$port" "$data_dir" > "$state_file"
+    ;;
+  *)
+    echo "unexpected gc args: $subcmd $*" >&2
+    exit 64
+    ;;
+esac
+`, invocationFile, startedFile, layout.PackStateDir, layout.DataDir, layout.LogFile, layout.StateFile, layout.PIDFile, layout.LockFile, layout.ConfigFile)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nset -eu\ncase \"${1:-}\" in\n  config)\n    exit 0\n    ;;\n  *)\n    printf 'dolt %s\\n' \"$*\" >> \"$GC_FAKE_DOLT_INVOCATION_FILE\"\n    exit 1\n    ;;\nesac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invokedDolt := filepath.Join(t.TempDir(), "dolt-invocation")
+
+	readyFile := filepath.Join(t.TempDir(), "holder-ready")
+	holder := exec.Command("sh", "-c", `
+set -eu
+lock_file="$1"
+ready_file="$2"
+started_file="$3"
+: > "$lock_file"
+exec 9>"$lock_file"
+flock 9
+printf 'ready\n' > "$ready_file"
+sleep 11
+printf 'ready\n' > "$started_file"
+sleep 1
+`, "sh", layout.LockFile, readyFile, startedFile)
+	holder.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start lock holder: %v", err)
+	}
+	defer func() {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for lock holder to acquire flock")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_PORT=3311",
+		"GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS=12000",
+		"GC_BIN="+fakeGC,
+		"GC_FAKE_DOLT_INVOCATION_FILE="+invokedDolt,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed while slow concurrent starter was making progress: %v\n%s", err, out)
 	}
 	if got := strings.TrimSpace(string(mustReadFile(t, layout.PIDFile))); got != "4242" {
 		t.Fatalf("pid file = %q, want 4242", got)

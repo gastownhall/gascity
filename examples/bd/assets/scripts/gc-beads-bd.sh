@@ -27,6 +27,7 @@ DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
+CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-30000}"
 
 # Derived paths (set after GC_CITY_PATH validation).
 GC_DIR=""
@@ -935,8 +936,18 @@ EOF
 }
 
 wait_for_concurrent_start_ready() {
-    local existing_pid="" existing_port="" holder="" waited=0
-    while [ "$waited" -lt 20 ]; do
+    local existing_pid="" existing_port="" holder="" waited=0 timeout_ms max_attempts
+    timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=30000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 500 ]; then
+        timeout_ms=500
+    fi
+    max_attempts=$(( (timeout_ms + 499) / 500 ))
+    while [ "$waited" -lt "$max_attempts" ]; do
         if load_existing_managed_from_gc; then
             existing_pid="$GC_EXISTING_MANAGED_PID"
             if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
