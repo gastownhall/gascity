@@ -921,6 +921,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		}
 	}
 
+	senderExplicit := from != ""
 	sender := from
 	if sender == "" {
 		if store != nil {
@@ -938,11 +939,6 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	}
-
-	var nf nudgeFunc
-	if notify && store != nil {
-		nf = newMailNudgeFunc(sender)
 	}
 
 	// When --to is set, prepend it to args so doMailSend sees [to, body].
@@ -972,6 +968,21 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		if validRecipients != nil {
 			validRecipients[canonicalTo] = true
 		}
+	}
+
+	// A sender derived from inherited session env vars that exactly matches
+	// the recipient almost always indicates a human running gc from a shell
+	// attached to (or inside) the recipient's session, not the recipient
+	// agent mailing itself. Fall back to "human" so inbox attribution matches
+	// the tutorial's documented behaviour. Agents that legitimately want to
+	// send mail to themselves can opt in explicitly with --from.
+	if !senderExplicit && !all && len(args) > 0 && sender == args[0] {
+		sender = "human"
+	}
+
+	var nf nudgeFunc
+	if notify && store != nil {
+		nf = newMailNudgeFunc(sender)
 	}
 
 	if all {

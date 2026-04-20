@@ -465,6 +465,146 @@ func TestCmdMailSendDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testi
 	}
 }
 
+// TestCmdMailSendHumanFallbackWhenEnvDerivedSenderEqualsRecipient guards the
+// tutorial-04 behaviour: when a human runs `gc mail send mayor ...` from a
+// shell that has inherited session env vars for that same mailbox (e.g. the
+// user is physically inside the mayor's tmux session), the env-derived sender
+// would otherwise resolve to the recipient itself and produce FROM=mayor.
+// Without --from set, we fall back to "human" so inbox attribution matches the
+// intuitive (and documented) "this came from a human" shape.
+func TestCmdMailSendHumanFallbackWhenEnvDerivedSenderEqualsRecipient(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"session_name": "mayor-gc-42",
+		},
+	}); err != nil {
+		t.Fatalf("Create mayor session: %v", err)
+	}
+
+	// Simulate a human running `gc mail send mayor` from a shell that has
+	// inherited the mayor session's runtime env vars. Without the fallback
+	// this would attribute the sender as "mayor" — the bug reported in
+	// tutorial 04.
+	t.Setenv("GC_SESSION_ID", "mayor-gc-42")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_AGENT", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor", "note from human"}, false, false, "", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	var msg beads.Bead
+	found := false
+	for _, b := range all {
+		if b.Type == "message" {
+			msg = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("message bead not found; beads=%#v", all)
+	}
+	if msg.Assignee != "mayor" {
+		t.Fatalf("message Assignee = %q, want mayor", msg.Assignee)
+	}
+	if msg.From == msg.Assignee {
+		t.Fatalf("message From (%q) must not equal Assignee (%q); inbox would show FROM=recipient", msg.From, msg.Assignee)
+	}
+	if msg.From != "human" {
+		t.Fatalf("message From = %q, want human", msg.From)
+	}
+}
+
+// TestCmdMailSendExplicitFromIsRespectedEvenWhenMatchingRecipient ensures the
+// human-fallback heuristic only applies when the caller did *not* pass --from.
+// An agent legitimately mailing itself can opt in via --from <self>.
+func TestCmdMailSendExplicitFromIsRespectedEvenWhenMatchingRecipient(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"session_name": "mayor-gc-42",
+		},
+	}); err != nil {
+		t.Fatalf("Create mayor session: %v", err)
+	}
+
+	_ = os.Unsetenv("GC_SESSION_ID")
+	_ = os.Unsetenv("GC_ALIAS")
+	_ = os.Unsetenv("GC_AGENT")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor", "note to self"}, false, false, "mayor", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	var msg beads.Bead
+	found := false
+	for _, b := range all {
+		if b.Type == "message" {
+			msg = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("message bead not found; beads=%#v", all)
+	}
+	if msg.From != "mayor" {
+		t.Fatalf("message From = %q, want mayor (explicit --from must not be rewritten)", msg.From)
+	}
+}
+
 func TestResolveDefaultMailTargetsForCommand_HumanDefaultWhenNoEnv(t *testing.T) {
 	t.Setenv("GC_MAIL", "fake")
 	_ = os.Unsetenv("GC_ALIAS")
