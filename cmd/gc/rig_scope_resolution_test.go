@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -104,4 +105,63 @@ func TestResolveRigScopeFromFlagOrCwd(t *testing.T) {
 			t.Fatalf("rig = %+v, want nil (whitespace flag should not select a rig)", rig)
 		}
 	})
+}
+
+// TestRigScopeDrivesFormulaSearchPaths locks in the integration between
+// resolveRigScopeFromFlagOrCwd and FormulaLayers.SearchPaths used by both
+// `gc formula cook` and `gc formula show`. The #1004 bug had two halves:
+// a wrong store root AND wrong search paths; asserting the search-path
+// half here prevents regression even if the store half is correct.
+func TestRigScopeDrivesFormulaSearchPaths(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	cityLayers := []string{"/city/formulas"}
+	rigLayers := []string{"/city/formulas", "/rigs/my-project/formulas"}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "my-project", Path: rigPath}},
+		FormulaLayers: config.FormulaLayers{
+			City: cityLayers,
+			Rigs: map[string][]string{"my-project": rigLayers},
+		},
+	}
+
+	cases := []struct {
+		name    string
+		cwd     string
+		flag    string
+		wantRig string
+		want    []string
+	}{
+		{"cwd in rig yields rig layers", rigPath, "", "my-project", rigLayers},
+		{"flag yields rig layers", cityPath, "my-project", "my-project", rigLayers},
+		{"city scope yields city layers", cityPath, "", "", cityLayers},
+	}
+
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(tc.cwd)
+			rig, err := resolveRigScopeFromFlagOrCwd(cfg, cityPath, tc.flag)
+			if err != nil {
+				t.Fatalf("resolveRigScopeFromFlagOrCwd: %v", err)
+			}
+			rigName := ""
+			if rig != nil {
+				rigName = rig.Name
+			}
+			if rigName != tc.wantRig {
+				t.Errorf("rigName = %q, want %q", rigName, tc.wantRig)
+			}
+			got := cfg.FormulaLayers.SearchPaths(rigName)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("searchPaths = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

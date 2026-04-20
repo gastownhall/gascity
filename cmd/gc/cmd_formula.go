@@ -106,7 +106,25 @@ Examples:
 
 			compileVars := vars
 
-			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(stderr), compileVars)
+			cityPath, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				return err
+			}
+			rig, err := resolveRigScopeFromFlagOrCwd(cfg, cityPath, rigFlag)
+			if err != nil {
+				return err
+			}
+			rigName := ""
+			if rig != nil {
+				rigName = rig.Name
+			}
+			searchPaths := cfg.FormulaLayers.SearchPaths(rigName)
+
+			recipe, err := formula.Compile(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
 				return err
 			}
@@ -345,20 +363,6 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 		out[key] = value
 	}
 	return out, nil
-}
-
-// cityFormulaSearchPaths returns the city-level formula search paths.
-// Best-effort: returns nil if no city is loaded.
-func cityFormulaSearchPaths(warningWriter ...io.Writer) []string {
-	cityPath, err := resolveCity()
-	if err != nil {
-		return nil
-	}
-	cfg, err := loadCityConfig(cityPath, warningWriter...)
-	if err != nil {
-		return nil
-	}
-	return cfg.FormulaLayers.City
 }
 
 // allFormulaSearchPaths returns the deduplicated union of formula search
