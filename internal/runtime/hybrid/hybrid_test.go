@@ -72,6 +72,9 @@ func TestListRunning_PartialFailure(t *testing.T) {
 	if len(names) != 1 {
 		t.Fatalf("expected 1 session from healthy backend, got %d", len(names))
 	}
+	if got := err.Error(); !strings.Contains(got, "remote backend:") || !strings.Contains(got, "local results included") {
+		t.Fatalf("ListRunning error = %v, want backend context and partial-results note", err)
+	}
 }
 
 func TestListRunning_BothFail(t *testing.T) {

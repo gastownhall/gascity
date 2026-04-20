@@ -3,7 +3,10 @@ package auto
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -109,6 +112,41 @@ func TestStopPreservesRouteOnBothFail(t *testing.T) {
 	}
 }
 
+func TestStopReturnsJoinedErrorsFromBothBackends(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	defaultSP.StopErrors["agent-fail"] = errors.New("default stop failed")
+	acpSP.StopErrors["agent-fail"] = errors.New("acp stop failed")
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return error when both backends fail")
+	}
+	for _, want := range []string{
+		"acp backend: acp stop failed",
+		"default backend: default stop failed",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Stop error = %v, want to contain %q", err, want)
+		}
+	}
+}
+
+func TestStopTreatsSessionGoneOnBothBackendsAsIdempotent(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	defaultSP.StopErrors["ghost-agent"] = fmt.Errorf("%w: default missing", runtime.ErrSessionNotFound)
+	acpSP.StopErrors["ghost-agent"] = fmt.Errorf("%w: acp missing", runtime.ErrSessionNotFound)
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("ghost-agent")
+	if err := p.Stop("ghost-agent"); err != nil {
+		t.Fatalf("Stop error = %v, want nil when both backends report session gone", err)
+	}
+}
+
 func TestListRunningPartialError(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFailFake() // ListRunning returns error
@@ -137,6 +175,25 @@ func TestListRunningBothFail(t *testing.T) {
 	}
 	if names != nil {
 		t.Errorf("ListRunning both fail = %v, want nil", names)
+	}
+}
+
+func TestListRunningPartialErrorIncludesBackendContext(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFailFake()
+	p := New(defaultSP, acpSP)
+
+	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
+
+	names, err := p.ListRunning("")
+	if err == nil {
+		t.Fatal("ListRunning should return error when one backend fails")
+	}
+	if len(names) != 1 || names[0] != "default-1" {
+		t.Fatalf("ListRunning partial = %v, want [default-1]", names)
+	}
+	if got := err.Error(); !strings.Contains(got, "acp backend:") || !strings.Contains(got, "default results included") {
+		t.Fatalf("ListRunning error = %v, want backend context and partial-results note", err)
 	}
 }
 
@@ -235,4 +292,23 @@ func TestPendingUnsupportedWhenBackendLacksInteractionSupport(t *testing.T) {
 
 type runtimeNoInteractionProvider struct {
 	runtime.Provider
+}
+
+func TestWaitForInterruptBoundaryDelegatesToRoutedBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("interactive-agent")
+	since := time.Unix(1700000000, 123).UTC()
+	if err := p.WaitForInterruptBoundary(context.Background(), "interactive-agent", since, 2*time.Second); err != nil {
+		t.Fatalf("WaitForInterruptBoundary: %v", err)
+	}
+	if len(acpSP.Calls) == 0 {
+		t.Fatal("expected routed backend to record WaitForInterruptBoundary")
+	}
+	last := acpSP.Calls[len(acpSP.Calls)-1]
+	if last.Method != "WaitForInterruptBoundary" || last.Name != "interactive-agent" {
+		t.Fatalf("last call = %#v, want WaitForInterruptBoundary for interactive-agent", last)
+	}
 }

@@ -226,7 +226,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	stderrW.Close() //nolint:errcheck
 
 	// Create control socket for cross-process discovery.
-	lis, err := p.startControlSocket(name, cmd)
+	processDone := make(chan struct{})
+	lis, err := p.startControlSocket(name, cmd, processDone)
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -234,7 +235,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
-	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines())
+	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -252,7 +253,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
-		close(sc.done)
+		close(processDone)
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -486,12 +487,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {
-		// Clear busy state on send failure.
-		sc.mu.Lock()
-		if sc.activePromptID == id {
-			sc.activePromptID = 0
-		}
-		sc.mu.Unlock()
+		sc.clearActivePrompt(id)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with
 		// the agent lifecycle, so surface them immediately rather than
 		// stalling the caller on sc.done.
@@ -719,7 +715,7 @@ func (p *Provider) socketNameForEntry(key string) string {
 }
 
 // startControlSocket creates a unix socket for cross-process commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
@@ -738,14 +734,14 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener,
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd)
+			go handleControlConn(conn, cmd, done)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd) {
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -754,25 +750,10 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		deadline := time.After(5 * time.Second)
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-		alive := true
-		for alive {
-			select {
-			case <-deadline:
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				alive = false
-			case <-ticker.C:
-				if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-					alive = false
-				}
-			}
-		}
+		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -864,13 +845,5 @@ func isPipeWriteError(err error) bool {
 
 // terminateProcess sends SIGTERM then SIGKILL to a tracked process group.
 func terminateProcess(sc *sessionConn) error {
-	_ = syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGTERM)
-	select {
-	case <-sc.done:
-		return nil
-	case <-time.After(5 * time.Second):
-	}
-	_ = syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGKILL)
-	<-sc.done
-	return nil
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
 }

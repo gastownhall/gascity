@@ -4,8 +4,6 @@ package hybrid
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -159,20 +157,10 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	local, lErr := p.local.ListRunning(prefix)
 	remote, rErr := p.remote.ListRunning(prefix)
-	merged := append(local, remote...)
-	switch {
-	case lErr != nil && rErr != nil:
-		return nil, errors.Join(
-			fmt.Errorf("local backend: %w", lErr),
-			fmt.Errorf("remote backend: %w", rErr),
-		)
-	case lErr != nil:
-		return merged, fmt.Errorf("local backend: %w (remote results included)", lErr)
-	case rErr != nil:
-		return merged, fmt.Errorf("remote backend: %w (local results included)", rErr)
-	default:
-		return merged, nil
-	}
+	return runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "local", Names: local, Err: lErr},
+		runtime.BackendListResult{Label: "remote", Names: remote, Err: rErr},
+	)
 }
 
 // GetLastActivity delegates to the routed backend.

@@ -488,14 +488,35 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.mu.Lock()
-	id := int64(42)
-	sc.activePromptID = 0 // as dispatch would do
-	_ = id
-	sc.mu.Unlock()
+	sc.clearActivePrompt(42)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
+	}
+}
+
+func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
+	sc := &sessionConn{
+		outputBufMax: 100,
+		pending:      make(map[int64]chan JSONRPCMessage),
+	}
+	sc.setActivePrompt(42)
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sc.waitIdle(2 * time.Second)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sc.clearActivePrompt(42)
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("waitIdle returned false, want true after busy state clears")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("waitIdle did not unblock promptly after busy state cleared")
 	}
 }
 
@@ -908,7 +929,7 @@ func TestNudge_ReturnsNilWhenAgentExitsDuringSend(t *testing.T) {
 	name := testName()
 
 	stdin := &closedPipeStdin{writeCalled: make(chan struct{})}
-	sc := newSessionConn(nil, stdin, nil, 100)
+	sc := newSessionConn(nil, stdin, nil, 100, nil)
 	sc.sessionID = "session-1"
 
 	p.mu.Lock()
@@ -946,7 +967,7 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 	name := testName()
 
 	stubErr := errors.New("disk quota exceeded")
-	sc := newSessionConn(nil, &erroringStdin{err: stubErr}, nil, 100)
+	sc := newSessionConn(nil, &erroringStdin{err: stubErr}, nil, 100, nil)
 	sc.sessionID = "session-1"
 
 	p.mu.Lock()

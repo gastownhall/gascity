@@ -7,7 +7,6 @@ package auto
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -90,6 +89,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // to handle stale/missing route entries (e.g., after controller restart).
 func (p *Provider) Stop(name string) error {
 	primary := p.route(name)
+	primaryLabel := "default"
+	otherLabel := "acp"
 	err := primary.Stop(name)
 	if err == nil {
 		p.Unroute(name)
@@ -99,16 +100,23 @@ func (p *Provider) Stop(name string) error {
 	var other runtime.Provider
 	p.mu.RLock()
 	if p.routes[name] {
+		primaryLabel = "acp"
+		otherLabel = "default"
 		other = p.defaultSP
 	} else {
 		other = p.acpSP
 	}
 	p.mu.RUnlock()
-	if otherErr := other.Stop(name); otherErr == nil {
+	otherErr := other.Stop(name)
+	if mergedErr := runtime.MergeBackendStopErrors(
+		runtime.BackendError{Label: primaryLabel, Err: err},
+		runtime.BackendError{Label: otherLabel, Err: otherErr},
+	); mergedErr == nil {
 		p.Unroute(name)
 		return nil
+	} else {
+		return mergedErr
 	}
-	return err // return original error if both fail
 }
 
 // Interrupt delegates to the routed backend.
@@ -238,19 +246,10 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	defaultList, dErr := p.defaultSP.ListRunning(prefix)
 	acpList, aErr := p.acpSP.ListRunning(prefix)
-	var merged []string
-	merged = append(merged, defaultList...)
-	merged = append(merged, acpList...)
-	switch {
-	case dErr != nil && aErr != nil:
-		return nil, errors.Join(fmt.Errorf("default backend: %w", dErr), fmt.Errorf("acp backend: %w", aErr))
-	case dErr != nil:
-		return merged, fmt.Errorf("default backend: %w (acp results included)", dErr)
-	case aErr != nil:
-		return merged, fmt.Errorf("acp backend: %w (default results included)", aErr)
-	default:
-		return merged, nil
-	}
+	return runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "default", Names: defaultList, Err: dErr},
+		runtime.BackendListResult{Label: "acp", Names: acpList, Err: aErr},
+	)
 }
 
 // GetLastActivity delegates to the routed backend.

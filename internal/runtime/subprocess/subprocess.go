@@ -144,7 +144,8 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	_ = nullFile.Close()
 
 	// Create control socket for cross-process discovery.
-	lis, err := p.startControlSocket(name, cmd)
+	done := make(chan struct{})
+	lis, err := p.startControlSocket(name, cmd, done)
 	if err != nil {
 		// Socket creation failed — kill the process and bail.
 		_ = cmd.Process.Kill()
@@ -152,7 +153,6 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
-	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		// Clean up socket before signaling done so ListRunning
@@ -196,7 +196,7 @@ func (p *Provider) Interrupt(name string) error {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 	if ok {
-		return signalSessionGroup(sc.cmd, syscall.SIGINT)
+		return runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
 	}
 
 	// Fall back to socket (cross-process case).
@@ -421,7 +421,7 @@ func (p *Provider) socketNameForEntry(dir, key string) string {
 //   - "interrupt" — SIGINT to the whole session process group; replies "ok"
 //   - "ping" — replies "ok"
 //   - "pid" — replies with the PID (diagnostics)
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	if err := os.MkdirAll(filepath.Dir(sp), 0o755); err != nil {
@@ -444,14 +444,14 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener,
 			if err != nil {
 				return // listener closed
 			}
-			go handleSessionConn(conn, cmd)
+			go handleSessionConn(conn, cmd, done)
 		}
 	}()
 	return lis, nil
 }
 
 // handleSessionConn reads a command from the connection and acts on the process.
-func handleSessionConn(conn net.Conn, cmd *exec.Cmd) {
+func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -460,26 +460,10 @@ func handleSessionConn(conn net.Conn, cmd *exec.Cmd) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = signalSessionGroup(cmd, syscall.SIGTERM)
-		// Wait up to 5s for graceful exit, then SIGKILL.
-		deadline := time.After(5 * time.Second)
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-		alive := true
-		for alive {
-			select {
-			case <-deadline:
-				_ = signalSessionGroup(cmd, syscall.SIGKILL)
-				alive = false
-			case <-ticker.C:
-				if !processAlive(cmd) {
-					alive = false
-				}
-			}
-		}
+		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = signalSessionGroup(cmd, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -554,17 +538,7 @@ func isUnavailableSocketError(err error) bool {
 
 // terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked process.
 func terminateSessionConn(sc *sessionConn) error {
-	_ = signalSessionGroup(sc.cmd, syscall.SIGTERM)
-
-	select {
-	case <-sc.done:
-		return nil
-	case <-time.After(5 * time.Second):
-	}
-
-	_ = signalSessionGroup(sc.cmd, syscall.SIGKILL)
-	<-sc.done
-	return nil
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
 }
 
 // Capabilities reports subprocess provider capabilities. The subprocess
@@ -597,18 +571,4 @@ func processAlive(cmd *exec.Cmd) bool {
 		return false
 	}
 	return true
-}
-
-func signalSessionGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	// Managed subprocess sessions are started in their own process group so
-	// stop/interrupt reaches helper shells and any poller descendants.
-	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil {
-		return nil
-	}
-	// Fall back to the direct process signal for older sessions that were not
-	// started with Setpgid or for platforms where group signaling is unavailable.
-	return cmd.Process.Signal(sig)
 }
