@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"strings"
 	"time"
 
@@ -143,8 +144,11 @@ func reconcileDetachedAt(
 	}
 	if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() || sp == nil || !alive || policy.Capability != runtime.SessionSleepCapabilityFull {
 		if session.Metadata["detached_at"] != "" {
-			_ = store.SetMetadata(session.ID, "detached_at", "")
-			session.Metadata["detached_at"] = ""
+			if err := store.SetMetadata(session.ID, "detached_at", ""); err != nil {
+				log.Printf("session sleep: clearing detached_at for %s: %v", session.ID, err)
+			} else {
+				session.Metadata["detached_at"] = ""
+			}
 		}
 		return
 	}
@@ -155,15 +159,21 @@ func reconcileDetachedAt(
 	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, session.ID)
 	if err == nil && attached {
 		if session.Metadata["detached_at"] != "" {
-			_ = store.SetMetadata(session.ID, "detached_at", "")
-			session.Metadata["detached_at"] = ""
+			if err := store.SetMetadata(session.ID, "detached_at", ""); err != nil {
+				log.Printf("session sleep: clearing detached_at for %s: %v", session.ID, err)
+			} else {
+				session.Metadata["detached_at"] = ""
+			}
 		}
 		return
 	}
 	if session.Metadata["detached_at"] == "" {
 		ts := clk.Now().UTC().Format(time.RFC3339)
-		_ = store.SetMetadata(session.ID, "detached_at", ts)
-		session.Metadata["detached_at"] = ts
+		if err := store.SetMetadata(session.ID, "detached_at", ts); err != nil {
+			log.Printf("session sleep: setting detached_at for %s: %v", session.ID, err)
+		} else {
+			session.Metadata["detached_at"] = ts
+		}
 	}
 }
 

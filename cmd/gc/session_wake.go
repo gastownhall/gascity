@@ -184,10 +184,11 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 }
 
 func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) {
-	_ = sp.RemoveMeta(name, "GC_DRAIN_ACK")
-	_ = sp.RemoveMeta(name, reconcilerDrainAckSourceKey)
-	_ = sp.RemoveMeta(name, reconcilerDrainAckReasonKey)
-	_ = sp.RemoveMeta(name, reconcilerDrainAckGenerationKey)
+	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+		if err := sp.RemoveMeta(name, key); err != nil {
+			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
+		}
+	}
 }
 
 // cancelSessionDrain removes a cancelable drain if wake reasons reappeared for

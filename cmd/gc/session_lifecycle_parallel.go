@@ -640,8 +640,11 @@ func commitStartResultTraced(
 			return false
 		}
 		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-		_ = store.SetMetadata(session.ID, "last_woke_at", "")
-		session.Metadata["last_woke_at"] = ""
+		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+		} else {
+			session.Metadata["last_woke_at"] = ""
+		}
 		recordWakeFailure(session, store, clk)
 		if trace != nil {
 			trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{

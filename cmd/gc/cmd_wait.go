@@ -218,11 +218,13 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	}
 	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, waitBead)
 	if depErr != nil {
-		_ = setWaitTerminalState(store, waitBead.ID, map[string]string{
+		if err := setWaitTerminalState(store, waitBead.ID, map[string]string{
 			"state":      waitStateFailed,
 			"failed_at":  now.Format(time.RFC3339),
 			"last_error": depErr.Error(),
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session wait: setting failed state: %v\n", err) //nolint:errcheck
+		}
 		fmt.Fprintf(stderr, "gc session wait: dependency state check: %v\n", depErr) //nolint:errcheck
 		return 1
 	}
