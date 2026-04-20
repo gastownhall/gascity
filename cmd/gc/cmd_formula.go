@@ -229,15 +229,33 @@ bead into a sub-workflow at runtime.`,
 			if err != nil {
 				return err
 			}
-			store, err := openStoreAtForCity(cityPath, cityPath)
+
+			// Resolve target store scope: explicit --rig flag wins, else cwd,
+			// else city. Matches the pattern used by gc bd and gc sling so
+			// cooking a formula from a rig directory writes beads with the
+			// rig's prefix into the rig's store.
+			rig, err := resolveRigScopeFromFlagOrCwd(cfg, cityPath, rigFlag)
+			if err != nil {
+				return err
+			}
+			storeDir := cityPath
+			rigName := ""
+			if rig != nil {
+				storeDir = resolveStoreScopeRoot(cityPath, rig.Path)
+				rigName = rig.Name
+			}
+
+			store, err := openStoreAtForCity(storeDir, cityPath)
 			if err != nil {
 				return err
 			}
 
+			searchPaths := cfg.FormulaLayers.SearchPaths(rigName)
+
 			cookVars := parseFormulaVars(vars)
 
 			if attach != "" {
-				recipe, err := formula.Compile(cmd.Context(), args[0], cfg.FormulaLayers.City, cookVars)
+				recipe, err := formula.Compile(cmd.Context(), args[0], searchPaths, cookVars)
 				if err != nil {
 					return fmt.Errorf("compile: %w", err)
 				}
@@ -259,7 +277,7 @@ bead into a sub-workflow at runtime.`,
 				return nil
 			}
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], cfg.FormulaLayers.City, molecule.Options{
+			result, err := molecule.Cook(cmd.Context(), store, args[0], searchPaths, molecule.Options{
 				Title: title,
 				Vars:  cookVars,
 			})
