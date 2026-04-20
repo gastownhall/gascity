@@ -911,6 +911,39 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveIdentifierCollisionDesp
 	}
 }
 
+func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsPoolManagedIdentifierCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor"},
+		},
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor-gc-1",
+			"agent_name":   "mayor",
+			"template":     "mayor",
+			"pool_managed": "true",
+		},
+	}); err != nil {
+		t.Fatalf("Create pool managed: %v", err)
+	}
+
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(pool identifier collision) = %v, want nil", err)
+	}
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "foreman"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(wrong owner) = %v, want ErrSessionNameExists", err)
+	}
+}
+
 func TestWithCitySessionLocks_EmptyCityPathSharesIdentifierNamespace(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

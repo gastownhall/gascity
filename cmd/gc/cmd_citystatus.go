@@ -206,9 +206,6 @@ func doCityStatusJSON(
 }
 
 func controllerStatusForCity(cityPath string) ControllerJSON {
-	if pid := controllerAlive(cityPath); pid != 0 {
-		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
-	}
 	_, registered, err := registeredCityEntry(cityPath)
 	if err == nil && registered {
 		ctrl := ControllerJSON{Mode: "supervisor"}
@@ -217,9 +214,19 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 			if running, status, known := supervisorCityRunningHook(cityPath); known {
 				ctrl.Running = running
 				ctrl.Status = status
+				return ctrl
+			}
+			if supervisorAliveHook() != 0 {
+				ctrl.Status = "unknown"
+				return ctrl
 			}
 		}
-		return ctrl
+	}
+	if pid := controllerAlive(cityPath); pid != 0 {
+		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
+	}
+	if err == nil && registered {
+		return ControllerJSON{Mode: "supervisor"}
 	}
 	return ControllerJSON{}
 }
@@ -291,7 +298,7 @@ func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 		if ctrl.Running {
 			return lines
 		}
-		if ctrl.Status == "" {
+		if ctrl.Status == "" || ctrl.Status == "unknown" {
 			return append(lines, "Next: "+startCommand+" to ask the supervisor to start this city")
 		}
 		if ctrl.Status == "init_failed" {

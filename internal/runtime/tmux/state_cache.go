@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"strconv"
@@ -197,7 +198,7 @@ func (f *tmuxFetcher) FetchRunning(ctx context.Context) (map[string]bool, error)
 
 // isNoServerError checks if the error is a "no server running" error.
 func isNoServerError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no server running")
+	return errors.Is(err, ErrNoServer) || (err != nil && strings.Contains(err.Error(), "no server running"))
 }
 
 // cacheTTLFromEnv reads GC_TMUX_CACHE_TTL from the environment and parses
