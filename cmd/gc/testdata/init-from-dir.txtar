@@ -49,6 +49,11 @@ stderr 'no city.toml'
 # gc init --from and --file are mutually exclusive (exits non-zero).
 ! exec gc init --from $WORK/template --file $WORK/template/city.toml $WORK/other-city
 
+# PackV2 templates should not copy the deprecated top-level scripts/ shim.
+exec gc init --from $WORK/v2-template $WORK/v2-city
+! exists $WORK/v2-city/scripts/run.sh
+exists $WORK/v2-city/pack.toml
+
 -- template/city.toml --
 [workspace]
 provider = "claude"
@@ -77,5 +82,18 @@ prompt_template = "prompts/mayor.md"
 
 -- named-template/prompts/mayor.md --
 You are the mayor.
+
+-- v2-template/city.toml --
+[workspace]
+provider = "claude"
+
+-- v2-template/pack.toml --
+[pack]
+name = "v2-template"
+schema = 2
+
+-- v2-template/scripts/run.sh --
+#!/bin/sh
+echo compatibility shim
 
 -- no-city/.keep --

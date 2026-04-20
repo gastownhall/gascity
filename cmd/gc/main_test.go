@@ -2868,7 +2868,7 @@ func TestDoInitFromDirAlreadyInitializedByCityToml(t *testing.T) {
 	}
 }
 
-func TestDoInitFromDirPreservesPermissions(t *testing.T) {
+func TestDoInitFromDirPreservesPermissionsForLegacyTopLevelScripts(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
@@ -2908,6 +2908,46 @@ func TestDoInitFromDirPreservesPermissions(t *testing.T) {
 	}
 }
 
+func TestDoInitFromDirSkipsTopLevelScriptsForPackV2Template(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+
+	srcDir := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nname = \"src\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
+		[]byte("[pack]\nname = \"src\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(srcDir, "scripts", "run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "dst")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDir(srcDir, cityPath, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInitFromDir = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("top-level scripts/ should be skipped for PackV2 templates, stat err=%v", err)
+	}
+}
+
 func TestInitFromSkip(t *testing.T) {
 	tests := []struct {
 		relPath string
@@ -2930,6 +2970,48 @@ func TestInitFromSkip(t *testing.T) {
 			got := initFromSkip(tt.relPath, tt.isDir)
 			if got != tt.want {
 				t.Errorf("initFromSkip(%q, %v) = %v, want %v", tt.relPath, tt.isDir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInitFromSkipForSource(t *testing.T) {
+	dir := t.TempDir()
+	v1Dir := filepath.Join(dir, "v1")
+	if err := os.MkdirAll(v1Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v1Dir, "pack.toml"),
+		[]byte("[pack]\nname = \"legacy\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	v2Dir := filepath.Join(dir, "v2")
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2Dir, "pack.toml"),
+		[]byte("[pack]\nname = \"modern\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		srcDir  string
+		relPath string
+		isDir   bool
+		want    bool
+	}{
+		{name: "legacy keeps top-level scripts", srcDir: v1Dir, relPath: "scripts", isDir: true, want: false},
+		{name: "packv2 skips top-level scripts", srcDir: v2Dir, relPath: "scripts", isDir: true, want: true},
+		{name: "packv2 still skips .gc", srcDir: v2Dir, relPath: ".gc", isDir: true, want: true},
+		{name: "packv2 still skips tests", srcDir: v2Dir, relPath: "helper_test.go", isDir: false, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := initFromSkipForSource(tt.srcDir)(tt.relPath, tt.isDir)
+			if got != tt.want {
+				t.Errorf("initFromSkipForSource(%q)(%q, %v) = %v, want %v", tt.srcDir, tt.relPath, tt.isDir, got, tt.want)
 			}
 		})
 	}

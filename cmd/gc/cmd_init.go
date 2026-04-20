@@ -951,6 +951,34 @@ func initFromSkip(relPath string, isDir bool) bool {
 	return false
 }
 
+// initFromSkipForSource returns the source-aware skip policy for gc init --from.
+// PackV2 templates should not carry the deprecated top-level scripts/ shim
+// forward into the new city; legacy templates retain the historical behavior.
+func initFromSkipForSource(srcDir string) overlay.SkipFunc {
+	skipTopLevelScripts := sourceTemplatePackSchema(srcDir) >= initPackSchemaVersion
+	return func(relPath string, isDir bool) bool {
+		if skipTopLevelScripts {
+			top, _, _ := strings.Cut(relPath, string(filepath.Separator))
+			if top == "scripts" {
+				return true
+			}
+		}
+		return initFromSkip(relPath, isDir)
+	}
+}
+
+func sourceTemplatePackSchema(srcDir string) int {
+	data, err := os.ReadFile(filepath.Join(srcDir, "pack.toml"))
+	if err != nil {
+		return 0
+	}
+	var pc initPackConfig
+	if _, err := toml.Decode(string(data), &pc); err != nil {
+		return 0
+	}
+	return pc.Pack.Schema
+}
+
 // overrideCityName reads an existing city.toml, updates workspace.name, and writes it back.
 func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 	cfg, err := loadCityConfigForEditFS(f, tomlPath)
@@ -1025,7 +1053,7 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkip, stderr); err != nil {
+	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkipForSource(srcDir), stderr); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1086,7 +1114,7 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 	}
 
 	// Copy directory tree (skip .gc/ and *_test.go).
-	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkip, stderr); err != nil {
+	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkipForSource(srcDir), stderr); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
