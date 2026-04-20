@@ -288,20 +288,20 @@ func (p *Provider) startStartupWatch(
 	case result = <-first:
 	case <-timeout:
 		cancel()
-		_ = waitStartupWatch(done)
+		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 		return nil, nil, false, nil
 	case <-watchCtx.Done():
-		_ = waitStartupWatch(done)
+		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 		return nil, nil, false, ctx.Err()
 	}
 	if result.unsupported {
 		cancel()
-		_ = waitStartupWatch(done)
+		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 		return nil, nil, false, nil
 	}
 	if result.err != nil {
 		cancel()
-		_ = waitStartupWatch(done)
+		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 		return nil, nil, false, result.err
 	}
 

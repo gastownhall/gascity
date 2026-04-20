@@ -383,6 +383,43 @@ func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
 	}
 }
 
+func TestStartFailedStagingDoesNotRetainWorkDirForCopyTo(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	blocker := filepath.Join(workDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "copy-error", runtime.Config{
+		Command: "sleep 3600",
+		WorkDir: workDir,
+		CopyFiles: []runtime.CopyEntry{{
+			Src:    src,
+			RelDst: filepath.Join("blocked", "seed.txt"),
+		}},
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging a copy file fails")
+	}
+
+	lateSrc := filepath.Join(srcDir, "late.txt")
+	if err := os.WriteFile(lateSrc, []byte("late data"), 0o644); err != nil {
+		t.Fatalf("write late src: %v", err)
+	}
+	if err := p.CopyTo("copy-error", lateSrc, "late.txt"); err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "late.txt")); !os.IsNotExist(err) {
+		t.Fatalf("late copy err = %v, want no copy into failed session workdir", err)
+	}
+}
+
 func TestSocketCreated(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Start(context.Background(), "sock-check", runtime.Config{Command: "sleep 3600"}); err != nil {

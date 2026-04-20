@@ -243,6 +243,66 @@ esac
 	}
 }
 
+func TestStartFallsBackToPeekWhenWatchStartupLeavesStdoutOpenWithoutInitialEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    sh -c 'sleep 5' &
+    exit 0
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Do you trust the contents of this directory?"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	oldTimeout := startupWatchFirstEventTimeout
+	startupWatchFirstEventTimeout = func() time.Duration { return 50 * time.Millisecond }
+	t.Cleanup(func() {
+		startupWatchFirstEventTimeout = oldTimeout
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung while cleaning up a no-event watch-startup child")
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal after peek fallback", string(data))
+	}
+}
+
 func TestStartReturnsPromptlyWhenWatchStartupFirstEventIsMalformed(t *testing.T) {
 	dir := t.TempDir()
 	stopFile := filepath.Join(dir, "stop.log")

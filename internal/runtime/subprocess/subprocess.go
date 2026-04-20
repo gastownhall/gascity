@@ -96,8 +96,12 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	if cfg.WorkDir != "" {
 		p.workDirs[name] = cfg.WorkDir
 	}
+	clearWorkDir := func() {
+		delete(p.workDirs, name)
+	}
 
 	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+		clearWorkDir()
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
 
@@ -118,6 +122,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	// that can block on grandchildren inheriting the pipe.
 	nullFile, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
+		clearWorkDir()
 		return fmt.Errorf("opening %s for %q: %w", os.DevNull, name, err)
 	}
 	cmd.Stdout = nullFile
@@ -139,6 +144,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	if err := cmd.Start(); err != nil {
 		_ = nullFile.Close()
+		clearWorkDir()
 		return fmt.Errorf("starting session %q: %w", name, err)
 	}
 	_ = nullFile.Close()
@@ -150,6 +156,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		// Socket creation failed — kill the process and bail.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
