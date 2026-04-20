@@ -111,7 +111,7 @@ func TestEnsureSessionNameAvailable_RejectsOpenIdentifierCollisions(t *testing.T
 		Type:   BeadType,
 		Labels: []string{LabelSession},
 		Metadata: map[string]string{
-			"template": "myrig/worker",
+			"template": "worker",
 		},
 	})
 	if err != nil {
@@ -127,6 +127,83 @@ func TestEnsureSessionNameAvailable_RejectsOpenIdentifierCollisions(t *testing.T
 	}
 	if err := ensureSessionNameAvailable(store, "worker"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(closed collision) = %v, want nil", err)
+	}
+}
+
+// Bare names and qualified identifiers occupy distinct namespaces. A city-scoped
+// control-dispatcher with bare session_name="control-dispatcher" must coexist
+// with rig-scoped dispatchers whose agent_name is "<rig>/control-dispatcher".
+// Regression for the multi-rig collision fixed by dropping the bare-vs-qualified
+// suffix match in sessionNameConflictsWithExistingIdentifier.
+func TestEnsureSessionNameAvailable_AllowsBareVsQualifiedCoexistence(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Two rig-scoped dispatchers already registered with qualified identifiers.
+	// Matches the production shape where tp.SessionName = "<rig>--control-dispatcher"
+	// and agent_name/template carry the qualified "<rig>/control-dispatcher" form.
+	for _, rig := range []string{"codeprobe", "geo"} {
+		if _, err := store.Create(beads.Bead{
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"agent_name":   rig + "/control-dispatcher",
+				"template":     rig + "/control-dispatcher",
+				"session_name": rig + "--control-dispatcher",
+			},
+		}); err != nil {
+			t.Fatalf("Create(%s dispatcher): %v", rig, err)
+		}
+	}
+
+	// City-scoped dispatcher with bare session_name must still be able to claim
+	// "control-dispatcher" despite the qualified identifiers above.
+	if err := ensureSessionNameAvailable(store, "control-dispatcher"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(bare vs qualified) = %v, want nil", err)
+	}
+
+	// Exact-match on template must still collide (guard that the narrower check holds).
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"template": "control-dispatcher",
+		},
+	}); err != nil {
+		t.Fatalf("Create(bare template): %v", err)
+	}
+	if err := ensureSessionNameAvailable(store, "control-dispatcher"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(bare exact-match) error = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
+// Same multi-rig scenario via the production entry point
+// EnsureSessionNameAvailableWithConfigForOwner — the reconciler calls this path
+// (cmd/gc/session_beads.go, cmd/gc/session_template_start.go), so regression
+// coverage must include it alongside the helper-level test above.
+func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsBareVsQualifiedCoexistence(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{
+			{Template: "control-dispatcher"},
+		},
+	}
+
+	for _, rig := range []string{"codeprobe", "geo"} {
+		if _, err := store.Create(beads.Bead{
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"agent_name":   rig + "/control-dispatcher",
+				"template":     rig + "/control-dispatcher",
+				"session_name": rig + "--control-dispatcher",
+			},
+		}); err != nil {
+			t.Fatalf("Create(%s dispatcher): %v", rig, err)
+		}
+	}
+
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "control-dispatcher", "", "control-dispatcher"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(bare vs qualified) = %v, want nil", err)
 	}
 }
 

@@ -348,9 +348,10 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 		}
 		// Historical aliases are compatibility-only input and do not reserve
 		// namespace for new session-name claims.
-		// This collision check is intentionally one-way. Explicit names cannot
-		// reuse a live short identifier, but later template/common-name sessions
-		// may still coexist and are resolved second to the exact session_name.
+		// Identifier collisions are exact-match only: a bare name like
+		// "control-dispatcher" does not collide with a qualified sibling like
+		// "<rig>/control-dispatcher", since configured multi-rig dispatchers
+		// occupy distinct namespaces by design.
 		if sessionNameConflictsWithExistingIdentifier(b, name) {
 			if continuityIneligibleConfiguredOwner(b, selfOwner) {
 				continue
@@ -378,9 +379,6 @@ func sessionNameConflictsWithExistingIdentifier(b beads.Bead, name string) bool 
 			continue
 		}
 		if field == name {
-			return true
-		}
-		if !strings.Contains(name, "/") && strings.HasSuffix(field, "/"+name) {
 			return true
 		}
 	}
