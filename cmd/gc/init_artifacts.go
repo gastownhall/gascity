@@ -2,14 +2,19 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"io"
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/examples/bd"
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+var defaultFormulas = core.PackFS
 
 func ensureInitArtifacts(cityPath string, cfg *config.City, stderr io.Writer, commandName string) {
 	if commandName == "" {
@@ -69,6 +74,15 @@ func writeDefaultFormulas(fs fsys.FS, cityPath string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func MaterializeBeadsBdScript(cityPath string) error {
+	scriptsFS, err := fs.Sub(bd.PackFS, "assets/scripts")
+	if err != nil {
+		return err
+	}
+	dstDir := filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts")
+	return materializeFS(scriptsFS, ".", dstDir)
 }
 
 func writeInitFormulas(fs fsys.FS, cityPath string, overwrite bool) error {

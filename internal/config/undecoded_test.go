@@ -457,21 +457,24 @@ install_agent_hooks = ["hooks/gascity.json"]
 	}
 }
 
-func TestParsePackConfigWithMetaAllowsPackDescription(t *testing.T) {
+func TestParsePackConfigWithMetaAllowsKnownPackMetadata(t *testing.T) {
 	input := `
 [pack]
 name = "core"
 version = "0.1.0"
 schema = 2
-description = "Built-in reference skills."
+requires_gc = ">=0.14.0"
 `
 
 	cfg, warnings, err := parsePackConfigWithMeta([]byte(input), "/city/.gc/system/packs/core/pack.toml")
 	if err != nil {
 		t.Fatalf("parsePackConfigWithMeta: %v", err)
 	}
-	if cfg.Pack.Description != "Built-in reference skills." {
-		t.Fatalf("Pack.Description = %q, want %q", cfg.Pack.Description, "Built-in reference skills.")
+	if cfg.Pack.Version != "0.1.0" {
+		t.Fatalf("Pack.Version = %q, want %q", cfg.Pack.Version, "0.1.0")
+	}
+	if cfg.Pack.RequiresGC != ">=0.14.0" {
+		t.Fatalf("Pack.RequiresGC = %q, want %q", cfg.Pack.RequiresGC, ">=0.14.0")
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", warnings)

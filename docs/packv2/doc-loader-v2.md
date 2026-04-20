@@ -333,7 +333,7 @@ my-pack/
 │       ├── run.sh
 │       └── help.md
 ├── patches/               # prompt replacements for imported agents
-├── overlays/              # pack-wide overlay files
+├── overlay/               # pack-wide overlay files
 ├── skills/                # current-city-pack skills
 ├── mcp/                   # current-city-pack MCP server definitions
 ├── template-fragments/    # prompt template fragments
@@ -385,8 +385,8 @@ standard subdirectories.
 |---|---|---|
 | Agents | `[[agent]]` tables | `agents/<name>/` directories |
 | Agent prompts | `prompt_template = "prompts/x.md"` | `agents/<name>/prompt.md` |
-| Per-agent overlays | `overlay_dir = "overlays/x"` | `agents/<name>/overlay/` |
-| Pack-wide overlays | `overlay_dir = "overlays/default"` | `overlays/` directory |
+| Per-agent overlays | `overlay_dir = "overlay/x"` | `agents/<name>/overlay/` |
+| Pack-wide overlays | `overlay_dir = "overlay/default"` | `overlay/` directory |
 | Formulas | `[[formula]].path` + dir scan | `formulas/*.toml` directly |
 | Orders | inside formulas | `orders/*.toml` (top-level, convention-discovered) |
 | Scripts | `scripts_dir = "scripts"` | **Gone.** Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |

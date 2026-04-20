@@ -108,7 +108,7 @@ In this rollout, `[[agent]]` gets a loud warning on schema 2. Agent fields below
 |--------|-------|----------|--------------------|
 | 🟢 | `name` | Required string | **Convention-replaced.** Directory name is identity. |
 | 🟢 | `prompt_template` | Path string | **Convention-replaced.** `prompt.template.md` or `prompt.md` in agent dir. |
-| 🟢 | `overlay_dir` | Path string | **Convention-replaced.** `agents/<name>/overlay/` + pack-wide `overlays/`. |
+| 🟢 | `overlay_dir` | Path string | **Convention-replaced.** `agents/<name>/overlay/` + pack-wide `overlay/`. |
 | 🟢 | `namepool` | Path string | **Convention-replaced.** `agents/<name>/namepool.txt`. |
 
 ### V1 remnants

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Revision computes a deterministic bundle hash from all resolved config
@@ -116,48 +117,68 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// WatchDirs returns the set of directories that should be watched for
-// config changes. This includes the directory of each source file,
-// rig pack directories, and city-level pack directories.
-// Returns deduplicated, sorted paths.
-func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
-	seen := make(map[string]bool)
-	var dirs []string
+// WatchTarget describes a filesystem path that should be watched for config
+// changes and how much of its subtree participates in discovery.
+type WatchTarget struct {
+	Path                string
+	Recursive           bool
+	DiscoverConventions bool
+}
 
-	addDir := func(dir string) {
-		if dir != "" && !seen[dir] {
-			seen[dir] = true
-			dirs = append(dirs, dir)
+// WatchTargets returns the set of paths that should be watched for config
+// changes. Config source directories are shallow; city roots discover
+// convention subdirectories; pack roots and convention roots are recursive.
+func WatchTargets(prov *Provenance, cfg *City, cityRoot string) []WatchTarget {
+	seen := make(map[string]int)
+	var targets []WatchTarget
+
+	addTarget := func(path string, recursive, discoverConventions bool) {
+		if path == "" {
+			return
 		}
+		if idx, ok := seen[path]; ok {
+			targets[idx].Recursive = targets[idx].Recursive || recursive
+			targets[idx].DiscoverConventions = targets[idx].DiscoverConventions || discoverConventions
+			return
+		}
+		seen[path] = len(targets)
+		targets = append(targets, WatchTarget{
+			Path:                path,
+			Recursive:           recursive,
+			DiscoverConventions: discoverConventions,
+		})
 	}
 
-	// Config source file directories.
 	if prov != nil {
 		for _, src := range prov.Sources {
-			addDir(filepath.Dir(src))
+			dir := filepath.Dir(src)
+			addTarget(dir, false, pathutil.SamePath(dir, cityRoot))
 		}
 	}
 
-	// Rig pack directories (all pack sources).
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
-			addDir(topoDir)
+			topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
+			if !ok {
+				continue
+			}
+			addTarget(topoDir, true, false)
 		}
 	}
 
-	// City-level pack directories.
 	for _, ref := range cfg.Workspace.Includes {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
-		addDir(topoDir)
+		topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
+		if !ok {
+			continue
+		}
+		addTarget(topoDir, true, false)
 	}
 
-	// PackV2 imports resolve into concrete pack directories during config
-	// expansion, so watch those directories too. Without this, `gc import
-	// install` and edits under imported packs change the revision hash but not
-	// the watch set that drives reloads.
 	for _, dir := range cfg.PackDirs {
-		addDir(dir)
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		addTarget(dir, true, false)
 	}
 	rigNames := make([]string, 0, len(cfg.RigPackDirs))
 	for rigName := range cfg.RigPackDirs {
@@ -166,17 +187,41 @@ func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
 	sort.Strings(rigNames)
 	for _, rigName := range rigNames {
 		for _, dir := range cfg.RigPackDirs[rigName] {
-			addDir(dir)
+			if strings.TrimSpace(dir) == "" {
+				continue
+			}
+			addTarget(dir, true, false)
 		}
 	}
 
-	// Convention-discovered city-pack trees are loaded directly from the city
-	// root, so watch them too when they already exist.
 	for _, dir := range existingConventionDiscoveryDirsOS(cityRoot) {
-		addDir(dir)
+		addTarget(dir, true, false)
 	}
 
-	sort.Strings(dirs)
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].Path < targets[j].Path
+	})
+	return targets
+}
+
+func revisionPackDir(ref, declDir, cityRoot string) (string, bool) {
+	if strings.TrimSpace(ref) == "" {
+		return "", false
+	}
+	dir, err := resolvePackRef(ref, declDir, cityRoot)
+	if err != nil || strings.TrimSpace(dir) == "" {
+		return "", false
+	}
+	return dir, true
+}
+
+// WatchDirs returns the deduplicated paths from WatchTargets.
+func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
+	targets := WatchTargets(prov, cfg, cityRoot)
+	dirs := make([]string, len(targets))
+	for i, target := range targets {
+		dirs[i] = target.Path
+	}
 	return dirs
 }
 
@@ -195,7 +240,13 @@ func tracksPackV2Imports(cfg *City) bool {
 	return false
 }
 
-var conventionDiscoveryDirNames = []string{"agents", "commands", "doctor"}
+var conventionDiscoveryDirNames = []string{"agents", "commands", "doctor", "formulas", "orders", "template-fragments", "skills", "mcp"}
+
+// ConventionDiscoveryDirNames returns the fixed top-level directory names
+// whose contents participate in convention-based pack discovery.
+func ConventionDiscoveryDirNames() []string {
+	return append([]string(nil), conventionDiscoveryDirNames...)
+}
 
 func existingConventionDiscoveryDirsFS(fs fsys.FS, cityRoot string) []string {
 	var dirs []string

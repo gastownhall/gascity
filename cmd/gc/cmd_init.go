@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,16 +22,10 @@ import (
 
 const initPackSchemaVersion = 2
 
-// initExitAlreadyInitialized is the exit code `gc init` uses when the
-// target already contains a city. Callers (notably the supervisor HTTP
-// handler behind POST /v0/city) dispatch on this exit code instead of
-// string-matching stderr.
-const initExitAlreadyInitialized = 2
-
 type initPackMeta struct {
-	Name        string                   `toml:"name" jsonschema:"required"`
-	Version     string                   `toml:"version"`
-	Schema      int                      `toml:"schema" jsonschema:"required"`
+	Name        string                   `toml:"name"`
+	Version     string                   `toml:"version,omitempty"`
+	Schema      int                      `toml:"schema"`
 	Description string                   `toml:"description,omitempty"`
 	RequiresGC  string                   `toml:"requires_gc,omitempty"`
 	Includes    []string                 `toml:"includes,omitempty"`
@@ -48,9 +41,6 @@ type packRigDefaults struct {
 }
 
 type initPackConfig struct {
-	// Keep this layout in lockstep with internal/config.packConfig so
-	// pack.toml write paths in cmd/gc can round-trip the canonical root
-	// pack shape without dropping supported fields.
 	Pack           initPackMeta                   `toml:"pack"`
 	Imports        map[string]config.Import       `toml:"imports,omitempty"`
 	AgentDefaults  config.AgentDefaults           `toml:"agent_defaults,omitempty"`
@@ -74,7 +64,7 @@ var initConventionDirs = []string{
 	citylayout.FormulasRoot,
 	citylayout.OrdersRoot,
 	"template-fragments",
-	"overlay",
+	"overlays",
 	"assets",
 }
 
@@ -227,7 +217,7 @@ func resolveAgentChoice(input string, order []string, builtins map[string]config
 	return ""
 }
 
-const initProgressSteps = 8
+const initProgressSteps = 6
 
 func logInitProgress(stdout io.Writer, step int, msg string) {
 	if stdout == nil {
@@ -282,7 +272,7 @@ non-interactively, or --file to initialize from an existing TOML config file.`,
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
-	cmd.Flags().StringVar(&nameFlag, "name", "", "machine-local city name (default: source template's workspace.name if set, else source pack.name if set, else target directory basename)")
+	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "built-in workspace provider to use for the default mayor config")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
@@ -422,19 +412,11 @@ func initPromptTemplatePath(templatePath string) (string, bool) {
 	return filepath.Join("agents", base, "prompt.template.md"), true
 }
 
-// rewriteInitPromptTemplates rewrites the mayor agent's legacy prompt_template
-// from "prompts/mayor.md" to the V2 "agents/mayor/prompt.template.md" path
-// that writeInitAgentPrompts actually scaffolds. Other agents are left alone:
-// we only ship a scaffold for mayor, so rewriting e.g. "prompts/worker.md"
-// would silently point the config at a file that never gets created.
 func rewriteInitPromptTemplates(cfg *config.City) {
 	if cfg == nil {
 		return
 	}
 	for i := range cfg.Agents {
-		if cfg.Agents[i].Name != "mayor" {
-			continue
-		}
 		if next, ok := initPromptTemplatePath(cfg.Agents[i].PromptTemplate); ok {
 			cfg.Agents[i].PromptTemplate = next
 		}
@@ -460,9 +442,9 @@ func writeInitPackToml(fs fsys.FS, cityPath string, packCfg initPackConfig) erro
 
 func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 	type encodedInitPackMeta struct {
-		Name        string                   `toml:"name" jsonschema:"required"`
+		Name        string                   `toml:"name"`
 		Version     string                   `toml:"version,omitempty"`
-		Schema      int                      `toml:"schema" jsonschema:"required"`
+		Schema      int                      `toml:"schema"`
 		Description string                   `toml:"description,omitempty"`
 		RequiresGC  string                   `toml:"requires_gc,omitempty"`
 		Includes    []string                 `toml:"includes,omitempty"`
@@ -472,8 +454,8 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 		Pack          encodedInitPackMeta            `toml:"pack"`
 		Imports       map[string]config.Import       `toml:"imports,omitempty"`
 		AgentDefaults *config.AgentDefaults          `toml:"agent_defaults,omitempty"`
-		Defaults      packDefaults                   `toml:"defaults,omitempty"`
-		Agents        []config.Agent                 `toml:"agent"`
+		Defaults      *packDefaults                  `toml:"defaults,omitempty"`
+		Agents        []config.Agent                 `toml:"agent,omitempty"`
 		NamedSessions []config.NamedSession          `toml:"named_session,omitempty"`
 		Services      []config.Service               `toml:"service,omitempty"`
 		Providers     map[string]config.ProviderSpec `toml:"providers,omitempty"`
@@ -495,7 +477,6 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 			Requires:    cfg.Pack.Requires,
 		},
 		Imports:       cfg.Imports,
-		Defaults:      cfg.Defaults,
 		Agents:        cfg.Agents,
 		NamedSessions: cfg.NamedSessions,
 		Services:      cfg.Services,
@@ -505,6 +486,9 @@ func marshalInitPackConfig(cfg initPackConfig) ([]byte, error) {
 	}
 	if !isZeroValue(cfg.AgentDefaults) {
 		encCfg.AgentDefaults = &cfg.AgentDefaults
+	}
+	if !isZeroValue(cfg.Defaults) {
+		encCfg.Defaults = &cfg.Defaults
 	}
 	if !isZeroValue(cfg.Formulas) {
 		encCfg.Formulas = &cfg.Formulas
@@ -538,66 +522,19 @@ func newInitPackConfig(cityName string) initPackConfig {
 	}
 }
 
-func splitInitConfig(packName string, cfg *config.City) (initPackConfig, config.City) {
-	packCfg := newInitPackConfig(packName)
+func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.City) {
+	packCfg := newInitPackConfig(cityName)
 	if cfg == nil {
 		return packCfg, config.City{}
 	}
 
 	cityCfg := *cfg
-	cityCfg.Agents = nil
-	cityCfg.NamedSessions = nil
-	cityCfg.Imports = nil
-	cityCfg.Providers = nil
-	cityCfg.Services = nil
-	cityCfg.Formulas = config.FormulasConfig{}
-	cityCfg.Patches = config.Patches{}
-	cityCfg.AgentDefaults = config.AgentDefaults{}
-	cityCfg.AgentsDefaults = config.AgentDefaults{}
-	cityCfg.Workspace.Name = ""
-	cityCfg.Workspace.Prefix = ""
-
-	packCfg.Agents = append([]config.Agent(nil), cfg.Agents...)
-	packCfg.NamedSessions = append([]config.NamedSession(nil), cfg.NamedSessions...)
 	if len(cfg.Imports) > 0 {
 		packCfg.Imports = make(map[string]config.Import, len(cfg.Imports))
 		for name, imp := range cfg.Imports {
 			packCfg.Imports[name] = imp
 		}
-	}
-	if len(cfg.Providers) > 0 {
-		packCfg.Providers = make(map[string]config.ProviderSpec, len(cfg.Providers))
-		for name, spec := range cfg.Providers {
-			packCfg.Providers[name] = spec
-		}
-	}
-	packCfg.AgentDefaults = cfg.AgentDefaults
-	if isZeroValue(packCfg.AgentDefaults) && !isZeroValue(cfg.AgentsDefaults) {
-		packCfg.AgentDefaults = cfg.AgentsDefaults
-	}
-	packCfg.Formulas = cfg.Formulas
-	packCfg.Patches = cfg.Patches
-	for _, svc := range cfg.Services {
-		if svc.PublishMode == "direct" {
-			cityCfg.Services = append(cityCfg.Services, svc)
-			continue
-		}
-		packCfg.Services = append(packCfg.Services, svc)
-	}
-
-	if len(cfg.Workspace.Includes) > 0 {
-		packCfg.Pack.Includes = appendUniqueStrings(
-			append([]string(nil), packCfg.Pack.Includes...),
-			cfg.Workspace.Includes...,
-		)
-		cityCfg.Workspace.Includes = nil
-	}
-	if len(cfg.Workspace.GlobalFragments) > 0 {
-		packCfg.AgentDefaults.AppendFragments = appendUniqueStrings(
-			append([]string(nil), packCfg.AgentDefaults.AppendFragments...),
-			cfg.Workspace.GlobalFragments...,
-		)
-		cityCfg.Workspace.GlobalFragments = nil
+		cityCfg.Imports = nil
 	}
 	if len(cfg.DefaultRigImports) > 0 {
 		defaults := packDefaults{
@@ -611,18 +548,15 @@ func splitInitConfig(packName string, cfg *config.City) (initPackConfig, config.
 		packCfg.Defaults = defaults
 		cityCfg.Workspace.DefaultRigIncludes = nil
 	}
-
 	return packCfg, cityCfg
 }
 
-func decodeInitPackTemplate(data []byte, packName string) (initPackConfig, error) {
-	cfg := newInitPackConfig(packName)
+func decodeInitPackTemplate(data []byte, cityName string) (initPackConfig, error) {
+	cfg := newInitPackConfig(cityName)
 	if _, err := toml.Decode(string(data), &cfg); err != nil {
 		return initPackConfig{}, fmt.Errorf("parse pack template: %w", err)
 	}
-	// Fresh init always materializes a city-scoped root pack, so the target
-	// pack identity and current schema override any template header identity.
-	cfg.Pack.Name = packName
+	cfg.Pack.Name = cityName
 	cfg.Pack.Schema = initPackSchemaVersion
 	return cfg, nil
 }
@@ -632,6 +566,7 @@ func applyInitPackTemplateExtras(dst *initPackConfig, src initPackConfig) {
 		return
 	}
 	dst.Pack.Version = src.Pack.Version
+	dst.Pack.Description = src.Pack.Description
 	dst.Pack.RequiresGC = src.Pack.RequiresGC
 	dst.Pack.Includes = appendUniqueStrings(
 		append([]string(nil), dst.Pack.Includes...),
@@ -640,7 +575,9 @@ func applyInitPackTemplateExtras(dst *initPackConfig, src initPackConfig) {
 	dst.Pack.Requires = append([]config.PackRequirement(nil), src.Pack.Requires...)
 	dst.Doctor = append([]config.PackDoctorEntry(nil), src.Doctor...)
 	dst.Commands = append([]config.PackCommandEntry(nil), src.Commands...)
-	dst.Global = src.Global
+	if !isZeroValue(src.Global) {
+		dst.Global = src.Global
+	}
 }
 
 func appendUniqueStrings(dst []string, items ...string) []string {
@@ -698,26 +635,19 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return 1
 	}
 
-	// --file creates a new city from a template. Preserve explicit source
-	// identity when present, but write the machine-local result to
-	// .gc/site.toml instead of checked-in city.toml.
-	sourcePackName := parseInitPackName(data)
-	if sourcePackName == "" {
-		sourcePackName = readInitSourcePackName(fs, filepath.Dir(tomlSrc))
-	}
-	cityName := resolveCityName(nameOverride, cfg.Workspace.Name, sourcePackName, cityPath)
-	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	packName := resolvePackName(sourcePackName, cityName)
-	templatePack, err := decodeInitPackTemplate(data, packName)
+	// --file creates a new city from a template; default to target dir name.
+	cityName := resolveCityName(nameOverride, "", cityPath)
+	templatePack, err := decodeInitPackTemplate(data, cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	cfg.Workspace.Name = cityName
 
 	// Create directory structure.
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return initExitAlreadyInitialized
+		return 1
 	}
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -737,11 +667,25 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return code
 	}
 
+	// Write default formulas.
+	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
+		return code
+	}
+	packCfg, cityCfg := splitInitConfig(cityName, cfg)
+	applyInitPackTemplateExtras(&packCfg, templatePack)
+	if err := writeInitPackToml(fs, cityPath, packCfg); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
+	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
+		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
+	}
+
 	// Rewrite legacy prompt paths only after we've copied the embedded prompt
 	// scaffolds that still live under prompts/.
-	rewriteInitPromptTemplates(cfg)
-	packCfg, cityCfg := splitInitConfig(packName, cfg)
-	applyInitPackTemplateExtras(&packCfg, templatePack)
+	rewriteInitPromptTemplates(&cityCfg)
 
 	// Re-marshal so the name and rewritten prompt paths are updated.
 	content, err := cityCfg.Marshal()
@@ -750,26 +694,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return 1
 	}
 
-	if err := writeInitPackToml(fs, cityPath, packCfg); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	// Write city.toml.
 	if err := fs.WriteFile(filepath.Join(cityPath, "city.toml"), content, 0o644); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
-	}
-	if err := persistInitWorkspaceIdentity(fs, cityPath, filepath.Join(cityPath, "city.toml"), &cityCfg, cityName, cityPrefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	// Resolve formulas symlinks only after pack.toml and city.toml are both
-	// on disk so root-pack includes participate in the initial materialization.
-	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
-		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 	}
 
 	// Write .gitignore entries for city-managed directories.
@@ -801,12 +729,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
 		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return initExitAlreadyInitialized
+		return 1
 	}
 	if _, err := fs.Stat(tomlPath); err == nil {
 		if !canBootstrapExistingCity(wiz) {
 			fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-			return initExitAlreadyInitialized
+			return 1
 		}
 		if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -815,16 +743,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
 			return code
 		}
-		trimmedNameOverride := strings.TrimSpace(nameOverride)
-		if trimmedNameOverride != "" {
-			if code := overrideCityName(fs, tomlPath, trimmedNameOverride, stderr); code != 0 {
+		if nameOverride != "" {
+			if code := overrideCityName(fs, tomlPath, nameOverride, stderr); code != 0 {
 				return code
 			}
 		}
-		cityName := trimmedNameOverride
-		if cityName == "" {
-			cityName = loadExistingCityNameForInit(fs, tomlPath, stderr)
-		}
+		cityName := resolveCityName(nameOverride, "", cityPath)
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                              //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Bootstrapped city %q runtime scaffold.\n", cityName) //nolint:errcheck // best-effort stdout
 		return 0
@@ -849,7 +773,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// Build the initial city shape before writing prompt scaffolds so init
 	// only creates convention-discoverable prompt files for the agents the
 	// chosen city template actually declares.
-	cityName := resolveCityName(nameOverride, "", "", cityPath)
+	cityName := resolveCityName(nameOverride, "", cityPath)
 	var cfg config.City
 	switch {
 	case wiz.configName == "custom":
@@ -864,45 +788,41 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
 
 	// Write prompt files only for the agents declared by the init template.
-	// Wording matches the V2 layout: prompts scaffold under agents/<name>/
-	// prompt.template.md, not a root prompts/ directory.
-	logInitProgress(stdout, 3, "Scaffolding agent prompts")
+	logInitProgress(stdout, 3, "Writing default prompts")
 	if code := writeInitAgentPrompts(fs, cityPath, &cfg, stderr); code != 0 {
 		return code
 	}
 
-	// Write pack.toml + city.toml in the transitional v2 split: pack.toml
-	// owns portable definition, while city.toml keeps deployment/runtime
-	// state. We intentionally retain current compatibility fields such as
-	// workspace.provider in city.toml until the runtime cutover is complete.
-	rewriteInitPromptTemplates(&cfg)
-	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	// Write default formula files.
+	logInitProgress(stdout, 4, "Writing default formulas")
+	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
+		return code
+	}
+
+	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
+	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
+		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+
+	// Write city.toml — wizard path gets one agent + provider/startCommand;
+	// --provider path gets the same city shape non-interactively;
+	// custom path gets one mayor + no provider (user configures manually).
 	packCfg, cityCfg := splitInitConfig(cityName, &cfg)
+	rewriteInitPromptTemplates(&cityCfg)
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logInitProgress(stdout, 4, "Writing pack.toml")
+	logInitProgress(stdout, 5, "Writing pack.toml")
 	if err := writeInitPackToml(fs, cityPath, packCfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logInitProgress(stdout, 5, "Writing city configuration")
+	logInitProgress(stdout, 6, "Writing city configuration")
 	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
-	}
-	if err := persistInitWorkspaceIdentity(fs, cityPath, tomlPath, &cityCfg, cityName, cityPrefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	// Default formulas/orders now arrive via the root pack layer, so resolve
-	// them after the split config has been written to disk.
-	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
-		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
 	// Write .gitignore entries for city-managed directories.
@@ -926,6 +846,24 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	default:
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                                     //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Initialized city %q with default mayor agent.\n", cityName) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+func applyBootstrapProfile(cfg *config.City, profile string) {
+	if profile == bootstrapProfileK8sCell {
+		cfg.API.Port = config.DefaultAPIPort
+		cfg.API.Bind = "0.0.0.0"
+		cfg.API.AllowMutations = true
+	}
+}
+
+// installClaudeHooks writes Claude Code hook settings for the city.
+// Delegates to hooks.Install which is idempotent (won't overwrite existing files).
+func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
+	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
+		fmt.Fprintf(stderr, "gc init: installing claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	return 0
 }
@@ -954,30 +892,10 @@ func bootstrapScopedFileProviderCityFS(fs fsys.FS, cityPath string) error {
 	return fs.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
 }
 
-func applyBootstrapProfile(cfg *config.City, profile string) {
-	if profile == bootstrapProfileK8sCell {
-		cfg.API.Port = config.DefaultAPIPort
-		cfg.API.Bind = "0.0.0.0"
-		cfg.API.AllowMutations = true
-	}
-}
-
-// installClaudeHooks writes Claude Code hook settings for the city.
-// Delegates to hooks.Install which is idempotent (won't overwrite existing files).
-// The stderr prefix is neutral ("claude hooks:") because this function runs
-// both at `gc init` time and on every reconciler tick via resolveTemplate.
-func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
-	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
-		fmt.Fprintf(stderr, "claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
-}
-
-// writeInitAgentPrompts writes the mayor scaffold prompt into the V2
-// agents/mayor/ directory when the init template includes a mayor agent.
-// Other implicit agents use prompts shipped by the core bootstrap pack at
-// runtime, so they don't need init-time scaffolding.
+// writeInitAgentPrompts creates the agents/ directory and writes only the
+// default prompt scaffolds referenced by the init template's explicit agents.
+// This keeps a freshly initialized city aligned with the city.toml it writes
+// instead of silently creating additional convention-discoverable agents.
 func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer) int {
 	if err := fs.MkdirAll(filepath.Join(cityPath, "agents"), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -986,16 +904,19 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 	if cfg == nil {
 		return 0
 	}
+	seen := make(map[string]bool, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
-		if agent.Name != "mayor" {
+		dst, ok := initPromptTemplatePath(agent.PromptTemplate)
+		if !ok || seen[dst] {
 			continue
 		}
-		data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+		seen[dst] = true
+		data, err := defaultPrompts.ReadFile(agent.PromptTemplate)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: reading embedded mayor prompt: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		dst := filepath.Join(cityPath, "agents", "mayor", "prompt.template.md")
+		dst = filepath.Join(cityPath, dst)
 		if err := fs.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1004,7 +925,6 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return 0
 	}
 	return 0
 }
@@ -1022,16 +942,15 @@ func initFromSkip(relPath string, isDir bool) bool {
 	return false
 }
 
-// overrideCityName stores a machine-local workspace name override in
-// .gc/site.toml while preserving any existing site-bound prefix.
+// overrideCityName reads an existing city.toml, updates workspace.name, and writes it back.
 func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
-	binding, err := config.LoadSiteBinding(f, filepath.Dir(tomlPath))
+	cfg, err := loadCityConfigForEditFS(f, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	prefix := strings.TrimSpace(binding.WorkspacePrefix)
-	if err := config.PersistWorkspaceSiteBinding(f, filepath.Dir(tomlPath), name, prefix); err != nil {
+	cfg.Workspace.Name = name
+	if err := writeCityConfigForEditFS(f, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1039,67 +958,16 @@ func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 }
 
 // resolveCityName returns the workspace name to use during init.
-// Priority: explicit --name flag > source/template workspace.name >
-// source/template pack.name > target directory basename.
-// Matches runtime config.EffectiveCityName by trimming whitespace on all
-// inputs so a name with stray spaces resolves the same way at init time
-// and at runtime.
-func resolveCityName(nameOverride, sourceName, sourcePackName, cityPath string) string {
+// Priority: explicit --name flag > name set on the source/template config >
+// target directory basename.
+func resolveCityName(nameOverride, sourceName, cityPath string) string {
 	if n := strings.TrimSpace(nameOverride); n != "" {
 		return n
 	}
 	if n := strings.TrimSpace(sourceName); n != "" {
 		return n
 	}
-	if n := strings.TrimSpace(sourcePackName); n != "" {
-		return n
-	}
 	return strings.TrimSpace(filepath.Base(cityPath))
-}
-
-func resolvePackName(sourcePackName, cityName string) string {
-	if n := strings.TrimSpace(sourcePackName); n != "" {
-		return n
-	}
-	return strings.TrimSpace(cityName)
-}
-
-func parseInitPackName(data []byte) string {
-	var meta struct {
-		Pack struct {
-			Name string `toml:"name"`
-		} `toml:"pack"`
-	}
-	if _, err := toml.Decode(string(data), &meta); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(meta.Pack.Name)
-}
-
-func readInitSourcePackName(fs fsys.FS, srcDir string) string {
-	data, err := fs.ReadFile(filepath.Join(srcDir, "pack.toml"))
-	if err != nil {
-		return ""
-	}
-	return parseInitPackName(data)
-}
-
-func loadExistingCityNameForInit(fs fsys.FS, tomlPath string, stderr io.Writer) string {
-	data, err := fs.ReadFile(tomlPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: warning: reading persisted workspace identity from %q: %v\n", tomlPath, err) //nolint:errcheck // best-effort stderr
-		return strings.TrimSpace(filepath.Base(filepath.Dir(tomlPath)))
-	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: warning: parsing persisted workspace identity from %q: %v\n", tomlPath, err) //nolint:errcheck // best-effort stderr
-		return strings.TrimSpace(filepath.Base(filepath.Dir(tomlPath)))
-	}
-	if err := config.ResolveWorkspaceIdentity(fs, filepath.Dir(tomlPath), cfg); err != nil {
-		fmt.Fprintf(stderr, "gc init: warning: resolving persisted workspace identity from %q: %v\n", tomlPath, err) //nolint:errcheck // best-effort stderr
-		return strings.TrimSpace(filepath.Base(filepath.Dir(tomlPath)))
-	}
-	return config.EffectiveCityName(cfg, filepath.Base(filepath.Dir(tomlPath)))
 }
 
 func cmdInitFromDirWithOptions(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
@@ -1130,16 +998,13 @@ func cmdInitFromDirWithOptions(fromDir string, args []string, nameOverride strin
 }
 
 // doInitFromDir copies an example city directory to a new city path,
-// writes the local city identity to .gc/site.toml, creates .gc/, and installs hooks.
+// updates workspace.name, creates .gc/, and installs hooks.
 func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 	return doInitFromDirWithOptions(srcDir, cityPath, "", stdout, stderr, false)
 }
 
 func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
-	return doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness)
-}
-
-func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
+	fs := fsys.OSFS{}
 	// Validate source has city.toml.
 	srcToml := filepath.Join(srcDir, "city.toml")
 	if _, err := os.Stat(srcToml); err != nil {
@@ -1150,7 +1015,7 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 	// Check target not already initialized.
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		fmt.Fprintln(stderr, "gc init: already initialized") //nolint:errcheck // best-effort stderr
-		return initExitAlreadyInitialized
+		return 1
 	}
 
 	// Create target directory if needed.
@@ -1176,13 +1041,8 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// --from copies a template city; preserve explicit source identity when
-	// present, but write the machine-local result to .gc/site.toml.
-	sourcePackName := readInitSourcePackName(fs, srcDir)
-	cityName := resolveCityName(nameOverride, cfg.Workspace.Name, sourcePackName, cityPath)
-	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	cfg.Workspace.Name = ""
-	cfg.Workspace.Prefix = ""
+	cityName := resolveCityName(nameOverride, "", cityPath)
+	cfg.Workspace.Name = cityName
 	content, err := cfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1192,22 +1052,9 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 
 	// Create runtime scaffold.
 	if err := ensureCityScaffold(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	// Ensure V2 convention directories (formulas, orders, prompts, etc.)
-	// exist even when the copied template doesn't ship them. Compose
-	// references these paths unconditionally, so tests that stat the
-	// computed formula layers expect them to resolve.
-	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1230,10 +1077,7 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 	}
 
 	// Resolve formulas and scripts from pack layers.
-	expandedCfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, copiedToml)
-	if loadErr == nil {
-		emitLoadCityConfigWarnings(stderr, prov)
-	}
+	expandedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, copiedToml)
 	if loadErr == nil && len(expandedCfg.FormulaLayers.City) > 0 {
 		if rfErr := ResolveFormulas(cityPath, expandedCfg.FormulaLayers.City); rfErr != nil {
 			fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
@@ -1251,33 +1095,4 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 	})
-}
-
-func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {
-	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, cityPrefix); err != nil {
-		if restoreErr := restoreLegacyWorkspaceIdentity(fs, cityTomlPath, cfg, cityName, cityPrefix); restoreErr != nil {
-			return errors.Join(err, fmt.Errorf("restoring legacy workspace identity: %w", restoreErr))
-		}
-		return err
-	}
-	return nil
-}
-
-func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {
-	if cfg == nil {
-		return nil
-	}
-	restored := *cfg
-	restored.Workspace.Name = strings.TrimSpace(cityName)
-	restored.Workspace.Prefix = strings.TrimSpace(cityPrefix)
-	restored.ResolvedWorkspaceName = ""
-	restored.ResolvedWorkspacePrefix = ""
-	content, err := restored.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshal %q: %w", cityTomlPath, err)
-	}
-	if err := fs.WriteFile(cityTomlPath, content, 0o644); err != nil {
-		return fmt.Errorf("write %q: %w", cityTomlPath, err)
-	}
-	return nil
 }

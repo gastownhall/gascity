@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -9,11 +10,43 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
+
+var agentDefaultsCompatibilityOverlapKeys = []string{
+	"model",
+	"wake_mode",
+	"default_sling_formula",
+	"allow_overlay",
+	"allow_env_override",
+	"append_fragments",
+}
+
 // CheckUndecodedKeys examines TOML metadata for keys that were present in
 // the input but not mapped to any struct field. For each unknown key, it
 // computes edit distance against known field names and suggests the closest
 // match if one is within 2 edits. Returns a list of human-readable warnings.
 func CheckUndecodedKeys(md toml.MetaData, source string) []string {
+	var warnings []string
+	warnings = append(warnings, agentDefaultsCompatibilityWarnings(md, source)...)
+
+	undecoded := md.Undecoded()
+	if len(undecoded) == 0 {
+		return warnings
+	}
+
+	known := knownTOMLKeys()
+	for _, key := range undecoded {
+		keyStr := key.String()
+		if special, ok := specializedUndecodedWarning(source, keyStr); ok {
+			warnings = append(warnings, special)
+			continue
+		}
+		warnings = append(warnings, unknownFieldWarning(source, keyStr, known))
+	}
+	return warnings
+}
+
+func fatalUndecodedWarnings(md toml.MetaData, source string) []string {
 	undecoded := md.Undecoded()
 	if len(undecoded) == 0 {
 		return nil
@@ -23,16 +56,62 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 	var warnings []string
 	for _, key := range undecoded {
 		keyStr := key.String()
-		// Skip deeply nested keys — we only warn on section-level and
-		// field-level keys, not on sub-sub-fields of tables.
-		suggestion := suggestKey(keyStr, known)
-		w := fmt.Sprintf("%s: unknown field %q", source, keyStr)
-		if suggestion != "" {
-			w += fmt.Sprintf(" (did you mean %q?)", suggestion)
+		if _, ok := specializedUndecodedWarning(source, keyStr); ok {
+			continue
 		}
-		warnings = append(warnings, w)
+		warnings = append(warnings, unknownFieldWarning(source, keyStr, known))
 	}
 	return warnings
+}
+
+func unknownFieldWarning(source, key string, known []string) string {
+	suggestion := suggestKey(key, known)
+	w := fmt.Sprintf("%s: unknown field %q", source, key)
+	if suggestion != "" {
+		w += fmt.Sprintf(" (did you mean %q?)", suggestion)
+	}
+	return w
+}
+
+func agentDefaultsCompatibilityWarnings(md toml.MetaData, source string) []string {
+	if !md.IsDefined("agents") {
+		return nil
+	}
+
+	warnings := []string{fmt.Sprintf("%s: %s", source, agentsAliasWarning)}
+	if md.IsDefined("agent_defaults") && agentDefaultsTablesOverlap(md) {
+		warnings = append(warnings, fmt.Sprintf("%s: both [agent_defaults] and [agents] are present; canonical [agent_defaults] wins for overlapping keys", source))
+	}
+	return warnings
+}
+
+func agentDefaultsTablesOverlap(md toml.MetaData) bool {
+	for _, key := range agentDefaultsCompatibilityOverlapKeys {
+		if md.IsDefined("agent_defaults", key) && md.IsDefined("agents", key) {
+			return true
+		}
+	}
+	return false
+}
+
+func specializedUndecodedWarning(source, key string) (string, bool) {
+	isPackSource := filepath.Base(source) == "pack.toml"
+	switch key {
+	case "agent_defaults.provider", "agents.provider":
+		if isPackSource {
+			return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml", source, key), true
+		}
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.provider (or set provider per agent in agents/<name>/agent.toml)", source, key), true
+	case "agent_defaults.scope", "agents.scope":
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml", source, key), true
+	case "agent_defaults.install_agent_hooks", "agents.install_agent_hooks":
+		if isPackSource {
+			return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting install_agent_hooks per agent in agents/<name>/agent.toml", source, key), true
+		}
+		return fmt.Sprintf("%s: %q is not supported in this release wave; keep using workspace.install_agent_hooks (or set install_agent_hooks per agent in agents/<name>/agent.toml)", source, key), true
+	default:
+		return "", false
+	}
 }
 
 // suggestKey finds the closest known key to the given unknown key using
@@ -52,6 +131,9 @@ func suggestKey(unknown string, known []string) string {
 			bestDist = d
 			bestKey = k
 		}
+	}
+	if bestKey == leaf {
+		return ""
 	}
 	return bestKey
 }
@@ -97,15 +179,6 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(Workspace{}),
 		reflect.TypeOf(Agent{}),
 		reflect.TypeOf(Rig{}),
-		reflect.TypeOf(NamedSession{}),
-		reflect.TypeOf(Import{}),
-		reflect.TypeOf(PackMeta{}),
-		reflect.TypeOf(PackDoctorEntry{}),
-		reflect.TypeOf(PackCommandEntry{}),
-		reflect.TypeOf(PackGlobal{}),
-		reflect.TypeOf(packConfig{}),
-		reflect.TypeOf(packDefaults{}),
-		reflect.TypeOf(packRigDefaults{}),
 		reflect.TypeOf(ProviderSpec{}),
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),
@@ -123,6 +196,16 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(ServiceWorkflowConfig{}),
 		reflect.TypeOf(ServiceProcessConfig{}),
 		reflect.TypeOf(AgentDefaults{}),
+		reflect.TypeOf(packConfig{}),
+		reflect.TypeOf(PackMeta{}),
+		reflect.TypeOf(Import{}),
+		reflect.TypeOf(NamedSession{}),
+		reflect.TypeOf(PackRequirement{}),
+		reflect.TypeOf(PackDoctorEntry{}),
+		reflect.TypeOf(PackCommandEntry{}),
+		reflect.TypeOf(PackGlobal{}),
+		reflect.TypeOf(packDefaults{}),
+		reflect.TypeOf(packRigDefaults{}),
 	}
 	for _, t := range types {
 		collectTOMLTags(t, seen)
@@ -149,4 +232,14 @@ func collectTOMLTags(t reflect.Type, seen map[string]bool) {
 			seen[name] = true
 		}
 	}
+}
+
+func parsePackConfigWithMeta(data []byte, source string) (packConfig, []string, error) {
+	var cfg packConfig
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return packConfig{}, nil, err
+	}
+	normalizePackAgentDefaultsAlias(&cfg, md)
+	return cfg, CheckUndecodedKeys(md, source), nil
 }
