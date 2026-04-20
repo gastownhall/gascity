@@ -189,6 +189,37 @@ func TestStopFallsThroughWhenPrimaryMissingSessionReturnsNil(t *testing.T) {
 	}
 }
 
+func TestStopReturnsPrimaryFailureWhenFallbackStopsSameNamedSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	acpSP.StopErrors["agent-fail"] = errors.New("acp stop failed")
+	if err := acpSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+	if err := defaultSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return the routed backend failure even when fallback stops a same-named session")
+	}
+	if !strings.Contains(err.Error(), "acp backend: acp stop failed") {
+		t.Fatalf("Stop error = %v, want primary backend failure", err)
+	}
+	if !acpSP.IsRunning("agent-fail") {
+		t.Fatal("routed ACP session should remain running after primary stop failure")
+	}
+	if defaultSP.IsRunning("agent-fail") {
+		t.Fatal("fallback default session should be stopped during stale-route recovery")
+	}
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when the routed backend stop failed")
+	}
+}
+
 func TestListRunningPartialError(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFailFake() // ListRunning returns error

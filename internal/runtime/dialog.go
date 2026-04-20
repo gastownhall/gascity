@@ -471,6 +471,13 @@ func acceptDialogFromStream(
 				snapshots.replay([]string{latestReady})
 				return nil
 			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			default:
+			}
 			continue
 		}
 		if closed {

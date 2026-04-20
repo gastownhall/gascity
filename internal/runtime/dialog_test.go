@@ -388,6 +388,36 @@ func TestAcceptStartupDialogsFromStreamReplaysRateLimitDialogAcrossPhases(t *tes
 	}
 }
 
+func TestAcceptStartupDialogsFromStreamTimesOutDespiteContinuousIrrelevantSnapshots(t *testing.T) {
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	donePublishing := make(chan struct{})
+	go func() {
+		defer close(donePublishing)
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; i < 50; i++ {
+			stream.publish("still booting")
+			<-ticker.C
+		}
+		stream.finish()
+	}()
+
+	start := time.Now()
+	err := acceptWorkspaceTrustDialogFromStream(
+		context.Background(),
+		30*time.Millisecond,
+		newReplayableSnapshotCursorFromStream(stream),
+		func(keys ...string) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("acceptWorkspaceTrustDialogFromStream() error = %v, want nil timeout exit", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("acceptWorkspaceTrustDialogFromStream() took %s, want timeout-bounded exit", elapsed)
+	}
+	<-donePublishing
+}
+
 func TestContainsPromptIndicator(t *testing.T) {
 	t.Parallel()
 
