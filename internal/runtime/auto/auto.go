@@ -130,15 +130,15 @@ func (p *Provider) Stop(name string) error {
 			return fmt.Errorf("%s backend: %w", primaryLabel, err)
 		}
 	}
-	if mergedErr := runtime.MergeBackendStopErrors(
+	mergedErr := runtime.MergeBackendStopErrors(
 		runtime.BackendError{Label: primaryLabel, Err: err},
 		runtime.BackendError{Label: otherLabel, Err: otherErr},
-	); mergedErr == nil {
+	)
+	if mergedErr == nil {
 		p.Unroute(name)
 		return nil
-	} else {
-		return mergedErr
 	}
+	return mergedErr
 }
 
 // Interrupt delegates to the routed backend.

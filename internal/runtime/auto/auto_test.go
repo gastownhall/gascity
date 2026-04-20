@@ -18,7 +18,7 @@ type falseNegativeStopProvider struct {
 	stopErr error
 }
 
-func (p *falseNegativeStopProvider) Stop(name string) error { return p.stopErr }
+func (p *falseNegativeStopProvider) Stop(string) error { return p.stopErr }
 
 func (p *falseNegativeStopProvider) IsRunning(string) bool { return false }
 

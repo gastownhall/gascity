@@ -332,13 +332,11 @@ func acceptCustomAPIKeyDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:      containsCustomAPIKeyDialog,
-		matchKeys:  []string{"Up", "Enter"},
-		matchDelay: bypassDialogConfirmDelay,
-		ready:      containsPromptIndicator,
-		readyOrNext: func(content string) bool {
-			return containsRateLimitDialog(content)
-		},
+		match:       containsCustomAPIKeyDialog,
+		matchKeys:   []string{"Up", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsRateLimitDialog,
 	})
 }
 

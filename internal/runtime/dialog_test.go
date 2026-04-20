@@ -440,7 +440,7 @@ func TestAcceptStartupDialogsFromStreamTimesOutDespiteContinuousIrrelevantSnapsh
 		context.Background(),
 		30*time.Millisecond,
 		newReplayableSnapshotCursorFromStream(stream),
-		func(keys ...string) error { return nil },
+		func(_ ...string) error { return nil },
 	)
 	if err != nil {
 		t.Fatalf("acceptWorkspaceTrustDialogFromStream() error = %v, want nil timeout exit", err)
@@ -461,7 +461,7 @@ func TestAcceptStartupDialogsFromStreamWithStatusReturnsFalseAfterIrrelevantSnap
 			close(snapshots)
 			return snapshots
 		}(),
-		func(keys ...string) error { return nil },
+		func(_ ...string) error { return nil },
 	)
 	if err != nil {
 		t.Fatalf("AcceptStartupDialogsFromStreamWithStatus() error = %v", err)

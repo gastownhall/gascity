@@ -575,13 +575,3 @@ func (sc *sessionConn) alive() bool {
 		return true
 	}
 }
-
-func processAlive(cmd *exec.Cmd) bool {
-	if cmd == nil || cmd.Process == nil {
-		return false
-	}
-	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		return false
-	}
-	return true
-}

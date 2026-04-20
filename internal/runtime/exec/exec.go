@@ -288,53 +288,42 @@ func (p *Provider) startStartupWatch(
 	case result = <-first:
 	case <-timeout:
 		cancel()
-		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
+		_ = waitStartupWatch(done)
 		return nil, nil, false, nil
 	case <-ctx.Done():
 		cancel()
-		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
+		_ = waitStartupWatch(done)
 		return nil, nil, false, ctx.Err()
 	}
 	if result.unsupported {
 		cancel()
-		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
+		_ = waitStartupWatch(done)
 		return nil, nil, false, nil
 	}
 	if result.err != nil {
 		cancel()
-		_ = waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
+		_ = waitStartupWatch(done)
 		return nil, nil, false, result.err
 	}
 
 	closeWatch := func() error {
 		cancel()
-		return waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
+		return waitStartupWatch(done)
 	}
 
 	return events, closeWatch, true, nil
 }
 
 func waitStartupWatch(done <-chan error) error {
-	return waitStartupWatchWithTimeout(done, 0)
-}
-
-func waitStartupWatchWithTimeout(done <-chan error, timeout time.Duration) error {
-	if timeout > 0 {
-		select {
-		case err := <-done:
-			if err == nil || errors.Is(err, context.Canceled) || isCanceledStartupWatchError(err) {
-				return nil
-			}
-			return err
-		case <-time.After(timeout):
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, context.Canceled) || isCanceledStartupWatchError(err) {
 			return nil
 		}
-	}
-	err := <-done
-	if err == nil || errors.Is(err, context.Canceled) || isCanceledStartupWatchError(err) {
+		return err
+	case <-time.After(startupWatchCloseTimeout):
 		return nil
 	}
-	return err
 }
 
 func isCanceledStartupWatchError(err error) bool {

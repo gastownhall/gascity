@@ -62,7 +62,7 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 }
 
-func mustLoadSiteBinding(t *testing.T, fs fsys.FS, cityPath string) *config.SiteBinding {
+func mustLoadTestSiteBinding(t *testing.T, fs fsys.FS, cityPath string) *config.SiteBinding {
 	t.Helper()
 	binding, err := config.LoadSiteBinding(fs, cityPath)
 	if err != nil {
@@ -1694,7 +1694,7 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	if got != want {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
 	}
-	binding := mustLoadSiteBinding(t, f, "/bright-lights")
+	binding := mustLoadTestSiteBinding(t, f, "/bright-lights")
 	if binding.WorkspaceName != "bright-lights" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "bright-lights")
 	}
@@ -1996,7 +1996,7 @@ func TestDoInitBootstrapWithNameOverride(t *testing.T) {
 	if cfg.Workspace.Name != "old-name" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "old-name")
 	}
-	binding := mustLoadSiteBinding(t, f, "/city")
+	binding := mustLoadTestSiteBinding(t, f, "/city")
 	if binding.WorkspaceName != "new-name" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "new-name")
 	}
@@ -2022,7 +2022,7 @@ func TestDoInitBootstrapTrimsNameOverride(t *testing.T) {
 	if cfg.Workspace.Name != "old-name" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "old-name")
 	}
-	binding := mustLoadSiteBinding(t, f, "/city")
+	binding := mustLoadTestSiteBinding(t, f, "/city")
 	if binding.WorkspaceName != "new-name" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "new-name")
 	}
@@ -2863,7 +2863,7 @@ scale_check = "echo 3"
 	if len(cfg.Agents) != 0 {
 		t.Fatalf("len(raw city Agents) = %d, want 0", len(cfg.Agents))
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "bright-lights" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "bright-lights")
 	}
@@ -3175,7 +3175,7 @@ prompt_template = "prompts/mayor.md"
 			if cfg.Workspace.Name != "" {
 				t.Errorf("Workspace.Name = %q, want empty in city.toml", cfg.Workspace.Name)
 			}
-			binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+			binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 			if binding.WorkspaceName != tt.wantName {
 				t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, tt.wantName)
 			}
@@ -3231,7 +3231,7 @@ name = "pack-template"
 		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "pack-template" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "pack-template")
 	}
@@ -3265,7 +3265,7 @@ provider = "claude"
 		t.Fatalf("overrideCityName = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "machine-alias" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "machine-alias")
 	}
@@ -3297,7 +3297,7 @@ provider = "claude"
 		t.Fatalf("overrideCityName = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "machine-alias" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "machine-alias")
 	}
@@ -3368,7 +3368,7 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "bright-lights" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "bright-lights")
 	}
@@ -3425,7 +3425,7 @@ func TestDoInitFromDirPreservesSourceName(t *testing.T) {
 	if cfg.Workspace.Name != "" {
 		t.Errorf("Workspace.Name = %q, want empty in city.toml", cfg.Workspace.Name)
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "mining" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "mining")
 	}
@@ -3503,7 +3503,7 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 	if cfg.Workspace.Name != "" {
 		t.Errorf("Workspace.Name = %q, want empty in city.toml", cfg.Workspace.Name)
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "my-custom-name" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "my-custom-name")
 	}
@@ -3573,7 +3573,7 @@ func TestInitNameFlagWithFile(t *testing.T) {
 	if cfg.Workspace.Name != "" {
 		t.Errorf("Workspace.Name = %q, want empty in city.toml", cfg.Workspace.Name)
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "my-file-name" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "my-file-name")
 	}
@@ -3614,7 +3614,7 @@ func TestInitNameFlagWithBareInit(t *testing.T) {
 	if !strings.Contains(string(packData), `name = "my-bare-name"`) {
 		t.Errorf("pack.toml should keep init name aligned with bare-init name, got:\n%s", string(packData))
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "my-bare-name" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "my-bare-name")
 	}
@@ -3662,7 +3662,7 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 	if cfg.Workspace.Name != "" {
 		t.Errorf("Workspace.Name = %q, want empty in city.toml", cfg.Workspace.Name)
 	}
-	binding := mustLoadSiteBinding(t, fsys.OSFS{}, cityPath)
+	binding := mustLoadTestSiteBinding(t, fsys.OSFS{}, cityPath)
 	if binding.WorkspaceName != "my-new-city" {
 		t.Fatalf("binding.WorkspaceName = %q, want %q", binding.WorkspaceName, "my-new-city")
 	}
