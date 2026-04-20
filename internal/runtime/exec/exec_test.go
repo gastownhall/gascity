@@ -243,6 +243,53 @@ esac
 	}
 }
 
+func TestStartFallsBackToPeekWhenWatchStartupFailsAfterFirstEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"starting up"}'
+    printf '%s\n' 'not-json'
+    exit 1
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want peek fallback dismissal", string(data))
+	}
+}
+
 func TestStartDoesNotHangWhenWatchStartupKeepsStreamingPromptSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, `

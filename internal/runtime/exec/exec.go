@@ -34,6 +34,8 @@ type startupWatchEvent struct {
 
 var startupWatchFirstEventTimeout = runtime.StartupDialogTimeout
 
+const startupWatchCloseTimeout = 200 * time.Millisecond
+
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
@@ -151,10 +153,21 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 		return err
 	}
 	if ok {
-		defer closeWatch()
-		return runtime.AcceptStartupDialogsFromStream(ctx, dialogTimeout, snapshots,
+		streamErr := runtime.AcceptStartupDialogsFromStream(ctx, dialogTimeout, snapshots,
 			func(keys ...string) error { return p.SendKeys(name, keys...) },
 		)
+		closeErr := closeWatch()
+		switch {
+		case streamErr != nil:
+			return streamErr
+		case closeErr == nil:
+			return nil
+		default:
+			return runtime.AcceptStartupDialogs(ctx,
+				func(lines int) (string, error) { return p.Peek(name, lines) },
+				func(keys ...string) error { return p.SendKeys(name, keys...) },
+			)
+		}
 	}
 
 	return runtime.AcceptStartupDialogs(ctx,
@@ -292,18 +305,44 @@ func (p *Provider) startStartupWatch(
 
 	closeWatch := func() error {
 		cancel()
-		return waitStartupWatch(done)
+		return waitStartupWatchWithTimeout(done, startupWatchCloseTimeout)
 	}
 
 	return events, closeWatch, true, nil
 }
 
 func waitStartupWatch(done <-chan error) error {
+	return waitStartupWatchWithTimeout(done, 0)
+}
+
+func waitStartupWatchWithTimeout(done <-chan error, timeout time.Duration) error {
+	if timeout > 0 {
+		select {
+		case err := <-done:
+			if err == nil || errors.Is(err, context.Canceled) || isCanceledStartupWatchError(err) {
+				return nil
+			}
+			return err
+		case <-time.After(timeout):
+			return nil
+		}
+	}
 	err := <-done
-	if err == nil || errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, context.Canceled) || isCanceledStartupWatchError(err) {
 		return nil
 	}
 	return err
+}
+
+func isCanceledStartupWatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "signal: killed") ||
+		strings.Contains(msg, "signal: terminated") ||
+		strings.Contains(msg, "exit status 137") ||
+		strings.Contains(msg, "exit status 143")
 }
 
 func isUnknownOperation(err error) bool {

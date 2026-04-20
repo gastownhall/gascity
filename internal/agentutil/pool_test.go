@@ -98,7 +98,7 @@ func TestExpandAgentsSuspended(t *testing.T) {
 	}
 }
 
-func TestExpandAgentsUnlimitedPoolUsesPartialListResults(t *testing.T) {
+func TestExpandAgentsUnlimitedPoolFailsClosedOnPartialListResults(t *testing.T) {
 	agents := []config.Agent{
 		{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(-1)},
 	}
@@ -108,8 +108,8 @@ func TestExpandAgentsUnlimitedPoolUsesPartialListResults(t *testing.T) {
 	}
 
 	result := ExpandAgents(agents, "city", "", sp)
-	if len(result) != 2 {
-		t.Fatalf("got %d agents, want 2 from partial list results", len(result))
+	if len(result) != 0 {
+		t.Fatalf("got %d agents, want fail-closed empty result on partial list", len(result))
 	}
 }
 

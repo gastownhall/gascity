@@ -146,7 +146,7 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 	}
 }
 
-func TestDiscoverUnlimitedPoolUsesPartialListResults(t *testing.T) {
+func TestDiscoverUnlimitedPoolFailsClosedOnPartialListResults(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "myrig",
@@ -159,8 +159,8 @@ func TestDiscoverUnlimitedPoolUsesPartialListResults(t *testing.T) {
 	}
 
 	got := discoverUnlimitedPool(a, "myrig/polecat", "test-city", "", sp)
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2 discovered agents from partial results", len(got))
+	if len(got) != 0 {
+		t.Fatalf("len = %d, want fail-closed empty result on partial list", len(got))
 	}
 }
 

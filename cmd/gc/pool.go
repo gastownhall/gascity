@@ -389,7 +389,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	// Build the session name prefix to match against running sessions.
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, st)
 	running, err := sp.ListRunning("")
-	if err != nil && !runtime.IsPartialListError(err) {
+	if err != nil {
 		return nil
 	}
 	var names []string

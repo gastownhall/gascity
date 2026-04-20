@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,7 +247,7 @@ func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testin
 	err := acceptWorkspaceTrustDialogFromStream(
 		context.Background(),
 		time.Second,
-		stream,
+		newReplayableSnapshotCursorFromStream(stream),
 		func(keys ...string) error {
 			sent = append(sent, keys...)
 			return nil
@@ -257,6 +258,64 @@ func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testin
 	}
 	if !reflect.DeepEqual(sent, []string{"Enter"}) {
 		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamPrefersLaterDialogOverEarlierPrompt(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- "user@host $"
+	snapshots <- "Bypass Permissions mode"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+func TestAcceptBypassPermissionsWarningFromStreamSendsKeysSeparately(t *testing.T) {
+	oldDelay := bypassDialogConfirmDelay
+	bypassDialogConfirmDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		bypassDialogConfirmDelay = oldDelay
+	})
+
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	stream.publish("Bypass Permissions mode")
+	stream.finish()
+
+	var calls []string
+	var callTimes []time.Time
+	err := acceptBypassPermissionsWarningFromStream(
+		context.Background(),
+		time.Second,
+		newReplayableSnapshotCursorFromStream(stream),
+		func(keys ...string) error {
+			calls = append(calls, strings.Join(keys, ","))
+			callTimes = append(callTimes, time.Now())
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("acceptBypassPermissionsWarningFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(calls, []string{"Down", "Enter"}) {
+		t.Fatalf("calls = %v, want [Down Enter]", calls)
+	}
+	if len(callTimes) != 2 || callTimes[1].Sub(callTimes[0]) < 10*time.Millisecond {
+		t.Fatalf("callTimes gap = %v, want >= 10ms", callTimes[1].Sub(callTimes[0]))
 	}
 }
 

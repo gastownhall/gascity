@@ -350,7 +350,7 @@ func TestDiscoverPoolInstancesUnlimited(t *testing.T) {
 	}
 }
 
-func TestDiscoverPoolInstancesUnlimitedUsesPartialResults(t *testing.T) {
+func TestDiscoverPoolInstancesUnlimitedFailsClosedOnPartialResults(t *testing.T) {
 	sp := &partialListPoolProvider{
 		Fake:    runtime.NewFake(),
 		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
@@ -360,8 +360,8 @@ func TestDiscoverPoolInstancesUnlimitedUsesPartialResults(t *testing.T) {
 
 	pool := scaleParams{Min: 0, Max: -1}
 	instances := discoverPoolInstances("worker", "myrig", pool, nil, "city", "", sp)
-	if len(instances) != 2 {
-		t.Fatalf("len = %d, want 2 from healthy backend (instances: %v)", len(instances), instances)
+	if len(instances) != 0 {
+		t.Fatalf("len = %d, want fail-closed empty result on partial list (instances: %v)", len(instances), instances)
 	}
 }
 
@@ -386,7 +386,7 @@ func TestCountRunningPoolInstancesUsesPartialListResults(t *testing.T) {
 
 	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
 	if count != 2 {
-		t.Errorf("count = %d, want 2 from partial list results", count)
+		t.Errorf("count = %d, want 2 from per-session fallback", count)
 	}
 }
 
