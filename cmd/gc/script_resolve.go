@@ -12,6 +12,11 @@ import (
 // ResolveScripts computes per-relative-path winners from layered script
 // directories and creates symlinks in targetDir/scripts/.
 //
+// Compatibility note: PackV2's desired layout does not define a top-level
+// scripts/ surface. The runtime still materializes this directory so legacy
+// city-root script references continue to work until remaining path consumers
+// migrate to pack-local resolution.
+//
 // Layers are ordered lowest→highest priority. For each file found across
 // all layers, the highest-priority layer wins. Winners are symlinked into
 // targetDir/scripts/ preserving subdirectory structure.

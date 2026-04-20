@@ -37,9 +37,7 @@ name = "helper"
 scope = "city"
 `)
 	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
-	if err := os.MkdirAll(filepath.Join(cityDir, "scripts"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(scripts): %v", err)
-	}
+	writeDoctorFile(t, cityDir, "scripts/legacy.sh", "#!/bin/sh\necho legacy\n")
 
 	var buf bytes.Buffer
 	d := &doctor.Doctor{}
@@ -71,6 +69,76 @@ scope = "city"
 	}
 	if !strings.Contains(out, ".template.md") {
 		t.Fatalf("doctor output missing .template.md guidance:\n%s", out)
+	}
+}
+
+func TestV2ScriptsLayoutPassesForSymlinkOnlyDir(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("symlink-only scripts/ should pass; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "pack-resolved symlinks") {
+		t.Fatalf("symlink-only scripts/ should report compatibility shim state, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutWarnsOnRealFilesAlongsideSymlinks(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "resolved.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "resolved.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "legacy.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(legacy): %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("mixed scripts/ should warn; got status=%v", res.Status)
+	}
+	var hasLegacy, hasResolved bool
+	for _, d := range res.Details {
+		if strings.Contains(d, "legacy.sh") {
+			hasLegacy = true
+		}
+		if strings.Contains(d, "resolved.sh") {
+			hasResolved = true
+		}
+	}
+	if !hasLegacy {
+		t.Errorf("warning should cite legacy.sh; details=%v", res.Details)
+	}
+	if hasResolved {
+		t.Errorf("warning should not cite symlinked resolved.sh; details=%v", res.Details)
 	}
 }
 

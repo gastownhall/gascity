@@ -247,10 +247,59 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	if err != nil || !info.IsDir() {
 		return okCheck("v2-scripts-layout", "no top-level scripts/ directory found")
 	}
+	realFiles, sawSymlink, walkErr := inspectTopLevelScripts(path)
+	if walkErr != nil {
+		return warnCheck("v2-scripts-layout",
+			fmt.Sprintf("inspecting top-level scripts/: %v", walkErr),
+			"resolve filesystem errors and rerun gc doctor",
+			[]string{"scripts/"})
+	}
+	if len(realFiles) == 0 {
+		if sawSymlink {
+			return okCheck("v2-scripts-layout", "top-level scripts/ only contains pack-resolved symlinks")
+		}
+		return okCheck("v2-scripts-layout", "no legacy top-level scripts found")
+	}
 	return warnCheck("v2-scripts-layout",
-		"top-level scripts/ is deprecated; move scripts to commands/ or assets/",
+		"top-level scripts/ contains legacy real files; move scripts to commands/ or assets/",
 		"move entrypoint scripts next to commands/doctor entries or under assets/",
-		[]string{"scripts/"})
+		realFiles)
+}
+
+// inspectTopLevelScripts returns relative paths (under "scripts/") of real
+// files plus whether the tree contains any symlinks. Symlinks are treated as
+// compatibility artifacts created by ResolveScripts, while real files indicate
+// the deprecated user-authored top-level scripts layout.
+func inspectTopLevelScripts(dir string) ([]string, bool, error) {
+	var real []string
+	var sawSymlink bool
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, lErr := os.Lstat(path)
+		if lErr != nil {
+			return lErr
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			sawSymlink = true
+			return nil
+		}
+		rel, rErr := filepath.Rel(dir, path)
+		if rErr != nil {
+			return rErr
+		}
+		real = append(real, filepath.Join("scripts", rel))
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	sort.Strings(real)
+	return real, sawSymlink, nil
 }
 
 type v2WorkspaceNameCheck struct{}
