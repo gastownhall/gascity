@@ -263,7 +263,11 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 }
 
 // RestartRequestPatch records a controller handoff to a fresh provider
-// conversation. The caller owns stopping any currently running runtime.
+// conversation. It intentionally clears only the fields that force the next
+// wake onto a first-start path; started_live_hash/live_hash remain intact until
+// the next successful start rewrites them so restart-in-flight drift readers do
+// not observe an empty-hash backfill state. The caller owns stopping any
+// currently running runtime.
 func RestartRequestPatch(sessionKey string) MetadataPatch {
 	patch := MetadataPatch{
 		"restart_requested":          "",
