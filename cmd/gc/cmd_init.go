@@ -953,9 +953,14 @@ func initFromSkip(relPath string, isDir bool) bool {
 
 // initFromSkipForSource returns the source-aware skip policy for gc init --from.
 // PackV2 templates should not carry the deprecated top-level scripts/ shim
-// forward into the new city; legacy templates retain the historical behavior.
+// forward into the new city, but real files and foreign symlink trees remain
+// user-owned and are copied through unchanged.
 func initFromSkipForSource(srcDir string) overlay.SkipFunc {
-	skipTopLevelScripts := sourceTemplatePackSchema(srcDir) >= initPackSchemaVersion
+	return initFromSkipForSourceFS(fsys.OSFS{}, srcDir)
+}
+
+func initFromSkipForSourceFS(srcFS fsys.FS, srcDir string) overlay.SkipFunc {
+	skipTopLevelScripts := shouldSkipLegacyTopLevelScripts(srcFS, srcDir)
 	return func(relPath string, isDir bool) bool {
 		if skipTopLevelScripts {
 			top, _, _ := strings.Cut(relPath, string(filepath.Separator))
@@ -967,8 +972,29 @@ func initFromSkipForSource(srcDir string) overlay.SkipFunc {
 	}
 }
 
+func shouldSkipLegacyTopLevelScripts(srcFS fsys.FS, srcDir string) bool {
+	if sourceTemplatePackSchemaFS(srcFS, srcDir) < initPackSchemaVersion {
+		return false
+	}
+	_, ok, err := legacyShimLinks(srcDir, sourceTemplateLegacyScriptOrigins(srcDir))
+	return err == nil && ok
+}
+
+func sourceTemplateLegacyScriptOrigins(srcDir string) []string {
+	dir := filepath.Join(srcDir, "assets", "scripts")
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+	return []string{filepath.Clean(dir)}
+}
+
 func sourceTemplatePackSchema(srcDir string) int {
-	data, err := os.ReadFile(filepath.Join(srcDir, "pack.toml"))
+	return sourceTemplatePackSchemaFS(fsys.OSFS{}, srcDir)
+}
+
+func sourceTemplatePackSchemaFS(srcFS fsys.FS, srcDir string) int {
+	data, err := srcFS.ReadFile(filepath.Join(srcDir, "pack.toml"))
 	if err != nil {
 		return 0
 	}
@@ -1053,7 +1079,7 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkipForSource(srcDir), stderr); err != nil {
+	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkipForSourceFS(fs, srcDir), stderr); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

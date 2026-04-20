@@ -49,10 +49,17 @@ stderr 'no city.toml'
 # gc init --from and --file are mutually exclusive (exits non-zero).
 ! exec gc init --from $WORK/template --file $WORK/template/city.toml $WORK/other-city
 
-# PackV2 templates should not copy the deprecated top-level scripts/ shim.
+# PackV2 templates preserve real top-level scripts.
 exec gc init --from $WORK/v2-template $WORK/v2-city
-! exists $WORK/v2-city/scripts/run.sh
+exists $WORK/v2-city/scripts/run.sh
 exists $WORK/v2-city/pack.toml
+
+# PackV2 templates should not copy the deprecated top-level scripts/ shim.
+exec mkdir -p $WORK/v2-shim-template/scripts
+exec ln -s $WORK/v2-shim-template/assets/scripts/run.sh $WORK/v2-shim-template/scripts/run.sh
+exec gc init --from $WORK/v2-shim-template $WORK/v2-shim-city
+! exists $WORK/v2-shim-city/scripts/run.sh
+exists $WORK/v2-shim-city/pack.toml
 
 -- template/city.toml --
 [workspace]
@@ -93,6 +100,19 @@ name = "v2-template"
 schema = 2
 
 -- v2-template/scripts/run.sh --
+#!/bin/sh
+echo real top-level script
+
+-- v2-shim-template/city.toml --
+[workspace]
+provider = "claude"
+
+-- v2-shim-template/pack.toml --
+[pack]
+name = "v2-shim-template"
+schema = 2
+
+-- v2-shim-template/assets/scripts/run.sh --
 #!/bin/sh
 echo compatibility shim
 

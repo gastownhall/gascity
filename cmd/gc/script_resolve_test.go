@@ -34,11 +34,11 @@ func writeLegacyScriptFile(t *testing.T, dir, relPath, content string) {
 func TestPruneLegacyScripts_RemovesSymlinkOnlyTree(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")
-	srcDir := filepath.Join(dir, "src")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll src: %v", err)
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
 	}
-	srcFile := filepath.Join(srcDir, "helper.sh")
+	srcFile := filepath.Join(packScripts, "helper.sh")
 	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile src: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestPruneLegacyScripts_RemovesSymlinkOnlyTree(t *testing.T) {
 	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", srcFile)
 	writeLegacyScriptLink(t, cityPath, "scripts/checks/review.sh", srcFile)
 
-	if err := pruneLegacyScripts(cityPath); err != nil {
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
 		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestPruneLegacyScripts_LeavesRealFilesAlone(t *testing.T) {
 	cityPath := filepath.Join(dir, "city")
 	writeLegacyScriptFile(t, cityPath, "scripts/run.sh", "#!/bin/sh\necho run\n")
 
-	if err := pruneLegacyScripts(cityPath); err != nil {
+	if err := pruneLegacyScripts(cityPath, nil); err != nil {
 		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
 
@@ -72,11 +72,11 @@ func TestPruneLegacyScripts_LeavesRealFilesAlone(t *testing.T) {
 func TestPruneLegacyScripts_LeavesMixedTreeUntouched(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")
-	srcDir := filepath.Join(dir, "src")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll src: %v", err)
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
 	}
-	srcFile := filepath.Join(srcDir, "helper.sh")
+	srcFile := filepath.Join(packScripts, "helper.sh")
 	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile src: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestPruneLegacyScripts_LeavesMixedTreeUntouched(t *testing.T) {
 	writeLegacyScriptFile(t, cityPath, "scripts/run.sh", "#!/bin/sh\necho run\n")
 	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", srcFile)
 
-	if err := pruneLegacyScripts(cityPath); err != nil {
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
 		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
 
@@ -100,29 +100,65 @@ func TestPruneLegacyScripts_LeavesMixedTreeUntouched(t *testing.T) {
 	}
 }
 
+func TestPruneLegacyScripts_LeavesForeignSymlinkOnlyTreeUntouched(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	foreignDir := filepath.Join(dir, "foreign")
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll foreign: %v", err)
+	}
+	foreignFile := filepath.Join(foreignDir, "helper.sh")
+	if err := os.WriteFile(foreignFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile foreign: %v", err)
+	}
+	legacyOrigin := filepath.Join(dir, "packs/base/assets/scripts")
+
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", foreignFile)
+
+	if err := pruneLegacyScripts(cityPath, []string{legacyOrigin}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("foreign symlink should remain, err=%v", err)
+	}
+}
+
 func TestPruneLegacyConfiguredScripts_PrunesCityAndRigOnly(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
 	cityPath := filepath.Join(dir, "city")
 	rigPath := filepath.Join(cityPath, "rig")
-	srcDir := filepath.Join(dir, "src")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll src: %v", err)
+	cityPackScripts := filepath.Join(dir, "packs/city/assets/scripts")
+	rigPackScripts := filepath.Join(dir, "packs/rig/assets/scripts")
+	if err := os.MkdirAll(cityPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll city pack scripts: %v", err)
 	}
-	srcFile := filepath.Join(srcDir, "helper.sh")
-	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile src: %v", err)
+	if err := os.MkdirAll(rigPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll rig pack scripts: %v", err)
+	}
+	citySrcFile := filepath.Join(cityPackScripts, "city.sh")
+	if err := os.WriteFile(citySrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile city src: %v", err)
+	}
+	rigSrcFile := filepath.Join(rigPackScripts, "rig.sh")
+	if err := os.WriteFile(rigSrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile rig src: %v", err)
 	}
 
-	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", srcFile)
-	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", srcFile)
-	writeLegacyScriptLink(t, dir, "scripts/cwd.sh", srcFile)
+	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", citySrcFile)
+	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigSrcFile)
+	writeLegacyScriptLink(t, dir, "scripts/cwd.sh", citySrcFile)
 
 	cfg := &config.City{
+		PackDirs: []string{filepath.Join(dir, "packs/city")},
 		Rigs: []config.Rig{
 			{Name: "app", Path: "rig"},
 			{Name: "unbound"},
+		},
+		RigPackDirs: map[string][]string{
+			"app": {filepath.Join(dir, "packs/rig")},
 		},
 	}
 
@@ -149,23 +185,35 @@ func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")
 	rigPath := filepath.Join(dir, "rig")
-	srcDir := filepath.Join(dir, "src")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll src: %v", err)
+	cityPackScripts := filepath.Join(dir, "packs/city/assets/scripts")
+	rigPackScripts := filepath.Join(dir, "packs/rig/assets/scripts")
+	if err := os.MkdirAll(cityPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll city pack scripts: %v", err)
 	}
-	srcFile := filepath.Join(srcDir, "helper.sh")
-	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile src: %v", err)
+	if err := os.MkdirAll(rigPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll rig pack scripts: %v", err)
+	}
+	citySrcFile := filepath.Join(cityPackScripts, "city.sh")
+	if err := os.WriteFile(citySrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile city src: %v", err)
+	}
+	rigSrcFile := filepath.Join(rigPackScripts, "rig.sh")
+	if err := os.WriteFile(rigSrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile rig src: %v", err)
 	}
 
-	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", srcFile)
-	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", srcFile)
+	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", citySrcFile)
+	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigSrcFile)
 
 	logFile := filepath.Join(t.TempDir(), "beads.log")
 	t.Setenv("GC_BEADS", "exec:"+writeSpyScript(t, logFile))
 
 	cfg := config.DefaultCity("bright-lights")
 	cfg.Rigs = []config.Rig{{Name: "app", Path: rigPath}}
+	cfg.PackDirs = []string{filepath.Join(dir, "packs/city")}
+	cfg.RigPackDirs = map[string][]string{
+		"app": {filepath.Join(dir, "packs/rig")},
+	}
 
 	if err := prepareCityForSupervisor(cityPath, "bright-lights", &cfg, io.Discard, nil); err != nil {
 		t.Fatalf("prepareCityForSupervisor: %v", err)

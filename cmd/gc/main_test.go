@@ -2908,7 +2908,7 @@ func TestDoInitFromDirPreservesPermissionsForLegacyTopLevelScripts(t *testing.T)
 	}
 }
 
-func TestDoInitFromDirSkipsTopLevelScriptsForPackV2Template(t *testing.T) {
+func TestDoInitFromDirPreservesRealTopLevelScriptsForPackV2Template(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
@@ -2943,8 +2943,58 @@ func TestDoInitFromDirSkipsTopLevelScriptsForPackV2Template(t *testing.T) {
 		t.Fatalf("doInitFromDir = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
+	info, err := os.Stat(filepath.Join(cityPath, "scripts", "run.sh"))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("permissions = %o, want 755", info.Mode().Perm())
+	}
+}
+
+func TestDoInitFromDirSkipsLegacyShimScriptsForPackV2Template(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+
+	srcDir := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nname = \"src\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
+		[]byte("[pack]\nname = \"src\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assetScript := filepath.Join(srcDir, "assets", "scripts", "run.sh")
+	if err := os.WriteFile(assetScript, []byte("#!/bin/sh\necho hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(assetScript, filepath.Join(srcDir, "scripts", "run.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "dst")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDir(srcDir, cityPath, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInitFromDir = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
 	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("top-level scripts/ should be skipped for PackV2 templates, stat err=%v", err)
+		t.Fatalf("legacy top-level scripts/ shim should be skipped for PackV2 templates, stat err=%v", err)
 	}
 }
 
@@ -2981,17 +3031,75 @@ func TestInitFromSkipForSource(t *testing.T) {
 	if err := os.MkdirAll(v1Dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(v1Dir, "city.toml"),
+		[]byte("[workspace]\nname = \"legacy\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(v1Dir, "pack.toml"),
 		[]byte("[pack]\nname = \"legacy\"\nschema = 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	v2Dir := filepath.Join(dir, "v2")
-	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+	v2RealDir := filepath.Join(dir, "v2-real")
+	if err := os.MkdirAll(filepath.Join(v2RealDir, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(v2Dir, "pack.toml"),
+	if err := os.WriteFile(filepath.Join(v2RealDir, "city.toml"),
+		[]byte("[workspace]\nname = \"modern\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2RealDir, "pack.toml"),
 		[]byte("[pack]\nname = \"modern\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2RealDir, "scripts", "run.sh"),
+		[]byte("#!/bin/sh\necho hello\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	v2ShimDir := filepath.Join(dir, "v2-shim")
+	if err := os.MkdirAll(filepath.Join(v2ShimDir, "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(v2ShimDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2ShimDir, "city.toml"),
+		[]byte("[workspace]\nname = \"modern\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2ShimDir, "pack.toml"),
+		[]byte("[pack]\nname = \"modern\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	shimTarget := filepath.Join(v2ShimDir, "assets", "scripts", "run.sh")
+	if err := os.WriteFile(shimTarget, []byte("#!/bin/sh\necho shim\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shimTarget, filepath.Join(v2ShimDir, "scripts", "run.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	v2ForeignDir := filepath.Join(dir, "v2-foreign")
+	if err := os.MkdirAll(filepath.Join(v2ForeignDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2ForeignDir, "city.toml"),
+		[]byte("[workspace]\nname = \"modern\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2ForeignDir, "pack.toml"),
+		[]byte("[pack]\nname = \"modern\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	foreignTarget := filepath.Join(dir, "foreign", "run.sh")
+	if err := os.MkdirAll(filepath.Dir(foreignTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreignTarget, []byte("#!/bin/sh\necho foreign\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreignTarget, filepath.Join(v2ForeignDir, "scripts", "run.sh")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3003,9 +3111,11 @@ func TestInitFromSkipForSource(t *testing.T) {
 		want    bool
 	}{
 		{name: "legacy keeps top-level scripts", srcDir: v1Dir, relPath: "scripts", isDir: true, want: false},
-		{name: "packv2 skips top-level scripts", srcDir: v2Dir, relPath: "scripts", isDir: true, want: true},
-		{name: "packv2 still skips .gc", srcDir: v2Dir, relPath: ".gc", isDir: true, want: true},
-		{name: "packv2 still skips tests", srcDir: v2Dir, relPath: "helper_test.go", isDir: false, want: true},
+		{name: "packv2 preserves real top-level scripts", srcDir: v2RealDir, relPath: "scripts", isDir: true, want: false},
+		{name: "packv2 skips only legacy shim scripts", srcDir: v2ShimDir, relPath: "scripts", isDir: true, want: true},
+		{name: "packv2 preserves foreign symlink tree", srcDir: v2ForeignDir, relPath: "scripts", isDir: true, want: false},
+		{name: "packv2 still skips .gc", srcDir: v2ShimDir, relPath: ".gc", isDir: true, want: true},
+		{name: "packv2 still skips tests", srcDir: v2ShimDir, relPath: "helper_test.go", isDir: false, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3014,6 +3124,15 @@ func TestInitFromSkipForSource(t *testing.T) {
 				t.Errorf("initFromSkipForSource(%q)(%q, %v) = %v, want %v", tt.srcDir, tt.relPath, tt.isDir, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSourceTemplatePackSchemaFSUsesProvidedFS(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/src/pack.toml"] = []byte("[pack]\nname = \"modern\"\nschema = 2\n")
+
+	if got := sourceTemplatePackSchemaFS(fs, "/src"); got != 2 {
+		t.Fatalf("sourceTemplatePackSchemaFS() = %d, want 2", got)
 	}
 }
 
