@@ -91,10 +91,14 @@ func (p *Provider) Stop(name string) error {
 	primary := p.route(name)
 	primaryLabel := "default"
 	otherLabel := "acp"
+	primaryRunning := primary.IsRunning(name)
 	err := primary.Stop(name)
-	if err == nil {
+	if err == nil && primaryRunning {
 		p.Unroute(name)
 		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
 	}
 	// Fall through to the other backend in case the route is stale.
 	var other runtime.Provider

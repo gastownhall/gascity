@@ -172,6 +172,23 @@ func TestStopTreatsSessionGoneOnBothBackendsAsIdempotent(t *testing.T) {
 	}
 }
 
+func TestStopFallsThroughWhenPrimaryMissingSessionReturnsNil(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+
+	if err := acpSP.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+
+	if err := p.Stop("orphan"); err != nil {
+		t.Fatalf("Stop should fall through to ACP when default backend reports missing session as nil: %v", err)
+	}
+	if acpSP.IsRunning("orphan") {
+		t.Fatal("session should be stopped on ACP backend after stale-route fallthrough")
+	}
+}
+
 func TestListRunningPartialError(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFailFake() // ListRunning returns error
