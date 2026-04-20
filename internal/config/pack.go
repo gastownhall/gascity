@@ -1075,6 +1075,7 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 			}
 		}
 	}
+	applyInheritedPackAgentDefaults(includedAgents, tc.AgentDefaults)
 
 	// Process V2 [imports.X] entries. These are named bindings that
 	// produce agents with qualified names (bindingName.agentName).
@@ -1214,7 +1215,9 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 	if dErr != nil {
 		return nil, nil, nil, nil, nil, nil, nil, dErr
 	}
+	applyAgentsConventionDefaults(fs, topoDir, tc.Agents)
 	tc.Agents = append(tc.Agents, discovered...)
+	applyInheritedPackAgentDefaults(tc.Agents, tc.AgentDefaults)
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
 	if err != nil {
@@ -1266,6 +1269,10 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 		if agents[i].OverlayDir != "" {
 			agents[i].OverlayDir = adjustFragmentPath(
 				agents[i].OverlayDir, topoDir, cityRoot)
+		}
+		if agents[i].Namepool != "" {
+			agents[i].Namepool = adjustFragmentPath(
+				agents[i].Namepool, topoDir, cityRoot)
 		}
 	}
 	namedSessions := make([]NamedSession, len(tc.NamedSessions))
@@ -1422,6 +1429,8 @@ func deepCopyAgents(in []Agent) []Agent {
 		out[i].EmitsPermissionWarning = copyBoolPtr(in[i].EmitsPermissionWarning)
 		out[i].HooksInstalled = copyBoolPtr(in[i].HooksInstalled)
 		out[i].DefaultSlingFormula = copyStringPtr(in[i].DefaultSlingFormula)
+		out[i].InheritedDefaultSlingFormula = copyStringPtr(in[i].InheritedDefaultSlingFormula)
+		out[i].InheritedAppendFragments = append([]string(nil), in[i].InheritedAppendFragments...)
 		out[i].Attach = copyBoolPtr(in[i].Attach)
 	}
 	return out
@@ -1525,6 +1534,22 @@ func copyStringPtr(in *string) *string {
 	}
 	out := *in
 	return &out
+}
+
+func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
+	for i := range agents {
+		if agents[i].BindingName != "" {
+			continue
+		}
+		// Includes compose from the inside out: once an included agent has
+		// inherited a scalar default, outer packs do not replace it.
+		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil && agents[i].InheritedDefaultSlingFormula == nil {
+			agents[i].InheritedDefaultSlingFormula = copyStringPtr(&defaults.DefaultSlingFormula)
+		}
+		if len(defaults.AppendFragments) > 0 {
+			agents[i].InheritedAppendFragments = appendUnique(agents[i].InheritedAppendFragments, defaults.AppendFragments...)
+		}
+	}
 }
 
 func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {

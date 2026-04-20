@@ -61,8 +61,18 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(packToml, "source = \"../packs/gastown\"") {
 		t.Fatalf("pack.toml missing gastown source:\n%s", packToml)
 	}
-	if strings.Contains(packToml, "[defaults.rig.imports") {
-		t.Fatalf("pack.toml should not move ordered default_rig_includes into map-shaped defaults:\n%s", packToml)
+	for _, line := range []string{
+		"[defaults.rig.imports.z-pack]",
+		"source = \"../packs/z-pack\"",
+		"[defaults.rig.imports.a-pack]",
+		"source = \"../packs/a-pack\"",
+	} {
+		if !strings.Contains(packToml, line) {
+			t.Fatalf("pack.toml missing migrated default-rig imports %q:\n%s", line, packToml)
+		}
+	}
+	if strings.Index(packToml, "[defaults.rig.imports.z-pack]") > strings.Index(packToml, "[defaults.rig.imports.a-pack]") {
+		t.Fatalf("pack.toml reordered migrated default-rig imports:\n%s", packToml)
 	}
 
 	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
@@ -72,8 +82,8 @@ prompt_template = "prompts/worker.md"
 	if strings.Contains(cityToml, "\nincludes =") {
 		t.Fatalf("city.toml still contains workspace.includes:\n%s", cityToml)
 	}
-	if !strings.Contains(cityToml, `default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]`) {
-		t.Fatalf("city.toml should preserve ordered workspace.default_rig_includes:\n%s", cityToml)
+	if strings.Contains(cityToml, "default_rig_includes") {
+		t.Fatalf("city.toml should drop legacy workspace.default_rig_includes:\n%s", cityToml)
 	}
 
 	mayorAgentToml := readFile(t, filepath.Join(cityDir, "agents", "mayor", "agent.toml"))
@@ -132,6 +142,22 @@ default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
 
 	if _, err := Apply(cityDir, Options{}); err != nil {
 		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	for _, line := range []string{
+		"[defaults.rig.imports.z-pack]",
+		`source = "../packs/z-pack"`,
+		"[defaults.rig.imports.a-pack]",
+		`source = "../packs/a-pack"`,
+	} {
+		if !strings.Contains(packToml, line) {
+			t.Fatalf("pack.toml missing migrated default-rig imports %q:\n%s", line, packToml)
+		}
+	}
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	if strings.Contains(cityToml, "default_rig_includes") {
+		t.Fatalf("city.toml should drop legacy workspace.default_rig_includes:\n%s", cityToml)
 	}
 
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
@@ -244,7 +270,71 @@ source = "../packs/a-pack"
 	}
 }
 
-func TestMigrateDoesNotRewriteExistingPackWithoutPackChanges(t *testing.T) {
+func TestMigrateCreatesFreshBindingWhenExistingImportHasNonDefaultSemantics(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[imports.gastown]
+source = "../packs/gastown"
+transitive = false
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, "transitive = false") {
+		t.Fatalf("pack.toml should preserve the existing non-default binding:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "[imports.gastown-2]") {
+		t.Fatalf("pack.toml should add a fresh default binding instead of reusing the non-default one:\n%s", packToml)
+	}
+}
+
+func TestMigrateCreatesFreshDefaultRigBindingWhenExistingImportHasNonDefaultSemantics(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+default_rig_includes = ["../packs/gastown"]
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[defaults.rig.imports.gastown]
+source = "../packs/gastown"
+shadow = "silent"
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	if !strings.Contains(packToml, "[defaults.rig.imports.gastown]") || !strings.Contains(packToml, `shadow = "silent"`) {
+		t.Fatalf("pack.toml should preserve the existing non-default default-rig binding:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, "[defaults.rig.imports.gastown-2]") {
+		t.Fatalf("pack.toml should add a fresh default-rig binding instead of reusing the non-default one:\n%s", packToml)
+	}
+}
+
+func TestMigrateDropsLegacyCityDefaultRigIncludesWhenPackAlreadyCanonical(t *testing.T) {
 	t.Parallel()
 
 	cityDir := t.TempDir()
@@ -267,11 +357,19 @@ source = "../packs/a-pack"
 `)
 
 	beforePack := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
 	if _, err := Apply(cityDir, Options{}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if got := readFile(t, filepath.Join(cityDir, "pack.toml")); got != beforePack {
 		t.Fatalf("pack.toml changed without pack migration changes:\n%s", got)
+	}
+	afterCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+	if afterCity == beforeCity {
+		t.Fatalf("city.toml should drop legacy default_rig_includes when pack.toml is already canonical:\n%s", afterCity)
+	}
+	if strings.Contains(afterCity, "default_rig_includes") {
+		t.Fatalf("city.toml should remove default_rig_includes after migration:\n%s", afterCity)
 	}
 }
 

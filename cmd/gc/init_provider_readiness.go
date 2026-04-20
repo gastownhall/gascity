@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -149,6 +150,12 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 		return errInitProviderPreflight
 	}
 	ensureInitArtifacts(cityPath, cfg, stderr, commandName)
+	if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by bead store initialization\n", commandName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: initializing canonical bead store files: %v\n", commandName, err)                  //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: fix the bead store issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
+		return errInitProviderPreflight
+	}
 	targets, warnings, err := collectInitProviderTargets(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by provider resolution\n", commandName) //nolint:errcheck // best-effort stderr
@@ -269,6 +276,30 @@ func explicitProviderRefs(cfg *config.City) []string {
 	}
 	sort.Strings(refs)
 	return refs
+}
+
+func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *config.City) error {
+	if cfg == nil {
+		return nil
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	if !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+		return nil
+	}
+	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
+			return err
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+			return fmt.Errorf("rig %q: %w", rig.Name, err)
+		}
+	}
+	return nil
 }
 
 func providerReadinessProbeName(ref string, cfg *config.City) string {
@@ -460,8 +491,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		condition   func() bool // if non-nil, only checked when true
 	}
 
-	beadsProvider := rawBeadsProvider(cityPath)
-	needsBd := beadsProvider == "bd" || beadsProvider == ""
+	needsBd := initNeedsBdTooling(cityPath)
 
 	deps := []dep{
 		{
@@ -527,6 +557,26 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
+}
+
+func initNeedsBdTooling(cityPath string) bool {
+	if providerUsesBdStoreContract(rawBeadsProvider(cityPath)) {
+		return true
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return false
+	}
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, cityPath, cfg); err != nil {
+		return false
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
 // parseDepVersion runs "<binary> version" and extracts a semver-like version string.

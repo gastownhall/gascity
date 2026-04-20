@@ -166,9 +166,9 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula plus shared skill/MCP
-	// attachment baselines; other fields are parsed/composed but not yet
-	// inherited automatically.
+	// currently applies default_sling_formula and append_fragments; the
+	// attachment-list fields remain tombstones, and the other fields are
+	// parsed/composed but not yet inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -497,9 +497,13 @@ type AgentOverride struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
-	// Skills overrides the agent's attached shared skills list.
+	// Skills is a tombstone field retained for v0.15.1 backwards
+	// compatibility. Parsed for migration visibility, but attachment-list
+	// fields are accepted but ignored by the active materializer.
 	Skills []string `toml:"skills,omitempty"`
-	// MCP overrides the agent's attached shared MCP list.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	// Parsed for migration visibility, but attachment-list fields are
+	// accepted but ignored by the active materializer.
 	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
@@ -530,9 +534,13 @@ type AgentOverride struct {
 	SessionLiveAppend []string `toml:"session_live_append,omitempty"`
 	// InstallAgentHooksAppend appends to the agent's install_agent_hooks list.
 	InstallAgentHooksAppend []string `toml:"install_agent_hooks_append,omitempty"`
-	// SkillsAppend appends to the agent's attached shared skills list.
+	// SkillsAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility. Parsed for migration visibility, but attachment-list
+	// fields are accepted but ignored by the active materializer.
 	SkillsAppend []string `toml:"skills_append,omitempty"`
-	// MCPAppend appends to the agent's attached shared MCP list.
+	// MCPAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility. Parsed for migration visibility, but attachment-list
+	// fields are accepted but ignored by the active materializer.
 	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// Attach overrides the agent's attach setting.
 	Attach *bool `toml:"attach,omitempty"`
@@ -1413,11 +1421,14 @@ type AgentDefaults struct {
 	// V2 migration convenience — replaces global_fragments/inject_fragments
 	// for city-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
-	// Skills lists shared skills attached by name to agents through
-	// [agent_defaults].skills.
+	// Skills is a tombstone field retained for v0.15.1 backwards
+	// compatibility. Parsed and composed for migration visibility, but
+	// attachment-list fields are accepted but ignored by the active
+	// materializer.
 	Skills []string `toml:"skills,omitempty"`
-	// MCP lists shared MCP definitions attached by name to agents through
-	// [agent_defaults].mcp.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	// Parsed and composed for migration visibility, but attachment-list
+	// fields are accepted but ignored by the active materializer.
 	MCP []string `toml:"mcp,omitempty"`
 }
 
@@ -1528,17 +1539,27 @@ type Agent struct {
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck is a shell command whose output determines desired session count.
-	// Optional override — when set, its output is the desired count (still clamped
-	// by all cap levels).
+	// ScaleCheck is a shell command template whose output determines desired
+	// session count. Optional override — when set, its output is the desired
+	// count (still clamped by all cap levels). If it contains Go template
+	// placeholders, gc expands them using the same PathContext fields as
+	// work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot,
+	// CityName) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
 	DrainTimeout string `toml:"drain_timeout,omitempty" jsonschema:"default=5m"`
-	// OnBoot is a shell command run once at controller startup for this agent.
+	// OnBoot is a shell command template run once at controller startup for
+	// this agent. If it contains Go template placeholders, gc expands them
+	// using the same PathContext fields as work_dir and session_setup
+	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running
+	// the command.
 	OnBoot string `toml:"on_boot,omitempty"`
-	// OnDeath is a shell command run when a session dies unexpectedly.
+	// OnDeath is a shell command template run when a session dies unexpectedly.
+	// If it contains Go template placeholders, gc expands them using the same
+	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
+	// Rig, RigRoot, CityRoot, CityName) before running the command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -1546,8 +1567,12 @@ type Agent struct {
 	// NamepoolNames holds names loaded from the Namepool file at config load
 	// time. Not serialized to TOML.
 	NamepoolNames []string `toml:"-"`
-	// WorkQuery is the shell command to find available work for this agent.
-	// Used by gc hook and available in prompt templates as {{.WorkQuery}}.
+	// WorkQuery is the shell command template to find available work for this
+	// agent. If it contains Go template placeholders, gc expands them using
+	// the same PathContext fields as work_dir and session_setup (Agent,
+	// AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and
+	// prompt-context execution. Used by gc hook and available in prompt
+	// templates as {{.WorkQuery}}.
 	// If unset, Gas City uses a three-tier default query:
 	//   1. in_progress work assigned to this session/alias (crash recovery)
 	//   2. ready work assigned to this session/alias (pre-assigned work)
@@ -1556,7 +1581,10 @@ type Agent struct {
 	// routed_to tier applies. Override to integrate with external task systems.
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
-	// Used by gc sling to make a bead visible to the target's work_query.
+	// If it contains Go template placeholders, gc expands them using the same
+	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
+	// Rig, RigRoot, CityRoot, CityName) before replacing {} with the bead
+	// ID. Used by gc sling to make a bead visible to the target's work_query.
 	// The placeholder {} is replaced with the bead ID at runtime.
 	// Default for all agents:
 	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
@@ -1574,9 +1602,14 @@ type Agent struct {
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
-	// Skills lists shared skills attached to this agent by name.
+	// Skills is a tombstone field retained for v0.15.1 backwards
+	// compatibility. Accepted during parse for migration visibility, but
+	// attachment-list fields are accepted but ignored by the active
+	// materializer.
 	Skills []string `toml:"skills,omitempty"`
-	// MCP lists shared MCP definitions attached to this agent by name.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	// Accepted during parse for migration visibility, but attachment-list
+	// fields are accepted but ignored by the active materializer.
 	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection. Set to true when hooks
 	// are manually installed (e.g., merged into the project's own hook config)
@@ -1610,11 +1643,13 @@ type Agent struct {
 	// Set during pack/fragment loading; empty for inline agents.
 	// Runtime-only — not persisted to TOML or JSON.
 	SourceDir string `toml:"-" json:"-"`
-	// SharedSkills holds the inherited shared skills baseline for this agent.
-	// Runtime-only — not persisted to TOML or JSON.
+	// SharedSkills holds legacy derived attachment-list state for this agent.
+	// Runtime-only compatibility data — not persisted to TOML or JSON, and
+	// not consumed by the active skill materializer.
 	SharedSkills []string `toml:"-" json:"-"`
-	// SharedMCP holds the inherited shared MCP baseline for this agent.
-	// Runtime-only — not persisted to TOML or JSON.
+	// SharedMCP holds legacy derived attachment-list state for this agent.
+	// Runtime-only compatibility data — not persisted to TOML or JSON, and
+	// not consumed by the active MCP materializer.
 	SharedMCP []string `toml:"-" json:"-"`
 	// SkillsDir is the agent-local private skills catalog root.
 	// Runtime-only — not persisted to TOML or JSON.
@@ -1845,10 +1880,13 @@ func (a *Agent) DefaultSlingQuery() string {
 // EffectiveDefaultSlingFormula returns the default sling formula for
 // this agent, or "" if none is set.
 func (a *Agent) EffectiveDefaultSlingFormula() string {
-	if a.DefaultSlingFormula == nil {
-		return ""
+	if a.DefaultSlingFormula != nil {
+		return *a.DefaultSlingFormula
 	}
-	return *a.DefaultSlingFormula
+	if a.InheritedDefaultSlingFormula != nil {
+		return *a.InheritedDefaultSlingFormula
+	}
+	return ""
 }
 
 // DrainTimeoutDuration returns the drain timeout as a time.Duration.
@@ -2076,7 +2114,8 @@ func InjectImplicitAgents(cfg *City) {
 // ApplyAgentDefaults applies [agent_defaults] values to all agents that
 // don't set their own override. Call after InjectImplicitAgents so
 // implicit agents are already present. Control-dispatcher agents are
-// skipped because they are infrastructure, not work agents.
+// skipped because they are infrastructure, not work agents. Imported
+// pack defaults take precedence over the root city default.
 func ApplyAgentDefaults(cfg *City) {
 	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
 
@@ -2086,16 +2125,16 @@ func ApplyAgentDefaults(cfg *City) {
 			if cfg.Agents[i].Name == ControlDispatcherAgentName {
 				continue
 			}
-			if cfg.Agents[i].DefaultSlingFormula == nil {
+			if cfg.Agents[i].DefaultSlingFormula == nil && cfg.Agents[i].InheritedDefaultSlingFormula == nil {
 				cfg.Agents[i].DefaultSlingFormula = &formula
 			}
 		}
 	}
 }
 
-// applyAgentSharedAttachmentDefaults seeds inherited shared skills/MCP
-// onto the given agents. The explicit agent attachment lists stay in the
-// agent itself; the inherited baseline lives in SharedSkills/SharedMCP.
+// applyAgentSharedAttachmentDefaults preserves legacy derived attachment-list
+// state in SharedSkills/SharedMCP for compatibility checks. The active skill
+// and MCP materializers do not consume these fields.
 func applyAgentSharedAttachmentDefaults(agents []Agent, defaults AgentDefaults) {
 	if len(defaults.Skills) == 0 && len(defaults.MCP) == 0 {
 		return

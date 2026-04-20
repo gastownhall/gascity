@@ -186,6 +186,28 @@ func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
 	}
 }
 
+func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigPath := filepath.Join(cityPath, "frontend")
+	a := config.Agent{Name: "worker", Dir: "frontend"}
+	rigs := []config.Rig{{Name: "frontend", Path: rigPath}}
+
+	got := BuildSlingCommandForAgent(
+		"sling_query",
+		"custom {} --route={{.CityName}}/{{.Rig}}/{{.AgentBase}}",
+		"BL-42",
+		cityPath,
+		"",
+		a,
+		rigs,
+		nil,
+	)
+
+	if want := "custom 'BL-42' --route=demo-city/frontend/worker"; got != want {
+		t.Fatalf("BuildSlingCommandForAgent() = %q, want %q", got, want)
+	}
+}
+
 func TestCheckBeadStateCustomBDQueryNoIdempotency(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

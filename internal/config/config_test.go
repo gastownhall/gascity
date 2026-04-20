@@ -4105,6 +4105,28 @@ func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
 	t.Fatal("explicit agent 'worker' not found")
 }
 
+func TestAgentDefaultsSlingFormula_InheritedPackDefaultBeatsCityDefault(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{
+				Name:                         "worker",
+				InheritedDefaultSlingFormula: strPtr("mol-pack-default"),
+			},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-city-default",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+		t.Fatalf("EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+	}
+	if cfg.Agents[0].DefaultSlingFormula != nil {
+		t.Fatalf("DefaultSlingFormula = %q, want nil when inherited pack default wins", *cfg.Agents[0].DefaultSlingFormula)
+	}
+}
+
 func TestAgentDefaultsSharedAttachments_InheritAndPreserveExplicitLists(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{
@@ -4249,6 +4271,29 @@ func TestAgentDefaultsSlingFormula_ExplicitEmptyClearSurvives(t *testing.T) {
 	if *cfg.Agents[0].DefaultSlingFormula != "" {
 		t.Errorf("DefaultSlingFormula = %q, want %q (explicit clear should survive)",
 			*cfg.Agents[0].DefaultSlingFormula, "")
+	}
+}
+
+func TestAgentDefaultsSlingFormula_InheritedPackDefaultFallback(t *testing.T) {
+	a := Agent{
+		Name:                         "worker",
+		InheritedDefaultSlingFormula: strPtr("mol-pack-default"),
+	}
+
+	if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+		t.Fatalf("EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+	}
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitValueBeatsInheritedPackDefault(t *testing.T) {
+	a := Agent{
+		Name:                         "worker",
+		DefaultSlingFormula:          strPtr(""),
+		InheritedDefaultSlingFormula: strPtr("mol-pack-default"),
+	}
+
+	if got := a.EffectiveDefaultSlingFormula(); got != "" {
+		t.Fatalf("EffectiveDefaultSlingFormula() = %q, want explicit empty-string override", got)
 	}
 }
 

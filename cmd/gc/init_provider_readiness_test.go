@@ -653,6 +653,65 @@ prefix = "fe"
 	}
 }
 
+func TestCheckHardDependenciesRequiresBdToolsForSiteBoundBdRigUnderFileCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(`[[rig]]
+name = "frontend"
+path = "frontend"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "dolt" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(cityDir)
+	if len(missing) != 1 || missing[0].name != "dolt" {
+		t.Fatalf("missing deps = %#v, want only dolt for site-bound bd-backed rig", missing)
+	}
+}
+
 func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
@@ -705,6 +764,55 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	}
 	if calledRegister {
 		t.Fatal("registerCityWithSupervisor should not run when provider readiness blocks init")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("metadata.json missing after readiness block: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+		t.Fatalf("config.yaml missing after readiness block: %v", err)
+	}
+}
+
+func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "tutorial",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+			t.Fatalf("metadata.json missing before readiness block: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+			t.Fatalf("config.yaml missing before readiness block: %v", err)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
 		t.Fatalf("metadata.json missing after readiness block: %v", err)

@@ -249,6 +249,9 @@ schema = 1
 
 [imports.gastown]
 source = "./assets/imports/gastown"
+
+[defaults.rig.imports.gastown]
+source = "./assets/imports/gastown"
 `)
 	writeDoctorFile(t, cityDir, "agents/mayor/prompt.md", "Hello world\n")
 

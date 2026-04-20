@@ -109,6 +109,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				packAgents = append(packAgents, a)
 			}
 		}
+		applyAgentsConventionDefaults(fs, cityRoot, packAgents)
 		// Merge pack.toml imports into city imports (pack is base).
 		if len(pc.Imports) > 0 {
 			if root.Imports == nil {
@@ -377,6 +378,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
 	root.ScriptLayers = ComputeScriptLayers(
 		root.PackScriptDirs, root.RigScriptDirs, root.Rigs)
+	applyConfiguredAgentConventionDefaults(fs, root.Agents, cityRoot)
 
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
@@ -792,6 +794,16 @@ func adjustAgentPaths(agents []Agent, fragDir, cityRoot string) {
 			agents[i].Namepool = adjustFragmentPath(
 				agents[i].Namepool, fragDir, cityRoot)
 		}
+	}
+}
+
+func applyConfiguredAgentConventionDefaults(fs fsys.FS, agents []Agent, cityRoot string) {
+	for i := range agents {
+		packDir := agents[i].SourceDir
+		if packDir == "" {
+			packDir = cityRoot
+		}
+		applyAgentConventionDefaults(fs, packDir, &agents[i])
 	}
 }
 

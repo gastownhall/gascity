@@ -64,8 +64,8 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
 	return warnCheck("v2-default-rig-import-format",
-		"workspace.default_rig_includes is deprecated; migrate to [defaults.rig.imports.<binding>]",
-		v2MigrationHint(),
+		"workspace.default_rig_includes is deprecated; migrate to root pack.toml [defaults.rig.imports.<binding>]",
+		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
 		cfg.Workspace.DefaultRigIncludes)
 }
 

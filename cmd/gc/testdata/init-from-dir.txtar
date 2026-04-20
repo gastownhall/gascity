@@ -10,10 +10,9 @@ stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
 stdout 'my-city'
 
-# Verify city.toml exists and local identity was written to .gc/site.toml.
+# Verify city.toml exists and name was updated to target dir.
 exists $WORK/my-city/city.toml
-exec grep 'workspace_name = "my-city"' $WORK/my-city/.gc/site.toml
-! exec grep 'name = "my-city"' $WORK/my-city/city.toml
+exec grep 'my-city' $WORK/my-city/city.toml
 
 # Verify prompts were copied.
 exists $WORK/my-city/prompts/mayor.md
@@ -31,15 +30,12 @@ exists $WORK/my-city/.gc
 exec gc init --from $WORK/template --name custom-name $WORK/named-city
 stdout 'custom-name'
 exists $WORK/named-city/city.toml
-exec grep 'workspace_name = "custom-name"' $WORK/named-city/.gc/site.toml
-! exec grep 'name = "custom-name"' $WORK/named-city/city.toml
+exec grep 'custom-name' $WORK/named-city/city.toml
 
-# gc init --from preserves an explicit workspace identity from the template
-# in .gc/site.toml (#795 parallel-sibling); only the basename fallback
-# kicks in when the template does not set a name.
+# gc init --from uses the target dir basename unless --name overrides it,
+# even when the source template already has an explicit workspace.name.
 exec gc init --from $WORK/named-template $WORK/other-basename
-exec grep 'workspace_name = "mining"' $WORK/other-basename/.gc/site.toml
-! exec grep 'workspace_name = "other-basename"' $WORK/other-basename/.gc/site.toml
+exec grep 'name = "other-basename"' $WORK/other-basename/city.toml
 ! exec grep 'name = "mining"' $WORK/other-basename/city.toml
 
 # gc init --from rejects already-initialized city.

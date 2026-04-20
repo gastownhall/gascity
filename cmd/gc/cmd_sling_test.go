@@ -4241,6 +4241,44 @@ func TestDefaultFormulaApplied(t *testing.T) {
 	}
 }
 
+func TestDefaultFormulaAppliedFromInheritedPackDefault(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "polecat", Dir: "hw", InheritedDefaultSlingFormula: strPtr("mol-polecat-work")}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	opts := testOpts(a, "HW-42")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
+	}
+	assertStoreRoutedTo(t, deps.Store, "HW-42", "hw/polecat")
+	source, err := deps.Store.Get("HW-42")
+	if err != nil {
+		t.Fatalf("store.Get(HW-42): %v", err)
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+	b, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", rootID, err)
+	}
+	if b.Ref != "mol-polecat-work" {
+		t.Errorf("bead Ref = %q, want %q", b.Ref, "mol-polecat-work")
+	}
+	if !strings.Contains(stdout.String(), "default formula") {
+		t.Errorf("stdout = %q, want mention of default formula", stdout.String())
+	}
+}
+
 func TestDefaultFormulaNoFormulaOverride(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

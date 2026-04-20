@@ -119,7 +119,9 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the shell command whose output determines desired session count.
+	// ScaleCheck overrides the command template whose output determines desired
+	// session count. Supports the same Go template placeholders as
+	// Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -134,13 +136,16 @@ type PoolOverride struct {
 	Min *int `toml:"min,omitempty" jsonschema:"minimum=0"`
 	// Max overrides the maximum number of sessions. 0 means no sessions can claim routed work.
 	Max *int `toml:"max,omitempty" jsonschema:"minimum=0"`
-	// Check overrides the session scale check command.
+	// Check overrides the session scale check command template. Supports the
+	// same Go template placeholders as Agent.scale_check.
 	Check *string `toml:"check,omitempty"`
 	// DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h").
 	DrainTimeout *string `toml:"drain_timeout,omitempty"`
-	// OnDeath overrides the on_death command.
+	// OnDeath overrides the on_death command template. Supports the same Go
+	// template placeholders as Agent.on_death.
 	OnDeath *string `toml:"on_death,omitempty"`
-	// OnBoot overrides the on_boot command.
+	// OnBoot overrides the on_boot command template. Supports the same Go
+	// template placeholders as Agent.on_boot.
 	OnBoot *string `toml:"on_boot,omitempty"`
 }
 

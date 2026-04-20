@@ -318,23 +318,17 @@ gc config
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc config explain](#gc-config-explain) | Show resolved config with provenance annotations |
+| [gc config explain](#gc-config-explain) | Show resolved agent config with provenance annotations |
 | [gc config show](#gc-config-show) | Dump the resolved city configuration as TOML |
 
 ## gc config explain
 
-Show the resolved configuration with provenance.
+Show the resolved configuration for each agent with provenance.
 
-For agents (default): displays every resolved field with an annotation
-showing which config file provided the value. Use --rig and --agent to
-filter.
-
-For providers (--provider): displays the resolved ProviderSpec along
-with per-field and per-map-key attribution — which chain layer
-(builtin:X or providers.Y) contributed each value. Useful for
-debugging base-chain inheritance.
-
-Use --json to emit machine-readable output (providers only).
+Displays every resolved field with an annotation showing which config
+file provided the value. Use --rig and --agent to filter the output.
+Useful for debugging config composition and understanding override
+resolution.
 
 ```
 gc config explain [flags]
@@ -346,8 +340,6 @@ gc config explain [flags]
 gc config explain
   gc config explain --agent mayor
   gc config explain --rig my-project
-  gc config explain --provider codex-max
-  gc config explain --provider codex-max --json
   gc config explain -f overlay.toml --agent polecat
 ```
 
@@ -355,8 +347,6 @@ gc config explain
 |------|------|---------|-------------|
 | `--agent` | string |  | filter to a specific agent name |
 | `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
-| `--json` | bool |  | emit JSON (requires --provider) |
-| `--provider` | string |  | explain a provider's resolved chain instead of agents |
 | `--rig` | string |  | filter to agents in this rig |
 
 ## gc config show
@@ -432,7 +422,7 @@ gc converge create [flags]
 | `--formula` | string |  | Formula to use (required) |
 | `--gate` | string | `manual` | Gate mode: manual, condition, hybrid |
 | `--gate-condition` | string |  | Path to gate condition script |
-| `--gate-timeout` | string | `5m0s` | Gate execution timeout |
+| `--gate-timeout` | string | `30s` | Gate execution timeout |
 | `--gate-timeout-action` | string | `iterate` | Action on gate timeout: iterate, retry, manual, terminate |
 | `--max-iterations` | int | `5` | Maximum iterations |
 | `--target` | string |  | Target agent (required) |
@@ -1028,11 +1018,12 @@ gc import
 | Subcommand | Description |
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
-| [gc import install](#gc-import-install) | Install imports and reconcile packs.lock |
+| [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
+| [gc import why](#gc-import-why) | Explain why an import is present |
 
 ## gc import add
 
@@ -1049,16 +1040,11 @@ gc import add <source> [flags]
 
 ## gc import install
 
-Install imports and reconcile packs.lock
+Install imports from pack.toml and packs.lock
 
 ```
 gc import install
 ```
-
-When `packs.lock` is present, `gc import install` restores cache state
-from that lock. When `packs.lock` is missing or incomplete, it resolves
-the declared imports, writes `packs.lock`, and materializes the cache.
-Normal load/start/config flows do not do this implicitly.
 
 ## gc import list
 
@@ -1104,6 +1090,14 @@ Upgrade imported packs within their constraints
 gc import upgrade [name]
 ```
 
+## gc import why
+
+Explain why an import is present
+
+```
+gc import why <name-or-source>
+```
+
 ## gc init
 
 Create a new Gas City workspace in the given directory (or cwd).
@@ -1135,7 +1129,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
-| `--name` | string |  | machine-local city name (default: source template's workspace.name if set, else source pack.name if set, else target directory basename) |
+| `--name` | string |  | workspace name (default: target directory basename) |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1183,8 +1177,8 @@ Check for unread mail addressed to a session alias or mailbox.
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a &lt;system-reminder&gt; block suitable for
-hook injection (always exits 0). The recipient defaults to $GC_SESSION_ID,
-$GC_ALIAS, $GC_AGENT, or "human".
+hook injection (always exits 0). The recipient defaults to $GC_ALIAS,
+$GC_SESSION_ID, or "human".
 
 ```
 gc mail check [session] [flags]
@@ -1206,7 +1200,7 @@ gc mail check
 ## gc mail count
 
 Show total and unread message counts for a session alias or human.
-The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".
+The recipient defaults to $GC_ALIAS, $GC_SESSION_ID, or "human".
 
 ```
 gc mail count [session]
@@ -1225,7 +1219,7 @@ gc mail delete <id>
 List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
+to $GC_ALIAS, $GC_SESSION_ID, or "human". Pass a session alias to view another inbox.
 
 ```
 gc mail inbox [session]
@@ -1291,7 +1285,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
+to $GC_ALIAS or $GC_SESSION_ID (in sessions) or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -1316,7 +1310,7 @@ gc mail send mayor "Build is green"
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
-| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
+| `--from` | string |  | sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or "human") |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | nudge the recipient after sending |
 | `-s`, `--subject` | string |  | message subject line |
@@ -1545,9 +1539,8 @@ Register a city directory with the machine-wide supervisor.
 If no path is given, registers the current city (discovered from cwd).
 Use --name to set the machine-local registration alias. The alias is stored
 in the machine-local supervisor registry and never written back to city.toml.
-When --name is omitted, the current effective city identity is used
-(site-bound workspace name if present, otherwise legacy workspace.name,
-otherwise the directory basename) — in every case city.toml is not modified.
+When --name is omitted, workspace.name is used if present, otherwise
+[pack].name is used — in either case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 
@@ -2217,7 +2210,7 @@ List skills visible to the current city.
 Output includes:
   - City pack skills (skills/&lt;name&gt;/SKILL.md under the city root)
   - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
-  - Bootstrap implicit-import pack skills (e.g. core)
+  - Compatibility bootstrap skills, when legacy implicit imports still exist
   - With --agent/--session: that agent's agents/&lt;name&gt;/skills/ catalog
 
 The listing is a diagnostic view of what's *available*. It does not

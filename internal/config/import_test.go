@@ -99,6 +99,120 @@ scope = "city"
 	}
 }
 
+func TestImport_AgentDefaultsDefaultSlingFormulaInherited(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "tools")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.tools]
+source = "../tools"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-pack-default"
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.QualifiedName() != "tools.worker" {
+			continue
+		}
+		if a.DefaultSlingFormula != nil {
+			t.Fatalf("tools.worker DefaultSlingFormula = %v, want nil explicit override", *a.DefaultSlingFormula)
+		}
+		if a.InheritedDefaultSlingFormula == nil || *a.InheritedDefaultSlingFormula != "mol-pack-default" {
+			got := "<nil>"
+			if a.InheritedDefaultSlingFormula != nil {
+				got = *a.InheritedDefaultSlingFormula
+			}
+			t.Fatalf("tools.worker InheritedDefaultSlingFormula = %s, want %q", got, "mol-pack-default")
+		}
+		if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+		}
+		return
+	}
+	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
+}
+
+func TestImport_AgentDefaultsDefaultSlingFormulaInheritedBeatsCityDefault(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "tools")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-city-default"
+
+[imports.tools]
+source = "../tools"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[agent_defaults]
+default_sling_formula = "mol-pack-default"
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range explicitAgents(cfg.Agents) {
+		if a.QualifiedName() != "tools.worker" {
+			continue
+		}
+		if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+		}
+		if a.DefaultSlingFormula != nil {
+			t.Fatalf("tools.worker DefaultSlingFormula = %q, want nil when city default should not override imported pack default", *a.DefaultSlingFormula)
+		}
+		return
+	}
+	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
+}
+
 func TestImport_BindingNameStamped(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
