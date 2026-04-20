@@ -1319,6 +1319,152 @@ session_setup_script = "scripts/theme.sh"
 	}
 }
 
+func TestLoadWithIncludes_RootPatchSessionSetupScriptResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/base"]
+
+[[patches.agent]]
+name = "worker"
+session_setup_script = "scripts/local.sh"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("scripts/local.sh", "#!/bin/sh\necho local\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	want := filepath.Join(dir, "scripts/local.sh")
+	if cfg.Agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_RootRigOverrideSessionSetupScriptResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  session_setup_script = "scripts/rig-local.sh"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+	writeFile("scripts/rig-local.sh", "#!/bin/sh\necho city-override\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	want := filepath.Join(dir, "scripts/rig-local.sh")
+	if cfg.Agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_FragmentRigOverrideSessionSetupScriptResolvedFromFragmentDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/rig.toml"]
+
+[workspace]
+name = "test"
+`)
+	writeFile("fragments/rig.toml", `
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  session_setup_script = "scripts/fragment-local.sh"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+	writeFile("fragments/scripts/fragment-local.sh", "#!/bin/sh\necho fragment-override\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	want := filepath.Join(dir, "fragments/scripts/fragment-local.sh")
+	if cfg.Agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	}
+}
+
 func TestAdjustAgentPaths_OverlayDirAdjusted(t *testing.T) {
 	agents := []Agent{
 		{Name: "worker", OverlayDir: "overlays/worker"},

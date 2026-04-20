@@ -288,7 +288,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Adjust fragment agent paths to be city-root-relative.
 		fragDir := filepath.Dir(fragPath)
 		adjustAgentPaths(frag.Agents, fragDir, cityRoot)
-		adjustFragmentPatchPaths(&frag.Patches, fragDir, cityRoot)
+		adjustPatchPaths(&frag.Patches, fragDir, cityRoot)
+		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
@@ -310,6 +311,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		root.Workspace.Includes = append(root.Workspace.Includes, inc)
 	}
+
+	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)
+	adjustRigOverridePaths(root.Rigs, cityRoot, cityRoot)
 
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
@@ -522,19 +526,41 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	return root, prov, nil
 }
 
-// adjustFragmentPatchPaths resolves fragment patch session_setup_script values
-// to absolute paths rooted at the fragment directory. Patches do not retain
+// adjustPatchPaths resolves patch session_setup_script values to absolute
+// paths rooted at the declaring config directory. Patches do not retain
 // independent source provenance after merge, so runtime cannot otherwise
 // distinguish whether a relative override came from the target agent's source
 // or from the patch file itself.
-func adjustFragmentPatchPaths(patches *Patches, fragDir, cityRoot string) {
+func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
 		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
 			continue
 		}
-		v := resolveConfigPath(*p.SessionSetupScript, fragDir, cityRoot)
+		v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
 		p.SessionSetupScript = &v
+	}
+}
+
+// adjustRigOverridePaths resolves rig override session_setup_script values to
+// absolute paths rooted at the declaring config directory. Once overrides are
+// applied to pack-stamped agents, runtime only sees the target agent's
+// SourceDir, so relative override paths must be normalized during composition.
+func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
+	for i := range rigs {
+		adjustAgentOverridePaths(rigs[i].Overrides, declDir, cityRoot)
+		adjustAgentOverridePaths(rigs[i].RigPatches, declDir, cityRoot)
+	}
+}
+
+func adjustAgentOverridePaths(overrides []AgentOverride, declDir, cityRoot string) {
+	for i := range overrides {
+		ov := &overrides[i]
+		if ov.SessionSetupScript == nil || *ov.SessionSetupScript == "" {
+			continue
+		}
+		v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
+		ov.SessionSetupScript = &v
 	}
 }
 
