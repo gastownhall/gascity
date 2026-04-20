@@ -1,6 +1,7 @@
 package packman
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,6 +275,48 @@ func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
 	}
 }
 
+func TestSyncLockSelectiveUpgradeMergesSameSourceConstraints(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			return "cccc\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\n", nil
+		case "clone":
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "pack.toml"), []byte("[pack]\nname = \"shared\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "checkout":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+
+	lock, err := SyncLockSelectiveUpgrade(city, map[string]config.Import{
+		"pack:shared":         {Source: "https://example.com/shared.git", Version: ">=1.0"},
+		"rig:frontend:shared": {Source: "https://example.com/shared.git", Version: "<2.0"},
+	}, map[string]struct{}{
+		"https://example.com/shared.git": {},
+	})
+	if err != nil {
+		t.Fatalf("SyncLockSelectiveUpgrade: %v", err)
+	}
+	pack := lock.Packs["https://example.com/shared.git"]
+	if pack.Version != "1.5.0" {
+		t.Fatalf("Version = %q, want %q", pack.Version, "1.5.0")
+	}
+}
+
 func TestSyncLockMergesDirectAndTransitiveConstraintsBeforeResolution(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
@@ -313,6 +356,117 @@ schema = 1
 	}
 	if !strings.Contains(err.Error(), `source "https://example.com/c.git" has conflicting constraints`) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSyncLockInstallUpgradeReconcilesCompatibleConstraintsAcrossScopes(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs: map[string]LockedPack{
+			"https://example.com/shared.git":   {Version: "1.0.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			"https://example.com/consumer.git": {Version: "1.0.0", Commit: "dddd", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	stageCachedPack(t, "https://example.com/shared.git", "aaaa", `
+[pack]
+name = "shared"
+schema = 1
+`)
+	stageCachedPack(t, "https://example.com/shared.git", "bbbb", `
+[pack]
+name = "shared"
+schema = 1
+`)
+	stageCachedPack(t, "https://example.com/shared.git", "cccc", `
+[pack]
+name = "shared"
+schema = 1
+`)
+	stageCachedPack(t, "https://example.com/consumer.git", "dddd", `
+[pack]
+name = "consumer"
+schema = 1
+
+[imports.shared]
+source = "https://example.com/shared.git"
+version = "<2.0"
+`)
+
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			switch args[len(args)-1] {
+			case "https://example.com/shared.git":
+				return "cccc\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\naaaa\trefs/tags/v1.0.0\n", nil
+			case "https://example.com/consumer.git":
+				return "dddd\trefs/tags/v1.0.0\n", nil
+			default:
+				return "", nil
+			}
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+
+	lock, err := SyncLock(city, map[string]config.Import{
+		"a_shared":   {Source: "https://example.com/shared.git", Version: ">=1.0"},
+		"z_consumer": {Source: "https://example.com/consumer.git", Version: "^1.0"},
+	}, InstallUpgrade)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+
+	pack := lock.Packs["https://example.com/shared.git"]
+	if pack.Version != "1.5.0" {
+		t.Fatalf("Version = %q, want %q", pack.Version, "1.5.0")
+	}
+}
+
+func TestSyncLockConvergesForDeepTransitiveChains(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+
+	lock := &Lockfile{
+		Schema: LockfileSchema,
+		Packs:  make(map[string]LockedPack),
+	}
+	for i := 0; i <= 10; i++ {
+		source := fmt.Sprintf("https://example.com/p%d.git", i)
+		commit := fmt.Sprintf("c%d", i)
+		lock.Packs[source] = LockedPack{
+			Version: "1.0.0",
+			Commit:  commit,
+			Fetched: time.Unix(int64(i+1), 0).UTC(),
+		}
+
+		packToml := "[pack]\nname = \"p\"\nschema = 1\n"
+		if i < 10 {
+			packToml += fmt.Sprintf("\n[imports.next]\nsource = %q\nversion = \"^1.0\"\n", fmt.Sprintf("https://example.com/p%d.git", i+1))
+		}
+		stageCachedPack(t, source, commit, packToml)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"root": {Source: "https://example.com/p0.git", Version: "^1.0"},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 11 {
+		t.Fatalf("len(Packs) = %d, want 11", len(got.Packs))
 	}
 }
 
