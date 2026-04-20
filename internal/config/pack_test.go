@@ -409,6 +409,29 @@ scheam = 1
 	}
 }
 
+func TestExpandPacks_AcceptsPackDescription(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/described/pack.toml", `
+[pack]
+name = "described"
+schema = 2
+description = "Human-readable pack summary"
+
+[[agent]]
+name = "worker"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/described"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks rejected [pack].description: %v", err)
+	}
+}
+
 func TestExpandPacks_RejectsUnknownPackImportFields(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/helper/pack.toml", `
