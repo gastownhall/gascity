@@ -207,7 +207,7 @@ func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (
 	return constraints, reachable, dirty, nil
 }
 
-func (s *syncState) walkImport(name string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
+func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
 	if !isRemoteSource(imp.Source) {
 		return nil
 	}

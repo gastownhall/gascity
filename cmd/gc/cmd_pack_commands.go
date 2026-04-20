@@ -21,14 +21,6 @@ func addPackCommandsToRoot(root *cobra.Command, entries []config.PackCommandInfo
 	addDiscoveredCommandsToRoot(root, discovered, cityPath, cityName, stdout, stderr, true)
 }
 
-func runPackCommand(info config.PackCommandInfo, cityPath, cityName string, args []string, stdinR io.Reader, stdout, stderr io.Writer) int {
-	return runDiscoveredCommand(discoveredCommandFromPackCommandInfo(info), cityPath, cityName, args, stdinR, stdout, stderr)
-}
-
-func readLongDescription(info config.PackCommandInfo) string {
-	return readDiscoveredHelp(discoveredCommandFromPackCommandInfo(info))
-}
-
 func discoveredCommandFromPackCommandInfo(info config.PackCommandInfo) config.DiscoveredCommand {
 	helpFile := strings.TrimSpace(info.Entry.LongDescription)
 	if helpFile != "" && !filepath.IsAbs(helpFile) {

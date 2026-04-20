@@ -475,6 +475,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 	return 0
 }
 
+//nolint:unparam // FS seam is intentional for command tests and symmetry with doImportAdd.
 func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fs, cityPath)
 	if err != nil {

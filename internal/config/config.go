@@ -43,9 +43,8 @@ func ControlDispatcherStartCommandFor(qualifiedName string) string {
 	return `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/control-dispatcher-trace.log}"; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
 
-// QualifiedName returns the agent's canonical identity.
-// V1: "hello-world/polecat" (rig-scoped) or "mayor" (city-wide).
-// V2 with binding: "hello-world/gastown.polecat" or "gastown.mayor".
+// BindingQualifiedName returns the binding-qualified agent identity without a
+// rig prefix. Examples: "polecat", "gastown.polecat", or "gastown.mayor".
 func (a *Agent) BindingQualifiedName() string {
 	if a.BindingName == "" {
 		return a.Name
@@ -53,6 +52,9 @@ func (a *Agent) BindingQualifiedName() string {
 	return a.BindingName + "." + a.Name
 }
 
+// QualifiedName returns the agent's canonical identity, including the rig
+// prefix when present. Examples: "mayor", "gastown.mayor",
+// "hello-world/polecat", and "hello-world/gastown.polecat".
 func (a *Agent) QualifiedName() string {
 	name := a.BindingQualifiedName()
 	if a.Dir == "" {
