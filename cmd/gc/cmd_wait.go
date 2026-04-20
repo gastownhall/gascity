@@ -248,7 +248,10 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			return 1
 		}
 		if cityPath, err := resolveCity(); err == nil {
-			_ = pokeController(cityPath)
+			if err := pokeController(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
+				return 1
+			}
 		}
 		fmt.Fprintf(stdout, "Registered wait %s for session %s.\nSession %s draining to sleep.\n", waitBead.ID, sessionID, sessionID) //nolint:errcheck
 		return 0
@@ -382,7 +385,10 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 				return 1
 			}
 		}
-		_ = clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"])
+		if err := clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"]); err != nil {
+			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
+			return 1
+		}
 	}
 	fmt.Fprintf(stdout, "Updated wait %s to %s.\n", waitID, state) //nolint:errcheck
 	return 0
@@ -688,14 +694,18 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 			return err
 		}
-		_ = store.SetMetadata(wait.ID, "nudge_id", nudgeID)
+		if err := store.SetMetadata(wait.ID, "nudge_id", nudgeID); err != nil {
+			return fmt.Errorf("setting wait nudge_id: %w", err)
+		}
 		// provider_kind is stamped from ResolvedProvider.Kind /
 		// BuiltinAncestor at session-bead creation, so wrapped codex
 		// aliases (e.g. [providers.my-wrapped-codex] base = "builtin:codex")
 		// already surface as "codex" here. The provider fallback covers
 		// sessions created before provider_kind was stamped.
 		if sessionProviderFamily(sessionBead) == "codex" {
-			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
+			if err := startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
+				return fmt.Errorf("starting wait nudge poller: %w", err)
+			}
 		}
 	}
 	return nil

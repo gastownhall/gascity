@@ -25,6 +25,17 @@ type waitErrorStore struct {
 	*beads.MemStore
 }
 
+type waitNudgeMetadataFailStore struct {
+	*beads.MemStore
+}
+
+func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
+	if key == "nudge_id" {
+		return errors.New("set nudge id failed")
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
 var (
 	waitTestRealBDPathOnce sync.Once
 	waitTestRealBDCached   string
@@ -783,6 +794,98 @@ func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("startNudgePoller was not called")
+	}
+}
+
+func TestDispatchReadyWaitNudges_PropagatesNudgeIDMetadataFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := waitNudgeMetadataFailStore{MemStore: beads.NewMemStore()}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	err = dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "setting wait nudge_id") {
+		t.Fatalf("dispatchReadyWaitNudges error = %v, want nudge_id failure", err)
+	}
+}
+
+func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		return errors.New("poller failed")
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	err = dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "starting wait nudge poller") {
+		t.Fatalf("dispatchReadyWaitNudges error = %v, want poller failure", err)
 	}
 }
 
