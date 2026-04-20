@@ -151,9 +151,8 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	return p.route(name).Peek(name, lines)
 }
 
-// ListRunning queries both backends and merges results. If one backend
-// errors, partial results are returned with the error so callers can
-// distinguish complete vs partial results.
+// ListRunning queries both backends and preserves best-effort results when
+// one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	local, lErr := p.local.ListRunning(prefix)
 	remote, rErr := p.remote.ListRunning(prefix)

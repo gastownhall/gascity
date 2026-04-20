@@ -4692,6 +4692,9 @@
       "ProviderReadiness": {
         "additionalProperties": false,
         "properties": {
+          "detail": {
+            "type": "string"
+          },
           "display_name": {
             "type": "string"
           },
@@ -4909,6 +4912,9 @@
       "ReadinessItem": {
         "additionalProperties": false,
         "properties": {
+          "detail": {
+            "type": "string"
+          },
           "display_name": {
             "type": "string"
           },

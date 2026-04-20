@@ -3,7 +3,6 @@ package runtime
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // BackendError carries provider/backend context for aggregated failures.
@@ -20,18 +19,18 @@ type BackendListResult struct {
 }
 
 // MergeBackendListResults merges provider ListRunning results and preserves
-// backend context when one or more providers fail.
+// best-effort behavior when only some backends fail.
+//
+// Historical callers assume ListRunning still returns any healthy backend's
+// sessions so cleanup, discovery, and accounting can proceed. Only a total
+// failure returns an error.
 func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	merged := make([]string, 0)
-	successLabels := make([]string, 0, len(results))
 	failures := make([]error, 0, len(results))
 	failed := 0
 
 	for _, result := range results {
 		merged = append(merged, result.Names...)
-		if result.Err == nil {
-			successLabels = append(successLabels, result.Label)
-		}
 	}
 
 	for _, result := range results {
@@ -39,11 +38,7 @@ func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 			continue
 		}
 		failed++
-		err := fmt.Errorf("%s backend: %w", result.Label, result.Err)
-		if note := partialResultsNote(result.Label, successLabels); note != "" {
-			err = fmt.Errorf("%s backend: %w (%s)", result.Label, result.Err, note)
-		}
-		failures = append(failures, err)
+		failures = append(failures, fmt.Errorf("%s backend: %w", result.Label, result.Err))
 	}
 
 	if len(failures) == 0 {
@@ -52,7 +47,7 @@ func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	if failed == len(results) {
 		return nil, errors.Join(failures...)
 	}
-	return merged, errors.Join(failures...)
+	return merged, nil
 }
 
 // MergeBackendStopErrors standardizes multi-backend Stop semantics.
@@ -76,18 +71,4 @@ func MergeBackendStopErrors(results ...BackendError) error {
 		return nil
 	}
 	return errors.Join(failures...)
-}
-
-func partialResultsNote(failedLabel string, successLabels []string) string {
-	included := make([]string, 0, len(successLabels))
-	for _, label := range successLabels {
-		if label == failedLabel {
-			continue
-		}
-		included = append(included, label)
-	}
-	if len(included) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%s results included", strings.Join(included, " + "))
 }

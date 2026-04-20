@@ -184,6 +184,51 @@ esac
 	}
 }
 
+func TestStartDoesNotHangWhenWatchStartupKeepsStreamingPromptSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    i=0
+    while [ "$i" -lt 2000 ]; do
+      printf '%s\n' '{"content":"user@host $"}'
+      i=$((i+1))
+    done
+    sleep 5
+    ;;
+  send-keys)
+    ;;
+  peek)
+    echo "peek should not be used"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung while cleaning up watch-startup stream")
+	}
+}
+
 func TestStartWrapsDuplicateSessionError(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

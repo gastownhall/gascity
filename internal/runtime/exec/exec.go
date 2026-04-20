@@ -182,11 +182,11 @@ func (p *Provider) startStartupWatch(
 	}
 
 	first := make(chan firstResult, 1)
-	rest := make(chan string)
+	events := make(chan string, 1)
 	done := make(chan error, 1)
 
 	go func() {
-		defer close(rest)
+		defer close(events)
 
 		scanner := bufio.NewScanner(stdout)
 		emitted := false
@@ -203,9 +203,13 @@ func (p *Provider) startStartupWatch(
 			if !emitted {
 				emitted = true
 				first <- firstResult{content: event.Content}
-				continue
 			}
-			rest <- event.Content
+			select {
+			case events <- event.Content:
+			case <-watchCtx.Done():
+				done <- formatStartupWatchError(stderr.String(), cmd.Wait())
+				return
+			}
 		}
 
 		scanErr := scanner.Err()
@@ -250,21 +254,12 @@ func (p *Provider) startStartupWatch(
 		return nil, nil, false, result.err
 	}
 
-	snapshots := make(chan string, 1)
-	snapshots <- result.content
-	go func() {
-		defer close(snapshots)
-		for content := range rest {
-			snapshots <- content
-		}
-	}()
-
 	closeWatch := func() error {
 		cancel()
 		return waitStartupWatch(done)
 	}
 
-	return snapshots, closeWatch, true, nil
+	return events, closeWatch, true, nil
 }
 
 func waitStartupWatch(done <-chan error) error {

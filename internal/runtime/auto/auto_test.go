@@ -155,8 +155,8 @@ func TestListRunningPartialError(t *testing.T) {
 	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
 
 	names, err := p.ListRunning("")
-	if err == nil {
-		t.Fatal("ListRunning should return error when one backend fails")
+	if err != nil {
+		t.Fatalf("ListRunning error = %v, want nil on partial failure", err)
 	}
 	// Should still return partial results from the working backend.
 	if len(names) != 1 || names[0] != "default-1" {
@@ -186,14 +186,11 @@ func TestListRunningPartialErrorIncludesBackendContext(t *testing.T) {
 	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
 
 	names, err := p.ListRunning("")
-	if err == nil {
-		t.Fatal("ListRunning should return error when one backend fails")
-	}
 	if len(names) != 1 || names[0] != "default-1" {
 		t.Fatalf("ListRunning partial = %v, want [default-1]", names)
 	}
-	if got := err.Error(); !strings.Contains(got, "acp backend:") || !strings.Contains(got, "default results included") {
-		t.Fatalf("ListRunning error = %v, want backend context and partial-results note", err)
+	if err != nil {
+		t.Fatalf("ListRunning error = %v, want nil on partial failure", err)
 	}
 }
 

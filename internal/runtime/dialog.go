@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,25 +48,26 @@ func AcceptStartupDialogsFromStream(
 	snapshots <-chan string,
 	sendKeys func(keys ...string) error,
 ) error {
-	if err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+	stream := newReplayableSnapshotStream(snapshots)
+	if err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, sendKeys); err != nil {
 		return fmt.Errorf("workspace trust dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptBypassPermissionsWarningFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+	if err := acceptBypassPermissionsWarningFromStream(ctx, timeout, stream, sendKeys); err != nil {
 		return fmt.Errorf("bypass permissions warning: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptCustomAPIKeyDialogFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+	if err := acceptCustomAPIKeyDialogFromStream(ctx, timeout, stream, sendKeys); err != nil {
 		return fmt.Errorf("custom API key dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := dismissRateLimitDialogFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+	if err := dismissRateLimitDialogFromStream(ctx, timeout, stream, sendKeys); err != nil {
 		return fmt.Errorf("rate limit dialog: %w", err)
 	}
 	return nil
@@ -149,7 +151,7 @@ func acceptWorkspaceTrustDialog(
 func acceptWorkspaceTrustDialogFromStream(
 	ctx context.Context,
 	timeout time.Duration,
-	snapshots <-chan string,
+	snapshots *replayableSnapshotStream,
 	sendKeys func(keys ...string) error,
 ) error {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
@@ -208,7 +210,7 @@ func acceptBypassPermissionsWarning(
 func acceptBypassPermissionsWarningFromStream(
 	ctx context.Context,
 	timeout time.Duration,
-	snapshots <-chan string,
+	snapshots *replayableSnapshotStream,
 	sendKeys func(keys ...string) error,
 ) error {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
@@ -260,7 +262,7 @@ func acceptCustomAPIKeyDialog(
 func acceptCustomAPIKeyDialogFromStream(
 	ctx context.Context,
 	timeout time.Duration,
-	snapshots <-chan string,
+	snapshots *replayableSnapshotStream,
 	sendKeys func(keys ...string) error,
 ) error {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
@@ -322,7 +324,7 @@ func dismissRateLimitDialog(
 func dismissRateLimitDialogFromStream(
 	ctx context.Context,
 	timeout time.Duration,
-	snapshots <-chan string,
+	snapshots *replayableSnapshotStream,
 	sendKeys func(keys ...string) error,
 ) error {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
@@ -341,26 +343,74 @@ type streamDialogSpec struct {
 	matchDelay  time.Duration
 }
 
+type replayableSnapshotStream struct {
+	mu      sync.Mutex
+	latest  string
+	hasData bool
+	version uint64
+	closed  bool
+	update  chan struct{}
+}
+
+func newReplayableSnapshotStream(src <-chan string) *replayableSnapshotStream {
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	go func() {
+		for content := range src {
+			stream.publish(content)
+		}
+		stream.finish()
+	}()
+	return stream
+}
+
+func (s *replayableSnapshotStream) publish(content string) {
+	s.mu.Lock()
+	s.latest = content
+	s.hasData = true
+	s.version++
+	update := s.update
+	s.update = make(chan struct{})
+	s.mu.Unlock()
+	close(update)
+}
+
+func (s *replayableSnapshotStream) finish() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	update := s.update
+	s.mu.Unlock()
+	close(update)
+}
+
+func (s *replayableSnapshotStream) snapshot() (string, bool, uint64, bool, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latest, s.hasData, s.version, s.closed, s.update
+}
+
 func acceptDialogFromStream(
 	ctx context.Context,
 	timeout time.Duration,
-	snapshots <-chan string,
+	snapshots *replayableSnapshotStream,
 	sendKeys func(keys ...string) error,
 	spec streamDialogSpec,
 ) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	var (
+		seenVersion uint64
+		seenData    bool
+	)
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return nil
-		case content, ok := <-snapshots:
-			if !ok {
-				return nil
-			}
+		content, hasData, version, closed, updated := snapshots.snapshot()
+		if hasData && (!seenData || version != seenVersion) {
+			seenData = true
+			seenVersion = version
 			if spec.match != nil && spec.match(content) {
 				if err := sendKeys(spec.matchKeys...); err != nil {
 					return err
@@ -374,6 +424,16 @@ func acceptDialogFromStream(
 			if spec.readyOrNext != nil && spec.readyOrNext(content) {
 				return nil
 			}
+		}
+		if closed {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		case <-updated:
 		}
 	}
 }

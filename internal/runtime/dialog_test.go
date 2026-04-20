@@ -236,6 +236,75 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsFromStreamReplaysBypassDialogAcrossPhases(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 1)
+	snapshots <- "Bypass Permissions mode"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamReplaysCustomAPIKeyDialogAcrossPhases(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 1)
+	snapshots <- "Detected a custom API key in your environment\nDo you want to use this API key?"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Up", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Up Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamReplaysRateLimitDialogAcrossPhases(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 1)
+	snapshots <- "Usage limit reached"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
 func TestContainsPromptIndicator(t *testing.T) {
 	t.Parallel()
 

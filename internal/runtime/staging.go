@@ -36,17 +36,10 @@ func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 	return nil
 }
 
-// StageDir copies a directory overlay and turns best-effort copy warnings into
-// a returned error so startup cannot silently continue with partial state.
+// StageDir copies a directory overlay while preserving CopyDir's historical
+// best-effort behavior for per-path warnings.
 func StageDir(srcDir, dstDir string) error {
-	var stderr bytes.Buffer
-	if err := overlay.CopyDir(srcDir, dstDir, &stderr); err != nil {
-		return err
-	}
-	if stderr.Len() > 0 {
-		return fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
-	}
-	return nil
+	return overlay.CopyDir(srcDir, dstDir, &bytes.Buffer{})
 }
 
 // StagePath copies a file or directory and returns any per-file warnings as an
