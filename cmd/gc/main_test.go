@@ -62,15 +62,6 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 }
 
-func mustLoadSiteBinding(t *testing.T, fs fsys.FS, cityPath string) *config.SiteBinding {
-	t.Helper()
-	binding, err := config.LoadSiteBinding(fs, cityPath)
-	if err != nil {
-		t.Fatalf("LoadSiteBinding(%q): %v", cityPath, err)
-	}
-	return binding
-}
-
 func configureSupervisorHooksForTests() {
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
