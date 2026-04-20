@@ -81,6 +81,9 @@ type TemplateParams struct {
 	// SessionOverride is the per-agent session provider override (e.g., "acp",
 	// "tmux", "exec:..."). Empty means use the city-level default.
 	SessionOverride string
+	// EffectiveSessionProvider is the actual session provider after applying
+	// city-level defaults.
+	EffectiveSessionProvider string
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -505,6 +508,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		IsACP:            cfgAgent.Session == "acp",
 		HookEnabled:      hasHooks,
 		SessionOverride:  cfgAgent.Session,
+		EffectiveSessionProvider: effectiveSessionProvider(cfgAgent.Session, p.sessionProvider),
 	}, nil
 }
 
@@ -575,12 +579,31 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 			}
 		}
 	}
+	env := make(map[string]string, len(tp.Env)+1)
+	for k, v := range tp.Env {
+		env[k] = v
+	}
+	if templateParamsUseT3Bridge(tp) {
+		alias := strings.TrimSpace(tp.Alias)
+		if alias == "" {
+			alias = strings.TrimSpace(env["GC_AGENT"])
+		}
+		if alias == "" {
+			alias = strings.TrimSpace(tp.InstanceName)
+		}
+		if alias == "" {
+			alias = strings.TrimSpace(tp.TemplateName)
+		}
+		if alias != "" && strings.TrimSpace(env["GC_ALIAS"]) == "" {
+			env["GC_ALIAS"] = alias
+		}
+	}
 	startupEnvelope := buildStartupEnvelope(tp, tp.Prompt)
 	return runtime.Config{
 		Command:                tp.Command,
 		PromptSuffix:           promptSuffix,
 		PromptFlag:             promptFlag,
-		Env:                    tp.Env,
+		Env:                    env,
 		StartupEnvelope:        startupEnvelope,
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
@@ -697,6 +720,9 @@ func findAssignedWorkBead(store beads.Store, sessionName, agentName string) (bea
 }
 
 func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessage {
+	if !templateParamsUseT3Bridge(tp) {
+		return nil
+	}
 	envelope := map[string]any{
 		"version": 1,
 		"gc": map[string]any{
@@ -711,7 +737,7 @@ func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessa
 		"runtime": map[string]any{
 			"provider":         tp.Env["GC_PROVIDER"],
 			"model":            startupEnvelopeModel(tp),
-			"sessionTransport": tp.SessionOverride,
+			"sessionTransport": tp.EffectiveSessionProvider,
 			"runtimeMode":      "full-access",
 			"interactionMode":  "default",
 			"workDir":          tp.WorkDir,
@@ -764,6 +790,27 @@ func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessa
 		return nil
 	}
 	return json.RawMessage(data)
+}
+
+func templateParamsUseT3Bridge(tp TemplateParams) bool {
+	sessionProvider := strings.TrimSpace(tp.EffectiveSessionProvider)
+	if sessionProvider == "" {
+		sessionProvider = strings.TrimSpace(tp.SessionOverride)
+	}
+	if sessionProvider == "t3bridge" {
+		return true
+	}
+	if strings.HasPrefix(sessionProvider, "exec:") {
+		return strings.HasSuffix(strings.TrimPrefix(sessionProvider, "exec:"), "gc-session-t3")
+	}
+	return false
+}
+
+func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {
+	if strings.TrimSpace(sessionOverride) != "" {
+		return strings.TrimSpace(sessionOverride)
+	}
+	return strings.TrimSpace(citySessionProvider)
 }
 
 func startupEnvelopeModel(tp TemplateParams) string {

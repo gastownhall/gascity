@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -104,35 +103,6 @@ func providerStateDir(providerName, cityPath string) string {
 	return filepath.Join(supervisor.RuntimeDir(), providerName, hex.EncodeToString(sum[:4]))
 }
 
-func resolveT3BridgeExecShim(cityPath string) string {
-	candidates := []string{}
-	if cityPath != "" {
-		candidates = append(candidates,
-			filepath.Join(cityPath, "assets", "scripts", "gc-session-t3"),
-			filepath.Join(cityPath, "scripts", "gc-session-t3"),
-		)
-	}
-	candidates = append(candidates, "gc-session-t3")
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if filepath.IsAbs(candidate) {
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-			continue
-		}
-		if _, err := exec.LookPath(candidate); err == nil {
-			return candidate
-		}
-	}
-	if cityPath != "" {
-		return filepath.Join(cityPath, "assets", "scripts", "gc-session-t3")
-	}
-	return "gc-session-t3"
-}
-
 // newSessionProviderByName constructs a runtime.Provider from a provider name.
 // cityName is used to auto-default the tmux socket when none is configured.
 // cityPath is used to isolate socket-based providers per city.
@@ -148,9 +118,6 @@ func resolveT3BridgeExecShim(cityPath string) string {
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
 		script := strings.TrimPrefix(name, "exec:")
-		if strings.HasSuffix(script, "gc-session-t3") {
-			return sessiont3bridge.NewProvider(script), nil
-		}
 		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
@@ -174,7 +141,7 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 		}
 		return sessionacp.NewProvider(cfg), nil
 	case "t3bridge":
-		return sessiont3bridge.NewProvider(resolveT3BridgeExecShim(cityPath)), nil
+		return sessiont3bridge.NewProvider(), nil
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":

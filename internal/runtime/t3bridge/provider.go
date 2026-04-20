@@ -4,11 +4,15 @@
 package t3bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,7 +22,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -27,7 +30,6 @@ import (
 // operations into native Go WebSocket calls while leaving a small helper
 // surface on the internal exec shim.
 type Provider struct {
-	exec         *sessionexec.Provider
 	mu           sync.Mutex
 	reqSeq       int
 	watchers     map[string]context.CancelFunc
@@ -94,10 +96,114 @@ func resolveWsURL() string {
 	return "ws://localhost:3773/ws"
 }
 
-func NewProvider(execScript string) *Provider {
+func resolveT3ServerDir() string {
+	if v := os.Getenv("T3_SERVER_DIR"); strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return "/data/projects/t3code/apps/server"
+}
+
+func resolveT3BaseDir() string {
+	if v := os.Getenv("T3_BASE_DIR"); strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	t3Home := os.Getenv("T3_HOME")
+	if strings.TrimSpace(t3Home) == "" {
+		t3Home = filepath.Join(os.Getenv("HOME"), ".t3")
+	}
+	return filepath.Join(t3Home, "dev")
+}
+
+func issueT3BearerSession() (string, error) {
+	if token := strings.TrimSpace(os.Getenv("T3_BEARER_TOKEN")); token != "" {
+		return token, nil
+	}
+	if token := strings.TrimSpace(os.Getenv("GC_T3_BEARER_TOKEN")); token != "" {
+		return token, nil
+	}
+	cmd := exec.Command("node", "src/cli.ts", "auth", "session", "issue", "--base-dir", resolveT3BaseDir(), "--token-only")
+	cmd.Dir = resolveT3ServerDir()
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("issue bearer session: %w", err)
+	}
+	token := strings.TrimSpace(string(output))
+	if token == "" {
+		return "", fmt.Errorf("issue bearer session: empty token")
+	}
+	return token, nil
+}
+
+func issueT3WebSocketToken(wsURL string) (string, error) {
+	bearer, err := issueT3BearerSession()
+	if err != nil {
+		return "", err
+	}
+
+	parsed, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("parse ws url: %w", err)
+	}
+	switch parsed.Scheme {
+	case "ws":
+		parsed.Scheme = "http"
+	case "wss":
+		parsed.Scheme = "https"
+	default:
+		return "", fmt.Errorf("unsupported websocket scheme: %s", parsed.Scheme)
+	}
+	parsed.Path = "/api/auth/ws-token"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+
+	req, err := http.NewRequest(http.MethodPost, parsed.String(), bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return "", fmt.Errorf("build ws-token request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request ws token: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("request ws token: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode ws token: %w", err)
+	}
+	if strings.TrimSpace(payload.Token) == "" {
+		return "", fmt.Errorf("decode ws token: empty token")
+	}
+	return payload.Token, nil
+}
+
+func authenticatedWsURL() (string, error) {
+	wsURL := resolveWsURL()
+	wsToken, err := issueT3WebSocketToken(wsURL)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("parse authenticated ws url: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("wsToken", wsToken)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func NewProvider() *Provider {
 	cleanupLegacyStateDir()
 	return &Provider{
-		exec:         sessionexec.NewProvider(execScript),
 		watchers:     make(map[string]context.CancelFunc),
 		recentStarts: make(map[string]time.Time),
 	}
@@ -121,6 +227,103 @@ func cleanupLegacyStateDir() {
 		return
 	}
 	_ = os.RemoveAll(stateDir)
+}
+
+func resolveNativeStateDir() string {
+	if stateDir := os.Getenv("GC_T3BRIDGE_STATE_DIR"); stateDir != "" {
+		return stateDir
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = os.TempDir()
+	}
+	return filepath.Join(home, ".t3", "gc-bridge-native")
+}
+
+func ensureNativeStateDir() error {
+	return os.MkdirAll(resolveNativeStateDir(), 0o755)
+}
+
+func metaFilePath(name, key string) string {
+	safeKey := strings.NewReplacer("/", "_", string(filepath.Separator), "_").Replace(key)
+	return filepath.Join(resolveNativeStateDir(), fmt.Sprintf("%s.meta.%s", name, safeKey))
+}
+
+func writeMetaValue(name, key, value string) error {
+	if err := ensureNativeStateDir(); err != nil {
+		return err
+	}
+	return os.WriteFile(metaFilePath(name, key), []byte(value), 0o644)
+}
+
+func readMetaValue(name, key string) (string, error) {
+	data, err := os.ReadFile(metaFilePath(name, key))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}
+
+func removeMetaValue(name, key string) error {
+	err := os.Remove(metaFilePath(name, key))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func copyFileToPath(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if info, err := os.Stat(src); err == nil {
+		_ = os.Chmod(dst, info.Mode())
+	}
+	return nil
+}
+
+func copyDirContents(srcDir, dstDir string) error {
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == srcDir {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dstDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFileToPath(path, target)
+	})
 }
 
 func parseMetadataValue(value interface{}) string {
@@ -332,7 +535,10 @@ func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[st
 	reqID := p.reqSeq
 	p.mu.Unlock()
 
-	wsURL := resolveWsURL()
+	wsURL, err := authenticatedWsURL()
+	if err != nil {
+		return nil, err
+	}
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		return nil, err
@@ -514,7 +720,16 @@ func (p *Provider) dispatchProjectCreate(projectID, title, workspaceRoot, provid
 	return p.rpcDispatchCommand(command)
 }
 
-func (p *Provider) dispatchThreadCreate(threadID, projectID, title, provider, model, branch, worktreePath string) error {
+func (p *Provider) dispatchThreadCreate(
+	threadID,
+	projectID,
+	title,
+	provider,
+	model,
+	branch,
+	worktreePath string,
+	customMetadata map[string]interface{},
+) error {
 	command := map[string]interface{}{
 		"type":            "thread.create",
 		"commandId":       p.nextCommandID("t3bridge-thread"),
@@ -533,6 +748,9 @@ func (p *Provider) dispatchThreadCreate(threadID, projectID, title, provider, mo
 	}
 	if worktreePath != "" {
 		command["worktreePath"] = worktreePath
+	}
+	if customMetadata != nil {
+		command["customMetadata"] = customMetadata
 	}
 	return p.rpcDispatchCommand(command)
 }
@@ -914,9 +1132,9 @@ func (p *Provider) removeWorktreeForThread(thread map[string]interface{}) {
 }
 
 func (p *Provider) clearBridgeMeta(name string) {
-	_ = p.exec.RemoveMeta(name, "GC_DRAIN")
-	_ = p.exec.RemoveMeta(name, "GC_DRAIN_ACK")
-	_ = p.exec.RemoveMeta(name, "drained")
+	_ = removeMetaValue(name, "GC_DRAIN")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK")
+	_ = removeMetaValue(name, "drained")
 }
 
 func poolKickoffText(envelope StartupEnvelope) string {
@@ -1380,6 +1598,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	providerName, modelName := resolveProviderModel(cfg, envelope)
+	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) resolved provider=%s model=%s workdir=%s projectRoot=%s agent=%s template=%s\n", //nolint:errcheck
+		name, providerName, modelName, cfg.WorkDir, deriveProjectWorkspaceRoot(cfg.WorkDir, envelope), envelope.GC.Agent, envelope.GC.Template)
 	if envelope.Runtime.Provider == "" {
 		envelope.Runtime.Provider = providerName
 	}
@@ -1449,6 +1669,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	threadID := ""
 
 	if existingBinding != nil {
+		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) found existing binding thread=%s project=%s\n", name, existingBinding.ThreadID, existingBinding.ProjectID) //nolint:errcheck
 		reuse := DecideThreadReuse(ReuseCheck{
 			Desired:       envelope,
 			Stored:        storedEnvelopeFromThread(existingThread),
@@ -1458,6 +1679,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 		switch reuse.Decision {
 		case ReuseDecisionReuse, ReuseDecisionRebind:
+			fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) reuse decision=%s thread=%s\n", name, reuse.Decision, existingBinding.ThreadID) //nolint:errcheck
 			projectID = existingBinding.ProjectID
 			threadID = existingBinding.ThreadID
 			if reuse.Decision == ReuseDecisionRebind {
@@ -1494,6 +1716,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			p.ensureEventWatcher(name, cfg, binding, envelope, providerName)
 			return nil
 		default:
+			fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) discard existing thread=%s decision=%s\n", name, existingBinding.ThreadID, reuse.Decision) //nolint:errcheck
 			if existingBinding.ThreadID != "" {
 				_ = p.dispatchThreadMeta(existingBinding.ThreadID, map[string]interface{}{"gc.state": "archived"})
 				_ = p.dispatchThreadSessionStop(existingBinding.ThreadID)
@@ -1505,6 +1728,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	projectID = resolveActiveProjectID(snapshot, projectWorkspaceRoot)
 	if projectID == "" {
 		projectID = uuid.NewString()
+		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) creating project id=%s title=%s root=%s\n", name, projectID, projectTitle, projectWorkspaceRoot) //nolint:errcheck
 		if err := p.dispatchProjectCreate(projectID, projectTitle, projectWorkspaceRoot, providerName, modelName); err != nil {
 			if worktreePath != "" {
 				_ = p.rpcRemoveWorktree(cwd, worktreePath)
@@ -1520,7 +1744,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		createBranch = worktreeBranch
 		createWorktreePath = worktreePath
 	}
-	if err := p.dispatchThreadCreate(threadID, projectID, threadTitle, providerName, modelName, createBranch, createWorktreePath); err != nil {
+	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) creating thread id=%s project=%s title=%s branch=%s worktree=%s\n", //nolint:errcheck
+		name, threadID, projectID, threadTitle, createBranch, createWorktreePath)
+	initialGCMetadata := buildGCMetadata(envelope, providerName, "active", buildThreadEnv(cfg.Env))
+	if err := p.dispatchThreadCreate(
+		threadID,
+		projectID,
+		threadTitle,
+		providerName,
+		modelName,
+		createBranch,
+		createWorktreePath,
+		initialGCMetadata,
+	); err != nil {
 		if worktreePath != "" {
 			_ = p.rpcRemoveWorktree(cwd, worktreePath)
 		}
@@ -1537,7 +1773,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		Model:       modelName,
 	}
 	p.setRecentStart(name, time.Now())
-	_ = p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, "active", buildThreadEnv(cfg.Env)))
+	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) writing gc metadata thread=%s\n", name, threadID) //nolint:errcheck
+	_ = p.dispatchThreadMeta(threadID, initialGCMetadata)
 	_ = p.dispatchActivity(threadID, "gc.session.started", "GC session started", "info", map[string]interface{}{
 		"agent":       envelope.GC.Agent,
 		"rig":         envelope.GC.RigName,
@@ -1553,11 +1790,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		"sessionName": name,
 	})
 	p.ensureEventWatcher(name, cfg, binding, envelope, providerName)
+	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) waiting for gc metadata thread=%s\n", name, threadID) //nolint:errcheck
 	if err := p.waitForThreadGCMetadata(threadID, 5*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) metadata wait failed thread=%s err=%v\n", name, threadID, err) //nolint:errcheck
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) metadata ready thread=%s\n", name, threadID) //nolint:errcheck
 
 	if prompt := strings.TrimSpace(envelope.Startup.StartupPrompt); prompt != "" {
+		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending startup prompt thread=%s len=%d\n", name, threadID, len(prompt)) //nolint:errcheck
 		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName); err != nil {
 			return err
 		}
@@ -1570,6 +1811,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		nudgeText = strings.TrimSpace(poolKickoffText(envelope))
 	}
 	if nudgeText != "" {
+		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending nudge thread=%s len=%d\n", name, threadID, len(nudgeText)) //nolint:errcheck
 		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName); err != nil {
 			return err
 		}
@@ -1692,7 +1934,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 }
 
 func (p *Provider) SetMeta(name, key, value string) error {
-	if err := p.exec.SetMeta(name, key, value); err != nil {
+	if err := writeMetaValue(name, key, value); err != nil {
 		return err
 	}
 	snapshot, err := p.rpcSnapshot()
@@ -1707,18 +1949,18 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	case key == "GC_DRAIN":
 		p.recordStateChange(binding.ThreadID, "draining", "GC session draining", nil)
 	case key == "GC_DRAIN_ACK" && value == "1":
-		_ = p.exec.SetMeta(name, "drained", "1")
+		_ = writeMetaValue(name, "drained", "1")
 		p.recordStateChange(binding.ThreadID, "drained", "GC session drained", nil)
 	}
 	return nil
 }
 
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	return p.exec.GetMeta(name, key)
+	return readMetaValue(name, key)
 }
 
 func (p *Provider) RemoveMeta(name, key string) error {
-	err := p.exec.RemoveMeta(name, key)
+	err := removeMetaValue(name, key)
 	if err != nil {
 		return err
 	}
@@ -1734,7 +1976,7 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	case "GC_DRAIN":
 		p.recordStateChange(binding.ThreadID, "active", "GC drain cleared", map[string]interface{}{"reason": "drain cleared"})
 	case "GC_DRAIN_ACK":
-		_ = p.exec.RemoveMeta(name, "drained")
+		_ = removeMetaValue(name, "drained")
 		p.recordStateChange(binding.ThreadID, "active", "GC drain acknowledgment cleared", map[string]interface{}{"reason": "drain acknowledgment cleared"})
 	}
 	return nil
@@ -1829,15 +2071,60 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 }
 
 func (p *Provider) ClearScrollback(name string) error {
-	return p.exec.ClearScrollback(name)
+	return nil
 }
 
 func (p *Provider) CopyTo(name, src, relDst string) error {
-	return p.exec.CopyTo(name, src, relDst)
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(src) == "" {
+		return nil
+	}
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		return nil
+	}
+	thread := snapshotThreadBySessionName(snapshot, name)
+	binding := snapshotThreadBinding(thread)
+	workDir := ""
+	if binding != nil {
+		workDir = strings.TrimSpace(binding.WorkDir)
+	}
+	if workDir == "" {
+		meta := threadCustomMetadata(thread)
+		workDir = strings.TrimSpace(meta["gc.startupWorkDir"])
+	}
+	if workDir == "" {
+		return nil
+	}
+
+	info, err := os.Stat(src)
+	if err != nil {
+		return nil
+	}
+	if info.IsDir() {
+		dst := workDir
+		if strings.TrimSpace(relDst) != "" {
+			dst = filepath.Join(workDir, relDst)
+		}
+		if err := copyDirContents(src, dst); err != nil {
+			return nil
+		}
+		return nil
+	}
+
+	dst := workDir
+	if strings.TrimSpace(relDst) != "" {
+		dst = filepath.Join(workDir, relDst)
+	} else {
+		dst = filepath.Join(workDir, filepath.Base(src))
+	}
+	if err := copyFileToPath(src, dst); err != nil {
+		return nil
+	}
+	return nil
 }
 
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	return p.exec.SendKeys(name, keys...)
+	return nil
 }
 
 func (p *Provider) RunLive(_ string, _ runtime.Config) error {
@@ -1845,5 +2132,11 @@ func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 }
 
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+	return runtime.ProviderCapabilities{
+		CanReportActivity: true,
+	}
+}
+
+func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityTimedOnly
 }

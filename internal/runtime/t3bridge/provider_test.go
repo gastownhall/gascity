@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -101,6 +103,7 @@ func TestProcessAlive_ReadyCountsAsAlive(t *testing.T) {
 		},
 	})
 	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("T3_WS_URL", server.wsURL())
 
 	p := &Provider{
@@ -132,6 +135,7 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 	})
 	defer server.Close()
 
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("T3_WS_URL", server.wsURL())
 
 	p := &Provider{
@@ -282,6 +286,7 @@ func TestWaitForThreadGCMetadata_RecognizesProjectedSessionEnv(t *testing.T) {
 		},
 	})
 	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("T3_WS_URL", server.wsURL())
 
 	p := &Provider{
@@ -307,6 +312,93 @@ func TestResolveBindingProviderModel_DefaultsCodexToGPT54WhenModelMissing(t *tes
 	}
 }
 
+func TestSetMetaGetMetaRemoveMeta_UsesNativeStateStore(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":        "thread-1",
+				"projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent":       "t3code/crew",
+					"gc.sessionName": "t3code--crew",
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	if err := p.SetMeta("t3code--crew", "GC_DRAIN", "123"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	got, err := p.GetMeta("t3code--crew", "GC_DRAIN")
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if got != "123" {
+		t.Fatalf("GC_DRAIN = %q, want 123", got)
+	}
+	if err := p.RemoveMeta("t3code--crew", "GC_DRAIN"); err != nil {
+		t.Fatalf("RemoveMeta: %v", err)
+	}
+	got, err = p.GetMeta("t3code--crew", "GC_DRAIN")
+	if err != nil {
+		t.Fatalf("GetMeta(after remove): %v", err)
+	}
+	if got != "" {
+		t.Fatalf("GC_DRAIN after remove = %q, want empty", got)
+	}
+}
+
+func TestCopyTo_UsesThreadWorkDir(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "note.txt")
+	if err := os.WriteFile(srcFile, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write src file: %v", err)
+	}
+
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":        "thread-1",
+				"projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent":          "t3code/crew",
+					"gc.sessionName":    "t3code--crew",
+					"gc.startupWorkDir": workDir,
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	if err := p.CopyTo("t3code--crew", srcFile, "nested/copied.txt"); err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workDir, "nested", "copied.txt"))
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("copied file = %q, want hello", string(data))
+	}
+}
+
 type t3BridgeTestServer struct {
 	t        *testing.T
 	server   *httptest.Server
@@ -320,6 +412,15 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 	ts := &t3BridgeTestServer{t: t, snapshot: snapshot}
 	upgrader := websocket.Upgrader{}
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/auth/ws-token" {
+			if auth := r.Header.Get("Authorization"); auth == "" {
+				http.Error(w, "missing auth", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "test-ws-token"})
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("upgrade websocket: %v", err)
