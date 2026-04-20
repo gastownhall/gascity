@@ -59,3 +59,33 @@ func TestStageWorkDirSkipsCopyWhenSourceAlreadyMatchesResolvedDestination(t *tes
 		t.Fatalf("staged source file = %q, want %q", string(data), "seed")
 	}
 }
+
+func TestStageWorkDirFailsWhenOverlayCopyWarns(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	workDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(srcDir, "ok.txt"), []byte("copied"), 0o644); err != nil {
+		t.Fatalf("write ok overlay file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, "blocked"), 0o755); err != nil {
+		t.Fatalf("mkdir blocked src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "blocked", "nested.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("write blocked overlay file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "blocked"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocked dst file: %v", err)
+	}
+
+	err := StageWorkDir(workDir, srcDir, nil)
+	if err == nil {
+		t.Fatal("StageWorkDir() succeeded, want overlay staging error")
+	}
+	if data, readErr := os.ReadFile(filepath.Join(workDir, "ok.txt")); readErr != nil {
+		t.Fatalf("read copied overlay file: %v", readErr)
+	} else if string(data) != "copied" {
+		t.Fatalf("copied overlay file = %q, want %q", string(data), "copied")
+	}
+}

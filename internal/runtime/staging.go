@@ -14,7 +14,7 @@ import (
 // the session process.
 func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 	if overlayDir != "" && workDir != "" {
-		if err := StageDir(overlayDir, workDir); err != nil {
+		if err := stageDirStrict(overlayDir, workDir); err != nil {
 			return fmt.Errorf("overlay %q -> %q: %w", overlayDir, workDir, err)
 		}
 	}
@@ -36,6 +36,17 @@ func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 		}
 	}
 
+	return nil
+}
+
+func stageDirStrict(srcDir, dstDir string) error {
+	var stderr bytes.Buffer
+	if err := overlay.CopyDir(srcDir, dstDir, &stderr); err != nil {
+		return err
+	}
+	if stderr.Len() > 0 {
+		return fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
+	}
 	return nil
 }
 

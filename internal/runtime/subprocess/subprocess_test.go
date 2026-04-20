@@ -383,6 +383,33 @@ func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
 	}
 }
 
+func TestStartFailsWhenOverlayCannotBeStaged(t *testing.T) {
+	workDir := t.TempDir()
+	overlayDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(overlayDir, "ok.txt"), []byte("copied"), 0o644); err != nil {
+		t.Fatalf("write ok overlay file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(overlayDir, "blocked"), 0o755); err != nil {
+		t.Fatalf("mkdir blocked src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "blocked", "nested.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("write blocked overlay file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "blocked"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocked dst file: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "overlay-error", runtime.Config{
+		Command:    "sleep 3600",
+		WorkDir:    workDir,
+		OverlayDir: overlayDir,
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging an overlay warns")
+	}
+}
+
 func TestStartFailedStagingDoesNotRetainWorkDirForCopyTo(t *testing.T) {
 	workDir := t.TempDir()
 	srcDir := t.TempDir()
