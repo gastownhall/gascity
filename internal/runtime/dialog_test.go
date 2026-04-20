@@ -212,6 +212,30 @@ func TestAcceptStartupDialogsAcceptsCustomAPIKeyDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- "Do you trust the contents of this directory?"
+	snapshots <- "user@host $"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
 func TestContainsPromptIndicator(t *testing.T) {
 	t.Parallel()
 

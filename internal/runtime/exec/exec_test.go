@@ -91,6 +91,99 @@ esac
 	}
 }
 
+func TestStartPrefersWatchStartupOverPeekPolling(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"user@host $"}'
+    ;;
+  peek)
+    echo "peek" >> "`+peekFile+`"
+    echo "user@host $"
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if data, err := os.ReadFile(peekFile); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("peek should not be called when watch-startup is supported, got %q", string(data))
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read peek log: %v", err)
+	}
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    exit 2
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want separate Down and Enter dismissal calls", string(data))
+	}
+}
+
 func TestStartWrapsDuplicateSessionError(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

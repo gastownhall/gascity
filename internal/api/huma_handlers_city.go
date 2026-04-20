@@ -75,6 +75,7 @@ func (s *Server) humaHandleProviderReadiness(ctx context.Context, input *Provide
 		providerResp.Providers[provider] = providerReadiness{
 			DisplayName: item.DisplayName,
 			Status:      item.Status,
+			Detail:      item.Detail,
 		}
 	}
 

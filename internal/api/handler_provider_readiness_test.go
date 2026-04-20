@@ -581,6 +581,45 @@ printf '%s\n' 'not-json'
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusProbeError)
 }
 
+func TestHandleProviderReadinessIncludesProbeErrorDetailForClaudeInvalidJSON(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+printf '%s\n' 'not-json'
+`)
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/provider-readiness?providers=claude&fresh=1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp providerReadinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail := resp.Providers["claude"].Detail; !strings.Contains(detail, "invalid") {
+		t.Fatalf("claude detail = %q, want invalid-json detail", detail)
+	}
+}
+
 func TestHandleProviderReadinessReturnsNotInstalledWhenBinaryMissing(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -672,6 +711,51 @@ func TestHandleProviderReadinessReturnsInvalidConfigurationForUnsupportedAuthMod
 	}
 	if got := resp.Providers["gemini"].Status; got != probeStatusInvalidConfiguration {
 		t.Errorf("gemini status = %q, want %q", got, probeStatusInvalidConfiguration)
+	}
+}
+
+func TestHandleProviderReadinessIncludesInvalidConfigurationDetail(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+
+	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(homeDir, ".codex", "auth.json"),
+		[]byte(`{"auth_mode":"api_key","tokens":{"access_token":"token"}}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("write codex auth: %v", err)
+	}
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/provider-readiness?providers=codex&fresh=1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp providerReadinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail := resp.Providers["codex"].Detail; !strings.Contains(detail, "ChatGPT auth") {
+		t.Fatalf("codex detail = %q, want unsupported-auth detail", detail)
 	}
 }
 

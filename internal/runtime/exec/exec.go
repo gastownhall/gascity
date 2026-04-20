@@ -1,8 +1,10 @@
 package exec
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +26,10 @@ type Provider struct {
 	script       string
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
+}
+
+type startupWatchEvent struct {
+	Content string `json:"content"`
 }
 
 // NewProvider returns an exec [Provider] that delegates to the given script.
@@ -119,17 +125,170 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	// Dismiss startup dialogs using the same shared Go logic as tmux.
-	if cfg.EmitsPermissionWarning || len(cfg.ProcessNames) > 0 {
-		if err := runtime.AcceptStartupDialogs(ctx,
-			func(lines int) (string, error) { return p.Peek(name, lines) },
-			func(keys ...string) error { return p.SendKeys(name, keys...) },
-		); err != nil {
-			return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
-		}
+	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
+		return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
 	}
 
 	return nil
+}
+
+func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
+	if !cfg.EmitsPermissionWarning && len(cfg.ProcessNames) == 0 {
+		return nil
+	}
+
+	snapshots, closeWatch, ok, err := p.startStartupWatch(ctx, name)
+	if err != nil {
+		return err
+	}
+	if ok {
+		defer closeWatch()
+		return runtime.AcceptStartupDialogsFromStream(ctx, runtime.StartupDialogTimeout(), snapshots,
+			func(keys ...string) error { return p.SendKeys(name, keys...) },
+		)
+	}
+
+	return runtime.AcceptStartupDialogs(ctx,
+		func(lines int) (string, error) { return p.Peek(name, lines) },
+		func(keys ...string) error { return p.SendKeys(name, keys...) },
+	)
+}
+
+func (p *Provider) startStartupWatch(
+	ctx context.Context,
+	name string,
+) (<-chan string, func() error, bool, error) {
+	watchCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
+	cmd.WaitDelay = 2 * time.Second
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, nil, false, fmt.Errorf("startup watcher stdout pipe: %w", err)
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, nil, false, fmt.Errorf("startup watcher start: %w", err)
+	}
+
+	type firstResult struct {
+		content     string
+		unsupported bool
+		err         error
+	}
+
+	first := make(chan firstResult, 1)
+	rest := make(chan string)
+	done := make(chan error, 1)
+
+	go func() {
+		defer close(rest)
+
+		scanner := bufio.NewScanner(stdout)
+		emitted := false
+		for scanner.Scan() {
+			var event startupWatchEvent
+			if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+				if !emitted {
+					first <- firstResult{err: fmt.Errorf("startup watcher decode: %w", err)}
+				} else {
+					done <- fmt.Errorf("startup watcher decode: %w", err)
+				}
+				return
+			}
+			if !emitted {
+				emitted = true
+				first <- firstResult{content: event.Content}
+				continue
+			}
+			rest <- event.Content
+		}
+
+		scanErr := scanner.Err()
+		waitErr := cmd.Wait()
+		if !emitted {
+			if isUnknownOperation(waitErr) {
+				first <- firstResult{unsupported: true}
+				done <- nil
+				return
+			}
+			if scanErr != nil {
+				first <- firstResult{err: fmt.Errorf("startup watcher scan: %w", scanErr)}
+				done <- scanErr
+				return
+			}
+			if waitErr != nil {
+				err := formatStartupWatchError(stderr.String(), waitErr)
+				first <- firstResult{err: err}
+				done <- err
+				return
+			}
+			first <- firstResult{unsupported: true}
+			done <- nil
+			return
+		}
+		if scanErr != nil {
+			done <- fmt.Errorf("startup watcher scan: %w", scanErr)
+			return
+		}
+		done <- formatStartupWatchError(stderr.String(), waitErr)
+	}()
+
+	result := <-first
+	if result.unsupported {
+		cancel()
+		_ = waitStartupWatch(done)
+		return nil, nil, false, nil
+	}
+	if result.err != nil {
+		cancel()
+		_ = waitStartupWatch(done)
+		return nil, nil, false, result.err
+	}
+
+	snapshots := make(chan string, 1)
+	snapshots <- result.content
+	go func() {
+		defer close(snapshots)
+		for content := range rest {
+			snapshots <- content
+		}
+	}()
+
+	closeWatch := func() error {
+		cancel()
+		return waitStartupWatch(done)
+	}
+
+	return snapshots, closeWatch, true, nil
+}
+
+func waitStartupWatch(done <-chan error) error {
+	err := <-done
+	if err == nil || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
+func isUnknownOperation(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 2
+}
+
+func formatStartupWatchError(stderr string, err error) error {
+	if err == nil {
+		return nil
+	}
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return err
+	}
+	return fmt.Errorf("startup watcher: %s", stderr)
 }
 
 // DismissKnownDialogs best-effort clears known trust/permissions dialogs on a

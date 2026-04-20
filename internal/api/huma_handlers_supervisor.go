@@ -267,6 +267,7 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 		providerResp.Providers[provider] = providerReadiness{
 			DisplayName: item.DisplayName,
 			Status:      item.Status,
+			Detail:      item.Detail,
 		}
 	}
 	out := &SupervisorProviderReadinessOutput{}

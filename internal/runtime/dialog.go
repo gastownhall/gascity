@@ -15,6 +15,12 @@ var (
 	startupDialogPeekLines   = 120
 )
 
+// StartupDialogTimeout returns the current timeout budget used by the shared
+// startup dialog helpers. Tests override the backing variable directly.
+func StartupDialogTimeout() time.Duration {
+	return dialogPollTimeout
+}
+
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Handles (in order):
 //  1. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
@@ -31,6 +37,38 @@ func AcceptStartupDialogs(
 	sendKeys func(keys ...string) error,
 ) error {
 	return AcceptStartupDialogsWithTimeout(ctx, dialogPollTimeout, peek, sendKeys)
+}
+
+// AcceptStartupDialogsFromStream dismisses known startup dialogs using an
+// event stream of full-screen snapshots instead of repeated peeks.
+func AcceptStartupDialogsFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) error {
+	if err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+		return fmt.Errorf("workspace trust dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := acceptBypassPermissionsWarningFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+		return fmt.Errorf("bypass permissions warning: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := acceptCustomAPIKeyDialogFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+		return fmt.Errorf("custom API key dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := dismissRateLimitDialogFromStream(ctx, timeout, snapshots, sendKeys); err != nil {
+		return fmt.Errorf("rate limit dialog: %w", err)
+	}
+	return nil
 }
 
 // AcceptStartupDialogsWithTimeout dismisses known startup dialogs using the
@@ -108,6 +146,21 @@ func acceptWorkspaceTrustDialog(
 	return nil
 }
 
+func acceptWorkspaceTrustDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) error {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsWorkspaceTrustDialog,
+		matchKeys:   []string{"Enter"},
+		matchDelay:  startupDialogAcceptDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: func(content string) bool { return strings.Contains(content, "Bypass Permissions mode") },
+	})
+}
+
 func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
@@ -152,6 +205,20 @@ func acceptBypassPermissionsWarning(
 	return nil
 }
 
+func acceptBypassPermissionsWarningFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) error {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:      func(content string) bool { return strings.Contains(content, "Bypass Permissions mode") },
+		matchKeys:  []string{"Down", "Enter"},
+		matchDelay: bypassDialogConfirmDelay,
+		ready:      containsPromptIndicator,
+	})
+}
+
 // acceptCustomAPIKeyDialog dismisses Claude's API-key confirmation prompt.
 // In headless CI, Claude detects the injected ANTHROPIC_API_KEY and asks if it
 // should use it. The menu defaults to "No (recommended)", so press Up then
@@ -188,6 +255,23 @@ func acceptCustomAPIKeyDialog(
 		sleep(ctx, dialogPollInterval)
 	}
 	return nil
+}
+
+func acceptCustomAPIKeyDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) error {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:      containsCustomAPIKeyDialog,
+		matchKeys:  []string{"Up", "Enter"},
+		matchDelay: bypassDialogConfirmDelay,
+		ready:      containsPromptIndicator,
+		readyOrNext: func(content string) bool {
+			return containsRateLimitDialog(content)
+		},
+	})
 }
 
 func containsCustomAPIKeyDialog(content string) bool {
@@ -233,6 +317,65 @@ func dismissRateLimitDialog(
 		sleep(ctx, dialogPollInterval)
 	}
 	return nil
+}
+
+func dismissRateLimitDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) error {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:      containsRateLimitDialog,
+		matchKeys:  []string{"Down", "Enter"},
+		matchDelay: bypassDialogConfirmDelay,
+		ready:      containsPromptIndicator,
+	})
+}
+
+type streamDialogSpec struct {
+	match       func(string) bool
+	ready       func(string) bool
+	readyOrNext func(string) bool
+	matchKeys   []string
+	matchDelay  time.Duration
+}
+
+func acceptDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+	spec streamDialogSpec,
+) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		case content, ok := <-snapshots:
+			if !ok {
+				return nil
+			}
+			if spec.match != nil && spec.match(content) {
+				if err := sendKeys(spec.matchKeys...); err != nil {
+					return err
+				}
+				sleep(ctx, spec.matchDelay)
+				return nil
+			}
+			if spec.ready != nil && spec.ready(content) {
+				return nil
+			}
+			if spec.readyOrNext != nil && spec.readyOrNext(content) {
+				return nil
+			}
+		}
+	}
 }
 
 func containsRateLimitDialog(content string) bool {
