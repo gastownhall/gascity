@@ -436,6 +436,70 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 	}
 }
 
+func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(t *testing.T) {
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+	jqPath, err := findPreferredBinary("jq")
+	if err != nil {
+		t.Skip("jq not installed")
+	}
+
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("BEADS_DIR", beadsDir)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
+
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+		"BEADS_DIR": beadsDir,
+	}))
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued polecat work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "polecat",
+		},
+	}); err != nil {
+		t.Fatalf("create routed work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if len(dsResult.AssignedWorkBeads) != 0 {
+		t.Fatalf("AssignedWorkBeads = %d, want 0 for routed unassigned work", len(dsResult.AssignedWorkBeads))
+	}
+	if got := dsResult.ScaleCheckCounts["polecat"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[polecat] = %d, want 1 from default scale_check routed ready work", got)
+	}
+	polecatSessions := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "polecat" {
+			polecatSessions++
+		}
+	}
+	if polecatSessions != 1 {
+		t.Fatalf("polecat desired sessions = %d, want 1 for min=0 routed ready work; stderr:\n%s", polecatSessions, stderr.String())
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_RoutedMetadataAloneDoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -1469,6 +1533,50 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	}
 	if got := sessionBeads[0].Metadata[poolManagedMetadataKey]; got != "true" {
 		t.Fatalf("pool_managed = %q, want true", got)
+	}
+}
+
+func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var (
+		sessionName string
+		firstTP     TemplateParams
+	)
+	for sn, tp := range first.State {
+		if tp.TemplateName == "gascity/polecat" {
+			sessionName = sn
+			firstTP = tp
+			break
+		}
+	}
+	if sessionName == "" {
+		t.Fatalf("first desired state missing gascity/polecat session: %#v", first.State)
+	}
+	startedHash := runtime.CoreFingerprint(templateParamsToConfig(firstTP))
+
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	secondTP, ok := second.State[sessionName]
+	if !ok {
+		t.Fatalf("second desired state missing existing session %q: %#v", sessionName, second.State)
+	}
+	currentHash := runtime.CoreFingerprint(templateParamsToConfig(secondTP))
+	if currentHash != startedHash {
+		t.Fatalf("pool session core fingerprint changed across desired-state ticks: first=%s second=%s first_alias=%q second_alias=%q",
+			startedHash, currentHash, firstTP.Env["GC_ALIAS"], secondTP.Env["GC_ALIAS"])
 	}
 }
 
