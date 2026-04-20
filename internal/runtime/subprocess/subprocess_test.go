@@ -526,6 +526,56 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 	}
 }
 
+func TestStopBySocket_FallsBackToLegacySocketWhenCanonicalRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := "legacy-fallback"
+
+	canonical, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen canonical: %v", err)
+	}
+	t.Cleanup(func() { _ = canonical.Close() })
+
+	legacy, err := net.Listen("unix", p.legacySockPath(name))
+	if err != nil {
+		t.Fatalf("Listen legacy: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+
+	go func() {
+		conn, acceptErr := canonical.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	gotLegacy := make(chan string, 1)
+	go func() {
+		conn, acceptErr := legacy.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotLegacy <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("ok\n"))
+	}()
+
+	if err := p.stopBySocket(name); err != nil {
+		t.Fatalf("stopBySocket error = %v, want legacy fallback success", err)
+	}
+	if got := <-gotLegacy; got != "stop" {
+		t.Fatalf("legacy socket command = %q, want stop", got)
+	}
+}
+
 func TestSocketGoneAfterProcessDeath(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Start(context.Background(), "short-lived", runtime.Config{Command: "true"}); err != nil {

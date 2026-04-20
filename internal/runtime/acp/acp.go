@@ -785,27 +785,41 @@ func (p *Provider) socketAlive(name string) bool {
 
 // sendSocketCommand connects to the session's control socket and sends a command.
 func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration) error {
-	var lastErr error
+	var (
+		lastErr            error
+		firstActionableErr error
+	)
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
-		conn, err := net.DialTimeout("unix", sp, timeout)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		defer conn.Close()                        //nolint:errcheck
-		conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
-		_, err = fmt.Fprintf(conn, "%s\n", command)
-		if err != nil {
-			return err
-		}
-		scanner := bufio.NewScanner(conn)
-		if scanner.Scan() && scanner.Text() == "ok" {
+		err := func(path string) error {
+			conn, err := net.DialTimeout("unix", path, timeout)
+			if err != nil {
+				return err
+			}
+			defer conn.Close()                        //nolint:errcheck
+			conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
+			_, err = fmt.Fprintf(conn, "%s\n", command)
+			if err != nil {
+				return err
+			}
+			scanner := bufio.NewScanner(conn)
+			if scanner.Scan() && scanner.Text() == "ok" {
+				return nil
+			}
+			if err := scanner.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("unexpected response from socket")
+		}(sp)
+		if err == nil {
 			return nil
 		}
-		if err := scanner.Err(); err != nil {
-			return err
+		if !isUnavailableSocketError(err) && firstActionableErr == nil {
+			firstActionableErr = err
 		}
-		return fmt.Errorf("unexpected response from socket")
+		lastErr = err
+	}
+	if firstActionableErr != nil {
+		return firstActionableErr
 	}
 	return lastErr
 }

@@ -487,7 +487,10 @@ func (p *Provider) socketAlive(name string) bool {
 // sendSocketCommand connects to the session's control socket, sends a
 // command, and waits for "ok". Returns nil on success.
 func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration) error {
-	var lastErr error
+	var (
+		lastErr            error
+		firstActionableErr error
+	)
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
 		err := func(sockPath string) error {
 			conn, err := net.DialTimeout("unix", sockPath, timeout)
@@ -511,10 +514,13 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		if err == nil {
 			return nil
 		}
-		if !isUnavailableSocketError(err) {
-			return err
+		if !isUnavailableSocketError(err) && firstActionableErr == nil {
+			firstActionableErr = err
 		}
 		lastErr = err
+	}
+	if firstActionableErr != nil {
+		return firstActionableErr
 	}
 	return lastErr
 }
