@@ -51,7 +51,7 @@ func (s *countingWakeMetadataStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
-func (s *failingWakeMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+func (s *failingWakeMetadataStore) SetMetadataBatch(_ string, _ map[string]string) error {
 	return s.err
 }
 

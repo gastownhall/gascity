@@ -64,9 +64,9 @@ func RequestWakePatch(reason string) MetadataPatch {
 	}
 }
 
-// PreWakePatch records the metadata transition for a concrete runtime wake
-// attempt. The caller computes generation, token, and continuation epoch; the
-// patch owns keeping all persisted lifecycle fields consistent for that
+// PreWakePatchInput records the metadata transition for a concrete runtime
+// wake attempt. The caller computes generation, token, and continuation epoch;
+// the patch owns keeping all persisted lifecycle fields consistent for that
 // transition.
 type PreWakePatchInput struct {
 	Generation        int
