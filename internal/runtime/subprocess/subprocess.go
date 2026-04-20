@@ -523,11 +523,11 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 func (p *Provider) stopBySocket(name string) error {
 	err := p.sendSocketCommand(name, "stop", 7*time.Second)
 	if err != nil {
-		// Socket doesn't exist or can't connect — session is dead (idempotent).
-		// Clean up stale socket file if it exists.
-		os.Remove(p.sockPath(name)) //nolint:errcheck
-		_ = os.Remove(p.sockNamePath(name))
 		if isUnavailableSocketError(err) {
+			// Socket doesn't exist or can't connect — session is dead (idempotent).
+			// Clean up stale socket file if it exists.
+			os.Remove(p.sockPath(name)) //nolint:errcheck
+			_ = os.Remove(p.sockNamePath(name))
 			return nil
 		}
 		return err

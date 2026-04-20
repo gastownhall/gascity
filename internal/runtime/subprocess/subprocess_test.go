@@ -491,11 +491,11 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 	if got := <-gotCommand; got != "stop" {
 		t.Fatalf("socket command = %q, want stop", got)
 	}
-	if _, statErr := os.Stat(p.sockPath(name)); !os.IsNotExist(statErr) {
-		t.Fatalf("socket path still exists after failed stop: %v", statErr)
+	if _, statErr := os.Stat(p.sockPath(name)); statErr != nil {
+		t.Fatalf("socket path err = %v, want socket preserved after failed stop", statErr)
 	}
-	if _, statErr := os.Stat(p.sockNamePath(name)); !os.IsNotExist(statErr) {
-		t.Fatalf("socket name path still exists after failed stop: %v", statErr)
+	if _, statErr := os.Stat(p.sockNamePath(name)); statErr != nil {
+		t.Fatalf("socket name path err = %v, want socket name preserved after failed stop", statErr)
 	}
 }
 
