@@ -26,6 +26,9 @@ func TestInitTutorialProviderWritesWorkspaceProvider(t *testing.T) {
 	if !strings.Contains(string(data), `provider = "claude"`) {
 		t.Fatalf("tutorial init contract: city.toml should record workspace provider claude, got:\n%s", string(data))
 	}
+	if !strings.Contains(string(data), `name = "my-city"`) {
+		t.Fatalf("tutorial init contract: city.toml should record workspace name my-city, got:\n%s", string(data))
+	}
 }
 
 func TestFormulaShowTutorialStepCountMatchesRenderedSteps(t *testing.T) {

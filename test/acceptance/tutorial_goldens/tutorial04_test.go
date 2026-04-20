@@ -100,26 +100,14 @@ count = 3
 id = "attempt"
 title = "Try to deploy"
 `, 0o644)
+	ws.noteWarning("tutorial 05 continuity workaround: gc init no longer seeds a built-in pancakes formula, so the page driver writes the documented example formula before exercising formula list/show/sling/cook")
 
 	var pancakesRootID string
 
-	t.Run("gc agent add --name worker", func(t *testing.T) {
-		out, err := ws.runShell("gc agent add --name worker", "")
-		if err != nil {
-			t.Fatalf("gc agent add --name worker: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "Scaffolded agent 'worker'") {
-			t.Fatalf("gc agent add output mismatch:\n%s", out)
-		}
-	})
-
-	t.Run("cat > agents/worker/prompt.template.md << 'EOF'", func(t *testing.T) {
-		cmd := `cat > agents/worker/prompt.template.md << 'EOF'
-# Worker Agent
-You are a general-purpose Gas City worker. Execute assigned work carefully and report the result.
-EOF`
+	t.Run("cat > formulas/pancakes.toml << 'EOF'", func(t *testing.T) {
+		cmd := "cat > formulas/pancakes.toml << 'EOF'\n" + tutorialPancakesFormula + "EOF"
 		if out, err := ws.runShell(cmd, ""); err != nil {
-			t.Fatalf("writing worker prompt: %v\n%s", err, out)
+			t.Fatalf("writing pancakes formula: %v\n%s", err, out)
 		}
 	})
 
@@ -145,6 +133,26 @@ EOF`
 		}
 		if !strings.Contains(out, "Steps (5):") {
 			t.Fatalf("tutorial contract: pancakes should render 5 visible steps, got:\n%s", out)
+		}
+	})
+
+	t.Run("gc agent add --name worker", func(t *testing.T) {
+		out, err := ws.runShell("gc agent add --name worker", "")
+		if err != nil {
+			t.Fatalf("gc agent add --name worker: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "Scaffolded agent 'worker'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
+	})
+
+	t.Run("cat > agents/worker/prompt.template.md << 'EOF'", func(t *testing.T) {
+		cmd := `cat > agents/worker/prompt.template.md << 'EOF'
+# Worker Agent
+You are a general-purpose Gas City worker. Execute assigned work carefully and report the result.
+EOF`
+		if out, err := ws.runShell(cmd, ""); err != nil {
+			t.Fatalf("writing worker prompt: %v\n%s", err, out)
 		}
 	})
 

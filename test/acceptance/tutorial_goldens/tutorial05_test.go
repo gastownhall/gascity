@@ -41,6 +41,8 @@ func TestTutorial06Beads(t *testing.T) {
 	writeFile(t, filepath.Join(myCity, "agents", "worker", "prompt.template.md"), "# Worker Agent\nHandle general work.\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer Agent\nReview code.\n", 0o644)
+	ws.noteWarning("tutorial 06 continuity workaround: tutorial 05 now writes pancakes as a user formula, so the page driver seeds that same formula here before exercising the next page's bead examples")
+	writeTutorialPancakesFormula(t, myCity)
 
 	updateAPIOut, err := ws.runShell(`bd create "Update API docs"`, "")
 	if err != nil {

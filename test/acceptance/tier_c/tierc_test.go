@@ -15,6 +15,7 @@
 package tierc_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -518,8 +519,22 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
 	cmd.Env = env.List()
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		if stdout.Len() == 0 {
+			return stderr.String(), err
+		}
+		if stderr.Len() == 0 {
+			return stdout.String(), err
+		}
+		return stdout.String() + stderr.String(), err
+	}
+	// Keep successful JSON callers isolated from non-fatal bd warnings emitted
+	// on stderr; CombinedOutput corrupts stdout payloads that expect pure JSON.
+	return stdout.String(), nil
 }
 
 func gatherSessionDiagnostics(t *testing.T, c *helpers.City, beadDir string, templates ...string) string {

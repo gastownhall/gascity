@@ -25,12 +25,13 @@ agent just as you would any other work.
 
 ## A simple formula
 
-Formula files use the `.formula.toml` extension and live in your city's
-`formulas/` directory. `gc init` already dropped a few in there for you,
-including a pancakes recipe:
+Formula files use the `.toml` extension and live in your city's
+`formulas/` directory. To follow along, write a pancakes recipe into that
+directory:
 
-```toml
-# formulas/pancakes.formula.toml
+```shell
+~/my-city
+$ cat > formulas/pancakes.toml << 'EOF'
 formula = "pancakes"
 description = "Make pancakes from scratch"
 
@@ -61,6 +62,7 @@ id = "serve"
 title = "Serve"
 description = "Stack pancakes on a plate with butter and syrup."
 needs = ["cook"]
+EOF
 ```
 
 The `needs` field declares dependencies between sibling steps.
@@ -99,7 +101,7 @@ $ gc formula show pancakes
 Formula: pancakes
 Description: Make pancakes from scratch
 
-Steps (6):
+Steps (5):
   ├── pancakes.dry: Mix dry ingredients
   ├── pancakes.wet: Mix wet ingredients
   ├── pancakes.combine: Combine wet and dry [needs: pancakes.dry, pancakes.wet]
@@ -108,8 +110,8 @@ Steps (6):
 ```
 
 `gc formula show` _compiles_ the formula by arranging the steps and the
-dependencies, then displaying to you. In this case, the `(6)` count includes
-the implicit root step that wraps the five recipe steps.
+dependencies, then displaying to you. In this case, the `(5)` count matches the
+five visible recipe steps in the rendered workflow.
 
 For the next few examples, keep using the `mayor` from the earlier tutorials
 and add a generic worker so you have a second execution target besides the
