@@ -247,10 +247,57 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	if err != nil || !info.IsDir() {
 		return okCheck("v2-scripts-layout", "no top-level scripts/ directory found")
 	}
+	// ResolveScripts (script_resolve.go) auto-materializes top-level scripts/
+	// as symlinks into .gc/system/packs/*/scripts/ on every start/reload. Those
+	// are expected PackV2 runtime artifacts — only user-authored real files
+	// represent the deprecated V1 layout worth warning about.
+	realFiles, walkErr := legacyTopLevelScripts(path)
+	if walkErr != nil {
+		return warnCheck("v2-scripts-layout",
+			fmt.Sprintf("inspecting top-level scripts/: %v", walkErr),
+			"resolve filesystem errors and rerun gc doctor",
+			[]string{"scripts/"})
+	}
+	if len(realFiles) == 0 {
+		return okCheck("v2-scripts-layout", "no top-level scripts/ directory found")
+	}
 	return warnCheck("v2-scripts-layout",
-		"top-level scripts/ is deprecated; move scripts to commands/ or assets/",
+		"top-level scripts/ contains legacy real files; move scripts to commands/ or assets/",
 		"move entrypoint scripts next to commands/doctor entries or under assets/",
-		[]string{"scripts/"})
+		realFiles)
+}
+
+// legacyTopLevelScripts returns relative paths (under "scripts/") of real
+// (non-symlink) files in the top-level scripts directory. Symlinks are
+// ignored — they are created by ResolveScripts from pack layers.
+func legacyTopLevelScripts(dir string) ([]string, error) {
+	var real []string
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, lErr := os.Lstat(p)
+		if lErr != nil {
+			return nil
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		rel, rErr := filepath.Rel(dir, p)
+		if rErr != nil {
+			return nil
+		}
+		real = append(real, filepath.Join("scripts", rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(real)
+	return real, nil
 }
 
 type v2WorkspaceNameCheck struct{}
