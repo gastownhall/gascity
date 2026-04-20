@@ -838,25 +838,26 @@ const maxInlinePromptLen = 1024
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	fullCommand := cfg.Command
 	if cfg.PromptSuffix != "" {
-		if len(cfg.PromptSuffix) > maxInlinePromptLen && cfg.WorkDir != "" {
+		if len(cfg.PromptSuffix) > maxInlinePromptLen {
 			// Large prompt — write to temp file and use $(cat ...) expansion
-			// inside the tmux session's shell to avoid the protocol limit.
+			// inside the tmux session's shell to avoid the protocol limit and
+			// prevent the quoted prompt from leaking into the exec command
+			// line (which triggers ENAMETOOLONG / exit 126 when the total
+			// command overflows kernel argv/exec buffers).
 			promptFile, err := writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
-			if err == nil {
-				if cfg.PromptFlag != "" {
-					fullCommand = fmt.Sprintf(`sh -c 'exec %s %s "$(cat %q)" && rm -f %q'`,
-						cfg.Command, cfg.PromptFlag, promptFile, promptFile)
-				} else {
-					fullCommand = fmt.Sprintf(`sh -c 'exec %s "$(cat %q)" && rm -f %q'`,
-						cfg.Command, promptFile, promptFile)
-				}
+			if err != nil {
+				// No silent fallback: the inline path would produce the
+				// "File name too long" tmux pane death that this helper
+				// exists to prevent. Surface the failure so the reconciler
+				// records it and the operator can diagnose the cause.
+				return fmt.Errorf("writing prompt temp file for session %q: %w", name, err)
+			}
+			if cfg.PromptFlag != "" {
+				fullCommand = fmt.Sprintf(`sh -c 'exec %s %s "$(cat %q)" && rm -f %q'`,
+					cfg.Command, cfg.PromptFlag, promptFile, promptFile)
 			} else {
-				// Fall back to inline (will likely fail, but preserves old behavior).
-				if cfg.PromptFlag != "" {
-					fullCommand = fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix
-				} else {
-					fullCommand = fullCommand + " " + cfg.PromptSuffix
-				}
+				fullCommand = fmt.Sprintf(`sh -c 'exec %s "$(cat %q)" && rm -f %q'`,
+					cfg.Command, promptFile, promptFile)
 			}
 		} else {
 			if cfg.PromptFlag != "" {
@@ -926,10 +927,18 @@ func recreateSessionAfterCleanup(ops startOps, name, workDir, command string, en
 	return err
 }
 
-// writePromptFile writes a shell-quoted prompt string to a temp file in
-// the agent's working directory. The file contains the raw prompt text
-// (unquoted) so it can be read back via $(cat ...) inside the shell.
-// Returns the file path on success.
+// writePromptFile writes a shell-quoted prompt string to a temp file for
+// the tmux session's shell to read back via $(cat ...). The file contains
+// the raw prompt text (unquoted) so shell expansion yields a single argv
+// element.
+//
+// Preferred location is <workDir>/.gc/tmp (visible from inside the worktree
+// and cleaned up with the agent's scratch space). If that path is unusable
+// — workDir is empty, doesn't exist yet (pre_start hasn't materialized the
+// worktree), or is read-only — falls back to os.TempDir(). The fallback is
+// load-bearing: without it a failed MkdirAll used to trigger a silent
+// "inline the prompt into the tmux command line" path that produced
+// "cannot execute: File name too long" pane deaths for large prompts.
 func writePromptFile(workDir, agentName, shellQuotedPrompt string) (string, error) {
 	// Strip surrounding single quotes from shell-quoted string.
 	raw := shellQuotedPrompt
@@ -937,7 +946,30 @@ func writePromptFile(workDir, agentName, shellQuotedPrompt string) (string, erro
 		raw = raw[1 : len(raw)-1]
 		raw = strings.ReplaceAll(raw, `'\''`, `'`)
 	}
-	dir := filepath.Join(workDir, ".gc", "tmp")
+
+	// Try workDir-scoped path first so the prompt file sits next to the
+	// session's scratch state. An unusable workDir is not fatal; we still
+	// want a valid argv-via-file path to avoid the inline fallback.
+	var candidateErrs []error
+	if workDir != "" {
+		dir := filepath.Join(workDir, ".gc", "tmp")
+		if path, err := writePromptToDir(dir, agentName, raw); err == nil {
+			return path, nil
+		} else {
+			candidateErrs = append(candidateErrs, fmt.Errorf("workdir tmp: %w", err))
+		}
+	}
+	if path, err := writePromptToDir(os.TempDir(), agentName, raw); err == nil {
+		return path, nil
+	} else {
+		candidateErrs = append(candidateErrs, fmt.Errorf("os tmp: %w", err))
+	}
+	return "", errors.Join(candidateErrs...)
+}
+
+// writePromptToDir creates the target directory and writes the prompt to
+// a new temp file inside it. Returns the temp file path on success.
+func writePromptToDir(dir, agentName, raw string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

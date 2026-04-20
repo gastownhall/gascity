@@ -1368,6 +1368,109 @@ func TestEnsureFreshSession_LongPromptWithFlagUsesFileExpansion(t *testing.T) {
 	}
 }
 
+// TestEnsureFreshSession_LongPromptUnusableWorkDirFallsBackToOSTemp verifies
+// that when WorkDir points at a path that can't be materialized (e.g. the
+// polecat worktree pre_start hasn't run yet, leaving the worktree missing),
+// the prompt still lands in a temp file and the tmux command still uses
+// file-expansion. Regression for gc-yha: PackV2 polecat spawns died with
+// "cannot execute: File name too long" because writePromptFile failed on
+// the missing workdir and the silent fallback embedded the raw prompt in
+// the tmux command string.
+func TestEnsureFreshSession_LongPromptUnusableWorkDirFallsBackToOSTemp(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	// A deep path whose ancestors can't be created (os.MkdirAll fails on a
+	// path that descends into a regular file).
+	tmp := t.TempDir()
+	regularFile := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(regularFile, []byte("sentinel"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	unusableWorkDir := filepath.Join(regularFile, "worktree-that-cannot-exist")
+
+	longPromptRaw := strings.Repeat("x", maxInlinePromptLen+100)
+	longPrompt := "'" + longPromptRaw + "'"
+	cfg := runtime.Config{
+		WorkDir:      unusableWorkDir,
+		Command:      "claude --dangerously-skip-permissions",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-unusable-workdir", cfg)
+	if err != nil {
+		t.Fatalf("expected OS temp dir fallback, got error: %v", err)
+	}
+
+	c := ops.calls[0]
+	// Must use file-expansion, NOT inline.
+	if !strings.HasPrefix(c.command, "sh -c '") {
+		t.Fatalf("long prompt with unusable workdir should still use sh -c wrapper, got %q", c.command)
+	}
+	if !strings.Contains(c.command, "$(cat ") {
+		t.Errorf("expected $(cat ...) expansion, got %q", c.command)
+	}
+	// The raw prompt MUST NOT appear verbatim in the command — that is the
+	// failure mode that produced "cannot execute: File name too long" in
+	// the tmux pane for PackV2 polecat spawns.
+	if strings.Contains(c.command, longPromptRaw) {
+		t.Errorf("raw prompt leaked into tmux command (this is the regression), command = %q", c.command)
+	}
+}
+
+// TestEnsureFreshSession_LongPromptEmptyWorkDirFallsBackToOSTemp verifies
+// that when WorkDir is empty the long-prompt path still writes to OS temp
+// instead of silently falling back to inline embedding.
+func TestEnsureFreshSession_LongPromptEmptyWorkDirFallsBackToOSTemp(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	longPromptRaw := strings.Repeat("y", maxInlinePromptLen+100)
+	longPrompt := "'" + longPromptRaw + "'"
+	cfg := runtime.Config{
+		WorkDir:      "",
+		Command:      "claude",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-empty-workdir", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	if !strings.HasPrefix(c.command, "sh -c '") {
+		t.Fatalf("long prompt with empty workdir should use sh -c wrapper, got %q", c.command)
+	}
+	if strings.Contains(c.command, longPromptRaw) {
+		t.Errorf("raw prompt leaked into tmux command, command = %q", c.command)
+	}
+}
+
+// TestEnsureFreshSession_LongPromptWorkDirPreferredOverOSTemp verifies that
+// when the configured WorkDir is usable, the prompt file lands inside it
+// (not OS temp). This preserves the session-scoped lifetime of the file so
+// it gets cleaned up alongside the session.
+func TestEnsureFreshSession_LongPromptWorkDirPreferredOverOSTemp(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	workDir := t.TempDir()
+	longPrompt := "'" + strings.Repeat("z", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      workDir,
+		Command:      "claude",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-prefer-workdir", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	// The prompt file path appears inside the sh -c wrapper. It should be
+	// rooted at workDir/.gc/tmp rather than os.TempDir.
+	expectedDir := filepath.Join(workDir, ".gc", "tmp")
+	if !strings.Contains(c.command, expectedDir) {
+		t.Errorf("expected prompt file under %q, got command %q", expectedDir, c.command)
+	}
+}
+
 func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	ops := &tmuxStartOps{tm: &Tmux{cfg: DefaultConfig()}}
