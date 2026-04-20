@@ -96,12 +96,9 @@ func (p *Provider) Stop(name string) error {
 	primaryExplicitRoute := p.routes[name]
 	p.mu.RUnlock()
 	err := primary.Stop(name)
-	if err == nil && (primaryRunning || primaryExplicitRoute) {
+	if err == nil && primaryRunning {
 		p.Unroute(name)
 		return nil
-	}
-	if err == nil {
-		err = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
 	}
 	// Fall through to the other backend in case the route is stale.
 	var other runtime.Provider
@@ -115,6 +112,16 @@ func (p *Provider) Stop(name string) error {
 	}
 	p.mu.RUnlock()
 	otherRunning := other.IsRunning(name)
+	if err == nil {
+		if primaryExplicitRoute {
+			if otherRunning {
+				return fmt.Errorf("%s backend: stop succeeded without liveness confirmation while %s backend still reports the session running", primaryLabel, otherLabel)
+			}
+			p.Unroute(name)
+			return nil
+		}
+		err = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
+	}
 	otherErr := other.Stop(name)
 	if otherErr == nil {
 		if !otherRunning {

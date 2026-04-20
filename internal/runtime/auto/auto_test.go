@@ -254,7 +254,7 @@ func TestStopReturnsPrimaryFailureWhenPrimaryCannotConfirmLiveness(t *testing.T)
 	}
 }
 
-func TestStopTrustsExplicitRouteSuccessWhenLivenessProbeIsFalseNegative(t *testing.T) {
+func TestStopReturnsErrorWhenExplicitRouteOwnershipIsAmbiguous(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	if err := defaultSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
 		t.Fatalf("default Start: %v", err)
@@ -263,14 +263,18 @@ func TestStopTrustsExplicitRouteSuccessWhenLivenessProbeIsFalseNegative(t *testi
 	p := New(defaultSP, acpSP)
 
 	p.RouteACP("agent-fail")
-	if err := p.Stop("agent-fail"); err != nil {
-		t.Fatalf("Stop error = %v, want nil for explicit-route success", err)
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return an error when the explicit route cannot confirm ownership and fallback is running")
+	}
+	if !strings.Contains(err.Error(), "acp backend: stop succeeded without liveness confirmation") {
+		t.Fatalf("Stop error = %v, want explicit-route ambiguity error", err)
 	}
 	if !defaultSP.IsRunning("agent-fail") {
-		t.Fatal("same-named fallback session should remain running when routed stop succeeds")
+		t.Fatal("same-named fallback session should remain running when ownership is ambiguous")
 	}
-	if got := p.route("agent-fail"); got != defaultSP {
-		t.Fatal("route should be cleared after explicit-route stop success")
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when explicit-route ownership is ambiguous")
 	}
 }
 
