@@ -835,6 +835,70 @@ func TestDoRigAdd_WithPack(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAddWithIncludes(fsys.OSFS{}, cityPath, rigPath, []string{"packs/planner", "packs/architect"}, "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAddWithIncludes returned %d, stderr: %s", code, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Include: packs/planner, packs/architect") {
+		t.Errorf("output missing combined includes: %s", output)
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"packs/planner", "packs/architect"}
+	if !reflect.DeepEqual(cfg.Rigs[0].Includes, want) {
+		t.Errorf("rig includes = %v, want %v", cfg.Rigs[0].Includes, want)
+	}
+}
+
+func TestNewRigAddCmdIncludeFlagIsRepeatable(t *testing.T) {
+	cmd := newRigAddCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	flag := cmd.Flags().Lookup("include")
+	if flag == nil {
+		t.Fatal("include flag not registered")
+	}
+	if flag.Value.Type() != "stringArray" {
+		t.Fatalf("include flag type = %q, want stringArray", flag.Value.Type())
+	}
+}
+
+func TestNewRigCmdRegistersSetEndpointSubcommand(t *testing.T) {
+	cmd := newRigCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	found := false
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "set-endpoint" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("set-endpoint subcommand not registered")
+	}
+}
+
 func TestDoRigAdd_WithoutPack(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

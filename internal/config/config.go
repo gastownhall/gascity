@@ -2111,6 +2111,57 @@ func applyAgentSharedAttachmentDefaults(agents []Agent, defaults AgentDefaults) 
 	}
 }
 
+// deprecatedAttachmentWarning is the canonical warning message emitted when
+// a loaded config still references the tombstone attachment-list fields
+// removed from the active materializer path in v0.15.1.
+const deprecatedAttachmentWarning = "gc: warning: attachment-list fields (`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`) are deprecated as of v0.15.1 and ignored. They may appear on agents, [agent_defaults], [[patches.agent]], [[rigs.overrides]], or [[rigs.patches]]. Remove them from your config (or run `gc doctor --fix` once available). Hard parse error lands in v0.16."
+
+// WarnDeprecatedAttachmentFields returns the canonical deprecation warning if
+// any v0.15.0 attachment-list tombstone field appears populated anywhere in
+// the loaded config. Callers are responsible for routing the warning through
+// their chosen sink.
+func WarnDeprecatedAttachmentFields(cfg *City) string {
+	if cfg == nil {
+		return ""
+	}
+	if !hasDeprecatedAttachmentFields(cfg) {
+		return ""
+	}
+	return deprecatedAttachmentWarning
+}
+
+func hasDeprecatedAttachmentFields(cfg *City) bool {
+	if len(cfg.AgentDefaults.Skills) > 0 || len(cfg.AgentDefaults.MCP) > 0 {
+		return true
+	}
+	if len(cfg.AgentsDefaults.Skills) > 0 || len(cfg.AgentsDefaults.MCP) > 0 {
+		return true
+	}
+	for _, a := range cfg.Agents {
+		if len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.SharedSkills) > 0 || len(a.SharedMCP) > 0 {
+			return true
+		}
+	}
+	for _, p := range cfg.Patches.Agents {
+		if len(p.Skills) > 0 || len(p.MCP) > 0 || len(p.SkillsAppend) > 0 || len(p.MCPAppend) > 0 {
+			return true
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		for _, ov := range rig.Overrides {
+			if len(ov.Skills) > 0 || len(ov.MCP) > 0 || len(ov.SkillsAppend) > 0 || len(ov.MCPAppend) > 0 {
+				return true
+			}
+		}
+		for _, ov := range rig.RigPatches {
+			if len(ov.Skills) > 0 || len(ov.MCP) > 0 || len(ov.SkillsAppend) > 0 || len(ov.MCPAppend) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {

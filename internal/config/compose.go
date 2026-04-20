@@ -411,6 +411,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if root.Daemon.GraphWorkflows && !root.Daemon.FormulaV2 {
 		root.Daemon.FormulaV2 = true
 	}
+	if warning := WarnDeprecatedAttachmentFields(root); warning != "" {
+		prov.Warnings = append(prov.Warnings, warning)
+	}
 
 	siteWarnings, err := ApplySiteBindings(fs, cityRoot, root)
 	if err != nil {

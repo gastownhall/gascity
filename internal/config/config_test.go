@@ -4461,6 +4461,7 @@ scale_check = "echo 5"
 		t.Errorf("effective scale_check = %q, want %q", worker.EffectiveScaleCheck(), "echo 5")
 	}
 }
+
 // TestLoadWithIncludes_DeprecatedAttachmentWarning confirms that a config
 // containing the v0.15.0 attachment-list tombstone fields still parses,
 // and that a single deprecation warning is surfaced through provenance.
