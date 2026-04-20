@@ -92,6 +92,7 @@ func (p *Provider) Stop(name string) error {
 	primaryLabel := "default"
 	otherLabel := "acp"
 	primaryRunning := primary.IsRunning(name)
+	primaryExplicitRoute := false
 	err := primary.Stop(name)
 	if err == nil && primaryRunning {
 		p.Unroute(name)
@@ -104,6 +105,7 @@ func (p *Provider) Stop(name string) error {
 	var other runtime.Provider
 	p.mu.RLock()
 	if p.routes[name] {
+		primaryExplicitRoute = true
 		primaryLabel = "acp"
 		otherLabel = "default"
 		other = p.defaultSP
@@ -116,7 +118,7 @@ func (p *Provider) Stop(name string) error {
 	if otherErr == nil {
 		if !otherRunning {
 			otherErr = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
-		} else if primaryRunning && !runtime.IsSessionGone(err) {
+		} else if (primaryRunning || primaryExplicitRoute) && !runtime.IsSessionGone(err) {
 			return fmt.Errorf("%s backend: %w", primaryLabel, err)
 		}
 	}
