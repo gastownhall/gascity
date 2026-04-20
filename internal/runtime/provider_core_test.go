@@ -37,3 +37,18 @@ func TestMergeBackendListResultsFailsWhenAllBackendsFail(t *testing.T) {
 		t.Fatalf("MergeBackendListResults() names = %v, want nil", names)
 	}
 }
+
+func TestMergeBackendListResultsPreservesNamesWhenAllBackendsAreDegraded(t *testing.T) {
+	t.Parallel()
+
+	names, err := MergeBackendListResults(
+		BackendListResult{Label: "local", Names: []string{"sess-a"}, Err: errors.New("local degraded")},
+		BackendListResult{Label: "remote", Names: []string{"sess-b"}, Err: errors.New("remote degraded")},
+	)
+	if !IsPartialListError(err) {
+		t.Fatalf("MergeBackendListResults() error = %v, want partial list error", err)
+	}
+	if len(names) != 2 || names[0] != "sess-a" || names[1] != "sess-b" {
+		t.Fatalf("MergeBackendListResults() names = %v, want [sess-a sess-b]", names)
+	}
+}

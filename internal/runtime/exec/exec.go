@@ -128,6 +128,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
+		if stopErr := p.Stop(name); stopErr != nil {
+			return errors.Join(
+				fmt.Errorf("exec provider: dismissing startup dialogs: %w", err),
+				fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr),
+			)
+		}
 		return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
 	}
 

@@ -68,11 +68,13 @@ func TestStart(t *testing.T) {
 
 func TestStart_ReturnsDialogDismissalError(t *testing.T) {
 	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
 	script := writeScript(t, dir, `
 op="$1"
 
 case "$op" in
   start) cat > /dev/null ;;
+  stop) echo "$*" >> "`+stopFile+`" ;;
   peek) echo "Bypass Permissions mode" ;;
   send-keys) echo "failed to dismiss dialog" >&2; exit 1 ;;
   *) exit 2 ;;
@@ -88,6 +90,13 @@ esac
 	}
 	if !strings.Contains(err.Error(), "failed to dismiss dialog") {
 		t.Fatalf("Start error = %v, want dialog dismissal context", err)
+	}
+	data, readErr := os.ReadFile(stopFile)
+	if readErr != nil {
+		t.Fatalf("read stop log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "stop test-sess") {
+		t.Fatalf("stop log = %q, want cleanup stop call", string(data))
 	}
 }
 

@@ -72,6 +72,9 @@ func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	if len(failures) == 0 {
 		return merged, nil
 	}
+	if len(merged) > 0 {
+		return merged, &PartialListError{Err: errors.Join(failures...)}
+	}
 	if failed == len(results) {
 		return nil, errors.Join(failures...)
 	}

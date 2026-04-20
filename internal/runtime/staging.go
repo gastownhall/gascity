@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -23,10 +24,12 @@ func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 		if cf.RelDst != "" {
 			dst = filepath.Join(workDir, cf.RelDst)
 		}
-		if absSrc, err := filepath.Abs(cf.Src); err == nil {
-			if absDst, err := filepath.Abs(dst); err == nil && absSrc == absDst {
-				continue
-			}
+		effectiveDst, err := effectiveStageDestination(cf.Src, dst)
+		if err != nil {
+			return fmt.Errorf("resolving copy destination %q -> %q: %w", cf.Src, dst, err)
+		}
+		if sameFile(cf.Src, effectiveDst) {
+			continue
 		}
 		if err := StagePath(cf.Src, dst); err != nil {
 			return fmt.Errorf("copy file %q -> %q: %w", cf.Src, dst, err)
@@ -53,4 +56,35 @@ func StagePath(src, dst string) error {
 		return fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+func effectiveStageDestination(src, dst string) (string, error) {
+	info, err := os.Stat(src)
+	if os.IsNotExist(err) {
+		return dst, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return dst, nil
+	}
+	if dstInfo, err := os.Stat(dst); err == nil && dstInfo.IsDir() {
+		return filepath.Join(dst, filepath.Base(src)), nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	return dst, nil
+}
+
+func sameFile(src, dst string) bool {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return false
+	}
+	dstInfo, err := os.Stat(dst)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(srcInfo, dstInfo)
 }

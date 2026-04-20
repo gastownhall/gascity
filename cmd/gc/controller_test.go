@@ -87,7 +87,7 @@ func TestControllerLoopTick(t *testing.T) {
 	}
 }
 
-func TestRunningSessionSetUsesPartialListResults(t *testing.T) {
+func TestRunningSessionSetRejectsPartialListResults(t *testing.T) {
 	sp := &partialListPoolProvider{
 		Fake:    runtime.NewFake(),
 		listErr: &runtime.PartialListError{Err: runtime.ErrSessionNotFound},
@@ -95,14 +95,26 @@ func TestRunningSessionSetUsesPartialListResults(t *testing.T) {
 	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
 
 	got, ok := runningSessionSet(sp, []string{"alpha", "beta"})
-	if !ok {
-		t.Fatal("runningSessionSet should accept partial list results")
+	if ok {
+		t.Fatal("runningSessionSet should reject partial list results")
 	}
-	if !got["alpha"] {
-		t.Fatalf("runningSessionSet = %v, want alpha to be marked running", got)
+	if got != nil {
+		t.Fatalf("runningSessionSet = %v, want nil result on partial list", got)
 	}
-	if got["beta"] {
-		t.Fatalf("runningSessionSet = %v, want beta absent", got)
+}
+
+func TestGracefulStopAllFallsBackWhenPartialListOmitsExplicitTarget(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:      runtime.NewFake(),
+		listErr:   &runtime.PartialListError{Err: runtime.ErrSessionNotFound},
+		listNames: []string{},
+	}
+	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
+
+	var stdout, stderr bytes.Buffer
+	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, nil, &stdout, &stderr)
+	if sp.IsRunning("alpha") {
+		t.Fatal("gracefulStopAll should stop explicit targets even when partial listing omits them")
 	}
 }
 

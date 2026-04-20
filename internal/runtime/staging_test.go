@@ -37,3 +37,25 @@ func TestStageDirPreservesBestEffortOverlayWarnings(t *testing.T) {
 		t.Fatalf("copied overlay file = %q, want %q", string(data), "copied")
 	}
 }
+
+func TestStageWorkDirSkipsCopyWhenSourceAlreadyMatchesResolvedDestination(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	src := filepath.Join(workDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	if err := StageWorkDir(workDir, "", []CopyEntry{{Src: src}}); err != nil {
+		t.Fatalf("StageWorkDir() error = %v, want nil", err)
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read staged source file: %v", err)
+	}
+	if string(data) != "seed" {
+		t.Fatalf("staged source file = %q, want %q", string(data), "seed")
+	}
+}

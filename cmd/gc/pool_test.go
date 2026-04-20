@@ -21,11 +21,15 @@ import (
 
 type partialListPoolProvider struct {
 	*runtime.Fake
-	listErr error
+	listErr   error
+	listNames []string
 }
 
 func (p *partialListPoolProvider) ListRunning(prefix string) ([]string, error) {
-	names, _ := p.Fake.ListRunning(prefix)
+	names := p.listNames
+	if names == nil {
+		names, _ = p.Fake.ListRunning(prefix)
+	}
 	return names, p.listErr
 }
 
