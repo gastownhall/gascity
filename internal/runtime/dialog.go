@@ -14,6 +14,9 @@ var (
 	startupDialogAcceptDelay = 500 * time.Millisecond
 	bypassDialogConfirmDelay = 200 * time.Millisecond
 	startupDialogPeekLines   = 120
+	// Give streamed startup snapshots a short chance to surface a follow-on
+	// dialog after an initial shell prompt appears.
+	startupDialogStreamReadyGrace = 100 * time.Millisecond
 )
 
 // StartupDialogTimeout returns the current timeout budget used by the shared
@@ -448,11 +451,28 @@ func acceptDialogFromStream(
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
+	var (
+		readySeen     bool
+		latestReady   string
+		readyTimer    *time.Timer
+		readyDeadline <-chan time.Time
+	)
+	stopReadyTimer := func() {
+		if readyTimer == nil {
+			return
+		}
+		if !readyTimer.Stop() {
+			select {
+			case <-readyTimer.C:
+			default:
+			}
+		}
+	}
+	defer stopReadyTimer()
+
 	for {
 		history, closed, updated := snapshots.nextBatch()
 		if len(history) > 0 {
-			readySeen := false
-			latestReady := ""
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
 					snapshots.replay(history[idx+1:])
@@ -463,25 +483,38 @@ func acceptDialogFromStream(
 					return nil
 				}
 				if spec.ready != nil && spec.ready(content) {
-					readySeen = true
 					latestReady = content
+					if !readySeen {
+						readySeen = true
+						if startupDialogStreamReadyGrace <= 0 {
+							snapshots.replay([]string{latestReady})
+							return nil
+						}
+						readyTimer = time.NewTimer(startupDialogStreamReadyGrace)
+						readyDeadline = readyTimer.C
+					}
 				}
 			}
+		}
+		if closed {
 			if readySeen {
 				snapshots.replay([]string{latestReady})
-				return nil
 			}
+			return nil
+		}
+		if readySeen {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-timer.C:
+				snapshots.replay([]string{latestReady})
 				return nil
-			default:
+			case <-readyDeadline:
+				snapshots.replay([]string{latestReady})
+				return nil
+			case <-updated:
 			}
 			continue
-		}
-		if closed {
-			return nil
 		}
 		select {
 		case <-ctx.Done():

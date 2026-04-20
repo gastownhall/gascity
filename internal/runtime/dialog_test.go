@@ -285,6 +285,39 @@ func TestAcceptStartupDialogsFromStreamPrefersLaterDialogOverEarlierPrompt(t *te
 	}
 }
 
+func TestAcceptStartupDialogsFromStreamWaitsBrieflyForDelayedDialogAfterPrompt(t *testing.T) {
+	oldGrace := startupDialogStreamReadyGrace
+	startupDialogStreamReadyGrace = 75 * time.Millisecond
+	t.Cleanup(func() {
+		startupDialogStreamReadyGrace = oldGrace
+	})
+
+	var sent []string
+	snapshots := make(chan string, 1)
+	snapshots <- "user@host $"
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		snapshots <- "Bypass Permissions mode"
+		close(snapshots)
+	}()
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
 func TestAcceptBypassPermissionsWarningFromStreamSendsKeysSeparately(t *testing.T) {
 	oldDelay := bypassDialogConfirmDelay
 	bypassDialogConfirmDelay = 10 * time.Millisecond
