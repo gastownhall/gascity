@@ -134,6 +134,31 @@ func TestStopReturnsJoinedErrorsFromBothBackends(t *testing.T) {
 	}
 }
 
+func TestStopPreservesRouteWhenFallbackBackendDidNotOwnSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	acpSP.StopErrors["agent-fail"] = errors.New("acp stop failed")
+	if err := acpSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return error when the routed backend fails and fallback has no session")
+	}
+	if !strings.Contains(err.Error(), "acp backend: acp stop failed") {
+		t.Fatalf("Stop error = %v, want primary backend failure", err)
+	}
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when fallback backend did not own the session")
+	}
+	if !acpSP.IsRunning("agent-fail") {
+		t.Fatal("session should still be running on ACP after failed stop")
+	}
+}
+
 func TestStopTreatsSessionGoneOnBothBackendsAsIdempotent(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()

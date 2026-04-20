@@ -107,7 +107,11 @@ func (p *Provider) Stop(name string) error {
 		other = p.acpSP
 	}
 	p.mu.RUnlock()
+	otherRunning := other.IsRunning(name)
 	otherErr := other.Stop(name)
+	if otherErr == nil && !otherRunning {
+		otherErr = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
+	}
 	if mergedErr := runtime.MergeBackendStopErrors(
 		runtime.BackendError{Label: primaryLabel, Err: err},
 		runtime.BackendError{Label: otherLabel, Err: otherErr},
