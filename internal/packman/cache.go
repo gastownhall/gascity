@@ -55,7 +55,7 @@ func EnsureRepoInCache(source, commit string) (string, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", fmt.Errorf("creating repo cache root: %w", err)
 	}
-	return withRepoCacheWriteLock(root, func() (string, error) {
+	return config.WithRepoCacheWriteLock(root, func() (string, error) {
 		return ensureRepoInCacheLocked(source, commit, parsed, cachePath)
 	})
 }
@@ -65,7 +65,7 @@ func ensureRepoInCacheLocked(source, commit string, parsed remoteSource, cachePa
 		if err := checkoutExistingCache(cachePath, commit); err == nil {
 			if err := validateCachedPackRoot(source, cachePath); err != nil {
 				if removeErr := os.RemoveAll(cachePath); removeErr != nil {
-					return "", fmt.Errorf("removing invalid repo cache %q after %v: %w", cachePath, err, removeErr)
+					return "", fmt.Errorf("removing invalid repo cache %q after %w: %w", cachePath, err, removeErr)
 				}
 			} else {
 				return cachePath, nil
@@ -92,15 +92,12 @@ func ensureRepoInCacheLocked(source, commit string, parsed remoteSource, cachePa
 		return "", fmt.Errorf("checking out %q: %w", commit, err)
 	}
 	if err := validateCachedPackRoot(source, cachePath); err != nil {
+		if removeErr := os.RemoveAll(cachePath); removeErr != nil {
+			return "", fmt.Errorf("removing invalid repo cache %q after %w: %w", cachePath, err, removeErr)
+		}
 		return "", err
 	}
 	return cachePath, nil
-}
-
-const repoCacheLockName = ".packman-cache.lock"
-
-func withRepoCacheWriteLock(root string, fn func() (string, error)) (string, error) {
-	return withRepoCacheLock(root, syscall.LOCK_EX, fn)
 }
 
 func withRepoCacheReadLock(fn func() error) error {
@@ -108,44 +105,62 @@ func withRepoCacheReadLock(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	lockFile, err := os.OpenFile(filepath.Join(root, repoCacheLockName), os.O_RDONLY, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fn()
-		}
-		return fmt.Errorf("opening repo cache lock: %w", err)
-	}
-	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_SH); err != nil {
-		return fmt.Errorf("locking repo cache: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	return fn()
-}
-
-func withRepoCacheLock(root string, mode int, fn func() (string, error)) (string, error) {
-	lockFile, err := os.OpenFile(filepath.Join(root, repoCacheLockName), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return "", fmt.Errorf("opening repo cache lock: %w", err)
-	}
-	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), mode); err != nil {
-		return "", fmt.Errorf("locking repo cache: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	return fn()
+	return config.WithRepoCacheReadLock(root, fn)
 }
 
 func checkoutExistingCache(cachePath, commit string) error {
 	head, headErr := runGit(cachePath, "rev-parse", "HEAD")
 	if headErr == nil && sameCommit(head, commit) {
-		return nil
+		dirty, err := cachedRepoDirty(cachePath)
+		if err != nil {
+			return err
+		}
+		if !dirty {
+			return nil
+		}
+		return resetCachedRepo(cachePath, commit)
 	}
 	if _, err := runGit(cachePath, "checkout", "--quiet", commit); err != nil {
 		if headErr != nil {
-			return fmt.Errorf("reading cached repo HEAD: %w; checking out %q: %v", headErr, commit, err)
+			return fmt.Errorf("reading cached repo HEAD: %w; checking out %q: %w", headErr, commit, err)
 		}
 		return fmt.Errorf("checking out %q in cached repo: %w", commit, err)
+	}
+	return resetCachedRepo(cachePath, commit)
+}
+
+func cachedRepoDirty(cachePath string) (bool, error) {
+	status, err := runGit(cachePath, "status", "--porcelain", "--ignored")
+	if err != nil {
+		return false, fmt.Errorf("checking cached repo worktree status: %w", err)
+	}
+	return strings.TrimSpace(status) != "", nil
+}
+
+func validateCachedRepoCheckout(cachePath, commit string) error {
+	head, err := runGit(cachePath, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("reading cached repo HEAD: %w", err)
+	}
+	if !sameCommit(head, commit) {
+		return fmt.Errorf("cached repository is checked out at %s, expected %s", strings.TrimSpace(head), commit)
+	}
+	dirty, err := cachedRepoDirty(cachePath)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		return fmt.Errorf("cached repository has local worktree changes")
+	}
+	return nil
+}
+
+func resetCachedRepo(cachePath, commit string) error {
+	if _, err := runGit(cachePath, "reset", "--hard", "--quiet", commit); err != nil {
+		return fmt.Errorf("resetting cached repo to %q: %w", commit, err)
+	}
+	if _, err := runGit(cachePath, "clean", "-ffdx", "--quiet"); err != nil {
+		return fmt.Errorf("cleaning cached repo: %w", err)
 	}
 	return nil
 }
@@ -219,7 +234,12 @@ func parseGitHubTreeSource(source string) remoteSource {
 }
 
 func defaultRunGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmdArgs := append([]string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.untrackedCache=false",
+	}, args...)
+	cmd := exec.Command("git", cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -229,6 +249,7 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 		}
 		cmd.Env = append(cmd.Env, e)
 	}
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
@@ -242,4 +263,15 @@ var fetchGitEnvBlacklist = map[string]bool{
 	"GIT_INDEX_FILE":                   true,
 	"GIT_OBJECT_DIRECTORY":             true,
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+	"GIT_COMMON_DIR":                   true,
+	"GIT_CEILING_DIRECTORIES":          true,
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  true,
+	"GIT_NAMESPACE":                    true,
+	"GIT_CONFIG":                       true,
+	"GIT_CONFIG_GLOBAL":                true,
+	"GIT_CONFIG_SYSTEM":                true,
+	"GIT_CONFIG_NOSYSTEM":              true,
+	"GIT_CONFIG_COUNT":                 true,
+	"GIT_EXEC_PATH":                    true,
+	"GIT_PAGER":                        true,
 }

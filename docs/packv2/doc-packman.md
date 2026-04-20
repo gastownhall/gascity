@@ -188,6 +188,9 @@ hint to run `gc import install`.
 - restore cache state from `packs.lock` when possible
 - provide the one remediation path used by fresh clones, broken caches,
   and offline-preparation workflows
+- repair managed repo-cache entries in place when they drift from
+  `packs.lock`; this may discard local edits or untracked files inside
+  `$HOME/.gc/cache/repos/<key>` because that directory is machine-managed
 
 ### `gc import check`
 

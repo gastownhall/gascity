@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -307,6 +308,10 @@ func (s *importScopeState) syntheticKey(name string) string {
 	return s.syntheticTag + name
 }
 
+func (s *importScopeState) isRootPackScope() bool {
+	return s != nil && s.syntheticTag == "pack:"
+}
+
 func loadImportScopeFS(fs fsys.FS, cityPath string) (*importScopeState, error) {
 	targetRig := strings.TrimSpace(rigFlag)
 	if targetRig == "" {
@@ -363,6 +368,15 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	for name, imp := range packManifest.Imports {
 		all["pack:"+name] = imp
 	}
+	if len(packManifest.Defaults.Rig.Imports) > 0 {
+		defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, bound := range defaults {
+			all["default-rig:"+bound.Binding] = bound.Import
+		}
+	}
 
 	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
 		if os.IsNotExist(err) {
@@ -381,6 +395,39 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 		}
 	}
 	return all, nil
+}
+
+func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
+	imports := make(map[string]config.Import, len(scope.imports))
+	for name, imp := range scope.imports {
+		imports[name] = imp
+	}
+	if !scope.isRootPackScope() {
+		return imports, nil
+	}
+	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, bound := range defaults {
+		key := "default-rig:" + bound.Binding
+		if _, exists := imports[key]; exists {
+			return nil, fmt.Errorf("import %q conflicts with reserved default-rig inspection key", key)
+		}
+		imports[key] = bound.Import
+	}
+	return imports, nil
+}
+
+func lookupInspectableImport(target string, imports map[string]config.Import) (config.Import, bool) {
+	if imp, ok := imports[target]; ok {
+		return imp, true
+	}
+	if !strings.Contains(target, ":") {
+		imp, ok := imports["default-rig:"+target]
+		return imp, ok
+	}
+	return config.Import{}, false
 }
 
 func loadCityImportManifestFS(fs fsys.FS, cityPath string) (*config.City, error) {
@@ -442,6 +489,10 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintln(stderr, "gc import add: could not derive import name; use --name") //nolint:errcheck
 		return 1
 	}
+	if strings.HasPrefix(name, "default-rig:") {
+		fmt.Fprintf(stderr, "gc import add: import name %q uses reserved prefix \"default-rig:\"\n", name) //nolint:errcheck
+		return 1
+	}
 	if _, exists := scope.imports[name]; exists {
 		fmt.Fprintf(stderr, "gc import add: import %q already exists\n", name) //nolint:errcheck
 		return 1
@@ -500,10 +551,18 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		return 1
 	}
 	if _, exists := scope.imports[name]; !exists {
-		fmt.Fprintf(stderr, "gc import remove: import %q not found\n", name) //nolint:errcheck
-		return 1
+		removed, err := removeRootDefaultRigImportFS(fs, cityPath, scope, name)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if !removed {
+			fmt.Fprintf(stderr, "gc import remove: import %q not found\n", name) //nolint:errcheck
+			return 1
+		}
+	} else {
+		delete(scope.imports, name)
 	}
-	delete(scope.imports, name)
 
 	allImports, err := collectAllImportsFS(fs, cityPath)
 	if err != nil {
@@ -511,6 +570,7 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		return 1
 	}
 	delete(allImports, scope.syntheticKey(name))
+	delete(allImports, "default-rig:"+strings.TrimPrefix(name, "default-rig:"))
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
@@ -526,6 +586,25 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	}
 	fmt.Fprintf(stdout, "Removed import %q\n", name) //nolint:errcheck
 	return 0
+}
+
+func removeRootDefaultRigImportFS(fs fsys.FS, cityPath string, scope *importScopeState, name string) (bool, error) {
+	if !scope.isRootPackScope() {
+		return false, nil
+	}
+	defaultName := strings.TrimPrefix(name, "default-rig:")
+	manifest, err := loadCityPackManifestFS(fs, cityPath)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := manifest.Defaults.Rig.Imports[defaultName]; !ok {
+		return false, nil
+	}
+	delete(manifest.Defaults.Rig.Imports, defaultName)
+	scope.save = func() error {
+		return writeCityPackManifest(fs, cityPath, manifest)
+	}
+	return true, nil
 }
 
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
@@ -616,7 +695,12 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 	if target == "" {
 		lock, err = syncImports(cityPath, allImports, packman.InstallUpgrade)
 	} else {
-		targetImp, ok := scope.imports[target]
+		inspectImports, inspectErr := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
+		if inspectErr != nil {
+			fmt.Fprintf(stderr, "gc import upgrade: %v\n", inspectErr) //nolint:errcheck
+			return 1
+		}
+		targetImp, ok := lookupInspectableImport(target, inspectImports)
 		if !ok {
 			fmt.Fprintf(stderr, "gc import upgrade: import %q not found\n", target) //nolint:errcheck
 			return 1
@@ -660,13 +744,18 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	var directNames []string
-	for name := range scope.imports {
+	for name := range inspectImports {
 		directNames = append(directNames, name)
 	}
 	sort.Strings(directNames)
 	if tree {
-		if err := writeImportTree(stdout, scope.imports, lock); err != nil {
+		if err := writeImportTree(stdout, inspectImports, lock); err != nil {
 			fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -678,9 +767,9 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	allowLockOnlyFallback := len(allImports) == len(scope.imports)
+	allowLockOnlyFallback := len(allImports) == len(inspectImports)
 
-	graph, graphErr := buildImportGraph(scope.imports, lock)
+	graph, graphErr := buildImportGraph(inspectImports, lock)
 	if graphErr != nil && !allowLockOnlyFallback {
 		fmt.Fprintf(stderr, "gc import list: %v\n", graphErr) //nolint:errcheck
 		return 1
@@ -688,7 +777,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 
 	directSources := make(map[string]bool)
 	for _, name := range directNames {
-		imp := scope.imports[name]
+		imp := inspectImports[name]
 		if !isRemoteImportSource(imp.Source) {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", name, imp.Source, imp.Version, "(path)") //nolint:errcheck
 			continue
@@ -733,7 +822,12 @@ func doImportWhy(cityPath, target string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	graph, err := buildImportGraph(scope.imports, lock)
+	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	graph, err := buildImportGraph(inspectImports, lock)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
@@ -924,7 +1018,7 @@ func findImportWhyMatches(nodes []*importGraphNode, target string) ([][]*importG
 		if node.Import.Source == target {
 			sourceMatches = append(sourceMatches, append([]*importGraphNode(nil), path...))
 		}
-		if node.Name == target {
+		if node.Name == target || importDisplayName(node.Name) == target {
 			nameMatches = append(nameMatches, append([]*importGraphNode(nil), path...))
 		}
 		for _, child := range node.Children {
@@ -957,6 +1051,13 @@ func findImportWhyMatches(nodes []*importGraphNode, target string) ([][]*importG
 	}
 
 	return nameMatches, nil
+}
+
+func importDisplayName(name string) string {
+	if rest, ok := strings.CutPrefix(name, "default-rig:"); ok {
+		return rest
+	}
+	return name
 }
 
 func writeImportWhy(stdout io.Writer, target string, matches [][]*importGraphNode) error {
@@ -1121,7 +1222,7 @@ func writeOrderedDefaultRigImports(buf *bytes.Buffer, manifest *cityPackManifest
 
 	for _, name := range names {
 		imp := manifest.Defaults.Rig.Imports[name]
-		fmt.Fprintf(buf, "\n[defaults.rig.imports.%s]\n", name) //nolint:errcheck
+		fmt.Fprintf(buf, "\n[defaults.rig.imports.%s]\n", strconv.Quote(name)) //nolint:errcheck
 		if err := toml.NewEncoder(buf).Encode(imp); err != nil {
 			return fmt.Errorf("encoding defaults.rig.imports.%s: %w", name, err)
 		}

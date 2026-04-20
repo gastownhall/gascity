@@ -1089,6 +1089,23 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 }
 
 func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache, opts LoadOptions) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
+	var agents []Agent
+	var namedSessions []NamedSession
+	var providers map[string]ProviderSpec
+	var services []Service
+	var topoDirs []string
+	var requirements []PackRequirement
+	var globals []ResolvedPackGlobal
+	err := withRepoCacheReadLockForPath(topoDir, func() error {
+		var loadErr error
+		agents, namedSessions, providers, services, topoDirs, requirements, globals, loadErr = loadPackWithCacheOptionsLocked(
+			fs, topoPath, topoDir, cityRoot, rigName, seen, cache, opts)
+		return loadErr
+	})
+	return agents, namedSessions, providers, services, topoDirs, requirements, globals, err
+}
+
+func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache, opts LoadOptions) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
 	// Initialize seen set on first call.
 	if seen == nil {
 		seen = make(map[string]bool)

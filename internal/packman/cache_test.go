@@ -70,6 +70,9 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 		if reflect.DeepEqual(args, []string{"rev-parse", "HEAD"}) {
 			return "abc123", nil
 		}
+		if reflect.DeepEqual(args, []string{"status", "--porcelain", "--ignored"}) {
+			return "", nil
+		}
 		return "", fmt.Errorf("unexpected git call: %v", args)
 	}
 	t.Cleanup(func() { runGit = prev })
@@ -81,8 +84,66 @@ func TestEnsureRepoInCacheUsesExistingCloneWhenCheckoutMatches(t *testing.T) {
 	if got != path {
 		t.Fatalf("EnsureRepoInCache path = %q, want %q", got, path)
 	}
-	if len(calls) != 1 || !reflect.DeepEqual(calls[0], []string{"rev-parse", "HEAD"}) {
-		t.Fatalf("git calls = %#v, want rev-parse only", calls)
+	want := [][]string{
+		{"rev-parse", "HEAD"},
+		{"status", "--porcelain", "--ignored"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("git calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte("not toml"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	var calls [][]string
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "rev-parse":
+			return "abc123", nil
+		case "status":
+			return " M pack.toml", nil
+		case "reset":
+			if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte("[pack]\nname = \"repo\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "clean":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+
+	got, err := EnsureRepoInCache("https://github.com/example/repo", "abc123")
+	if err != nil {
+		t.Fatalf("EnsureRepoInCache: %v", err)
+	}
+	if got != path {
+		t.Fatalf("EnsureRepoInCache path = %q, want %q", got, path)
+	}
+	want := [][]string{
+		{"rev-parse", "HEAD"},
+		{"status", "--porcelain", "--ignored"},
+		{"reset", "--hard", "--quiet", "abc123"},
+		{"clean", "-ffdx", "--quiet"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("git calls = %#v, want %#v", calls, want)
 	}
 }
 
@@ -109,6 +170,10 @@ func TestEnsureRepoInCacheRepairsExistingCloneCheckout(t *testing.T) {
 			return "def456", nil
 		case "checkout":
 			return "", nil
+		case "reset":
+			return "", nil
+		case "clean":
+			return "", nil
 		default:
 			return "", fmt.Errorf("unexpected git call: %v", args)
 		}
@@ -125,6 +190,8 @@ func TestEnsureRepoInCacheRepairsExistingCloneCheckout(t *testing.T) {
 	want := [][]string{
 		{"rev-parse", "HEAD"},
 		{"checkout", "--quiet", "abc123"},
+		{"reset", "--hard", "--quiet", "abc123"},
+		{"clean", "-ffdx", "--quiet"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("git calls = %#v, want %#v", calls, want)
@@ -149,6 +216,8 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 		switch args[0] {
 		case "rev-parse":
 			return "abc123", nil
+		case "status":
+			return "", nil
 		case "clone":
 			target := args[len(args)-1]
 			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
@@ -175,11 +244,45 @@ func TestEnsureRepoInCacheReclonesInvalidExistingCache(t *testing.T) {
 	}
 	want := [][]string{
 		{"rev-parse", "HEAD"},
+		{"status", "--porcelain", "--ignored"},
 		{"clone", "--quiet", "https://github.com/example/repo", path},
 		{"checkout", "--quiet", "abc123"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("git calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestEnsureRepoInCacheCleansFreshCloneAfterPackValidationFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		switch args[0] {
+		case "clone":
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "checkout":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+
+	if _, err := EnsureRepoInCache("https://github.com/example/repo", "abc123"); err == nil {
+		t.Fatal("EnsureRepoInCache succeeded, want pack validation error")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cache path still exists after validation failure: %v", err)
 	}
 }
 

@@ -125,7 +125,6 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.CityConfigCheck{})
 	registerV2DeprecationChecks(d)
 	d.Register(&doctor.ImplicitImportCacheCheck{})
-	d.Register(newImportStateDoctorCheck(cityPath))
 	d.Register(&doctor.DeprecatedAttachmentFieldsCheck{})
 
 	// Load config for deeper checks. If it fails, we still run the core
@@ -144,6 +143,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+	}
+	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
+		d.Register(newImportStateDoctorCheck(cityPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack

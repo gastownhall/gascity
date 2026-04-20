@@ -61,23 +61,29 @@ func TestCheckInstalledReportsMissingCache(t *testing.T) {
 	assertSingleIssue(t, report, "missing-cache")
 }
 
-func TestCheckInstalledMissingCacheDoesNotCreateCacheRoot(t *testing.T) {
+func TestCheckInstalledMissingCacheDoesNotCreateCacheEntry(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	source := "https://example.com/tools.git"
+	commit := "aaaa"
 	writeTestLockfile(t, city, map[string]LockedPack{
-		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+		source: {Version: "1.0.0", Commit: commit},
 	})
 
 	report, err := CheckInstalled(city, map[string]config.Import{
-		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+		"pack:tools": {Source: source, Version: "^1.0"},
 	})
 	if err != nil {
 		t.Fatalf("CheckInstalled: %v", err)
 	}
 	assertSingleIssue(t, report, "missing-cache")
-	if _, err := os.Stat(filepath.Join(home, ".gc", "cache", "repos")); !os.IsNotExist(err) {
-		t.Fatalf("repo cache root stat err = %v, want not exist", err)
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("repo cache entry stat err = %v, want not exist", err)
 	}
 }
 
@@ -241,6 +247,30 @@ schema = 1
 	}
 }
 
+func TestCheckInstalledParsesNonTransitiveCachedPack(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPack(t, "https://example.com/tools.git", "aaaa", `
+[pack
+name = "tools"
+schema = 1
+`)
+
+	transitiveFalse := false
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0", Transitive: &transitiveFalse},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "invalid-cached-pack")
+}
+
 func TestCheckInstalledReportsCacheCheckoutMismatch(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
@@ -262,6 +292,30 @@ schema = 1
 		t.Fatalf("CheckInstalled: %v", err)
 	}
 	assertSingleIssue(t, report, "cache-checkout-mismatch")
+}
+
+func TestCheckInstalledReportsDirtyCacheWorktree(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPackAtCommit(t, "https://example.com/tools.git", "aaaa", "aaaa", `
+[pack]
+name = "tools"
+schema = 1
+`)
+	markCachedPackDirty(t, "https://example.com/tools.git", "aaaa")
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "cache-worktree-dirty")
 }
 
 func TestCheckInstalledUsesRemoteSubpath(t *testing.T) {
@@ -337,6 +391,14 @@ func stubCachedPackGit(t *testing.T) {
 			}
 			return string(data), nil
 		}
+		if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+			if _, err := os.Stat(filepath.Join(dir, ".packman-test-dirty")); err == nil {
+				return " M pack.toml", nil
+			} else if err != nil && !os.IsNotExist(err) {
+				return "", err
+			}
+			return "", nil
+		}
 		if len(args) >= 1 && args[0] == "checkout" {
 			if dir == "" {
 				return "", fmt.Errorf("checkout requires dir")
@@ -368,5 +430,16 @@ func writeCachedPackCommit(t *testing.T, cachePath, commit string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(cachePath, ".packman-test-commit"), []byte(commit), 0o644); err != nil {
 		t.Fatalf("WriteFile(.packman-test-commit): %v", err)
+	}
+}
+
+func markCachedPackDirty(t *testing.T, source, commit string) {
+	t.Helper()
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, ".packman-test-dirty"), []byte("dirty"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.packman-test-dirty): %v", err)
 	}
 }

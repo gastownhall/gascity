@@ -182,13 +182,9 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 	}
 
 	packDir, ok := s.validateCachedPack(name, imp.Source, locked.Commit)
-	if !ok || !imp.ImportIsTransitive() {
+	if !ok {
 		return
 	}
-	if s.seen[imp.Source] {
-		return
-	}
-	s.seen[imp.Source] = true
 	nested, err := readPackImports(packDir)
 	if err != nil {
 		s.closureIncomplete = true
@@ -203,6 +199,13 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 		})
 		return
 	}
+	if !imp.ImportIsTransitive() {
+		return
+	}
+	if s.seen[imp.Source] {
+		return
+	}
+	s.seen[imp.Source] = true
 	for _, nestedName := range sortedImportNames(nested) {
 		s.walkImport(name+"/"+nestedName, nested[nestedName])
 	}
@@ -273,6 +276,33 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 				Commit:     commit,
 				Path:       cachePath,
 				Message:    fmt.Sprintf("cached repository is checked out at %s, expected %s", strings.TrimSpace(head), commit),
+				RepairHint: `run "gc import install"`,
+			})
+			return "", false
+		}
+		dirty, err := cachedRepoDirty(cachePath)
+		if err != nil {
+			s.closureIncomplete = true
+			s.addIssue(CheckIssue{
+				Code:       "unreadable-cache-git",
+				ImportName: name,
+				Source:     source,
+				Commit:     commit,
+				Path:       cachePath,
+				Message:    fmt.Sprintf("cannot read cached repository status: %v", err),
+				RepairHint: `run "gc import install"`,
+			})
+			return "", false
+		}
+		if dirty {
+			s.closureIncomplete = true
+			s.addIssue(CheckIssue{
+				Code:       "cache-worktree-dirty",
+				ImportName: name,
+				Source:     source,
+				Commit:     commit,
+				Path:       cachePath,
+				Message:    "cached repository has local worktree changes",
 				RepairHint: `run "gc import install"`,
 			})
 			return "", false

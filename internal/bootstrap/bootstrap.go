@@ -109,7 +109,8 @@ func EnsureBootstrapForCity(gcHome string, userImports map[string]config.Import)
 	}
 
 	if len(BootstrapPacks) > 0 {
-		if err := os.MkdirAll(filepath.Join(gcHome, "cache", "repos"), 0o755); err != nil {
+		cacheRoot := filepath.Join(gcHome, "cache", "repos")
+		if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
 			return fmt.Errorf("creating bootstrap cache root: %w", err)
 		}
 		for _, entry := range BootstrapPacks {
@@ -119,10 +120,15 @@ func EnsureBootstrapForCity(gcHome string, userImports map[string]config.Import)
 			}
 
 			cacheDir := config.GlobalRepoCachePath(gcHome, entry.Source, commit)
-			if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
-				if err := materializeBootstrapPack(cacheDir, entry); err != nil {
-					return fmt.Errorf("bootstrapping %q: %w", entry.Name, err)
+			if _, err := config.WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+				if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
+					if err := materializeBootstrapPack(cacheDir, entry); err != nil {
+						return "", err
+					}
 				}
+				return cacheDir, nil
+			}); err != nil {
+				return fmt.Errorf("bootstrapping %q: %w", entry.Name, err)
 			}
 
 			next := implicitImport{

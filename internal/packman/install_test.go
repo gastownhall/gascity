@@ -145,7 +145,7 @@ func TestSyncLockResolveIfNeededResolvesAndCaches(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	prev := runGit
-	runGit = func(_ string, args ...string) (string, error) {
+	runGit = func(dir string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "aaaa\trefs/tags/v1.0.0\n", nil
@@ -159,6 +159,15 @@ func TestSyncLockResolveIfNeededResolvesAndCaches(t *testing.T) {
 			}
 			return "", nil
 		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
 			return "", nil
 		default:
 			return "", nil
@@ -233,6 +242,7 @@ func TestInstallLockedEnsuresEveryLockedRepo(t *testing.T) {
 func TestReadCachedPackImportsUsesSubpath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
 
 	source := "file:///tmp/repo.git//packs/base"
 	commit := "abc123"
@@ -243,6 +253,7 @@ func TestReadCachedPackImportsUsesSubpath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git): %v", err)
 	}
+	writeCachedPackCommit(t, path, commit)
 	if err := os.MkdirAll(filepath.Join(path, "packs", "base"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(subpath): %v", err)
 	}
@@ -263,6 +274,35 @@ source = "https://example.com/inner.git"
 	}
 	if _, ok := imports["inner"]; !ok {
 		t.Fatalf("missing nested import from subpath pack: %#v", imports)
+	}
+}
+
+func TestReadCachedPackImportsRejectsMissingGitHead(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	source := "file:///tmp/repo.git//packs/base"
+	commit := "abc123"
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "packs", "base"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(subpath): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "packs", "base", "pack.toml"), []byte("[pack]\nname = \"base\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	_, err = ReadCachedPackImports(source, commit)
+	if err == nil {
+		t.Fatal("ReadCachedPackImports succeeded for cache with missing .git/HEAD")
+	}
+	if !strings.Contains(err.Error(), "reading cached repo HEAD") {
+		t.Fatalf("error = %v, want cached repo HEAD failure", err)
 	}
 }
 
@@ -289,7 +329,7 @@ func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	prev := runGit
-	runGit = func(_ string, args ...string) (string, error) {
+	runGit = func(dir string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "aaaa\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\n", nil
@@ -303,6 +343,15 @@ func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
 			}
 			return "", nil
 		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
 			return "", nil
 		default:
 			return "", nil
@@ -329,7 +378,7 @@ func TestSyncLockSelectiveUpgradeMergesSameSourceConstraints(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	prev := runGit
-	runGit = func(_ string, args ...string) (string, error) {
+	runGit = func(dir string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "cccc\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\n", nil
@@ -343,6 +392,15 @@ func TestSyncLockSelectiveUpgradeMergesSameSourceConstraints(t *testing.T) {
 			}
 			return "", nil
 		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
 			return "", nil
 		default:
 			return "", nil
@@ -448,8 +506,9 @@ source = "https://example.com/shared.git"
 version = "<2.0"
 `)
 
+	stubCachedPackGit(t)
 	prev := runGit
-	runGit = func(_ string, args ...string) (string, error) {
+	runGit = func(dir string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			switch args[len(args)-1] {
@@ -461,7 +520,7 @@ version = "<2.0"
 				return "", nil
 			}
 		default:
-			return "", nil
+			return prev(dir, args...)
 		}
 	}
 	t.Cleanup(func() { runGit = prev })
@@ -527,7 +586,7 @@ func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T)
 
 	cloneCount := 0
 	prev := runGit
-	runGit = func(_ string, args ...string) (string, error) {
+	runGit = func(dir string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "aaaa\trefs/tags/v1.2.3\n", nil
@@ -551,6 +610,15 @@ func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T)
 			}
 			return "", nil
 		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
 			return "", nil
 		default:
 			return "", nil

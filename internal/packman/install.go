@@ -33,10 +33,26 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	if err != nil {
 		return nil, err
 	}
+	packPath := cachePath
 	if subpath := normalizeRemoteSource(source).Subpath; subpath != "" {
-		cachePath = filepath.Join(cachePath, subpath)
+		packPath = filepath.Join(packPath, subpath)
 	}
-	return readPackImports(cachePath)
+	root, err := RepoCacheRoot()
+	if err != nil {
+		return nil, err
+	}
+	var imports map[string]config.Import
+	if err := config.WithRepoCacheReadLock(root, func() error {
+		if err := validateCachedRepoCheckout(cachePath, commit); err != nil {
+			return err
+		}
+		var readErr error
+		imports, readErr = readPackImports(packPath)
+		return readErr
+	}); err != nil {
+		return nil, err
+	}
+	return imports, nil
 }
 
 // InstallLocked restores every entry recorded in packs.lock into the shared cache.
@@ -227,8 +243,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 		return nil
 	}
 
-	cachePath, err := s.cachedPackPath(imp.Source, chosen.Commit)
-	if err != nil {
+	if _, err := s.cachedPackPath(imp.Source, chosen.Commit); err != nil {
 		return err
 	}
 	if !imp.ImportIsTransitive() {
@@ -239,7 +254,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	}
 	seen[imp.Source] = true
 
-	nested, err := readPackImports(cachePath)
+	nested, err := ReadCachedPackImports(imp.Source, chosen.Commit)
 	if err != nil {
 		return err
 	}
