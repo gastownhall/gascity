@@ -49,8 +49,8 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
 		return nil, fmt.Errorf("bd create --graph: parsing JSON: %w", err)
 	}
-	if len(result.IDs) == 0 {
-		return nil, fmt.Errorf("bd create --graph: empty result")
+	if err := ValidateGraphApplyResult(plan, &result); err != nil {
+		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 	return &result, nil
 }

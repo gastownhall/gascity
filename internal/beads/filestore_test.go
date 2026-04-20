@@ -1,6 +1,7 @@
 package beads_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -139,6 +140,32 @@ func TestFileStoreMetadataPersistence(t *testing.T) {
 	}
 }
 
+func TestFileStoreDeletePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s1.Create(beads.Bead{Title: "delete-me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Delete(b.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(b.ID); err == nil {
+		t.Fatalf("Get(%q) after reopen should fail", b.ID)
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%q) after reopen = %v, want ErrNotFound", b.ID, err)
+	}
+}
+
 func TestFileStoreChildrenExcludeClosedByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "beads.json")
 	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
@@ -273,6 +300,25 @@ func TestFileStoreOpenEmpty(t *testing.T) {
 	}
 	if b.ID != "gc-1" {
 		t.Errorf("ID = %q, want %q", b.ID, "gc-1")
+	}
+}
+
+func TestFileStorePingDetectsReadFailures(t *testing.T) {
+	path := "/city/beads.json"
+	f := fsys.NewFake()
+	f.Dirs["/city"] = true
+	f.Files[path] = []byte(`{}`)
+
+	s, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Errors[path] = fmt.Errorf("permission denied")
+	if err := s.Ping(); err == nil {
+		t.Fatal("expected ping error")
+	} else if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("Ping error = %v, want permission denied", err)
 	}
 }
 
@@ -457,6 +503,71 @@ func TestFileStoreConcurrentCreateWithFlock(t *testing.T) {
 	}
 
 	// Reopen and verify all beads survived.
+	s3 := open()
+	all, err := s3.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != perStore*2 {
+		t.Errorf("after reopen: %d beads, want %d", len(all), perStore*2)
+	}
+}
+
+// This regression covers the default locker path for OS-backed file stores.
+// It fails on branches where callers must inject locking manually.
+func TestFileStoreConcurrentCreateUsesDefaultLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("flock not available on Windows")
+	}
+
+	dir := t.TempDir()
+	beadsPath := filepath.Join(dir, "beads.json")
+
+	const perStore = 20
+
+	open := func() *beads.FileStore {
+		s, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	s1 := open()
+	s2 := open()
+
+	var wg sync.WaitGroup
+	ids := make(chan string, perStore*2)
+
+	createN := func(s *beads.FileStore, prefix string) {
+		defer wg.Done()
+		for i := 0; i < perStore; i++ {
+			b, err := s.Create(beads.Bead{Title: fmt.Sprintf("%s-%d", prefix, i)})
+			if err != nil {
+				t.Errorf("Create failed: %v", err)
+				return
+			}
+			ids <- b.ID
+		}
+	}
+
+	wg.Add(2)
+	go createN(s1, "s1")
+	go createN(s2, "s2")
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[string]bool)
+	for id := range ids {
+		if seen[id] {
+			t.Errorf("duplicate ID: %s", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != perStore*2 {
+		t.Errorf("got %d unique IDs, want %d", len(seen), perStore*2)
+	}
+
 	s3 := open()
 	all, err := s3.ListOpen()
 	if err != nil {

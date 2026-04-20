@@ -291,8 +291,14 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 		t.Fatalf("metadata after update = %v, want gc.step_ref=mol.review", got.Metadata)
 	}
 
-	// Apply a close event.
-	closed := beads.Bead{ID: b1.ID, Status: "closed", Metadata: map[string]string{"gc.outcome": "pass"}}
+	// Apply a close event with the full closed bead payload.
+	closed := beads.Bead{
+		ID:       b1.ID,
+		Title:    "Closed by agent",
+		Status:   "closed",
+		Labels:   []string{"done"},
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	}
 	payload, _ = json.Marshal(closed)
 	cs.ApplyEvent("bead.closed", payload)
 
@@ -300,12 +306,17 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	if got.Status != "closed" {
 		t.Fatalf("status after close event = %q, want closed", got.Status)
 	}
+	if got.Title != "Closed by agent" {
+		t.Fatalf("title after close event = %q, want Closed by agent", got.Title)
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "done" {
+		t.Fatalf("labels after close event = %v, want [done]", got.Labels)
+	}
 	if got.Metadata["gc.outcome"] != "pass" {
 		t.Fatalf("outcome = %q, want pass", got.Metadata["gc.outcome"])
 	}
-	// Original metadata should be preserved (merged, not replaced).
-	if got.Metadata["gc.step_ref"] != "mol.review" {
-		t.Fatalf("step_ref lost after close event: %v", got.Metadata)
+	if got.Metadata["gc.step_ref"] != "" {
+		t.Fatalf("close event should replace stale metadata, got %v", got.Metadata)
 	}
 }
 

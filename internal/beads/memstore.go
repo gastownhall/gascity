@@ -64,6 +64,7 @@ func cloneBead(b Bead) Bead {
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)
+	b.Dependencies = slices.Clone(b.Dependencies)
 	return b
 }
 

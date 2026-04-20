@@ -282,6 +282,38 @@ func TestMemStoreAddAndRemoveLabels(t *testing.T) {
 	}
 }
 
+func TestMemStoreGetReturnsClonedDependencies(t *testing.T) {
+	s := beads.NewMemStore()
+	created, err := s.Create(beads.Bead{
+		Title: "test",
+		Dependencies: []beads.Dep{
+			{IssueID: "gc-1", DependsOnID: "dep-1", Type: "blocks"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created.Dependencies[0].DependsOnID = "mutated"
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Dependencies[0].DependsOnID != "dep-1" {
+		t.Fatalf("DependsOnID after returned bead mutation = %q, want dep-1", got.Dependencies[0].DependsOnID)
+	}
+
+	got.Dependencies[0].DependsOnID = "changed-again"
+	again, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Dependencies[0].DependsOnID != "dep-1" {
+		t.Fatalf("DependsOnID after Get mutation = %q, want dep-1", again.Dependencies[0].DependsOnID)
+	}
+}
+
 // --- DepAdd / DepRemove / DepList ---
 
 func TestMemStoreDepAddAndList(t *testing.T) {

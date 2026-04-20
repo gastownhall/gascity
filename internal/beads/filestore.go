@@ -37,10 +37,15 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
 
+	locker := Locker(nopLocker{})
+	if _, ok := fs.(fsys.OSFS); ok {
+		locker = NewFileFlock(path + ".lock")
+	}
+
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &FileStore{MemStore: NewMemStore(), fs: fs, path: path, locker: nopLocker{}}, nil
+			return &FileStore{MemStore: NewMemStore(), fs: fs, path: path, locker: locker}, nil
 		}
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
@@ -49,7 +54,7 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
-	return &FileStore{MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps), fs: fs, path: path, locker: nopLocker{}}, nil
+	return &FileStore{MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps), fs: fs, path: path, locker: locker}, nil
 }
 
 // SetLocker sets a cross-process Locker (typically a FileFlock). When set,
@@ -221,9 +226,38 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Delete delegates to MemStore.Delete and flushes to disk.
+// If the disk flush fails, the in-memory mutation is rolled back.
+func (fs *FileStore) Delete(id string) error {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return err
+	}
+	snap := fs.snapshotLocked()
+	if err := fs.MemStore.Delete(id); err != nil {
+		return err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return err
+	}
+	return nil
+}
+
 // Ping checks that the store file is accessible.
 func (fs *FileStore) Ping() error {
-	return fs.MemStore.Ping()
+	if err := fs.MemStore.Ping(); err != nil {
+		return err
+	}
+	if _, err := fs.fs.ReadFile(fs.path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("pinging file store: %w", err)
+	}
+	return nil
 }
 
 // DepAdd delegates to MemStore.DepAdd and flushes to disk.
