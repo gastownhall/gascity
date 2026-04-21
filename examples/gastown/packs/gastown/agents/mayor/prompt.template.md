@@ -144,6 +144,28 @@ Wrong. The issue is about beads code, so it goes in the beads rig.
 **NOT your job**: Per-worker cleanup, session killing, routine nudging (Witness handles that)
 **Exception**: If refinery/witness is stuck, use `{{ cmd }} nudge refinery "Process MQ"`
 
+## Bead Creation — NEVER Fabricate IDs
+
+When creating assignment beads for review legs, you MUST capture the bead ID
+from command output. NEVER invent, guess, or reuse a bead ID.
+
+**Correct pattern:**
+```bash
+LEG_BEAD=$(gc bd create --title "..." --description "..." \
+  --type task --priority 2 --json | jq -r .id)
+echo "Created: $LEG_BEAD"    # verify it printed a real ID
+bd show "$LEG_BEAD"           # verify it exists before slinging
+```
+
+**Wrong pattern (causes stranded workers):**
+```bash
+LEG_BEAD="sc-qq3a0"           # ← fabricated ID, will break everything
+gc sling ... "$LEG_BEAD" ...  # ← slings a dead reference
+```
+
+Always use `assets/scripts/verified-sling.sh` instead of raw `gc sling`
+when dispatching review legs. It validates the bead exists before slinging.
+
 ## Rig Wake/Sleep Protocol
 
 Rigs start **dormant by default** (`--start-suspended`). The Mayor activates

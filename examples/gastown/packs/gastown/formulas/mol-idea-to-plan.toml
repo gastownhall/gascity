@@ -141,19 +141,35 @@ description = """
 Fan out parallel PRD review using review task beads plus `mol-review-leg`.
 
 **Dispatch pattern for EVERY review leg in this workflow:**
-1. `gc bd create` a task bead with a detailed description
-2. set metadata:
-   - `coordinator=$COORDINATOR`
-   - `review_id=$REVIEW_ID`
-   - `review_phase=<phase>`
-   - `review_leg=<leg>`
-3. sling it to `$REVIEW_TARGET` with:
+1. Create the assignment bead and CAPTURE its ID from command output:
 ```bash
-gc sling "$REVIEW_TARGET" "$LEG_BEAD" --on {{review_formula}}
+LEG_BEAD=$(gc bd create --title "<leg title>" --description "<prompt>" \
+  --type task --priority 2 --json | jq -r .id)
+echo "Created bead: $LEG_BEAD"    # MUST print a real ID like sc-xxxxx
 ```
-4. record the bead ID in the round log
-5. wait for completion mail or poll the bead until it closes
-6. read the full report from the bead notes with `gc bd show <id>`
+2. VERIFY the bead exists (guards against fabricated IDs):
+```bash
+bd show "$LEG_BEAD"               # MUST succeed — stop if it fails
+```
+3. Set metadata on the verified bead:
+```bash
+bd update "$LEG_BEAD" \
+  --set-metadata coordinator="$COORDINATOR" \
+  --set-metadata review_id="$REVIEW_ID" \
+  --set-metadata review_phase=<phase> \
+  --set-metadata review_leg=<leg>
+```
+4. Sling using the validated wrapper:
+```bash
+"$GC_CITY_DIR/assets/scripts/verified-sling.sh" "$REVIEW_TARGET" "$LEG_BEAD" --on {{review_formula}}
+```
+5. Record the bead ID in the round log
+6. Wait for completion mail or poll the bead until it closes
+7. Read the full report from the bead notes with `gc bd show "$LEG_BEAD"`
+
+⚠️ **NEVER fabricate bead IDs.** The ID MUST come from `gc bd create --json`
+output. If the create command fails or returns empty, STOP and escalate.
+Do NOT invent an ID like `sc-xxxxx` and proceed — this strands workers.
 
 **Standard instructions each review bead must include:**
 - read `.prd-reviews/$REVIEW_ID/prd-draft.md`
