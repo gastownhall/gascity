@@ -22,8 +22,7 @@ is_running() {
     command -v nc >/dev/null 2>&1 && nc -z "$GC_DOLT_HOST" "$GC_DOLT_PORT" 2>/dev/null && return 0
     return 1
   fi
-  # Local server — check if anything listens on the port.
-  lsof -nP -iTCP:"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
+  managed_runtime_tcp_reachable "$GC_DOLT_PORT"
 }
 
 if is_running; then

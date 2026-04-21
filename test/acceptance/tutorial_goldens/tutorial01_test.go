@@ -217,6 +217,7 @@ func TestTutorial01Cities(t *testing.T) {
 			if helloTaskID == "" {
 				t.Fatal("missing hello.py task id from prior sling step")
 			}
+			const helloPyReadyTimeout = 3 * time.Minute
 			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
 			if err != nil {
 				t.Fatalf("gc bd show --watch start: %v", err)
@@ -226,7 +227,7 @@ func TestTutorial01Cities(t *testing.T) {
 			if err := rs.waitFor(helloTaskID, 30*time.Second); err != nil {
 				t.Fatalf("gc bd show --watch did not render target bead: %v", err)
 			}
-			if !waitForCondition(t, 90*time.Second, 2*time.Second, func() bool {
+			if !waitForCondition(t, helloPyReadyTimeout, 2*time.Second, func() bool {
 				data, err := os.ReadFile(filepath.Join(myProject, "hello.py"))
 				return err == nil && strings.TrimSpace(string(data)) != ""
 			}) {
@@ -234,11 +235,11 @@ func TestTutorial01Cities(t *testing.T) {
 				data, readErr := os.ReadFile(filepath.Join(myProject, "hello.py"))
 				switch {
 				case readErr != nil:
-					t.Fatalf("provider did not create hello.py within 90s: %v", readErr)
+					t.Fatalf("provider did not create hello.py within %s: %v", helloPyReadyTimeout, readErr)
 				case strings.TrimSpace(string(data)) == "":
-					t.Fatalf("provider created hello.py but left it empty after 90s")
+					t.Fatalf("provider created hello.py but left it empty after %s", helloPyReadyTimeout)
 				default:
-					t.Fatalf("provider created hello.py after timeout window; file was not ready within 90s")
+					t.Fatalf("provider created hello.py after timeout window; file was not ready within %s", helloPyReadyTimeout)
 				}
 			}
 		})

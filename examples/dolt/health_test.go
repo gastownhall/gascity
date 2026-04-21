@@ -282,7 +282,261 @@ func TestRuntimeScriptPortPrecedence(t *testing.T) {
 	}
 }
 
+func TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof(t *testing.T) {
+	tests := []struct {
+		name        string
+		lsofBody    string
+		ncBody      func(port string) string
+		wantManaged bool
+	}{
+		{
+			name:     "inconclusive lsof accepts reachable port",
+			lsofBody: "#!/bin/sh\nexit 0\n",
+			ncBody: func(port string) string {
+				return `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "` + port + `" ]; then
+  exit 0
+fi
+exit 1
+`
+			},
+			wantManaged: true,
+		},
+		{
+			name:     "mismatched lsof pid still rejects port",
+			lsofBody: "#!/bin/sh\necho $$\nsleep 5\n",
+			ncBody: func(_ string) string {
+				return `#!/bin/sh
+exit 0
+`
+			},
+			wantManaged: false,
+		},
+		{
+			name:     "inconclusive lsof with unreachable port still rejects port",
+			lsofBody: "#!/bin/sh\nexit 0\n",
+			ncBody: func(_ string) string {
+				return `#!/bin/sh
+exit 1
+`
+			},
+			wantManaged: false,
+		},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := listener.Addr().(*net.TCPAddr).Port
+			managedPort := strconv.Itoa(port)
+			want := "3307"
+			if tt.wantManaged {
+				want = managedPort
+			}
+
+			writeManagedRuntimeStateForScript(t, cityPath, port)
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
+
+			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+			cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH")
+			cmd.Env = append(cmd.Env,
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != want {
+				t.Fatalf("GC_DOLT_PORT = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid(t *testing.T) {
+	tests := []struct {
+		name     string
+		lsofBody string
+		ncBody   func(port string) string
+	}{
+		{
+			name:     "listener pid match via ps fallback",
+			lsofBody: "#!/bin/sh\necho 424242\n",
+			ncBody: func(_ string) string {
+				return `#!/bin/sh
+exit 1
+`
+			},
+		},
+		{
+			name:     "reachable port via ps fallback when lsof is inconclusive",
+			lsofBody: "#!/bin/sh\nexit 0\n",
+			ncBody: func(port string) string {
+				return `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "` + port + `" ]; then
+  exit 0
+fi
+exit 1
+`
+			},
+		},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := listener.Addr().(*net.TCPAddr).Port
+			managedPort := strconv.Itoa(port)
+
+			writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, 424242)
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
+			writeExecutable(t, filepath.Join(fakeBin, "ps"), `#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "424242" ]; then
+  echo " 424242"
+  exit 0
+fi
+exit 1
+`)
+
+			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+			cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH")
+			cmd.Env = append(cmd.Env,
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != managedPort {
+				t.Fatalf("GC_DOLT_PORT = %q, want %q", got, managedPort)
+			}
+		})
+	}
+}
+
+func TestRuntimeScriptPortPrecedenceParsesManagedRuntimeStateWithPortableSed(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	managedPort := strconv.Itoa(port)
+
+	realSed, err := exec.LookPath("sed")
+	if err != nil {
+		t.Fatalf("LookPath(sed): %v", err)
+	}
+
+	writeManagedRuntimeStateForScript(t, cityPath, port)
+	writeExecutable(t, filepath.Join(fakeBin, "sed"), fmt.Sprintf(`#!/bin/sh
+case "$2" in
+  *'\\(true\\|false\\)'*)
+    exit 0
+    ;;
+esac
+exec %q "$@"
+`, realSed))
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+	cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH")
+	cmd.Env = append(cmd.Env,
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != managedPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, managedPort)
+	}
+}
+
+func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), `"running": true`) {
+		t.Fatalf("health output missing running=true:\n%s", out)
+	}
+}
+
 func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) {
+	t.Helper()
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, os.Getpid())
+}
+
+func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, port int, pid int) {
 	t.Helper()
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -290,12 +544,19 @@ func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) 
 	}
 	payload := []byte(fmt.Sprintf(
 		`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
-		os.Getpid(),
+		pid,
 		port,
 		filepath.Join(cityPath, ".beads", "dolt"),
 	))
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeExecutable(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
 }
 

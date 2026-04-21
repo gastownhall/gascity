@@ -78,10 +78,10 @@ server_latency=0
 server_reachable=false
 
 # Find dolt PID by port.
-pid=$(lsof -nP -t -iTCP:"$GC_DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
-if [ -n "$pid" ]; then
+pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   server_running=true
-  server_pid="$pid"
+  [ -n "$pid" ] && server_pid="$pid"
   # Measure query latency.
   start_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"

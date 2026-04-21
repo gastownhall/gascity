@@ -43,6 +43,24 @@ var resolveProviderLifecycleGCBinary = func() string {
 	return ""
 }
 
+var (
+	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
+	initDirIfReadyInitAndHookDir      = initAndHookDir
+	initDirIfReadyRetryDelay          = time.Second
+)
+
+const initDirIfReadyRetryLimit = 2
+
+func isRetryableManagedDoltLifecycleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "dolt server exited during startup") ||
+		strings.Contains(msg, "did not become query-ready") ||
+		strings.Contains(msg, "signal: terminated")
+}
+
 // ── Consolidated lifecycle operations ────────────────────────────────────
 //
 // The bead store lifecycle has a strict ordering:
@@ -132,6 +150,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) erro
 // Returns (deferred bool, err). deferred=true means the bd provider
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
+	provider := beadsProvider(cityPath)
 	if cityUsesBdStoreContract(cityPath) {
 		if os.Getenv("GC_DOLT") == "skip" {
 			// Defer to controller/startup without forcing a new dolt_database:
@@ -141,16 +160,12 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 			}
 			return true, nil
 		}
-		if err := ensureBeadsProvider(cityPath); err != nil {
-			return false, fmt.Errorf("bead store: %w", err)
-		}
-		if err := initAndHookDir(cityPath, dir, prefix); err != nil {
+		if err := initDirIfReadyManagedDolt(cityPath, dir, prefix, provider); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
 
-	provider := beadsProvider(cityPath)
 	if provider == "" {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, ""); err != nil {
 			return false, err
@@ -170,13 +185,33 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 			return true, nil // Not running — defer to gc start.
 		}
 	}
-	if err := ensureBeadsProvider(cityPath); err != nil {
-		return false, fmt.Errorf("bead store: %w", err)
-	}
-	if err := initAndHookDir(cityPath, dir, prefix); err != nil {
+	if err := initDirIfReadyManagedDolt(cityPath, dir, prefix, provider); err != nil {
 		return false, err
 	}
 	return false, nil
+}
+
+func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
+	var err error
+	for attempt := 1; attempt <= initDirIfReadyRetryLimit; attempt++ {
+		if err = initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
+			err = fmt.Errorf("bead store: %w", err)
+		} else if err = initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err == nil {
+			return nil
+		}
+		if attempt == initDirIfReadyRetryLimit || !shouldRetryInitDirIfReady(cityPath, provider, err) {
+			return err
+		}
+		time.Sleep(initDirIfReadyRetryDelay)
+	}
+	return err
+}
+
+func shouldRetryInitDirIfReady(cityPath, provider string, err error) bool {
+	if !providerUsesBdStoreContract(provider) || isExternalDolt(cityPath) {
+		return false
+	}
+	return isRetryableManagedDoltLifecycleError(err)
 }
 
 func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.ConfigState, bool, error) {
