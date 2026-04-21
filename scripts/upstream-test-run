@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# upstream-test-run — run `make check` inside the upstream test image.
+#
+# Invoked by the `gastownhall-upstream` formula's `run-tests` step.
+# Wraps a plain `docker run` with the bind-mount + env-scrub shape the
+# formula depends on. The host worktree is mounted read-only; the
+# container copies it into a tmpfs before running tests so make targets
+# that write to the repo root work without touching the host checkout.
+#
+# The image is expected at gc-upstream-test:latest (overridable via
+# GC_UPSTREAM_TEST_IMAGE). Build it first with `make upstream-test-image`
+# — the formula's `run-tests` step does this before calling the wrapper.
+#
+# Exit status is docker's, which propagates `make check`'s.
+set -euo pipefail
+
+IMAGE="${GC_UPSTREAM_TEST_IMAGE:-gc-upstream-test:latest}"
+WORKTREE="$(git rev-parse --show-toplevel)"
+
+# Named volumes for go build + module caches. They persist across pours
+# for cache warmth; Phase 2 revisits pruning policy.
+GOCACHE_VOLUME="${GC_UPSTREAM_GOCACHE_VOLUME:-upstream-gocache}"
+GOMODCACHE_VOLUME="${GC_UPSTREAM_GOMODCACHE_VOLUME:-upstream-gomodcache}"
+
+# --env-file /dev/null: explicit "no host env leakage" (mirrors `env -i`
+# in the Makefile wrap). We export only what the test harness needs.
+# --user $(id -u):$(id -g): keeps stdout/file ownership sane if the
+# formula later wants a log bind-mount; Phase 1 streams to the formula
+# log so this is defensive.
+exec docker run --rm \
+  --init \
+  --env-file /dev/null \
+  -e HOME=/home/gcagent \
+  -e PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
+  -e GOCACHE=/home/gcagent/.cache/go-build \
+  -e GOMODCACHE=/home/gcagent/go/pkg/mod \
+  -v "${WORKTREE}:/workspace:ro" \
+  -v "${GOCACHE_VOLUME}:/home/gcagent/.cache/go-build" \
+  -v "${GOMODCACHE_VOLUME}:/home/gcagent/go/pkg/mod" \
+  --user "$(id -u):$(id -g)" \
+  --tmpfs /tmp \
+  "${IMAGE}" \
+  bash -c 'cp -a /workspace /tmp/src && cd /tmp/src && make check'

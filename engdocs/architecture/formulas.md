@@ -112,6 +112,46 @@ Closed wisps are purged by the controller's wisp GC in
 [`cmd/gc/wisp_gc.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/wisp_gc.go). The interval and TTL come from
 `[daemon].wisp_gc_interval` and `[daemon].wisp_ttl`.
 
+### Running tests in containers
+
+Most formula steps run in the pool worker's own shell. That is correct
+for steps whose work IS the agent's state (git operations on the host
+checkout, bd mutations, message sends) — host == work context. It is
+NOT correct for steps that are supposed to mirror a clean build
+environment, because the worker shell inherits city/session state
+(`GC_CITY_PATH`, `GC_DOLT_*`, `GC_ALIAS`, …) that CI does not.
+
+The `gastownhall-upstream` formula's `run-tests` step is the first step
+to adopt a containerized execution contract. The contract is:
+
+- `make upstream-test-image` builds `gc-upstream-test:<deps-hash>` on
+  first pour and tags `:latest`. Cached by
+  `sha256(deps.env + contrib/upstream-container/Dockerfile.upstream)`, so
+  subsequent pours with unchanged versions skip the build.
+- `scripts/upstream-test-run` invokes `docker run` with the worktree
+  bind-mounted read-only and `--env-file /dev/null` (no host env leaks
+  into the test process). `GOCACHE`/`GOMODCACHE` are named-volume
+  mounts — cache warmth across pours, single-host for Phase 1.
+- Preflight hard-fails if `docker` is missing. There is no host
+  fallback: fallback is what containerization exists to eliminate.
+- Host-side operations stay on host. The `rebuild-integration` step
+  uses git remotes and push credentials the container does not have;
+  it produces the worktree the container then bind-mounts. This split
+  is deliberate (see
+  [`engdocs/design/gastownhall-upstream-containerize.md`](../design/gastownhall-upstream-containerize.md)).
+
+Other formulas are not containerized. Adopt this contract only for
+steps whose work SHOULD be environment-insensitive — most commonly,
+steps that are mirroring CI.
+
+Phase 2 (tracked as follow-on work in the design doc above) decouples
+the per-shipment `rebuild-integration` step from the running-binary
+patch set: `integration-refs.toml` becomes `deploy-refs.toml`, a
+`rebuild-deploy` step runs at binary-install time rather than every
+shipment, and the per-shipment path simplifies to a clean-checkout +
+container-run. Phase 1 does not anticipate that split; the container
+contract documented here stands as-is.
+
 ## Invariants
 
 - Formula resolution is last-wins by filename across ordered layers.
@@ -154,6 +194,8 @@ Closed wisps are purged by the controller's wisp GC in
 | `internal/beads/memstore.go` | Simplified in-memory molecule creation |
 | `internal/beads/filestore.go` | Persistent wrapper over `MemStore` |
 | `internal/convergence/formula.go` | Convergence-specific formula validation |
+| `contrib/upstream-container/Dockerfile.upstream` | Test image used by the containerized `run-tests` step |
+| `scripts/upstream-test-run` | Wrapper around `docker run` for the containerized `run-tests` step |
 
 ## Configuration
 

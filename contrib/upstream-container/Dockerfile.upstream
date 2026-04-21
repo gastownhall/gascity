@@ -1,0 +1,70 @@
+# Gas City upstream-submission test image.
+#
+# Built on top of `gc-agent-base` (ubuntu:24.04 + tmux/jq/dolt/gh/Claude
+# CLI/node/git/python3). Adds go, bd, and build-time tools pinned to the
+# same versions CI uses, so `make check` behaves the same in the
+# container as it does on a GitHub Actions runner.
+#
+# Used by the `gastownhall-upstream` formula's `run-tests` step. Not an
+# agent image — intended for a single `docker run` per pour.
+#
+# Build via: make upstream-test-image
+
+ARG BASE_IMAGE=gc-agent-base:latest
+FROM ${BASE_IMAGE}
+
+ARG GO_VERSION
+ARG BD_VERSION
+ARG BD_REPO=gastownhall/beads
+
+# Build tools the base image doesn't carry: `make` (+ gcc/libc headers
+# some tests pull in via cgo) and `libicu74` (bd links against it for
+# unicode collation; ubuntu-24.04 runners happen to ship it, the agent
+# base does not). These are test-harness additions; base intentionally
+# stays minimal for agent-runtime use.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      make build-essential libicu74 \
+ && rm -rf /var/lib/apt/lists/*
+
+# go — version must match .github/workflows/ci.yml actions/setup-go@v6 input.
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
+    | tar -C /usr/local -xz \
+ && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+ && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+# bd — fetched the same way CI fetches it, so container and CI resolve
+# the same binary.
+RUN set -eux; \
+    TARBALL="beads_${BD_VERSION#v}_linux_amd64.tar.gz"; \
+    curl -fsSL -o "/tmp/${TARBALL}" \
+      "https://github.com/${BD_REPO}/releases/download/${BD_VERSION}/${TARBALL}"; \
+    tar -xzf "/tmp/${TARBALL}" -C /tmp bd; \
+    install -m 0755 /tmp/bd /usr/local/bin/bd; \
+    rm -f "/tmp/${TARBALL}" /tmp/bd
+
+# Tools needed by `make check`: golangci-lint, oapi-codegen. `install-tools`
+# is a Makefile target in upstream — copy just enough of the repo to run
+# it, then discard so the image stays slim.
+#
+# Install to /home/gcagent/go/bin: that is the default BIN_DIR/$GOPATH/bin
+# the Makefile computes at runtime (HOME=/home/gcagent → GOPATH=$HOME/go).
+# Symlinked into /usr/local/bin for convenience so the runtime PATH
+# doesn't need a go-bin entry.
+WORKDIR /src
+COPY Makefile /src/Makefile
+COPY go.mod go.sum /src/
+ENV GOBIN=/home/gcagent/go/bin
+RUN mkdir -p /home/gcagent/go/bin \
+ && make install-tools BIN_DIR=/home/gcagent/go/bin \
+ && ln -sf /home/gcagent/go/bin/golangci-lint /usr/local/bin/golangci-lint \
+ && ln -sf /home/gcagent/go/bin/oapi-codegen /usr/local/bin/oapi-codegen \
+ && rm -rf /src
+
+# Go cache mount points the runtime wrapper bind-mounts named volumes on.
+# World-writable because --user in the wrapper drops to the host UID,
+# which won't match any pre-created account here.
+RUN mkdir -p /home/gcagent/.cache/go-build /home/gcagent/go/pkg/mod \
+ && chmod -R 0777 /home/gcagent
+
+WORKDIR /workspace

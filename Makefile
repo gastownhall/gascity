@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-cmd-gc-process test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-cmd-gc-process test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller upstream-test-image docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -393,6 +393,31 @@ docker-controller: check-docker
 		cluster=$$(kubectl config current-context | sed 's/^kind-//'); \
 		echo "Loading gc-controller:latest into kind cluster '$$cluster'..."; \
 		kind load docker-image gc-controller:latest --name "$$cluster"; \
+	fi
+
+## upstream-test-image: build the image the gastownhall-upstream formula's
+## containerized run-tests step uses. Cached by sha256(deps.env +
+## Dockerfile.upstream) truncated to 12 hex. First build is ~3 min; subsequent
+## builds with an unchanged hash are a no-op tag update.
+upstream-test-image: check-docker docker-base
+	@set -eu; \
+	DEPS_HASH=$$(cat deps.env contrib/upstream-container/Dockerfile.upstream \
+		| sha256sum | cut -c1-12); \
+	IMAGE_TAG="gc-upstream-test:$$DEPS_HASH"; \
+	if docker image inspect "$$IMAGE_TAG" >/dev/null 2>&1; then \
+		echo "upstream-test-image: $$IMAGE_TAG already present; retagging :latest"; \
+		docker tag "$$IMAGE_TAG" gc-upstream-test:latest; \
+	else \
+		echo "upstream-test-image: building $$IMAGE_TAG"; \
+		. ./deps.env && docker buildx build --load \
+			--platform linux/amd64 \
+			-f contrib/upstream-container/Dockerfile.upstream \
+			--build-arg GO_VERSION=$$GO_VERSION \
+			--build-arg BD_VERSION=$$BD_VERSION \
+			--build-arg BD_REPO=$$BD_REPO \
+			-t "$$IMAGE_TAG" \
+			-t gc-upstream-test:latest \
+			.; \
 	fi
 
 ## k8s-secret: create K8s secret with Claude credentials
