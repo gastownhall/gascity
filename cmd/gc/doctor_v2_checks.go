@@ -287,7 +287,7 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 // stale compatibility artifacts from the removed ResolveScripts shim, while
 // real files indicate the deprecated user-authored top-level scripts layout.
 func inspectTopLevelScripts(dir string) ([]string, bool, error) {
-	var real []string
+	var realFiles []string
 	var sawSymlink bool
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -308,14 +308,14 @@ func inspectTopLevelScripts(dir string) ([]string, bool, error) {
 		if rErr != nil {
 			return rErr
 		}
-		real = append(real, filepath.Join("scripts", rel))
+		realFiles = append(realFiles, filepath.Join("scripts", rel))
 		return nil
 	})
 	if err != nil {
 		return nil, false, err
 	}
-	sort.Strings(real)
-	return real, sawSymlink, nil
+	sort.Strings(realFiles)
+	return realFiles, sawSymlink, nil
 }
 
 func legacyTopLevelScriptsShim(cityPath string) (bool, error) {
@@ -323,11 +323,8 @@ func legacyTopLevelScriptsShim(cityPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	origins := legacyScriptSourceDirs(cfg.PackDirs)
-	if len(origins) == 0 {
-		origins = legacyScriptSourceDirs([]string{cityPath})
-	}
-	_, ok, err := legacyShimLinks(cityPath, origins)
+	origins := legacyScriptOriginsForScope(cityPath, cfg.PackDirs)
+	_, ok, err := legacyShimLinks(cityPath, origins, cityPath)
 	return ok, err
 }
 

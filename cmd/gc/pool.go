@@ -208,9 +208,22 @@ func resolveSetupScript(script, sourceDir, cityPath string) string {
 				return filepath.Join(cityPath, cleanScript)
 			}
 		}
-		return filepath.Join(sourceDir, script)
+		sourceCandidate := filepath.Join(sourceDir, script)
+		cityCandidate := filepath.Join(cityPath, filepath.Clean(script))
+		if fileExists(cityCandidate) && !fileExists(sourceCandidate) {
+			return cityCandidate
+		}
+		return sourceCandidate
 	}
 	return filepath.Join(cityPath, script)
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

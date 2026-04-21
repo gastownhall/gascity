@@ -1030,21 +1030,32 @@ func shouldSkipLegacyTopLevelScripts(srcFS fsys.FS, srcDir string) bool {
 	if sourceTemplatePackSchemaFS(srcFS, srcDir) < initPackSchemaVersion {
 		return false
 	}
-	_, ok, err := legacyShimLinks(srcDir, sourceTemplateLegacyScriptOriginsFS(srcFS, srcDir))
+	_, ok, err := legacyShimLinksFS(srcDir, sourceTemplateLegacyScriptOriginsFS(srcFS, srcDir), srcFS, srcDir)
 	return err == nil && ok
 }
 
-func sourceTemplateLegacyScriptOrigins(srcDir string) []string {
-	return sourceTemplateLegacyScriptOriginsFS(fsys.OSFS{}, srcDir)
-}
-
 func sourceTemplateLegacyScriptOriginsFS(srcFS fsys.FS, srcDir string) []string {
-	dir := filepath.Join(srcDir, "assets", "scripts")
-	info, err := srcFS.Stat(dir)
-	if err != nil || !info.IsDir() {
-		return nil
+	seen := make(map[string]struct{})
+	var dirs []string
+	add := func(candidates []string) {
+		for _, dir := range candidates {
+			dir = filepath.Clean(dir)
+			if _, ok := seen[dir]; ok {
+				continue
+			}
+			seen[dir] = struct{}{}
+			dirs = append(dirs, dir)
+		}
 	}
-	return []string{filepath.Clean(dir)}
+
+	add(legacyLocalScriptOriginsFS(srcFS, srcDir))
+
+	cfg, _, err := config.LoadWithIncludes(srcFS, filepath.Join(srcDir, "city.toml"))
+	if err == nil {
+		add(legacyScriptSourceDirsFS(srcFS, cfg.PackDirs))
+	}
+
+	return dirs
 }
 
 func sourceTemplatePackSchemaFS(srcFS fsys.FS, srcDir string) int {

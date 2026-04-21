@@ -148,6 +148,77 @@ schema = 2
 	}
 }
 
+func TestV2ScriptsLayoutTreatsTopLevelScriptsTargetsAsUserManaged(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(scriptsDir, "generated", "helper.sh"), filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("top-level scripts/ symlinks should still warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "user-managed symlinks") {
+		t.Fatalf("top-level scripts/ symlink targets should be treated as user-managed, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutTreatsRelayoutIntoAssetsScriptsAsUserManaged(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcFile := filepath.Join(cityDir, "assets", "scripts", "helper.sh")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "custom-helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("relayout symlink-only scripts/ should still warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "user-managed symlinks") {
+		t.Fatalf("relayout symlink-only scripts/ should be treated as user-managed, got %q", res.Message)
+	}
+}
+
 func TestV2ScriptsLayoutWarnsOnRealFilesAlongsideSymlinks(t *testing.T) {
 	t.Parallel()
 

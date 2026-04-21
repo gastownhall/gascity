@@ -42,9 +42,16 @@ func TestPruneLegacyScripts_RemovesSymlinkOnlyTree(t *testing.T) {
 	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile src: %v", err)
 	}
+	reviewSrc := filepath.Join(packScripts, "checks", "review.sh")
+	if err := os.MkdirAll(filepath.Dir(reviewSrc), 0o755); err != nil {
+		t.Fatalf("MkdirAll review src: %v", err)
+	}
+	if err := os.WriteFile(reviewSrc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile review src: %v", err)
+	}
 
 	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", srcFile)
-	writeLegacyScriptLink(t, cityPath, "scripts/checks/review.sh", srcFile)
+	writeLegacyScriptLink(t, cityPath, "scripts/checks/review.sh", reviewSrc)
 
 	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
 		t.Fatalf("pruneLegacyScripts: %v", err)
@@ -121,6 +128,67 @@ func TestPruneLegacyScripts_LeavesForeignSymlinkOnlyTreeUntouched(t *testing.T) 
 
 	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
 		t.Fatalf("foreign symlink should remain, err=%v", err)
+	}
+}
+
+func TestPruneLegacyScripts_LeavesUserManagedRelayoutUntouched(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
+	}
+	srcFile := filepath.Join(packScripts, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+
+	writeLegacyScriptLink(t, cityPath, "scripts/custom.sh", srcFile)
+
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "custom.sh")); err != nil {
+		t.Fatalf("user-managed relayout symlink should remain, err=%v", err)
+	}
+}
+
+func TestPruneLegacyScripts_LeavesSubsetOfLegacyOriginUntouched(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
+	}
+	helperSrc := filepath.Join(packScripts, "helper.sh")
+	if err := os.WriteFile(helperSrc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile helper src: %v", err)
+	}
+	extraSrc := filepath.Join(packScripts, "extra.sh")
+	if err := os.WriteFile(extraSrc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile extra src: %v", err)
+	}
+
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", helperSrc)
+
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("subset of legacy origin should remain user-owned, err=%v", err)
+	}
+}
+
+func TestPruneLegacyScripts_RemovesStaleLegacyShapeWhenOriginsMissing(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", filepath.Join(cityPath, "packs", "removed", "assets", "scripts", "helper.sh"))
+
+	if err := pruneLegacyScripts(cityPath, nil); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy-shaped scripts/ should be removed, err=%v", err)
 	}
 }
 
@@ -202,6 +270,7 @@ func TestPruneLegacyConfiguredScripts_FallsBackToScopeAssetsWhenPackDirsMissing(
 	}
 
 	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", cityAsset)
+	writeLegacyScriptLink(t, rigPath, "scripts/city.sh", cityAsset)
 	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigAsset)
 
 	cfg := &config.City{
@@ -220,6 +289,23 @@ func TestPruneLegacyConfiguredScripts_FallsBackToScopeAssetsWhenPackDirsMissing(
 	}
 	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
 		t.Fatalf("rig scripts/ should be pruned via local assets fallback, err=%v", err)
+	}
+}
+
+func TestPruneLegacyConfiguredScripts_FallbackPreservesTopLevelScriptsTargets(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", filepath.Join(cityPath, "scripts", "generated", "helper.sh"))
+
+	var warnings []string
+	pruneLegacyConfiguredScripts(cityPath, &config.City{}, func(scope string, err error) {
+		warnings = append(warnings, scope+": "+err.Error())
+	})
+	if len(warnings) > 0 {
+		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("user-managed top-level scripts symlink should remain, err=%v", err)
 	}
 }
 
@@ -245,6 +331,7 @@ func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 	}
 
 	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", citySrcFile)
+	writeLegacyScriptLink(t, rigPath, "scripts/city.sh", citySrcFile)
 	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigSrcFile)
 
 	logFile := filepath.Join(t.TempDir(), "beads.log")

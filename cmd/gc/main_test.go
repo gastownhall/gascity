@@ -3420,6 +3420,56 @@ func TestInitFromSkipForSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	v2ManagedDir := filepath.Join(dir, "v2-managed")
+	if err := os.MkdirAll(filepath.Join(v2ManagedDir, "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(v2ManagedDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2ManagedDir, "city.toml"),
+		[]byte("[workspace]\nname = \"modern\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2ManagedDir, "pack.toml"),
+		[]byte("[pack]\nname = \"modern\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	managedTarget := filepath.Join(v2ManagedDir, "assets", "scripts", "run.sh")
+	if err := os.WriteFile(managedTarget, []byte("#!/bin/sh\necho managed\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(managedTarget, filepath.Join(v2ManagedDir, "scripts", "custom-run.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	v2IncludedPackShimDir := filepath.Join(dir, "v2-include-shim")
+	if err := os.MkdirAll(filepath.Join(v2IncludedPackShimDir, "packs", "base", "assets", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(v2IncludedPackShimDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2IncludedPackShimDir, "city.toml"),
+		[]byte("[workspace]\nname = \"modern\"\nincludes = [\"packs/base\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2IncludedPackShimDir, "pack.toml"),
+		[]byte("[pack]\nname = \"modern\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2IncludedPackShimDir, "packs", "base", "pack.toml"),
+		[]byte("[pack]\nname = \"base\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	includedShimTarget := filepath.Join(v2IncludedPackShimDir, "packs", "base", "assets", "scripts", "run.sh")
+	if err := os.WriteFile(includedShimTarget, []byte("#!/bin/sh\necho include\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(includedShimTarget, filepath.Join(v2IncludedPackShimDir, "scripts", "run.sh")); err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name    string
 		srcDir  string
@@ -3430,6 +3480,8 @@ func TestInitFromSkipForSource(t *testing.T) {
 		{name: "legacy keeps top-level scripts", srcDir: v1Dir, relPath: "scripts", isDir: true, want: false},
 		{name: "packv2 preserves real top-level scripts", srcDir: v2RealDir, relPath: "scripts", isDir: true, want: false},
 		{name: "packv2 skips only legacy shim scripts", srcDir: v2ShimDir, relPath: "scripts", isDir: true, want: true},
+		{name: "packv2 skips legacy shim scripts backed by included packs", srcDir: v2IncludedPackShimDir, relPath: "scripts", isDir: true, want: true},
+		{name: "packv2 preserves user-managed symlink relayout", srcDir: v2ManagedDir, relPath: "scripts", isDir: true, want: false},
 		{name: "packv2 preserves foreign symlink tree", srcDir: v2ForeignDir, relPath: "scripts", isDir: true, want: false},
 		{name: "packv2 still skips .gc", srcDir: v2ShimDir, relPath: ".gc", isDir: true, want: true},
 		{name: "packv2 still skips tests", srcDir: v2ShimDir, relPath: "helper_test.go", isDir: false, want: true},
@@ -3465,6 +3517,7 @@ func TestInitFromSkipForSourceFSUsesProvidedLegacyOrigins(t *testing.T) {
 
 	fs := fsys.NewFake()
 	fs.Files[filepath.Join(srcDir, "pack.toml")] = []byte("[pack]\nname = \"modern\"\nschema = 2\n")
+	fs.Files[filepath.Join(srcDir, "assets", "scripts", "run.sh")] = []byte("#!/bin/sh\necho shim\n")
 	fs.Dirs[filepath.Join(srcDir, "assets")] = true
 	fs.Dirs[filepath.Join(srcDir, "assets", "scripts")] = true
 
