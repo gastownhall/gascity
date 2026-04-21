@@ -2621,7 +2621,7 @@ type WorkspaceResponse struct {
 
 // GetV0CityByCityNameAgentByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByBaseOutput.
 type GetV0CityByCityNameAgentByBaseOutputParams struct {
-	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
@@ -2633,7 +2633,7 @@ type PostV0CityByCityNameAgentByBaseByActionParamsAction string
 
 // GetV0CityByCityNameAgentByDirByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByDirByBaseOutput.
 type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
-	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
@@ -3029,7 +3029,7 @@ type StreamSessionParams struct {
 
 // GetV0CityByCityNameSessionByIdTranscriptParams defines parameters for GetV0CityByCityNameSessionByIdTranscript.
 type GetV0CityByCityNameSessionByIdTranscriptParams struct {
-	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Format Transcript format: conversation (default) or raw.

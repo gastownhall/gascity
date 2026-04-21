@@ -1028,6 +1028,7 @@ gc import
 | Subcommand | Description |
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
+| [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
@@ -1047,6 +1048,14 @@ gc import add <source> [flags]
 |------|------|---------|-------------|
 | `--name` | string |  | Local binding name override |
 | `--version` | string |  | Version constraint for git-backed imports |
+
+## gc import check
+
+Validate installed pack import state
+
+```
+gc import check
+```
 
 ## gc import install
 
@@ -2013,7 +2022,16 @@ Reads the session log, resolves the conversation DAG, and prints
 messages in chronological order. Searches default paths (~/.claude/projects/)
 and any extra paths from [daemon] observe_paths in city.toml.
 
-Use --tail to control how many compaction segments to show (0 = all).
+Use --tail to print only the last N transcript entries (0 = all).
+Semantics match Unix 'tail -n': '--tail 5' prints the final 5 entries,
+not the first 5. A single assistant turn with multiple tool-use blocks
+still counts as one entry. Compact-boundary dividers count as entries
+when they fall inside the final window.
+
+Compatibility note: before 1.0, --tail mapped to compaction segments.
+As of 1.0, --tail trims the displayed transcript entry window instead.
+The HTTP API's tail query parameter still uses compaction-segment
+semantics.
 Use -f to follow new messages as they arrive.
 
 ```
@@ -2024,6 +2042,8 @@ gc session logs <session> [flags]
 
 ```
 gc session logs mayor
+  gc session logs mayor --tail 2
+  gc session logs gc-123 --tail 20
   gc session logs gc-123 --tail 0
   gc session logs s-gc-123 -f
 ```
@@ -2031,7 +2051,7 @@ gc session logs mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-f`, `--follow` | bool |  | Follow new messages as they arrive |
-| `--tail` | int | `1` | Number of compaction segments to show (0 = all) |
+| `--tail` | int | `10` | Number of most recent transcript entries to show (0 = all; compact dividers count as entries) |
 
 ## gc session new
 

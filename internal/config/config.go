@@ -774,8 +774,11 @@ func splitCompoundWord(word string) []string {
 // Workspace holds city-level metadata and optional defaults that apply
 // to all agents unless overridden per-agent.
 type Workspace struct {
-	// Name is the human-readable name for this city.
-	Name string `toml:"name" jsonschema:"required"`
+	// Name is the legacy checked-in city name. Runtime identity now resolves
+	// from site binding (.gc/site.toml workspace_name), declared config, and
+	// basename precedence instead; gc init writes the machine-local name to
+	// site.toml and omits it from city.toml.
+	Name string `toml:"name,omitempty"`
 	// Prefix overrides the auto-derived HQ bead ID prefix. When empty,
 	// the prefix is derived from the city Name via DeriveBeadsPrefix.
 	Prefix string `toml:"prefix,omitempty"`

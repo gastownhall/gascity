@@ -216,31 +216,39 @@ func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"
-	commit := "abc123def456"
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
-	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+	repoDir := filepath.Join(home, "orders-pack-work")
+	if err := os.MkdirAll(filepath.Join(repoDir, "formulas"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "formulas"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "orders"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repoDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(cacheDir, "pack.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "pack.toml"), []byte(`
 [pack]
 name = "ops"
 schema = 1
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cacheDir, "orders", "health-check.order.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "orders", "health-check.order.toml"), []byte(`
 [order]
 formula = "health-check"
 trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitImport(t, repoDir, "init")
+	mustGitImport(t, repoDir, "add", ".")
+	mustGitImport(t, repoDir, "commit", "-m", "initial")
+	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
+
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repoDir, cacheDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,7 +274,7 @@ schema = 1
 
 [packs."https://github.com/example/orders-pack.git"]
 version = "1.2.3"
-commit = "abc123def456"
+commit = "`+commit+`"
 fetched = "2026-04-10T00:00:00Z"
 `), 0o644); err != nil {
 		t.Fatal(err)

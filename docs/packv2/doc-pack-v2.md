@@ -269,6 +269,7 @@ Four distinct operations, currently partially conflated:
 | Operation | Verb | What it does |
 |---|---|---|
 | Define a city's contents | `gc init` (creates files), or hand-edit | Creates pack.toml, city.toml, directory structure |
+| Validate installed imports | `gc import check` | Checks declared imports, `packs.lock`, and local cache state without fetching or mutating |
 | Install a city's packs | `gc import install` | Bootstraps or repairs `packs.lock` and materializes all imports into the cache |
 | Register a city with the controller | `gc register` | Binds the city to `.gc/`; tells the controller it exists |
 | Start the city's runtime | `gc start` | Controller activates the registered city |

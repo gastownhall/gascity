@@ -192,7 +192,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
-		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false)
+		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true)
 	}
 	statusCode := http.StatusAccepted // always async for agent sessions
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
@@ -352,7 +352,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
-		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false)
+		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true)
 	}
 	statusCode := http.StatusCreated
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)

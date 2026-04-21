@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func writeTestSession(t *testing.T, searchBase, workDir string, lines ...string) {
@@ -79,11 +82,63 @@ func TestDoSessionLogsBasic(t *testing.T) {
 	}
 }
 
-func TestDoSessionLogsCompactBoundary(t *testing.T) {
+// TestDoSessionLogsTailReturnsLastNEntries verifies the user-facing `--tail N`
+// semantics: print the LAST N displayable log entries (matching Unix `tail -n`),
+// not the FIRST N, and regardless of compaction boundaries in the transcript.
+func TestDoSessionLogsTailReturnsLastNEntries(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
 
-	// Two compact boundaries so tail=1 returns only the last segment.
+	// Six distinct user/assistant entries with no compaction boundaries at all.
+	// This mirrors the Gas City 1.0 tutorial case where a fresh mayor session
+	// has no compactions yet. Prior behavior ("N compaction segments") returned
+	// every entry, printing the FIRST N visible on screen; the corrected
+	// semantics must return the LAST N.
+	writeTestSession(t, searchBase, workDir,
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"first"},"timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":{"role":"assistant","content":"reply-1"},"timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"user","message":{"role":"user","content":"second"},"timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":{"role":"assistant","content":"reply-2"},"timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"5","parentUuid":"4","type":"user","message":{"role":"user","content":"third"},"timestamp":"2025-01-01T00:00:04Z"}`,
+		`{"uuid":"6","parentUuid":"5","type":"assistant","message":{"role":"assistant","content":"reply-3"},"timestamp":"2025-01-01T00:00:05Z"}`,
+	)
+
+	path := sessionlog.FindSessionFile([]string{searchBase}, workDir)
+	if path == "" {
+		t.Fatal("session file not found")
+	}
+
+	// --tail 2 must return the LAST 2 entries: "third" + "reply-3".
+	var stdout, stderr bytes.Buffer
+	code := doSessionLogs(path, "", false, 2, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "third") {
+		t.Errorf("tail=2 should include the penultimate entry 'third', got: %s", out)
+	}
+	if !strings.Contains(out, "reply-3") {
+		t.Errorf("tail=2 should include the last entry 'reply-3', got: %s", out)
+	}
+	// Everything before the last 2 must be absent. In particular, the FIRST
+	// entry must not leak through — that was the bug the user reported.
+	forbidden := []string{"first", "reply-1", "second", "reply-2"}
+	for _, s := range forbidden {
+		if strings.Contains(out, s) {
+			t.Errorf("tail=2 should not include earlier entry %q (would be 'first N' behavior), got: %s", s, out)
+		}
+	}
+}
+
+// TestDoSessionLogsTailIgnoresCompactBoundaries confirms that `--tail N` counts
+// displayable log entries, not compaction segments: a transcript with several
+// compact boundaries must still yield exactly N trailing entries.
+func TestDoSessionLogsTailIgnoresCompactBoundaries(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+
 	writeTestSession(t, searchBase, workDir,
 		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"first"},"timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":{"role":"assistant","content":"reply"},"timestamp":"2025-01-01T00:00:01Z"}`,
@@ -100,7 +155,8 @@ func TestDoSessionLogsCompactBoundary(t *testing.T) {
 		t.Fatal("session file not found")
 	}
 
-	// tail=1 should show only from the last compact boundary.
+	// --tail 1 should print exactly the last entry ("reply2"), not "the last
+	// compaction segment."
 	var stdout, stderr bytes.Buffer
 	code := doSessionLogs(path, "", false, 1, &stdout, &stderr)
 	if code != 0 {
@@ -108,14 +164,29 @@ func TestDoSessionLogsCompactBoundary(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if strings.Contains(out, "first") {
-		t.Errorf("tail=1 should not include messages before compact boundary, got: %s", out)
+	if !strings.Contains(out, "reply2") {
+		t.Errorf("tail=1 should include final assistant 'reply2', got: %s", out)
 	}
-	if !strings.Contains(out, "context compacted") {
-		t.Errorf("output should contain compact divider, got: %s", out)
+	for _, forbidden := range []string{"first", "middle", "second"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("tail=1 should not include earlier entry %q, got: %s", forbidden, out)
+		}
 	}
-	if !strings.Contains(out, "second") {
-		t.Errorf("output should contain 'second', got: %s", out)
+
+	// --tail 0 should print everything, including the two compact boundary
+	// dividers.
+	stdout.Reset()
+	stderr.Reset()
+	code = doSessionLogs(path, "", false, 0, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("tail=0 code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out = stdout.String()
+	if !strings.Contains(out, "first") || !strings.Contains(out, "second") {
+		t.Errorf("tail=0 should include all entries, got: %s", out)
+	}
+	if strings.Count(out, "context compacted") != 2 {
+		t.Errorf("tail=0 should render both compact dividers, got: %s", out)
 	}
 }
 
@@ -322,75 +393,104 @@ func TestDoSessionLogsNegativeTail(t *testing.T) {
 	}
 }
 
-// TestDoSessionLogsFollowSeeding verifies that follow mode seeds the 'seen' map
-// with ALL existing messages (not just the tail window) before entering the
-// poll loop. Without this, switching from tail=N to tail=0 re-reads would
-// replay messages from before the compaction boundary.
-func TestDoSessionLogsFollowSeeding(t *testing.T) {
-	searchBase := t.TempDir()
-	workDir := t.TempDir()
+// TestDoSessionLogsFollowTailShowsOnlyNewMessagesOnReadErrorExit exercises the
+// real follow path with an initial tail window and exits via the existing
+// consecutive-read-error threshold. Older pre-tail entries must be marked seen
+// from the initial snapshot so that follow-mode re-reads only emit messages
+// that arrived after the command started watching.
+func TestDoSessionLogsFollowTailShowsOnlyNewMessagesOnReadErrorExit(t *testing.T) {
+	initial := &sessionlog.Session{
+		Messages: []*sessionlog.Entry{
+			{
+				UUID:      "1",
+				Type:      "user",
+				Message:   jsonMessage(t, "user", "old msg"),
+				Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+			},
+			{
+				UUID:      "2",
+				Type:      "system",
+				Subtype:   "compact_boundary",
+				Timestamp: time.Date(2025, 1, 1, 0, 0, 1, 0, time.UTC),
+			},
+			{
+				UUID:      "3",
+				Type:      "user",
+				Message:   jsonMessage(t, "user", "middle msg"),
+				Timestamp: time.Date(2025, 1, 1, 0, 0, 2, 0, time.UTC),
+			},
+			{
+				UUID:      "4",
+				Type:      "system",
+				Subtype:   "compact_boundary",
+				Timestamp: time.Date(2025, 1, 1, 0, 0, 3, 0, time.UTC),
+			},
+			{
+				UUID:      "5",
+				Type:      "user",
+				Message:   jsonMessage(t, "user", "recent msg"),
+				Timestamp: time.Date(2025, 1, 1, 0, 0, 4, 0, time.UTC),
+			},
+		},
+	}
+	withNew := &sessionlog.Session{
+		Messages: append(append([]*sessionlog.Entry{}, initial.Messages...),
+			&sessionlog.Entry{
+				UUID:      "6",
+				Type:      "assistant",
+				Message:   jsonMessage(t, "assistant", "fresh msg"),
+				Timestamp: time.Date(2025, 1, 1, 0, 0, 5, 0, time.UTC),
+			},
+		),
+	}
 
-	// Session with two compact boundaries: tail=1 shows only the last segment.
-	// Need 2 boundaries so sliceAtCompactBoundaries actually trims.
-	writeTestSession(t, searchBase, workDir,
-		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"old msg"},"timestamp":"2025-01-01T00:00:00Z"}`,
-		`{"uuid":"2","parentUuid":"1","type":"system","subtype":"compact_boundary","message":{"role":"system","content":"compacted 1"},"timestamp":"2025-01-01T00:00:01Z"}`,
-		`{"uuid":"3","parentUuid":"2","type":"user","message":{"role":"user","content":"middle msg"},"timestamp":"2025-01-01T00:00:02Z"}`,
-		`{"uuid":"4","parentUuid":"3","type":"system","subtype":"compact_boundary","message":{"role":"system","content":"compacted 2"},"timestamp":"2025-01-01T00:00:03Z"}`,
-		`{"uuid":"5","parentUuid":"4","type":"user","message":{"role":"user","content":"recent msg"},"timestamp":"2025-01-01T00:00:04Z"}`,
+	var stdout, stderr bytes.Buffer
+	readCount := 0
+	code := runSessionLogs(
+		nil,
+		"",
+		"/ignored",
+		true,
+		1,
+		&stdout,
+		&stderr,
+		func(time.Duration) {},
+		func(_ *worker.Factory, _ string, _ string) (*worker.TranscriptSession, error) {
+			readCount++
+			switch readCount {
+			case 1:
+				return initial, nil
+			case 2:
+				return withNew, nil
+			default:
+				return nil, fmt.Errorf("boom %d", readCount)
+			}
+		},
 	)
-
-	path := sessionlog.FindSessionFile([]string{searchBase}, workDir)
-	if path == "" {
-		t.Fatal("session file not found")
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 after injected consecutive read failures", code)
 	}
 
-	// Simulate what doSessionLogs does: initial tail=1 read, then seed seen
-	// map with tail=0. Verify "old msg" uuid is in seen even though it
-	// wasn't printed.
-	sess, err := sessionlog.ReadFile(path, 1)
-	if err != nil {
-		t.Fatal(err)
+	out := stdout.String()
+	if !strings.Contains(out, "recent msg") {
+		t.Fatalf("initial tail window should print the most recent existing entry, got: %s", out)
 	}
-
-	seen := make(map[string]bool)
-	for _, msg := range sess.Messages {
-		seen[msg.UUID] = true
+	if !strings.Contains(out, "fresh msg") {
+		t.Fatalf("follow mode should print the new message from the reread, got: %s", out)
 	}
-
-	// At this point, seen should NOT contain uuid "1" (it's before the boundary).
-	if seen["1"] {
-		t.Fatal("tail=1 should not include pre-boundary messages")
-	}
-
-	// Now simulate the seeding step (what doSessionLogs does before follow loop).
-	full, err := sessionlog.ReadFile(path, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, msg := range full.Messages {
-		seen[msg.UUID] = true
-	}
-
-	// After seeding, "1" should be in seen — preventing replay on re-read.
-	if !seen["1"] {
-		t.Error("after follow-mode seeding, pre-boundary message UUID should be in seen")
-	}
-
-	// Simulate a follow-mode re-read: no unseen messages should exist.
-	reread, err := sessionlog.ReadFile(path, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var unseen []string
-	for _, msg := range reread.Messages {
-		if !seen[msg.UUID] {
-			unseen = append(unseen, msg.UUID)
+	for _, forbidden := range []string{"old msg", "middle msg"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("follow mode should not replay pre-tail entry %q, got: %s", forbidden, out)
 		}
 	}
-	if len(unseen) > 0 {
-		t.Errorf("follow-mode re-read found unseen messages (would be replayed): %v", unseen)
+	if !strings.Contains(stderr.String(), "5 consecutive read errors") {
+		t.Fatalf("stderr should report the injected termination condition, got: %s", stderr.String())
 	}
+}
+
+func jsonMessage(t *testing.T, role, content string) []byte {
+	t.Helper()
+	return []byte(fmt.Sprintf(`{"role":%q,"content":%q}`, role, content))
 }
 
 func TestPrintLogEntryTimestamp(t *testing.T) {

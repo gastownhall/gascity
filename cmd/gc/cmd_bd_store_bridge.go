@@ -220,7 +220,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		}
 		return writeJSON(stdout, bridgeBeads(items))
 	case "ready":
-		items, err := store.Ready()
+		items, err := beads.ReadyLive(store)
 		if err != nil {
 			return err
 		}

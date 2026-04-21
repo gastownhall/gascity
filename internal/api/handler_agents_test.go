@@ -33,6 +33,18 @@ func (p partialAgentSessionLister) ListRunning(prefix string) ([]string, error) 
 	return filtered, p.err
 }
 
+type activeBeadQueryStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Assignee != "" && query.Status == "in_progress" {
+		s.queries = append(s.queries, query)
+	}
+	return s.Store.List(query)
+}
+
 func TestAgentList(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
@@ -47,7 +59,10 @@ func TestAgentList(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var resp listResponse
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -352,6 +367,109 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	}
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want %q", got, work.ID)
+	}
+}
+
+func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	store := &activeBeadQueryStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	work, err := store.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0].ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want %q", got, work.ID)
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("active-bead queries = %d, want 1", len(store.queries))
+	}
+	if store.queries[0].Live {
+		t.Fatal("agent list active-bead lookup should stay cached")
+	}
+}
+
+func TestAgentGetActiveBeadUsesLiveLookup(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := backing.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	state.stores["myrig"] = cache
+
+	reassigned := "other-session"
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &reassigned}); err != nil {
+		t.Fatalf("reassign backing work: %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp.ActiveBead; got != "" {
+		t.Fatalf("active_bead = %q, want empty after external reassignment", got)
 	}
 }
 

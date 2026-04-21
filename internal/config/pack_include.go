@@ -4,12 +4,15 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+var runRepoCacheGit = defaultRunRepoCacheGit
 
 // includeCacheDir is the subdirectory under .gc/cache/includes/ where
 // remote pack includes are cached.
@@ -207,12 +210,21 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, fmt.Errorf("resolving home dir: %w", err)
 	}
 
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, entry.Commit))
-	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
-		if os.IsNotExist(err) {
-			return "", false, fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
+	if err := WithRepoCacheReadLock(cacheRoot, func() error {
+		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+			}
+			return fmt.Errorf("checking cached import %s: %w", source, err)
 		}
-		return "", false, fmt.Errorf("checking cached import %s: %w", source, err)
+		if err := validateLockedRemoteCache(source, cacheDir, entry.Commit); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return "", false, err
 	}
 	return cacheDir, true, nil
 }
@@ -241,14 +253,94 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 		return "", fmt.Errorf("resolving home dir: %w", err)
 	}
 
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, entry.Commit))
-	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
+	if err := WithRepoCacheReadLock(cacheRoot, func() error {
+		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+			}
+			return fmt.Errorf("checking cached import %s: %w", source, err)
 		}
-		return "", fmt.Errorf("checking cached import %s: %w", source, err)
+		if err := validateLockedRemoteCache(source, cacheDir, entry.Commit); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return "", err
 	}
 	return cacheDir, nil
+}
+
+func validateLockedRemoteCache(source, cacheDir, commit string) error {
+	head, err := runRepoCacheGit(cacheDir, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("reading cached import %s HEAD: %w", source, err)
+	}
+	if !sameRepoCacheCommit(head, commit) {
+		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
+	}
+	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain", "--ignored")
+	if err != nil {
+		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+	}
+	return nil
+}
+
+func sameRepoCacheCommit(actual, expected string) bool {
+	actual = strings.TrimSpace(actual)
+	expected = strings.TrimSpace(expected)
+	if actual == "" || expected == "" {
+		return false
+	}
+	if strings.EqualFold(actual, expected) {
+		return true
+	}
+	return len(expected) >= 7 && len(expected) < len(actual) && strings.HasPrefix(strings.ToLower(actual), strings.ToLower(expected))
+}
+
+func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
+	cmdArgs := append([]string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.untrackedCache=false",
+	}, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	cmd.Dir = dir
+	for _, e := range os.Environ() {
+		if k, _, ok := strings.Cut(e, "="); ok && repoCacheGitEnvBlacklist[k] {
+			continue
+		}
+		cmd.Env = append(cmd.Env, e)
+	}
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+var repoCacheGitEnvBlacklist = map[string]bool{
+	"GIT_DIR":                          true,
+	"GIT_WORK_TREE":                    true,
+	"GIT_INDEX_FILE":                   true,
+	"GIT_OBJECT_DIRECTORY":             true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+	"GIT_COMMON_DIR":                   true,
+	"GIT_CEILING_DIRECTORIES":          true,
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  true,
+	"GIT_NAMESPACE":                    true,
+	"GIT_CONFIG":                       true,
+	"GIT_CONFIG_GLOBAL":                true,
+	"GIT_CONFIG_SYSTEM":                true,
+	"GIT_CONFIG_NOSYSTEM":              true,
+	"GIT_CONFIG_COUNT":                 true,
+	"GIT_EXEC_PATH":                    true,
+	"GIT_PAGER":                        true,
 }
 
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.

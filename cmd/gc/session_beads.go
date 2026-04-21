@@ -375,7 +375,7 @@ func unclaimWorkAssignedToRetiredSessionBead(store beads.Store, sessionID, fallb
 	}
 	empty := ""
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: sessionID, Status: status})
+		work, err := store.List(beads.ListQuery{Assignee: sessionID, Status: status, Live: true})
 		if err != nil {
 			fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s: %v\n", sessionID, err) //nolint:errcheck
 			continue
@@ -403,7 +403,7 @@ func reassignWorkAssignedToRetiredSessionBead(store beads.Store, oldSessionID, n
 		stderr = io.Discard
 	}
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: oldSessionID, Status: status})
+		work, err := store.List(beads.ListQuery{Assignee: oldSessionID, Status: status, Live: true})
 		if err != nil {
 			fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s: %v\n", oldSessionID, err) //nolint:errcheck
 			continue

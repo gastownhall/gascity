@@ -231,7 +231,7 @@ conversation history:
 
 ```shell
 ~/my-city
-$ gc session logs mayor --tail 1
+$ gc session logs mayor --tail 2
 07:22:29 [USER] [my-city] mayor • 2026-04-08T00:22:24
 Check the status of mc-wisp-8t8
 
@@ -240,9 +240,13 @@ mc-wisp-8t8 is a review request for the auth module. I've routed it to
 my-project/reviewer.
 ```
 
-Note that `--tail` here counts compaction _segments_, not lines — `--tail 1`
-shows the most recent segment, `--tail 0` shows all of them. Follow live output
-with `-f`:
+`--tail N` prints the last N transcript entries (same convention as `tail -n`),
+so `--tail 2` above shows the most recent user prompt and the mayor's reply.
+Compact-boundary dividers count as entries if one lands inside that final
+window. Use `--tail 0` to print the whole conversation. Compatibility note:
+before 1.0, `--tail` counted compaction segments; as of 1.0 it counts
+displayed transcript entries instead. The HTTP API's `tail` query parameter
+still counts compaction segments. Follow live output with `-f`:
 
 ```shell
 ~/my-city

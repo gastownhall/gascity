@@ -16,6 +16,7 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in milliseconds (default: 45000)
 
 set -e
 
@@ -27,6 +28,7 @@ DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
+CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-45000}"
 
 # Derived paths (set after GC_CITY_PATH validation).
 GC_DIR=""
@@ -439,7 +441,15 @@ EOF
 }
 
 load_existing_managed_from_gc() {
-    local gc_bin host output key value status parsed=false
+    local gc_bin host output key value status parsed=false timeout_ms="${1:-30000}"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=30000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 1 ]; then
+        timeout_ms=1
+    fi
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     GC_EXISTING_USED="false"
@@ -451,7 +461,7 @@ load_existing_managed_from_gc() {
     GC_EXISTING_REUSABLE="false"
     [ -n "$gc_bin" ] || return 1
     GC_EXISTING_USED="true"
-    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms 30000 </dev/null 2>/dev/null)
+    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms "$timeout_ms" </dev/null 2>/dev/null)
     status=$?
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
@@ -488,6 +498,30 @@ EOF
         return 1
     fi
     [ "$status" -eq 0 ]
+}
+
+current_time_ms() {
+    local gc_bin now
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        now=$("$gc_bin" dolt-state now-ms </dev/null 2>/dev/null) || now=""
+        case "$now" in
+            ''|*[!0-9]*)
+                now=""
+                ;;
+        esac
+        if [ -n "$now" ]; then
+            printf '%s\n' "$now"
+            return 0
+        fi
+    fi
+    now=$(date +%s 2>/dev/null) || return 1
+    case "$now" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s000\n' "$now"
 }
 
 run_preflight_cleanup() {
@@ -935,9 +969,25 @@ EOF
 }
 
 wait_for_concurrent_start_ready() {
-    local existing_pid="" existing_port="" holder="" waited=0
-    while [ "$waited" -lt 20 ]; do
-        if load_existing_managed_from_gc; then
+    local existing_pid="" existing_port="" holder="" timeout_ms deadline_ms now_ms remaining_ms sleep_ms
+    timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=45000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 500 ]; then
+        timeout_ms=500
+    fi
+    now_ms=$(current_time_ms) || return 1
+    deadline_ms=$((now_ms + timeout_ms))
+    while :; do
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
+            return 1
+        fi
+        if load_existing_managed_from_gc "$remaining_ms"; then
             existing_pid="$GC_EXISTING_MANAGED_PID"
             if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
                 DOLT_PORT="$GC_EXISTING_STATE_PORT"
@@ -970,10 +1020,24 @@ wait_for_concurrent_start_ready() {
                 fi
             fi
         fi
-        sleep 0.5 2>/dev/null || sleep 1
-        waited=$((waited + 1))
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
+            return 1
+        fi
+        sleep_ms=500
+        if [ "$remaining_ms" -lt "$sleep_ms" ]; then
+            sleep_ms="$remaining_ms"
+        fi
+        if [ "$sleep_ms" -le 0 ]; then
+            return 1
+        fi
+        if [ "$sleep_ms" -lt 500 ]; then
+            sleep "0.$(printf '%03d' "$sleep_ms")" 2>/dev/null || sleep 1
+        else
+            sleep 0.5 2>/dev/null || sleep 1
+        fi
     done
-    return 1
 }
 
 load_stop_managed_from_gc() {

@@ -1966,7 +1966,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Name is the human-readable name for this city."
+          "description": "Name is the legacy checked-in city name. Runtime identity now resolves\nfrom site binding (.gc/site.toml workspace_name), declared config, and\nbasename precedence instead; gc init writes the machine-local name to\nsite.toml and omits it from city.toml."
         },
         "prefix": {
           "type": "string",
@@ -2023,9 +2023,6 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
       "description": "Workspace holds city-level metadata and optional defaults that apply to all agents unless overridden per-agent."
     }
   },

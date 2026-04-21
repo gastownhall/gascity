@@ -62,7 +62,7 @@ var tutorialPageManifests = []pageManifest{
 			"gc session attach mayor",
 			`gc session nudge mayor "What's the current city status?"`,
 			"gc session list",
-			"gc session logs mayor --tail 1",
+			"gc session logs mayor --tail 2",
 			"gc session logs mayor -f",
 			`gc session nudge mayor "What's the current city status?"`,
 		},

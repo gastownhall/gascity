@@ -25,6 +25,8 @@ The launch contract for PackV2 imports is now:
 - Normal load, start, and config flows are pure readers of declared
   imports, `packs.lock`, and the local cache. They do not fetch or
   self-heal.
+- `gc import check` is the read-only validation surface for declared
+  imports, lock state, and local cache state.
 - `gc import install` is the single remediation command. It bootstraps
   `packs.lock` from declared imports when needed and restores cache
   state from `packs.lock` when possible.
@@ -186,6 +188,16 @@ hint to run `gc import install`.
 - restore cache state from `packs.lock` when possible
 - provide the one remediation path used by fresh clones, broken caches,
   and offline-preparation workflows
+- repair managed repo-cache entries in place when they drift from
+  `packs.lock`; this may discard local edits or untracked files inside
+  `$HOME/.gc/cache/repos/<key>` because that directory is machine-managed
+
+### `gc import check`
+
+- validate declared imports against `packs.lock` without fetching
+- validate the locked cache entries and cached pack roots already exist
+- report stale lock/cache drift with `gc import install` as the repair
+  path
 
 ### `gc import upgrade [<binding>]`
 
@@ -218,6 +230,13 @@ Run `gc import install`. It resolves the declared imports, writes
 ### Normal load/start/config with missing import state
 
 Fail fast and tell the user to run `gc import install`.
+
+### Checking import state without mutation
+
+Run `gc import check`. It does not resolve versions, fetch, clone, or
+rewrite files. It reports missing lock entries, missing cache entries,
+cache checkout drift, missing cached `pack.toml` files, and stale lock
+entries. Run `gc import install` to repair the lock/cache state.
 
 ### Offline execution
 

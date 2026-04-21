@@ -690,18 +690,24 @@ func bootstrapSkillDirs() ([]namedSkillsDir, error) {
 		return nil, nil
 	}
 	out := make([]namedSkillsDir, 0, len(imports))
-	for name, imp := range imports {
-		if _, ok := bootstrapNames[name]; !ok {
-			continue
+	cacheRoot := filepath.Join(gcHome, "cache", "repos")
+	if err := config.WithRepoCacheReadLock(cacheRoot, func() error {
+		for name, imp := range imports {
+			if _, ok := bootstrapNames[name]; !ok {
+				continue
+			}
+			if imp.Commit == "" {
+				continue
+			}
+			skillsDir := filepath.Join(config.GlobalRepoCachePath(gcHome, imp.Source, imp.Commit), "skills")
+			if info, err := os.Stat(skillsDir); err != nil || !info.IsDir() {
+				continue
+			}
+			out = append(out, namedSkillsDir{Name: name, Dir: skillsDir})
 		}
-		if imp.Commit == "" {
-			continue
-		}
-		skillsDir := filepath.Join(config.GlobalRepoCachePath(gcHome, imp.Source, imp.Commit), "skills")
-		if info, err := os.Stat(skillsDir); err != nil || !info.IsDir() {
-			continue
-		}
-		out = append(out, namedSkillsDir{Name: name, Dir: skillsDir})
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

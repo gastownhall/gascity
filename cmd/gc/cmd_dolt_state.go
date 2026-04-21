@@ -230,6 +230,21 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = existingManaged.MarkFlagRequired("port")
 	cmd.AddCommand(existingManaged)
 
+	nowMS := &cobra.Command{
+		Use:    "now-ms",
+		Short:  "Print the current Unix time in milliseconds",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if _, err := fmt.Fprintln(stdout, time.Now().UnixMilli()); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state now-ms: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.AddCommand(nowMS)
+
 	queryProbe := &cobra.Command{
 		Use:    "query-probe",
 		Short:  "Probe managed Dolt SQL readiness",

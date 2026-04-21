@@ -7205,12 +7205,12 @@
             }
           },
           {
-            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
               "type": "string"
             }
           },
@@ -7656,12 +7656,12 @@
             }
           },
           {
-            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
               "type": "string"
             }
           },
@@ -15188,12 +15188,12 @@
             }
           },
           {
-            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
               "type": "string"
             }
           },
