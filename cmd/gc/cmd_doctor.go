@@ -144,6 +144,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
+	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
+		d.Register(newImportStateDoctorCheck(cityPath))
+	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
 	// materialization and the bootstrap collision checks cover what the

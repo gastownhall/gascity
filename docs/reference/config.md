@@ -97,11 +97,12 @@ Agent defines a configured agent in the city.
 | `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Accepted during parse for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. Set to true when hooks are manually installed (e.g., merged into the project's own hook config) and auto-installation via install_agent_hooks is not desired. When true, the agent is treated as hook-enabled for startup behavior: no prime instruction in beacon and no delayed nudge. Interacts with install_agent_hooks — set this instead when hooks are pre-installed. |
 | `session_setup` | []string |  |  | SessionSetup is a list of shell commands run after session creation. Each command is a template string supporting placeholders: &#123;&#123;.Session&#125;&#125;, &#123;&#123;.Agent&#125;&#125;, &#123;&#123;.AgentBase&#125;&#125;, &#123;&#123;.Rig&#125;&#125;, &#123;&#123;.RigRoot&#125;&#125;, &#123;&#123;.CityRoot&#125;&#125;, &#123;&#123;.CityName&#125;&#125;, &#123;&#123;.WorkDir&#125;&#125;. Commands run in gc's process (not inside the agent session) via sh -c. |
-| `session_setup_script` | string |  |  | SessionSetupScript is the path to a script run after session_setup commands. Relative paths resolve against the city directory. The script receives context via environment variables (GC_SESSION plus existing GC_* vars). |
+| `session_setup_script` | string |  |  | SessionSetupScript is the path to a script run after session_setup commands. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. The script receives context via environment variables (GC_SESSION plus existing GC_* vars). |
 | `session_live` | []string |  |  | SessionLive is a list of shell commands that are safe to re-apply without restarting the agent. Run at startup (after session_setup) and re-applied on config change without triggering a restart. Must be idempotent. Typical use: tmux theming, keybindings, status bars. Same template placeholders as session_setup. |
 | `overlay_dir` | string |  |  | OverlayDir is a directory whose contents are recursively copied (additive) into the agent's working directory at startup. Existing files are not overwritten. Relative paths resolve against the declaring config file's directory (pack-safe). |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula is the formula name automatically applied via --on when beads are slung to this agent, unless --no-formula is set. Example: "mol-polecat-work" |
 | `inject_fragments` | []string |  |  | InjectFragments lists named template fragments to append to this agent's rendered prompt. Fragments come from shared template directories across all loaded packs. Each name must match a &#123;&#123; define "name" &#125;&#125; block. |
+| `append_fragments` | []string |  |  | AppendFragments is the V2 per-agent alias for prompt fragment injection. It layers after InjectFragments and before inherited/default fragments. |
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialization vs which are the city-wide set.  Pointer tri-state:   nil   -&gt; inherit: inject when the agent has a vendor sink   *true -&gt; explicitly inject (equivalent to the default)   *false -&gt; disable; the template is responsible for rendering             any skill guidance itself |
 | `attach` | boolean |  |  | Attach controls whether the agent's session supports interactive attachment (e.g., tmux attach). When false, the agent can use a lighter runtime (subprocess instead of tmux). Defaults to true. |
 | `fallback` | boolean |  |  | Fallback marks this agent as a fallback definition. During pack composition, a non-fallback agent with the same name wins silently. When two fallbacks collide, the first loaded (depth-first) wins. |
@@ -152,11 +153,12 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills overrides Agent.InjectAssignedSkills (see that field for semantics). |
 | `session_setup` | []string |  |  | SessionSetup overrides the agent's session_setup commands. |
-| `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the city directory. |
+| `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session_live` | []string |  |  | SessionLive overrides the agent's session_live commands. |
 | `overlay_dir` | string |  |  | OverlayDir overrides the agent's overlay_dir path. Copies contents additively into the agent's working directory at startup. Relative paths resolve against the city directory. |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula overrides the default sling formula. |
 | `inject_fragments` | []string |  |  | InjectFragments overrides the agent's inject_fragments list. |
+| `append_fragments` | []string |  |  | AppendFragments appends named template fragments to this agent's rendered prompt. It is the V2 spelling for per-agent fragment selection. |
 | `pre_start_append` | []string |  |  | PreStartAppend appends commands to the agent's pre_start list (instead of replacing). Applied after PreStart if both are set. |
 | `session_setup_append` | []string |  |  | SessionSetupAppend appends commands to the agent's session_setup list. |
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
@@ -203,11 +205,12 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills overrides per-agent appendix injection (see Agent.InjectAssignedSkills). |
 | `session_setup` | []string |  |  | SessionSetup overrides the agent's session_setup commands. |
-| `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the city directory. |
+| `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session_live` | []string |  |  | SessionLive overrides the agent's session_live commands. |
 | `overlay_dir` | string |  |  | OverlayDir overrides the agent's overlay_dir path. Copies contents additively into the agent's working directory at startup. Relative paths resolve against the city directory. |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula overrides the default sling formula. |
 | `inject_fragments` | []string |  |  | InjectFragments overrides the agent's inject_fragments list. |
+| `append_fragments` | []string |  |  | AppendFragments overrides the agent's append_fragments list. |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
@@ -582,7 +585,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `name` | string | **yes** |  | Name is the human-readable name for this city. |
+| `name` | string |  |  | Name is the legacy checked-in city name. Runtime identity now resolves from site binding (.gc/site.toml workspace_name), declared config, and basename precedence instead; gc init writes the machine-local name to site.toml and omits it from city.toml. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived HQ bead ID prefix. When empty, the prefix is derived from the city Name via DeriveBeadsPrefix. |
 | `provider` | string |  |  | Provider is the default provider name used by agents that don't specify one. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for all agents. |

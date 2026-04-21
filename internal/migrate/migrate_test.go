@@ -625,6 +625,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		OverlayDir:             "overlays/test",
 		DefaultSlingFormula:    &formula,
 		InjectFragments:        []string{"frag1"},
+		AppendFragments:        []string{"append1"},
 		Attach:                 &trueVal,
 		Fallback:               true,
 		DependsOn:              []string{"other-agent"},

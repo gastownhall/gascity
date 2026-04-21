@@ -214,13 +214,60 @@ source = "./packs/gastown"
 	}
 	text := string(data)
 	for _, want := range []string{
-		`[defaults.rig.imports.gastown]`,
+		`[defaults.rig.imports."gastown"]`,
 		`source = "./packs/gastown"`,
 		`[imports.tools]`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("pack.toml missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestDoImportAddPreservesQuotedRootPackDefaultRigImportBinding(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports."foo.bar"]
+source = "./packs/foo"
+`)
+
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	t.Cleanup(func() {
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `[defaults.rig.imports."foo.bar"]`) {
+		t.Fatalf("pack.toml did not preserve quoted default-rig binding:\n%s", text)
+	}
+	if strings.Contains(text, "[defaults.rig.imports.foo.bar]") {
+		t.Fatalf("pack.toml split quoted default-rig binding:\n%s", text)
 	}
 }
 
@@ -447,7 +494,7 @@ source = "./packs/gastown"
 		t.Fatalf("pack.toml still contains removed import:\n%s", text)
 	}
 	for _, want := range []string{
-		`[defaults.rig.imports.gastown]`,
+		`[defaults.rig.imports."gastown"]`,
 		`source = "./packs/gastown"`,
 	} {
 		if !strings.Contains(text, want) {
@@ -670,6 +717,108 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	}
 }
 
+func TestDoImportCheckReportsOKForInstalledImports(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, `
+[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+
+[rigs.imports.ui]
+source = "https://example.com/ui.git"
+version = "^2.0"
+`)
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+transitive = false
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(cityRoot string, imports map[string]config.Import) (*packman.CheckReport, error) {
+		if cityRoot != dir {
+			t.Fatalf("cityRoot = %q, want %q", cityRoot, dir)
+		}
+		for _, name := range []string{"pack:tools", "default-rig:worker", "rig:frontend:ui"} {
+			if _, ok := imports[name]; !ok {
+				t.Fatalf("imports = %#v, want %s", imports, name)
+			}
+		}
+		return &packman.CheckReport{CheckedSources: 3}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportCheck(dir, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Import state OK: 3 remote import(s) checked") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestDoImportCheckPrintsIssueDetails(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{
+			CheckedSources: 1,
+			Issues: []packman.CheckIssue{{
+				Severity:   packman.CheckSeverityError,
+				Code:       "missing-cache",
+				ImportName: "pack:tools",
+				Source:     "https://example.com/tools.git",
+				Commit:     "abc123",
+				Path:       filepath.Join(dir, ".gc", "cache", "repos", "abc"),
+				Message:    "locked import is missing from the local repo cache",
+				RepairHint: `run "gc import install"`,
+			}},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportCheck(dir, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Import state has 1 issue(s):",
+		"[error] missing-cache pack:tools",
+		"locked import is missing from the local repo cache",
+		`repair: run "gc import install"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s\nstderr:\n%s", want, out, stderr.String())
+		}
+	}
+}
+
 func TestDoImportUpgradeTargetedMergesPreservedImports(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -825,6 +974,102 @@ source = "../packs/local"
 	}
 }
 
+func TestDoImportUpgradeTargetsDefaultRigImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+transitive = false
+`)
+
+	prevSelective := syncImportsSelective
+	t.Cleanup(func() { syncImportsSelective = prevSelective })
+	syncImportsSelective = func(_ string, imports map[string]config.Import, upgradeSources map[string]struct{}) (*packman.Lockfile, error) {
+		if _, ok := imports["default-rig:worker"]; !ok {
+			t.Fatalf("imports = %#v, want default-rig:worker", imports)
+		}
+		if len(upgradeSources) != 1 {
+			t.Fatalf("len(upgradeSources) = %d, want 1", len(upgradeSources))
+		}
+		if _, ok := upgradeSources["https://example.com/worker.git"]; !ok {
+			t.Fatalf("upgradeSources = %#v, want worker.git", upgradeSources)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://example.com/worker.git": {Version: "3.2.0", Commit: "worker"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "worker", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `Upgraded import "worker"`) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestDoImportRemoveTargetsDefaultRigImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+`)
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		if _, ok := imports["default-rig:worker"]; ok {
+			t.Fatalf("imports = %#v, did not expect default-rig:worker", imports)
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportRemove(fsys.OSFS{}, dir, "worker", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	defaults, err := config.LoadRootPackDefaultRigImports(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("LoadRootPackDefaultRigImports: %v", err)
+	}
+	if len(defaults) != 0 {
+		t.Fatalf("defaults = %#v, want empty", defaults)
+	}
+}
+
+func TestDoImportAddRejectsReservedDefaultRigPrefix(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://example.com/worker.git", "default-rig:worker", "^1.0", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected reserved prefix import add to fail")
+	}
+	if !strings.Contains(stderr.String(), "reserved prefix") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestDoImportListShowsDirectAndTransitive(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -882,11 +1127,44 @@ source = "../packs/local"
 	}
 }
 
+func TestDoImportListShowsDefaultRigImports(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/worker.git": {Version: "3.1.0", Commit: "worker"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportList(dir, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "default-rig:worker\thttps://example.com/worker.git\t^3.0\t3.1.0") {
+		t.Fatalf("missing default-rig import line:\n%s", stdout.String())
+	}
+}
+
 func TestDoImportListTreeShowsDependencyGraph(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
 	writePackToml(t, dir, `[pack]
@@ -1129,6 +1407,7 @@ func TestDoImportListWithRigShowsOnlyRigScopedClosure(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, `
 [workspace]
@@ -1331,6 +1610,7 @@ func TestDoImportWhyExplainsTransitiveImport(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
 	writePackToml(t, dir, `
@@ -1380,6 +1660,39 @@ schema = 1
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
+	}
+}
+
+func TestDoImportWhyShowsDefaultRigImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/worker.git": {Version: "3.1.0", Commit: "worker"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportWhy(dir, "worker", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker is a direct import") || !strings.Contains(out, "https://example.com/worker.git") {
+		t.Fatalf("unexpected why output:\n%s", out)
 	}
 }
 
@@ -1972,9 +2285,58 @@ func stageCmdCachedPack(t *testing.T, source, commit, packToml string) {
 	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(path, ".packman-test-commit"), []byte(commit), 0o644); err != nil {
+		t.Fatalf("WriteFile(.packman-test-commit): %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte(packToml), 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
 	}
+}
+
+func stubCmdCachedPackGit(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	gitPath := filepath.Join(binDir, "git")
+	script := `#!/bin/sh
+set -eu
+dir="$PWD"
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-C)
+			dir="$2"
+			shift 2
+			;;
+		-c)
+			shift 2
+			;;
+		*)
+			break
+			;;
+	esac
+done
+case "${1:-}" in
+	rev-parse)
+		if [ "${2:-}" = "HEAD" ]; then
+			cat "$dir/.packman-test-commit"
+			exit 0
+		fi
+		;;
+	status)
+		if [ "${2:-}" = "--porcelain" ]; then
+			if [ -f "$dir/.packman-test-dirty" ]; then
+				printf '%s\n' ' M pack.toml'
+			fi
+			exit 0
+		fi
+		;;
+esac
+printf 'unexpected git command: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake git): %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func mustGitImport(t *testing.T, dir string, args ...string) {

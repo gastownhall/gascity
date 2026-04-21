@@ -1,6 +1,8 @@
 package agent
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestSanitizeQualifiedNameForSession(t *testing.T) {
 	tests := []struct {

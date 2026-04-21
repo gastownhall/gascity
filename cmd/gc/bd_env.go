@@ -426,6 +426,7 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 }
 
 func cityRuntimeProcessEnv(cityPath string) []string {
+	cityPath = normalizePathForCompare(cityPath)
 	overrides := citylayout.CityRuntimeEnvMap(cityPath)
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}

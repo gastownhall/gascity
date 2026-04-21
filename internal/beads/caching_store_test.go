@@ -320,6 +320,60 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	b1, err := mem.Create(beads.Bead{Title: "Existing"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"id":         b1.ID,
+		"title":      "mayor",
+		"status":     "open",
+		"issue_type": "session",
+		"metadata": map[string]any{
+			"generation":           3,
+			"pending_create_claim": true,
+			"state":                "creating",
+			"wake_attempts":        0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs.ApplyEvent("bead.updated", payload)
+
+	stats := cs.Stats()
+	if stats.ProblemCount != 0 {
+		t.Fatalf("ProblemCount = %d, want 0 (last problem: %s)", stats.ProblemCount, stats.LastProblem)
+	}
+
+	got, err := cs.Get(b1.ID)
+	if err != nil {
+		t.Fatalf("Get after ApplyEvent update: %v", err)
+	}
+	if got.Type != "session" {
+		t.Fatalf("Type = %q, want session", got.Type)
+	}
+	if got.Metadata["generation"] != "3" {
+		t.Fatalf("generation = %q, want 3; metadata=%v", got.Metadata["generation"], got.Metadata)
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true; metadata=%v", got.Metadata["pending_create_claim"], got.Metadata)
+	}
+	if got.Metadata["wake_attempts"] != "0" {
+		t.Fatalf("wake_attempts = %q, want 0; metadata=%v", got.Metadata["wake_attempts"], got.Metadata)
+	}
+}
+
 func TestCachingStoreApplyEventIgnoredWhenDegraded(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()

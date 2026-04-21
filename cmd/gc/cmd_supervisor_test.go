@@ -132,7 +132,7 @@ func TestSupervisorAliveFallsBackToDefaultHomeSocket(t *testing.T) {
 	})
 
 	gotPath, gotPID := runningSupervisorSocket()
-	if gotPath != sockPath {
+	if !samePath(gotPath, sockPath) {
 		t.Fatalf("runningSupervisorSocket path = %q, want %q", gotPath, sockPath)
 	}
 	if gotPID != 4242 {

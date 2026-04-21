@@ -97,7 +97,7 @@ func TestResolveRigAddPath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveRigAddPath(%q): %v", tt.arg, err)
 			}
-			if got != filepath.Clean(tt.want) {
+			if !samePath(got, filepath.Clean(tt.want)) {
 				t.Fatalf("resolveRigAddPath(%q) = %q, want %q", tt.arg, got, filepath.Clean(tt.want))
 			}
 		})

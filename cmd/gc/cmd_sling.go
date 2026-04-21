@@ -16,7 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -189,7 +188,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := loadSlingCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -333,6 +332,10 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
+}
+
+func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
 func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {

@@ -391,7 +391,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	copyE2EScripts(t, cityDir)
 
 	// gc init — seed the city directly from the intended E2E config rather than
-	// the default tutorial scaffold, which brings along unrelated hooks/packs.
+	// the default minimal scaffold, which brings along unrelated hooks/packs.
 	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)

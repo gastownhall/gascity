@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -373,11 +374,14 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 
 // appendMaterializeSkillsPreStart appends a PreStart command that
 // invokes `gc internal materialize-skills --agent <name> --workdir
-// <path>` for per-session-worktree materialization. Shared-catalog
-// snapshots travel via GC_SHARED_SKILL_CATALOG_SNAPSHOT in the session
-// environment instead of via argv so stage-2 stays upgrade-compatible
-// with already-running sessions whose started CoreFingerprint hashed the
-// old pre-start command string.
+// <path>` for per-session-worktree materialization.
+//
+// The shared-catalog snapshot itself is staged to a deterministic file
+// under the workdir (see writeSkillSnapshotFile) and materialize-skills
+// re-discovers that path at runtime. Keeping the command shape stable
+// avoids flipping the runtime fingerprint for already-running sessions
+// during upgrade while still moving the large catalog blob off tmux's
+// env/argv paths.
 //
 // The gc binary path comes from $GC_BIN (populated by the runtime env
 // setup) with "gc" as a fallback if the env var isn't available at
@@ -386,4 +390,78 @@ func appendMaterializeSkillsPreStart(prestart []string, qualifiedName, workDir s
 	cmd := `"${GC_BIN:-gc}" internal materialize-skills --agent ` +
 		shellquote.Join([]string{qualifiedName}) + ` --workdir ` + shellquote.Join([]string{workDir})
 	return append(prestart, cmd)
+}
+
+// skillSnapshotFilePath returns the deterministic path used to persist
+// the shared skill catalog snapshot for one agent/workdir pair.
+func skillSnapshotFilePath(workDir, qualifiedName string) string {
+	if workDir == "" || qualifiedName == "" {
+		return ""
+	}
+	safeName := strings.ReplaceAll(qualifiedName, string(filepath.Separator), "_")
+	safeName = strings.ReplaceAll(safeName, "/", "_")
+	return filepath.Join(workDir, ".gc", "tmp", "skill-catalog-"+safeName+".b64")
+}
+
+// removeSkillSnapshotFile clears the deterministic staged snapshot path
+// so stage-2 materialize-skills falls back to live catalog loading
+// instead of consuming stale shared-catalog data.
+func removeSkillSnapshotFile(workDir, qualifiedName string) {
+	path := skillSnapshotFilePath(workDir, qualifiedName)
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// writeSkillSnapshotFile persists a base64-encoded shared skill catalog
+// snapshot to a file under <workDir>/.gc/tmp so the PreStart materialize
+// command can read it back without forcing the catalog through tmux's
+// new-session protocol buffer or argv. Returns the absolute path on
+// success, "" on any failure (caller falls back to letting
+// materialize-skills load the live catalog from disk).
+//
+// The filename is keyed by agent so repeat spawns of the same agent
+// reuse one file rather than littering .gc/tmp with one snapshot per
+// reconciler tick. The blob itself is overwritten each call because the
+// catalog can drift between ticks.
+func writeSkillSnapshotFile(workDir, qualifiedName, snapshot string) string {
+	path := skillSnapshotFilePath(workDir, qualifiedName)
+	if path == "" || snapshot == "" {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	tmp, err := os.CreateTemp(dir, "skill-catalog-*.tmp")
+	if err != nil {
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write([]byte(snapshot)); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	return path
 }

@@ -14,6 +14,43 @@ cd "$repo_root"
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
 
+gopath_val="$(go env GOPATH)"
+gocache_val="$(go env GOCACHE)"
+gomodcache_val="$(go env GOMODCACHE)"
+gotmpdir_val="$(go env GOTMPDIR)"
+goroot_val="$(go env GOROOT)"
+
+run_go_test() {
+  env -i \
+    PATH="${PATH}" \
+    HOME="${HOME:-}" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-}" \
+    SHELL="${SHELL:-/bin/sh}" \
+    LANG="${LANG:-C.UTF-8}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    GOPATH="${gopath_val}" \
+    GOCACHE="${gocache_val}" \
+    GOMODCACHE="${gomodcache_val}" \
+    GOTMPDIR="${gotmpdir_val}" \
+    GOROOT="${GOROOT:-$goroot_val}" \
+    GOENV="${GOENV-}" \
+    GOFLAGS="${GOFLAGS-}" \
+    GO111MODULE="${GO111MODULE-}" \
+    GOEXPERIMENT="${GOEXPERIMENT-}" \
+    GOPROXY="${GOPROXY-}" \
+    GOPRIVATE="${GOPRIVATE-}" \
+    GONOPROXY="${GONOPROXY-}" \
+    GONOSUMDB="${GONOSUMDB-}" \
+    GOSUMDB="${GOSUMDB-}" \
+    GOINSECURE="${GOINSECURE-}" \
+    GOVCS="${GOVCS-}" \
+    GOWORK="${GOWORK-}" \
+    GC_FAST_UNIT=0 \
+    go test "$@"
+}
+
 formula_tests=(
   TestAdoptPRFormulaCompileAndRun
   TestPersonalWorkFormulaCompileAndRun
@@ -71,11 +108,11 @@ run_pkg_tests() {
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
     go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
   fi
-  GC_FAST_UNIT=0 go test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+  run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 }
 
 list_integration_tests() {
-  go test -tags integration -list '^Test' "$pkg" | grep '^Test'
+  run_go_test -tags integration -list '^Test' "$pkg" | grep '^Test'
 }
 
 validate_selected_tests() {
@@ -112,7 +149,7 @@ run_packages_shard() {
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
     go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
   fi
-  GC_FAST_UNIT=0 go test "${go_test_args[@]}" "${packages[@]}"
+  run_go_test "${go_test_args[@]}" "${packages[@]}"
 }
 
 run_rest_smoke_shard() {

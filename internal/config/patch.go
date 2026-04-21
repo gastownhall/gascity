@@ -84,7 +84,8 @@ type AgentPatch struct {
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	SessionSetupScript *string `toml:"session_setup_script,omitempty"`
 	// SessionLive overrides the agent's session_live commands.
 	SessionLive []string `toml:"session_live,omitempty"`
@@ -96,6 +97,8 @@ type AgentPatch struct {
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
 	// InjectFragments overrides the agent's inject_fragments list.
 	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// AppendFragments overrides the agent's append_fragments list.
+	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Attach overrides the agent's attach setting.
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
@@ -337,6 +340,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if len(p.InjectFragments) > 0 {
 		a.InjectFragments = append([]string(nil), p.InjectFragments...)
+	}
+	if len(p.AppendFragments) > 0 {
+		a.AppendFragments = append([]string(nil), p.AppendFragments...)
 	}
 	if len(p.InjectFragmentsAppend) > 0 {
 		a.InjectFragments = append(a.InjectFragments, p.InjectFragmentsAppend...)

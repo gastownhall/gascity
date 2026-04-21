@@ -72,7 +72,8 @@ func (c *City) Init(provider string) {
 		c.t.Fatalf("gc init failed: %v\n%s", err, out)
 	}
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+		RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
+		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
 	})
 }
 
@@ -84,7 +85,8 @@ func (c *City) InitFrom(srcDir string) {
 		c.t.Fatalf("gc init --from %s failed: %v\n%s", srcDir, err, out)
 	}
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+		RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
+		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
 	})
 }
 

@@ -738,6 +738,7 @@ func TestSlingAttachGraphFormulaRejectsExistingLiveRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -795,6 +796,7 @@ func TestSlingAttachGraphFormulaRejectsExistingLiveRootAcrossStores(t *testing.T
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -865,6 +867,7 @@ func TestSlingAttachGraphFormulaForceReplacesExistingLiveRootAcrossStores(t *tes
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -955,6 +958,7 @@ func TestSlingAttachGraphFormulaForceRestoresCrossStoreRootWhenFinalizeFails(t *
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1048,6 +1052,7 @@ func TestSlingAttachGraphFormulaForceAllowsExistingLiveRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1129,6 +1134,7 @@ func TestSlingAttachGraphFormulaForceRollsBackNewRootWhenSupersededCloseFails(t 
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1228,6 +1234,7 @@ func TestSlingAttachGraphFormulaForceRestoresSupersededRootWhenFinalizeFails(t *
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1321,6 +1328,7 @@ func TestSlingAttachGraphFormulaConcurrentLaunchCreatesSingleRoot(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1400,6 +1408,7 @@ func TestDoSlingBatchGraphFormulaForceAllowsAttachedWorkflow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1494,6 +1503,7 @@ func TestDoSlingBatchPropagatesConflictErrorToCaller(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1583,6 +1593,7 @@ func TestDoSlingBatchPreflightEmitsConflictErrorForWorkflowAttachment(t *testing
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1669,6 +1680,7 @@ func TestDoSlingBatchPreflightEmitsPerChildConflictErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"

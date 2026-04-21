@@ -79,7 +79,12 @@ Use configured databases list.
 - Any export failures
 
 ```bash
-dolt sql -r json -q "SELECT * FROM <db>.issues <scrub_filter>" > <output>
+DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt \
+  --host "${GC_DOLT_HOST:-127.0.0.1}" \
+  --port "${GC_DOLT_PORT:-3307}" \
+  --user "${GC_DOLT_USER:-root}" \
+  --no-tls \
+  sql -r json -q "SELECT * FROM <db>.issues <scrub_filter>" > <output>
 ```
 
 **Exit criteria:** All databases exported to JSONL."""

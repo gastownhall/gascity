@@ -13,6 +13,7 @@ Use this as the opt-in replacement for hierarchy-first single-session formulas.
 """
 formula = "mol-scoped-work"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.issue]

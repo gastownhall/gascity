@@ -49,9 +49,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// TestInitTutorial verifies that gc init with the default tutorial
+// TestInitMinimal verifies that gc init with the default minimal
 // template creates a working city with city.toml, prompts, and formulas.
-func TestInitTutorial(t *testing.T) {
+func TestInitMinimal(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")
 
@@ -104,40 +104,51 @@ func TestInitGastown(t *testing.T) {
 	}
 }
 
-// TestInitGastownResumeAfterFailure simulates the scenario where
-// gc init wrote city.toml but failed during provider readiness.
-// A subsequent gc init (resume) should materialize packs and load config.
-//
-// Known regression: the gc init resume path in finalizeInit does not
-// materialize gastown packs before config load. This is a remaining
-// instance of Bug 4 (2026-03-18). The gc start path was fixed but
-// the gc init resume path was not. Skip until fixed.
+// TestInitGastownResumeAfterFailure simulates the scenario where gc init wrote
+// city.toml and pack.toml but failed before builtin packs were materialized. A
+// subsequent gc init (resume) should materialize packs before loading config.
 func TestInitGastownResumeAfterFailure(t *testing.T) {
-	t.Skip("Known regression: gc init resume doesn't materialize gastown packs (Bug 4 remaining instance)")
 	c := helpers.NewCity(t, testEnv)
 
-	// Simulate partial init: write city.toml with gastown includes
-	// but DON'T create the packs directory.
+	// Simulate partial PackV2 init but DON'T create .gc/system/packs.
 	c.WriteConfig(`[workspace]
 name = "partial"
-includes = ["packs/gastown"]
-default_rig_includes = ["packs/gastown"]
 `)
+	packToml := `[pack]
+name = "partial"
+schema = 2
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+
+[defaults.rig.imports.gastown]
+source = ".gc/system/packs/gastown"
+`
+	if err := os.WriteFile(filepath.Join(c.Dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatalf("writing pack.toml: %v", err)
+	}
 
 	// Ensure full scaffold exists so gc init resume recognizes this as a city.
 	for _, sub := range []string{".gc", ".gc/cache", ".gc/runtime", ".gc/system"} {
 		os.MkdirAll(filepath.Join(c.Dir, sub), 0o755) //nolint:errcheck
 	}
+	if err := os.WriteFile(filepath.Join(c.Dir, ".gc", "events.jsonl"), nil, 0o644); err != nil {
+		t.Fatalf("writing events log: %v", err)
+	}
 
 	// Re-running gc init on an existing city triggers the resume path,
-	// which calls finalizeInit → MaterializeGastownPacks.
+	// which calls finalizeInit → MaterializeBuiltinPacks.
 	out, err := c.GC("init", "--skip-provider-readiness", c.Dir)
 	if err != nil && containsSubstr(out, "pack.toml: no such file or directory") {
 		t.Fatalf("gc init resume failed with missing packs — Bug 4 regression:\n%s", out)
 	}
+	t.Cleanup(func() {
+		helpers.RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
+		helpers.RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+	})
 	// Positive assertion: packs must have been materialized.
-	if !c.HasFile("packs/gastown/pack.toml") {
-		t.Fatal("packs/gastown/pack.toml not materialized after resume — Bug 4 regression")
+	if !c.HasFile(".gc/system/packs/gastown/pack.toml") {
+		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after resume — Bug 4 regression")
 	}
 }
 

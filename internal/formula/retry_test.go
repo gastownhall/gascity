@@ -123,6 +123,7 @@ func TestCompileRetryManagedStepBlocksWorkflowOnLogicalBead(t *testing.T) {
 	formulaContent := `
 formula = "retry-demo"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "review"

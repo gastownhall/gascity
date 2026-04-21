@@ -281,6 +281,7 @@ Minimal pooled retry workflow used to verify crash-before-result recovery.
 """
 formula = "mol-retry-recovery-smoke"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "review"

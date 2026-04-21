@@ -29,6 +29,12 @@ const (
 
 var errProxyProcessExitedEarly = errors.New("process exited before listener became ready")
 
+// extraHelperEnv is an env-list builder that proxy_process tests can augment
+// to inject additional KEY=VALUE entries into the helper subprocess
+// environment (e.g. GC_TESTENV_PASSTHROUGH for internal/testenv). Production
+// leaves it nil. Tests are serial so no locking is needed.
+var extraHelperEnv []string
+
 type proxyProcessInstance struct {
 	rt           RuntimeContext
 	svc          config.Service
@@ -203,6 +209,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		"GC_SERVICE_VISIBILITY="+p.publication.Visibility,
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),
 	)
+	cmd.Env = append(cmd.Env, extraHelperEnv...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

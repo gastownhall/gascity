@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,31 +217,39 @@ func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"
-	commit := "abc123def456"
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
-	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+	repoDir := filepath.Join(home, "orders-pack-work")
+	if err := os.MkdirAll(filepath.Join(repoDir, "formulas"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "formulas"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "orders"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repoDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(cacheDir, "pack.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "pack.toml"), []byte(`
 [pack]
 name = "ops"
 schema = 1
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cacheDir, "orders", "health-check.order.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "orders", "health-check.order.toml"), []byte(`
 [order]
 formula = "health-check"
 trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitImport(t, repoDir, "init")
+	mustGitImport(t, repoDir, "add", ".")
+	mustGitImport(t, repoDir, "commit", "-m", "initial")
+	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
+
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repoDir, cacheDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,7 +275,7 @@ schema = 1
 
 [packs."https://github.com/example/orders-pack.git"]
 version = "1.2.3"
-commit = "abc123def456"
+commit = "`+commit+`"
 fetched = "2026-04-10T00:00:00Z"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -731,6 +740,7 @@ max_active_sessions = 1
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -861,6 +871,149 @@ prefix = "fe"
 	}
 	if lines[6] != rigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", lines[6], rigDir)
+	}
+}
+
+func TestOrderRunExecProjectsExternalDoltTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"dolt.host: external.example.internal",
+		"dolt.port: 4406",
+		"dolt.user: maintenance-user",
+		"",
+	}, "\n"))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	outPath := filepath.Join(cityDir, "exec-dolt-env.txt")
+	a := orders.Order{
+		Name:     "poll",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf '%%s\n%%s\n%%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile(exec-dolt-env): %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("exec dolt env lines = %d, want 3 (%q)", len(lines), string(data))
+	}
+	if lines[0] != "external.example.internal" {
+		t.Fatalf("GC_DOLT_HOST = %q, want external.example.internal", lines[0])
+	}
+	if lines[1] != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4406", lines[1])
+	}
+	if lines[2] != "maintenance-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want maintenance-user", lines[2])
+	}
+}
+
+func TestOrderRunExecPreservesAuthOnlyOverridesForManagedLocal(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	port := fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)
+	stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(stateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+		os.Getpid(),
+		port,
+		filepath.Join(cityDir, ".beads", "dolt"),
+	))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_DOLT_USER", "ambient-user")
+	t.Setenv("GC_DOLT_PASSWORD", "ambient-secret")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads.invalid")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9998")
+	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
+	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-secret")
+	outPath := filepath.Join(cityDir, "exec-dolt-env.txt")
+	a := orders.Order{
+		Name:     "poll",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec: fmt.Sprintf(
+			`printf 'host=<%%s>\nport=<%%s>\nuser=<%%s>\npass=<%%s>\nbeads_host=<%%s>\nbeads_port=<%%s>\nbeads_user=<%%s>\nbeads_pass=<%%s>\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$GC_DOLT_PASSWORD" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT" "$BEADS_DOLT_SERVER_USER" "$BEADS_DOLT_PASSWORD" > %q`,
+			outPath,
+		),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile(exec-dolt-env): %v", err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{
+		"host=<>",
+		"port=<" + port + ">",
+		"user=<ambient-user>",
+		"pass=<ambient-secret>",
+		"beads_host=<>",
+		"beads_port=<" + port + ">",
+		"beads_user=<ambient-user>",
+		"beads_pass=<ambient-secret>",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("exec dolt env:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

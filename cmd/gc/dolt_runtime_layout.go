@@ -24,6 +24,7 @@ func resolveManagedDoltRuntimeLayout(cityPath string) (managedDoltRuntimeLayout,
 	if cityPath == "" || cityPath == "." {
 		return managedDoltRuntimeLayout{}, fmt.Errorf("missing --city")
 	}
+	cityPath = normalizePathForCompare(cityPath)
 
 	packStateDir := strings.TrimSpace(os.Getenv("GC_PACK_STATE_DIR"))
 	if packStateDir == "" {
@@ -53,9 +54,9 @@ func resolveManagedDoltRuntimeLayout(cityPath string) (managedDoltRuntimeLayout,
 
 func defaultEnvPath(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
+		return normalizePathForCompare(value)
 	}
-	return fallback
+	return normalizePathForCompare(fallback)
 }
 
 func doltRuntimeLayoutFields(layout managedDoltRuntimeLayout) []string {

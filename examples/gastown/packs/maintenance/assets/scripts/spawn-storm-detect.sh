@@ -39,7 +39,8 @@ COUNTS=$(cat "$LEDGER")
 # Step 3: For each open unassigned bead, check if it has rejection metadata
 # (indicates it was returned from refinery or recovered by witness).
 STORMS=0
-echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .metadata.recovered != null) | .id' 2>/dev/null | while IFS= read -r bead_id; do
+RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .metadata.recovered != null) | .id' 2>/dev/null)
+while IFS= read -r bead_id; do
     [ -z "$bead_id" ] && continue
 
     # Increment count for this bead.
@@ -48,7 +49,8 @@ echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .
     COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$NEW" '.[$id] = $n')
 
     if [ "$NEW" -ge "$THRESHOLD" ]; then
-        TITLE=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.[0].title // "unknown"')
+        TITLE_JSON=$(bd show "$bead_id" --json 2>/dev/null || true)
+        TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
         gc mail send mayor/ \
             -s "SPAWN_STORM: bead $bead_id reset ${NEW}x" \
             -m "Bead $bead_id ($TITLE) has been reset to pool $NEW times (threshold: $THRESHOLD).
@@ -61,13 +63,25 @@ Recommended actions:
             2>/dev/null || true
         STORMS=$((STORMS + 1))
     fi
-done
+done <<< "$RESET_IDS"
 
 # Step 4: Prune closed beads from ledger.
-CLOSED_IDS=$(bd list --status=closed --json --limit=0 2>/dev/null | jq -r '.[].id' 2>/dev/null) || true
-for cid in $CLOSED_IDS; do
-    COUNTS=$(echo "$COUNTS" | jq --arg id "$cid" 'del(.[$id])' 2>/dev/null) || true
-done
+# Only check beads actually tracked in the ledger (avoids expensive full scan
+# of all closed beads via bd list --status=closed --limit=0).
+TRACKED_IDS=$(echo "$COUNTS" | jq -r 'keys[]' 2>/dev/null) || true
+while IFS= read -r tid; do
+    [ -z "$tid" ] && continue
+    if BEAD_OUTPUT=$(bd show "$tid" --json 2>&1); then
+        BEAD_STATUS=$(echo "$BEAD_OUTPUT" | jq -r 'if type == "array" then (.[0].status // "deleted") elif type == "object" and ((.error // "") | test("not found|no issue found"; "i")) then "deleted" else "unknown" end' 2>/dev/null || echo "unknown")
+    elif echo "$BEAD_OUTPUT" | grep -qiE 'not found|no issue found'; then
+        BEAD_STATUS="deleted"
+    else
+        BEAD_STATUS="unknown"
+    fi
+    if [ "$BEAD_STATUS" = "closed" ] || [ "$BEAD_STATUS" = "deleted" ]; then
+        COUNTS=$(echo "$COUNTS" | jq --arg id "$tid" 'del(.[$id])' 2>/dev/null) || true
+    fi
+done <<< "$TRACKED_IDS"
 
 # Step 5: Save updated ledger.
 echo "$COUNTS" > "$LEDGER"

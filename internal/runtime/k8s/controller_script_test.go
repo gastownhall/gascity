@@ -37,6 +37,7 @@ func TestControllerScriptDeployProjectsOnlyExplicitCanonicalDoltTarget(t *testin
 }
 
 func TestControllerScriptDeployDoesNotProjectDeprecatedK8sDoltTarget(t *testing.T) {
+	clearDoltAndCityEnv(t)
 	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{
 		Env: map[string]string{
 			"GC_K8S_DOLT_HOST": "legacy-dolt.example.com",
@@ -60,6 +61,7 @@ func TestControllerScriptDeployDoesNotProjectDeprecatedK8sDoltTarget(t *testing.
 }
 
 func TestControllerScriptDeployUsesResolvedConfigPrefixesForBootstrap(t *testing.T) {
+	clearDoltAndCityEnv(t)
 	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{
 		Env: map[string]string{
 			"GC_DOLT_HOST": "canonical-dolt.example.com",
@@ -138,6 +140,7 @@ func TestControllerScriptDeployFailsWhenBootstrapFails(t *testing.T) {
 }
 
 func TestControllerScriptDeployRejectsPartialCanonicalDoltTarget(t *testing.T) {
+	clearDoltAndCityEnv(t)
 	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{
 		Env: map[string]string{
 			"GC_DOLT_HOST": "canonical-dolt.example.com",

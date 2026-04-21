@@ -188,9 +188,6 @@ type City struct {
 	// FormulaLayers holds the resolved formula directories per scope.
 	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
 	FormulaLayers FormulaLayers `toml:"-" json:"-"`
-	// ScriptLayers holds the resolved script directories per scope.
-	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
-	ScriptLayers ScriptLayers `toml:"-" json:"-"`
 	// PackDirs is the ordered, deduplicated list of pack directories
 	// from all loaded city packs (includes resolved). Consumers derive
 	// resource-specific search paths by scanning subdirectories:
@@ -239,12 +236,6 @@ type City struct {
 	// RigPackGlobals maps rig name to resolved [global] sections from
 	// rig-level packs. Rig globals apply only to that rig's agents.
 	RigPackGlobals map[string][]ResolvedPackGlobal `toml:"-" json:"-"`
-	// PackScriptDirs is the ordered list of scripts/ directories from
-	// city packs. Populated during pack expansion. Not from TOML.
-	PackScriptDirs []string `toml:"-" json:"-"`
-	// RigScriptDirs maps rig name to its ordered scripts/ directories
-	// from rig packs. Populated during pack expansion. Not from TOML.
-	RigScriptDirs map[string][]string `toml:"-" json:"-"`
 	// PackCommands holds convention-discovered pack commands composed
 	// during city expansion. Runtime-only.
 	PackCommands []DiscoveredCommand `toml:"-" json:"-"`
@@ -404,16 +395,6 @@ func (fl FormulaLayers) SearchPaths(rigName string) []string {
 	return fl.City
 }
 
-// ScriptLayers holds resolved script directories for symlink materialization.
-// Each slice is ordered lowest→highest priority; later entries shadow earlier
-// ones by relative path.
-type ScriptLayers struct {
-	// City holds script dirs for city-scoped materialization.
-	City []string
-	// Rigs maps rig name → script dir layers.
-	Rigs map[string][]string
-}
-
 // Rig defines an external project registered in the city.
 type Rig struct {
 	// Name is the unique identifier for this rig.
@@ -519,7 +500,8 @@ type AgentOverride struct {
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	SessionSetupScript *string `toml:"session_setup_script,omitempty"`
 	// SessionLive overrides the agent's session_live commands.
 	SessionLive []string `toml:"session_live,omitempty"`
@@ -531,6 +513,9 @@ type AgentOverride struct {
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
 	// InjectFragments overrides the agent's inject_fragments list.
 	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// AppendFragments appends named template fragments to this agent's rendered
+	// prompt. It is the V2 spelling for per-agent fragment selection.
+	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
@@ -792,8 +777,11 @@ func splitCompoundWord(word string) []string {
 // Workspace holds city-level metadata and optional defaults that apply
 // to all agents unless overridden per-agent.
 type Workspace struct {
-	// Name is the human-readable name for this city.
-	Name string `toml:"name" jsonschema:"required"`
+	// Name is the legacy checked-in city name. Runtime identity now resolves
+	// from site binding (.gc/site.toml workspace_name), declared config, and
+	// basename precedence instead; gc init writes the machine-local name to
+	// site.toml and omits it from city.toml.
+	Name string `toml:"name,omitempty"`
 	// Prefix overrides the auto-derived HQ bead ID prefix. When empty,
 	// the prefix is derived from the city Name via DeriveBeadsPrefix.
 	Prefix string `toml:"prefix,omitempty"`
@@ -1637,8 +1625,10 @@ type Agent struct {
 	// Commands run in gc's process (not inside the agent session) via sh -c.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript is the path to a script run after session_setup commands.
-	// Relative paths resolve against the city directory. The script receives
-	// context via environment variables (GC_SESSION plus existing GC_* vars).
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
+	// The script receives context via environment variables (GC_SESSION plus
+	// existing GC_* vars).
 	SessionSetupScript string `toml:"session_setup_script,omitempty"`
 	// SessionLive is a list of shell commands that are safe to re-apply
 	// without restarting the agent. Run at startup (after session_setup)
@@ -1685,6 +1675,9 @@ type Agent struct {
 	// rendered prompt. Fragments come from shared template directories across
 	// all loaded packs. Each name must match a {{ define "name" }} block.
 	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// AppendFragments is the V2 per-agent alias for prompt fragment injection.
+	// It layers after InjectFragments and before inherited/default fragments.
+	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// InheritedAppendFragments records pack-scoped append_fragments inherited
 	// from an imported pack's [agent_defaults]. Runtime-only.
 	InheritedAppendFragments []string `toml:"-" json:"-"`
@@ -1917,7 +1910,9 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // EffectiveScaleCheck returns the scale check command for this agent.
 // If ScaleCheck is set, returns it. Otherwise returns a default that
 // counts actionable work routed to this agent's template, including
-// formula-dispatched molecule beads (which bd ready excludes).
+// standalone formula-dispatched molecule beads (which bd ready excludes).
+// Attached formulas contribute demand through the routed source bead in the
+// ready/in_progress tiers instead of through the molecule count.
 func (a *Agent) EffectiveScaleCheck() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck

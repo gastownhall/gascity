@@ -1790,6 +1790,7 @@ func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1910,6 +1911,7 @@ func TestDoSlingGraphWorkflowConflictReturnsExit3(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1967,6 +1969,7 @@ func TestBatchOnGraphWorkflowStartsWorkflowWithoutRoutingChild(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -2027,6 +2030,7 @@ func TestBatchOnGraphWorkflowConflictLeavesExistingRootInPlace(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -2239,6 +2243,7 @@ func TestOnFormulaGraphWorkflowPokesOnce(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -2818,7 +2823,7 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
 }
 
-func TestOnFormulaPoolAttachmentRoutesLegacyStepsToTarget(t *testing.T) {
+func TestOnFormulaPoolAttachmentKeepsLegacyStepsPrivate(t *testing.T) {
 	dir := testFormulaDir(t)
 	content := `
 formula = "multi-step"
@@ -2891,17 +2896,14 @@ needs = ["prep"]
 		if bead.ParentID == "BL-42" {
 			t.Fatalf("internal bead %s ParentID = %q, want not outer bead", bead.ID, bead.ParentID)
 		}
-		// Regression for #796: legacy [[steps]] formulas must stamp
-		// gc.routed_to on every internal step bead so EffectiveWorkQuery
-		// tier-3 and pool scale_check see the work. The sling target is
-		// "repo/polecat".
 		if bead.Ref == "" {
 			continue
 		}
-		if got := bead.Metadata["gc.routed_to"]; got != a.QualifiedName() {
-			t.Fatalf("internal bead %s gc.routed_to = %q, want %q", bead.ID, got, a.QualifiedName())
+		if got := bead.Metadata["gc.routed_to"]; got != "" {
+			t.Fatalf("internal legacy bead %s gc.routed_to = %q, want empty; attached v1 formulas should route only the source bead", bead.ID, got)
 		}
 	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", a.QualifiedName())
 }
 
 func TestBatchSkipsClosedMolecules(t *testing.T) {

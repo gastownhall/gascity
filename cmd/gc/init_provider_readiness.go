@@ -36,8 +36,7 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
-	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
+	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; needed before dependency and provider checks
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -58,9 +57,9 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 
 	if opts.showProgress {
 		if opts.skipProviderReadiness {
-			logInitProgress(stdout, 7, "Skipping provider readiness checks")
+			logInitProgress(stdout, 6, "Skipping provider readiness checks")
 		} else {
-			logInitProgress(stdout, 7, "Checking provider readiness")
+			logInitProgress(stdout, 6, "Checking provider readiness")
 		}
 	}
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
@@ -90,7 +89,7 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		return 1
 	}
 	if opts.showProgress {
-		logInitProgress(stdout, 8, "Registering city with supervisor")
+		logInitProgress(stdout, 7, "Registering city with supervisor")
 	}
 	return registerCityWithSupervisor(cityPath, stdout, stderr, opts.commandName, opts.showProgress)
 }
@@ -136,12 +135,6 @@ func wizardProviderGuidanceMessage(item api.ReadinessItem) string {
 }
 
 func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, commandName string) error {
-	// Materialize gastown packs before loading config — config.LoadWithIncludes
-	// resolves includes = ["packs/gastown"] which requires pack.toml on disk.
-	if err := MaterializeGastownPacks(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: materializing gastown packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return errInitProviderPreflight
-	}
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", commandName) //nolint:errcheck // best-effort stderr
@@ -149,7 +142,7 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
-	ensureInitArtifacts(cityPath, cfg, stderr, commandName)
+	ensureInitArtifacts(cityPath, stderr, commandName)
 	if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by bead store initialization\n", commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: initializing canonical bead store files: %v\n", commandName, err)                  //nolint:errcheck // best-effort stderr

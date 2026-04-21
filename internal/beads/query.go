@@ -36,7 +36,11 @@ type ListQuery struct {
 	Limit         int
 	IncludeClosed bool
 	AllowScan     bool
-	Sort          SortOrder
+	// Live bypasses CachingStore and reads from the backing store. Other Store
+	// implementations ignore it. Use it only for lifecycle gates that must
+	// observe external mutations immediately.
+	Live bool
+	Sort SortOrder
 }
 
 // HasFilter reports whether the query includes at least one indexed selector.

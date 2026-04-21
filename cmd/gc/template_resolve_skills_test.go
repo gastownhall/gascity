@@ -160,7 +160,13 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateSharedCatalogSnapshotUsesEnvWithoutChangingPreStart(t *testing.T) {
+// TestResolveTemplateSharedCatalogSnapshotFlowsThroughFile asserts that
+// resolveTemplate stages the shared skill catalog snapshot to a
+// deterministic file in the workdir while leaving the materialize-skills
+// PreStart command on its legacy shape. This fixes tmux env/argv
+// overflow without changing the runtime fingerprint for already-running
+// sessions during upgrade.
+func TestResolveTemplateSharedCatalogSnapshotFlowsThroughFile(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
 	sharedCat := materialize.CityCatalog{
@@ -198,26 +204,37 @@ func TestResolveTemplateSharedCatalogSnapshotUsesEnvWithoutChangingPreStart(t *t
 		t.Fatalf("resolveTemplate: %v", err)
 	}
 
-	found := false
+	var materializeEntry string
 	for _, entry := range tp.Hints.PreStart {
 		if strings.Contains(entry, "internal materialize-skills") {
-			found = true
-			if strings.Contains(entry, "--shared-catalog-snapshot") {
-				t.Fatalf("stage-2 PreStart should stay upgrade-compatible and must not carry snapshot flags: %v", tp.Hints.PreStart)
-			}
+			materializeEntry = entry
 			break
 		}
 	}
-	if !found {
+	if materializeEntry == "" {
 		t.Fatalf("expected stage-2 PreStart materialize command, got %v", tp.Hints.PreStart)
 	}
-	snapshot := strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar])
-	if snapshot == "" {
-		t.Fatalf("expected %s env var to carry shared catalog snapshot", sharedSkillCatalogSnapshotEnvVar)
+	// The snapshot must flow through a file, not the env or inline argv,
+	// and the materialize-skills command must keep its pre-upgrade shape.
+	if strings.Contains(materializeEntry, "--shared-catalog-snapshot ") {
+		t.Errorf("materialize-skills must NOT pass snapshot inline — argv would re-inflate via shell expansion and argv limits would reappear: %q", materializeEntry)
 	}
-	decoded, err := decodeSharedCatalogSnapshot(snapshot)
+	if strings.Contains(materializeEntry, "--shared-catalog-snapshot-file") {
+		t.Fatalf("materialize-skills PreStart must keep its legacy shape to avoid CoreFingerprint drift, got: %q", materializeEntry)
+	}
+	// Env MUST NOT carry the snapshot — that's the tmux-imsg-overflow path.
+	if got := strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar]); got != "" {
+		t.Fatalf("env must not carry snapshot (causes tmux imsg overflow for large catalogs); got %d bytes", len(got))
+	}
+	// Verify the deterministic snapshot file was staged and round-trips.
+	snapshotPath := skillSnapshotFilePath(tp.WorkDir, templateNameFor(agent, agent.QualifiedName()))
+	data, err := os.ReadFile(snapshotPath)
 	if err != nil {
-		t.Fatalf("decodeSharedCatalogSnapshot(%s): %v", sharedSkillCatalogSnapshotEnvVar, err)
+		t.Fatalf("reading snapshot file %q: %v", snapshotPath, err)
+	}
+	decoded, err := decodeSharedCatalogSnapshot(string(data))
+	if err != nil {
+		t.Fatalf("decodeSharedCatalogSnapshot: %v", err)
 	}
 	if len(decoded.Entries) != 1 || decoded.Entries[0].Name != "plan" {
 		t.Fatalf("decoded snapshot = %+v, want plan entry", decoded)
@@ -273,7 +290,12 @@ func TestResolveTemplateSharedCatalogSnapshotKeepsConfigHashStableAcrossCacheTra
 	}
 }
 
-func TestResolveTemplateSharedCatalogSnapshotEnvIsIgnoredByRuntimeHash(t *testing.T) {
+// TestResolveTemplateSharedCatalogSnapshotEnvIsAbsent verifies the
+// post-fix invariant: the GC_SHARED_SKILL_CATALOG_SNAPSHOT env var is
+// NEVER populated by resolveTemplate. The replacement path writes the
+// snapshot to a workdir-local file while leaving the materialize-skills
+// PreStart command unchanged.
+func TestResolveTemplateSharedCatalogSnapshotEnvIsAbsent(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
 	sharedCat := materialize.CityCatalog{
@@ -309,19 +331,86 @@ func TestResolveTemplateSharedCatalogSnapshotEnvIsIgnoredByRuntimeHash(t *testin
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	if strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar]) == "" {
-		t.Fatalf("expected %s env var to be present", sharedSkillCatalogSnapshotEnvVar)
+	if got := strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar]); got != "" {
+		t.Fatalf("env var %s must be empty (blob flows via file, not env): got %d bytes", sharedSkillCatalogSnapshotEnvVar, len(got))
+	}
+	for _, entry := range tp.Hints.PreStart {
+		if strings.Contains(entry, "--shared-catalog-snapshot-file") {
+			t.Fatalf("prestart must not grow a snapshot-file flag: %q", entry)
+		}
+	}
+	// CoreFingerprint comparison becomes trivial once the env var is always
+	// absent and the pre-start command shape is stable — keep a smoke check
+	// that resolveTemplate produces a deterministic fingerprint.
+	fp1 := runtime.CoreFingerprint(templateParamsToConfig(tp))
+	fp2 := runtime.CoreFingerprint(templateParamsToConfig(tp))
+	if fp1 != fp2 {
+		t.Fatalf("CoreFingerprint non-deterministic: %s vs %s", fp1, fp2)
+	}
+}
+
+func TestResolveTemplateRemovesStaleSharedCatalogSnapshotFileWhenCatalogUnavailable(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	agentSkillsDir := filepath.Join(cityPath, "agent-skills")
+	writeSkillSource(t, filepath.Join(agentSkillsDir, "private"))
+	sharedCat := materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{{
+			Name:   "plan",
+			Source: filepath.Join(cityPath, "skills", "plan"),
+			Origin: "city",
+		}},
+		OwnedRoots: []string{filepath.Join(cityPath, "skills")},
+	}
+	makeParams := func(cat *materialize.CityCatalog) *agentBuildParams {
+		return &agentBuildParams{
+			cityName:        "city",
+			cityPath:        cityPath,
+			workspace:       &config.Workspace{Provider: "claude"},
+			providers:       map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)}},
+			lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+			fs:              fsys.OSFS{},
+			rigs:            []config.Rig{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			skillCatalog:    cat,
+			sessionProvider: "tmux",
+		}
+	}
+	agent := &config.Agent{
+		Name:      "polecat",
+		Scope:     "city",
+		Provider:  "claude",
+		WorkDir:   ".gc/worktrees/polecat-1",
+		SkillsDir: agentSkillsDir,
 	}
 
-	legacy := tp
-	legacy.Env = make(map[string]string, len(tp.Env))
-	for k, v := range tp.Env {
-		legacy.Env[k] = v
+	tp, err := resolveTemplate(makeParams(&sharedCat), agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate initial: %v", err)
 	}
-	delete(legacy.Env, sharedSkillCatalogSnapshotEnvVar)
+	snapshotPath := skillSnapshotFilePath(tp.WorkDir, templateNameFor(agent, agent.QualifiedName()))
+	if _, err := os.Stat(snapshotPath); err != nil {
+		t.Fatalf("expected staged snapshot file at %q: %v", snapshotPath, err)
+	}
 
-	if got, want := runtime.CoreFingerprint(templateParamsToConfig(tp)), runtime.CoreFingerprint(templateParamsToConfig(legacy)); got != want {
-		t.Fatalf("runtime.CoreFingerprint changed when only %s env var was added: with=%s without=%s", sharedSkillCatalogSnapshotEnvVar, got, want)
+	tp2, err := resolveTemplate(makeParams(nil), agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate without catalog: %v", err)
+	}
+	if _, err := os.Stat(snapshotPath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale snapshot file to be removed, stat err=%v", err)
+	}
+	foundCmd := false
+	for _, entry := range tp2.Hints.PreStart {
+		if strings.Contains(entry, "internal materialize-skills") {
+			foundCmd = true
+			break
+		}
+	}
+	if !foundCmd {
+		t.Fatalf("expected materialize-skills prestart to remain for agent-local skills, got %v", tp2.Hints.PreStart)
 	}
 }
 

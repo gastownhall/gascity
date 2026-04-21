@@ -84,6 +84,9 @@ type WaitParam struct {
 
 // TailParam is an embeddable input mixin for transcript/agent-output
 // endpoints that use the sessionlog "tail N compaction segments" shape.
+// These API parameters intentionally retain compaction-segment semantics
+// even though the gc session logs CLI now counts displayed transcript
+// entries instead.
 //
 // tail stays typed as a string on the wire so three request states are
 // distinguishable:
@@ -97,7 +100,7 @@ type WaitParam struct {
 // Resolve method validates non-negative integer format and returns 422
 // for garbage.
 type TailParam struct {
-	Tail string `query:"tail" required:"false" doc:"Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N."`
+	Tail string `query:"tail" required:"false" doc:"Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N."`
 }
 
 // Resolve validates Tail. Huma calls this during binding.

@@ -11,6 +11,14 @@ env:
   BD_VERSION: "v1.0.0"
 
 jobs:
+  # Reuse the shared CI graph so RC inherits new parity checks automatically.
+  ci_parity:
+    name: CI parity
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
   ubuntu_make_test:
     name: ubuntu / make test
     runs-on: ubuntu-latest
@@ -321,6 +329,7 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     needs:
+      - ci_parity
       - ubuntu_make_test
       - ubuntu_make_check_docs
       - ubuntu_make_test_acceptance
@@ -334,59 +343,36 @@ jobs:
       - ubuntu_goreleaser_snapshot
       - macos_make_test
     env:
-      UBUNTU_MAKE_TEST: ${{ needs.ubuntu_make_test.result }}
-      UBUNTU_MAKE_CHECK_DOCS: ${{ needs.ubuntu_make_check_docs.result }}
-      UBUNTU_MAKE_TEST_ACCEPTANCE: ${{ needs.ubuntu_make_test_acceptance.result }}
-      UBUNTU_MAKE_TEST_ACCEPTANCE_B: ${{ needs.ubuntu_make_test_acceptance_b.result }}
-      UBUNTU_MAKE_TEST_ACCEPTANCE_C: ${{ needs.ubuntu_make_test_acceptance_c.result }}
-      UBUNTU_TEST_INTEGRATION_PACKAGES: ${{ needs.ubuntu_test_integration_packages.result }}
-      UBUNTU_TEST_INTEGRATION_REVIEW_FORMULAS: ${{ needs.ubuntu_test_integration_review_formulas.result }}
-      UBUNTU_TEST_INTEGRATION_BDSTORE: ${{ needs.ubuntu_test_integration_bdstore.result }}
-      UBUNTU_TEST_INTEGRATION_REST: ${{ needs.ubuntu_test_integration_rest.result }}
-      UBUNTU_MAKE_TEST_TUTORIAL: ${{ needs.ubuntu_make_test_tutorial.result }}
-      UBUNTU_GORELEASER_SNAPSHOT: ${{ needs.ubuntu_goreleaser_snapshot.result }}
-      MACOS_MAKE_TEST: ${{ needs.macos_make_test.result }}
+      NEEDS_JSON: ${{ toJSON(needs) }}
     steps:
       - name: Summarize RC gate
         run: |
-          cat >>"$GITHUB_STEP_SUMMARY" <<EOF
-          ## RC Gate
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
 
-          This workflow is the manual pre-RC gate. It ran the exact concrete command/platform matrix for the dispatched ref.
-
-          | Job | Result |
-          | --- | --- |
-          | ubuntu / make test | ${UBUNTU_MAKE_TEST} |
-          | ubuntu / make check-docs | ${UBUNTU_MAKE_CHECK_DOCS} |
-          | ubuntu / make test-acceptance | ${UBUNTU_MAKE_TEST_ACCEPTANCE} |
-          | ubuntu / make test-acceptance-b | ${UBUNTU_MAKE_TEST_ACCEPTANCE_B} |
-          | ubuntu / make test-acceptance-c | ${UBUNTU_MAKE_TEST_ACCEPTANCE_C} |
-          | ubuntu / integration packages | ${UBUNTU_TEST_INTEGRATION_PACKAGES} |
-          | ubuntu / integration review-formulas | ${UBUNTU_TEST_INTEGRATION_REVIEW_FORMULAS} |
-          | ubuntu / integration bdstore | ${UBUNTU_TEST_INTEGRATION_BDSTORE} |
-          | ubuntu / integration rest | ${UBUNTU_TEST_INTEGRATION_REST} |
-          | ubuntu / make test-tutorial | ${UBUNTU_MAKE_TEST_TUTORIAL} |
-          | ubuntu / goreleaser snapshot | ${UBUNTU_GORELEASER_SNAPSHOT} |
-          | macOS / make test | ${MACOS_MAKE_TEST} |
-          EOF
-
-          fail=0
-          for result in \
-            "$UBUNTU_MAKE_TEST" \
-            "$UBUNTU_MAKE_CHECK_DOCS" \
-            "$UBUNTU_MAKE_TEST_ACCEPTANCE" \
-            "$UBUNTU_MAKE_TEST_ACCEPTANCE_B" \
-            "$UBUNTU_MAKE_TEST_ACCEPTANCE_C" \
-            "$UBUNTU_TEST_INTEGRATION_PACKAGES" \
-            "$UBUNTU_TEST_INTEGRATION_REVIEW_FORMULAS" \
-            "$UBUNTU_TEST_INTEGRATION_BDSTORE" \
-            "$UBUNTU_TEST_INTEGRATION_REST" \
-            "$UBUNTU_MAKE_TEST_TUTORIAL" \
-            "$UBUNTU_GORELEASER_SNAPSHOT" \
-            "$MACOS_MAKE_TEST"
-          do
-            if [ "$result" != "success" ]; then
-              fail=1
-            fi
-          done
-          exit "$fail"
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          summary_path = os.environ['GITHUB_STEP_SUMMARY']
+          lines = [
+              '## RC Gate',
+              '',
+              'This workflow is the manual pre-RC gate. It calls the reusable CI workflow plus RC-only release jobs for the dispatched ref.',
+              '',
+              'The `ci_parity` entry is the aggregate result of the shared CI workflow. Inspect the nested CI jobs in this run for per-check detail.',
+              '',
+              'Jobs that show `skipped` were intentionally gated off by the same conditional logic used in CI.',
+              '',
+              '| Job | Result |',
+              '| --- | --- |',
+          ]
+          fail = False
+          for job_id, meta in needs.items():
+              result = meta.get('result', 'unknown')
+              lines.append(f'| {job_id} | {result} |')
+              if result not in {'success', 'skipped'}:
+                  fail = True
+          with open(summary_path, 'a', encoding='utf-8') as handle:
+              handle.write('\\n'.join(lines) + '\\n')
+          sys.exit(1 if fail else 0)
+          PY

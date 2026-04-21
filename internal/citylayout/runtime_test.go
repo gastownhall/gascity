@@ -1,6 +1,8 @@
 package citylayout
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestPackRuntimeEnv(t *testing.T) {
 	cityRoot := "/city"

@@ -136,6 +136,7 @@ func TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo(t *testing.T) {
 	formulaContent := `
 formula = "wf-test"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "work"

@@ -92,6 +92,7 @@ type agentFile struct {
 	SessionLive            []string          `toml:"session_live,omitempty"`
 	DefaultSlingFormula    *string           `toml:"default_sling_formula,omitempty"`
 	InjectFragments        []string          `toml:"inject_fragments,omitempty"`
+	AppendFragments        []string          `toml:"append_fragments,omitempty"`
 	Attach                 *bool             `toml:"attach,omitempty"`
 	DependsOn              []string          `toml:"depends_on,omitempty"`
 	ResumeCommand          string            `toml:"resume_command,omitempty"`
@@ -835,6 +836,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		SessionLive:            agent.SessionLive,
 		DefaultSlingFormula:    agent.DefaultSlingFormula,
 		InjectFragments:        agent.InjectFragments,
+		AppendFragments:        agent.AppendFragments,
 		Attach:                 agent.Attach,
 		DependsOn:              agent.DependsOn,
 		ResumeCommand:          agent.ResumeCommand,
@@ -880,6 +882,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		len(cfg.SessionLive) == 0 &&
 		cfg.DefaultSlingFormula == nil &&
 		len(cfg.InjectFragments) == 0 &&
+		len(cfg.AppendFragments) == 0 &&
 		cfg.Attach == nil &&
 		len(cfg.DependsOn) == 0 &&
 		cfg.ResumeCommand == "" &&

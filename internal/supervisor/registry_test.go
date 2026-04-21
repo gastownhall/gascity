@@ -41,9 +41,9 @@ func TestRegistryRegisterAndList(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	// Register canonicalizes via filepath.EvalSymlinks; resolve expected
-	// path so the comparison holds on macOS (/var → /private/var).
-	wantCity, _ := filepath.EvalSymlinks(cityPath)
+	// Register stores the same canonical comparison form used by runtime
+	// path comparisons.
+	wantCity := testutil.CanonicalPath(cityPath)
 	if entries[0].Path != wantCity {
 		t.Errorf("expected path %s, got %s", wantCity, entries[0].Path)
 	}
@@ -168,9 +168,9 @@ func TestRegistryMultipleCities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Register canonicalizes via filepath.EvalSymlinks; resolve expected
-	// path so the comparison holds on macOS (/var → /private/var).
-	wantPath2, _ := filepath.EvalSymlinks(path2)
+	// Register stores the same canonical comparison form used by runtime
+	// path comparisons.
+	wantPath2 := testutil.CanonicalPath(path2)
 	if len(entries) != 1 || entries[0].Path != wantPath2 {
 		t.Errorf("expected only city-b, got %v", entries)
 	}

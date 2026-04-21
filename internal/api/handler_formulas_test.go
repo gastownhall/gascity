@@ -567,6 +567,7 @@ func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
 description = "Preview {{issue}}"
 formula = "mol-preview"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.issue]

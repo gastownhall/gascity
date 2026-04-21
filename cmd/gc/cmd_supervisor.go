@@ -1080,16 +1080,6 @@ func reconcileCities(
 			})
 		}
 
-		// Quick-parse city.toml for pre-load tasks (same as doStart).
-		quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath)
-
-		// Materialize gastown packs before full config load if needed.
-		if qErr == nil && usesGastownPack(quickCfg) {
-			if err := MaterializeGastownPacks(path); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gastown packs: %v\n", name, err) //nolint:errcheck
-			}
-		}
-
 		if err := ensureLegacyNamedPacksCached(path); err != nil {
 			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
 			continue
@@ -1097,7 +1087,7 @@ func reconcileCities(
 
 		// Load city config with provenance so WatchTargets covers included files.
 		// System packs are appended as extra includes for normal pack expansion.
-		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, builtinPackIncludes(path)...)
+		cfg, prov, loadErr := loadSupervisorCityConfig(path)
 		if loadErr != nil {
 			recordInitFailure(name, loadErr.Error())
 			continue
@@ -1567,6 +1557,10 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 	return alreadyRunning
 }
 
+func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath)
+}
+
 // prepareCityForSupervisor runs the critical city initialization steps
 // that cmd_start.go performs before runController. Without these, cities
 // would have no formulas, no bead stores, and no resolved rig paths.
@@ -1594,7 +1588,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return fmt.Errorf("validate services: %w", err)
 	}
 
-	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
+	// Refresh builtin packs after config validation so commands and managed
+	// provider assets are present before the bead lifecycle starts.
 	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
 	// materialized alongside the rest of the pack content.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
@@ -1602,8 +1597,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Built-in prompts and formulas now arrive via the core bootstrap pack.
-	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
+	// Install local agent hooks after builtin packs are refreshed.
+	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -1650,12 +1645,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		}
 	}
 
-	// Resolve script symlinks, including empty layer sets so stale links are pruned.
+	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
 	if progress != nil {
-		progress("resolving_scripts")
+		progress("pruning_legacy_scripts")
 	}
-	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': pruning legacy %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
 	})
 
 	// Validate agents.

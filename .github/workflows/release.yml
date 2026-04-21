@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -21,12 +26,25 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Reject replace directives in go.mod
+        run: |
+          if grep -qE '^replace\s' go.mod; then
+            echo "ERROR: go.mod contains replace directives — aborting release."
+            echo "Replace directives break 'go install ...@latest' and bottle builds in homebrew-core."
+            grep -n '^replace' go.mod
+            exit 1
+          fi
+
+      - name: Verify release tag is stable
+        run: make check-version-tag
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
         with:
           version: "~> v2"
-          args: release --clean
+          args: >
+            release --clean
+            ${{ github.repository != 'gastownhall/gascity' && '--skip=publish --skip=announce' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

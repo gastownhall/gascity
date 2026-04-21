@@ -122,7 +122,7 @@ awareness of Gas City. Hooks wire the provider's event system into Gas City so
 agents can receive mail, pick up slung work, and drain queued nudges
 automatically.
 
-The tutorial template sets hooks at the workspace level, so all your agents
+The minimal template sets hooks at the workspace level, so all your agents
 already have them:
 
 ```toml

@@ -1558,7 +1558,7 @@ name = "witness"
 	}
 }
 
-func TestExpandPacks_SessionSetupScriptAdjusted(t *testing.T) {
+func TestExpandPacks_SessionSetupScriptPreserved(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `
 [pack]
@@ -1581,8 +1581,8 @@ session_setup_script = "scripts/setup.sh"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// session_setup_script should be adjusted relative to pack dir → city root.
-	want := "packs/gt/scripts/setup.sh"
+	// session_setup_script stays pack-local and resolves later via SourceDir.
+	want := "scripts/setup.sh"
 	if cfg.Agents[0].SessionSetupScript != want {
 		t.Errorf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
 	}
@@ -3131,12 +3131,14 @@ session_setup_script = "scripts/theme.sh"
 	if a.Name != "worker" {
 		t.Errorf("name = %q, want worker", a.Name)
 	}
-	// session_setup_script should be set (resolved path).
+	// session_setup_script should be resolved against the patch pack since
+	// patches do not retain their own SourceDir at runtime.
 	if a.SessionSetupScript == "" {
 		t.Fatal("SessionSetupScript not set by patch")
 	}
-	if !strings.Contains(a.SessionSetupScript, "scripts/theme.sh") {
-		t.Errorf("SessionSetupScript = %q, want to contain scripts/theme.sh", a.SessionSetupScript)
+	wantScript := filepath.Join(dir, "packs/overlay/scripts/theme.sh")
+	if a.SessionSetupScript != wantScript {
+		t.Errorf("SessionSetupScript = %q, want %q", a.SessionSetupScript, wantScript)
 	}
 	// Nudge should be inherited from base (not cleared by patch).
 	if a.Nudge != "do work" {
@@ -3177,7 +3179,7 @@ overlay_dir = "overlays/custom"
 	}
 	a := cfg.Agents[0]
 	// Paths should be resolved relative to the overlay pack dir.
-	wantScript := "packs/overlay/scripts/neon.sh"
+	wantScript := filepath.Join(dir, "packs/overlay/scripts/neon.sh")
 	if a.SessionSetupScript != wantScript {
 		t.Errorf("SessionSetupScript = %q, want %q", a.SessionSetupScript, wantScript)
 	}

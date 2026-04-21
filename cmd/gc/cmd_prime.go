@@ -278,6 +278,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fragments := effectivePromptFragments(
 				cfg.Workspace.GlobalFragments,
 				a.InjectFragments,
+				a.AppendFragments,
 				a.InheritedAppendFragments,
 				cfg.AgentDefaults.AppendFragments,
 			)

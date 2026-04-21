@@ -476,6 +476,44 @@ func TestControllerStatusLine(t *testing.T) {
 	}
 }
 
+func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan struct{} {
+	t.Helper()
+	sockPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = lis.Close()
+		_ = os.Remove(sockPath)
+	})
+
+	accepted := make(chan struct{}, 1)
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			select {
+			case accepted <- struct{}{}:
+			default:
+			}
+			go func(conn net.Conn) {
+				defer conn.Close() //nolint:errcheck // test cleanup
+				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				_, _ = conn.Read(make([]byte, 64))
+				_ = conn.SetReadDeadline(time.Time{})
+				_, _ = conn.Write([]byte(response))
+			}(conn)
+		}
+	}()
+	return accepted
+}
+
 func TestControllerStatusForCityPrefersRegisteredSupervisorState(t *testing.T) {
 	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
 
@@ -488,25 +526,7 @@ func TestControllerStatusForCityPrefersRegisteredSupervisorState(t *testing.T) {
 		t.Fatalf("register city: %v", err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = lis.Close()
-		_ = os.Remove(sockPath)
-	})
-	accepted := make(chan struct{}, 1)
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		accepted <- struct{}{}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		_, _ = conn.Write([]byte("1234\n"))
-	}()
+	accepted := startFakeControllerSocket(t, cityPath, "1234\n")
 
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
@@ -540,23 +560,7 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenRegisteredSupervisorDow
 		t.Fatalf("register city: %v", err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = lis.Close()
-		_ = os.Remove(sockPath)
-	})
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		_, _ = conn.Write([]byte("2468\n"))
-	}()
+	startFakeControllerSocket(t, cityPath, "2468\n")
 
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
@@ -615,7 +619,7 @@ func TestControllerStatusForCityReusesSupervisorPIDWhenCityStateUnknown(t *testi
 	}
 }
 
-func TestControllerStatusForCityFallsBackToStandaloneWhenSupervisorVanishesDuringUnknownProbe(t *testing.T) {
+func TestControllerStatusForCityReturnsSupervisorModeWhenProbeSucceedsAfterUnknownRetry(t *testing.T) {
 	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
 
 	root := shortSocketTempDir(t, "gc-status-")
@@ -627,23 +631,7 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenSupervisorVanishesDurin
 		t.Fatalf("register city: %v", err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = lis.Close()
-		_ = os.Remove(sockPath)
-	})
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		_, _ = conn.Write([]byte("2468\n"))
-	}()
+	startFakeControllerSocket(t, cityPath, "2468\n")
 
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
@@ -662,8 +650,8 @@ func TestControllerStatusForCityFallsBackToStandaloneWhenSupervisorVanishesDurin
 	})
 
 	got := controllerStatusForCity(cityPath)
-	if got.Mode != "standalone" || !got.Running || got.PID != 2468 {
-		t.Fatalf("controllerStatusForCity = %+v, want running standalone PID 2468", got)
+	if got.Mode != "supervisor" || !got.Running || got.PID != 2468 {
+		t.Fatalf("controllerStatusForCity = %+v, want running supervisor-mode PID 2468", got)
 	}
 	if calls != 2 {
 		t.Fatalf("supervisorAliveHook calls = %d, want 2", calls)

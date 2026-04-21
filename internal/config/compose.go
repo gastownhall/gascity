@@ -288,6 +288,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Adjust fragment agent paths to be city-root-relative.
 		fragDir := filepath.Dir(fragPath)
 		adjustAgentPaths(frag.Agents, fragDir, cityRoot)
+		adjustPatchPaths(&frag.Patches, fragDir, cityRoot)
+		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
@@ -309,6 +311,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		root.Workspace.Includes = append(root.Workspace.Includes, inc)
 	}
+
+	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)
+	adjustRigOverridePaths(root.Rigs, cityRoot, cityRoot)
 
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
@@ -438,8 +443,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	cityLocalFormulas := citylayout.ResolveFormulasDir(cityRoot, root.FormulasDir())
 	root.FormulaLayers = ComputeFormulaLayers(
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
-	root.ScriptLayers = ComputeScriptLayers(
-		root.PackScriptDirs, root.RigScriptDirs, root.Rigs)
 
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
@@ -521,6 +524,44 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// explicitly-declared agent. Populate the fields here so the
 	// convention works uniformly.
 	return root, prov, nil
+}
+
+// adjustPatchPaths resolves patch session_setup_script values to absolute
+// paths rooted at the declaring config directory. Patches do not retain
+// independent source provenance after merge, so runtime cannot otherwise
+// distinguish whether a relative override came from the target agent's source
+// or from the patch file itself.
+func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
+	for i := range patches.Agents {
+		p := &patches.Agents[i]
+		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
+			continue
+		}
+		v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
+		p.SessionSetupScript = &v
+	}
+}
+
+// adjustRigOverridePaths resolves rig override session_setup_script values to
+// absolute paths rooted at the declaring config directory. Once overrides are
+// applied to pack-stamped agents, runtime only sees the target agent's
+// SourceDir, so relative override paths must be normalized during composition.
+func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
+	for i := range rigs {
+		adjustAgentOverridePaths(rigs[i].Overrides, declDir, cityRoot)
+		adjustAgentOverridePaths(rigs[i].RigPatches, declDir, cityRoot)
+	}
+}
+
+func adjustAgentOverridePaths(overrides []AgentOverride, declDir, cityRoot string) {
+	for i := range overrides {
+		ov := &overrides[i]
+		if ov.SessionSetupScript == nil || *ov.SessionSetupScript == "" {
+			continue
+		}
+		v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
+		ov.SessionSetupScript = &v
+	}
 }
 
 // populateAgentLocalAssetDirs fills Agent.SkillsDir and Agent.MCPDir for
@@ -992,20 +1033,18 @@ func resolveConfigPath(p, declDir, cityRoot string) string {
 	return filepath.Join(declDir, p)
 }
 
-// adjustAgentPaths converts relative prompt_template and session_setup_script
-// paths in fragment agents to be city-root-relative, based on the fragment's
-// directory. Also sets SourceDir so session_setup templates can reference
-// scripts relative to their source directory.
+// adjustAgentPaths converts relative prompt_template, overlay_dir, and
+// namepool paths in fragment agents to be city-root-relative, based on the
+// fragment's directory. session_setup_script is left as-authored so runtime
+// resolution can interpret it relative to SourceDir. SourceDir is always set
+// so session_setup templates and runtime path resolution know the declaring
+// config directory.
 func adjustAgentPaths(agents []Agent, fragDir, cityRoot string) {
 	for i := range agents {
 		agents[i].SourceDir = fragDir
 		if agents[i].PromptTemplate != "" {
 			agents[i].PromptTemplate = adjustFragmentPath(
 				agents[i].PromptTemplate, fragDir, cityRoot)
-		}
-		if agents[i].SessionSetupScript != "" {
-			agents[i].SessionSetupScript = adjustFragmentPath(
-				agents[i].SessionSetupScript, fragDir, cityRoot)
 		}
 		if agents[i].OverlayDir != "" {
 			agents[i].OverlayDir = adjustFragmentPath(

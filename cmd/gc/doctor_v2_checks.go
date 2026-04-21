@@ -247,10 +247,85 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	if err != nil || !info.IsDir() {
 		return okCheck("v2-scripts-layout", "no top-level scripts/ directory found")
 	}
+	realFiles, sawSymlink, walkErr := inspectTopLevelScripts(path)
+	if walkErr != nil {
+		return warnCheck("v2-scripts-layout",
+			fmt.Sprintf("inspecting top-level scripts/: %v", walkErr),
+			"resolve filesystem errors and rerun gc doctor",
+			[]string{"scripts/"})
+	}
+	if len(realFiles) == 0 {
+		if sawSymlink {
+			legacyShim, provenanceErr := legacyTopLevelScriptsShim(ctx.CityPath)
+			if provenanceErr != nil {
+				return warnCheck("v2-scripts-layout",
+					fmt.Sprintf("inspecting top-level scripts/ provenance: %v", provenanceErr),
+					"fix the config load error or inspect scripts/ manually before rerunning gc doctor",
+					[]string{"scripts/"})
+			}
+			if legacyShim {
+				return warnCheck("v2-scripts-layout",
+					"top-level scripts/ only contains stale legacy symlinks",
+					"delete scripts/ or rerun gc start/gc supervisor so runtime pruning can remove the old shim",
+					[]string{"scripts/"})
+			}
+			return warnCheck("v2-scripts-layout",
+				"top-level scripts/ only contains user-managed symlinks; runtime pruning will not remove them",
+				"move scripts to commands/ or assets/, or remove the user-managed symlinks manually",
+				[]string{"scripts/"})
+		}
+		return okCheck("v2-scripts-layout", "no legacy top-level scripts found")
+	}
 	return warnCheck("v2-scripts-layout",
-		"top-level scripts/ is deprecated; move scripts to commands/ or assets/",
+		"top-level scripts/ contains legacy real files; move scripts to commands/ or assets/",
 		"move entrypoint scripts next to commands/doctor entries or under assets/",
-		[]string{"scripts/"})
+		realFiles)
+}
+
+// inspectTopLevelScripts returns relative paths (under "scripts/") of real
+// files plus whether the tree contains any symlinks. Symlinks are treated as
+// stale compatibility artifacts from the removed ResolveScripts shim, while
+// real files indicate the deprecated user-authored top-level scripts layout.
+func inspectTopLevelScripts(dir string) ([]string, bool, error) {
+	var realFiles []string
+	var sawSymlink bool
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, lErr := os.Lstat(path)
+		if lErr != nil {
+			return lErr
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			sawSymlink = true
+			return nil
+		}
+		rel, rErr := filepath.Rel(dir, path)
+		if rErr != nil {
+			return rErr
+		}
+		realFiles = append(realFiles, filepath.Join("scripts", rel))
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	sort.Strings(realFiles)
+	return realFiles, sawSymlink, nil
+}
+
+func legacyTopLevelScriptsShim(cityPath string) (bool, error) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false, err
+	}
+	origins := legacyScriptOriginsForScope(cityPath, cfg.PackDirs)
+	_, ok, err := legacyShimLinks(cityPath, origins, cityPath)
+	return ok, err
 }
 
 type v2WorkspaceNameCheck struct{}

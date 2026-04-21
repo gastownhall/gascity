@@ -1792,6 +1792,70 @@ func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
 	}
 }
 
+// TestSyncSessionBeads_RefreshesStoredCommandOnConfigChange reproduces an
+// observed bug where an agent that got an `[option_defaults] model = "opus"`
+// entry added to its config after its session bead was created never picked up
+// the resulting `--model claude-opus-4-6` flag — even across `gc restart`.
+//
+// Root cause: session_beads.go only wrote `metadata.command` when it was empty
+// ("backfill") so the stored value was frozen at first-create time. If any
+// respawn path reads `metadata.command` (used by `gc session attach` and the
+// fallback in worker/handle_lifecycle.go:427), the agent runs with stale CLI
+// flags forever.
+//
+// This test captures the contract that `syncSessionBeadsWithSnapshot` MUST
+// refresh `metadata.command` to match freshly resolved `tp.Command` whenever
+// the two differ.
+func TestSyncSessionBeads_RefreshesStoredCommandOnConfigChange(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "mayor", runtime.Config{Command: "claude --dangerously-skip-permissions --effort max"})
+
+	// Tick 1: initial bead creation. Command lacks --model (mirrors a session
+	// created before option_defaults.model was added to the agent config).
+	beforeCmd := "claude --dangerously-skip-permissions --effort max"
+	ds := map[string]TemplateParams{
+		"mayor": {TemplateName: "mayor", Command: beforeCmd},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	beads1 := allSessionBeads(t, store)
+	if len(beads1) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(beads1))
+	}
+	if got := beads1[0].Metadata["command"]; got != beforeCmd {
+		t.Fatalf("tick 1: command = %q, want %q", got, beforeCmd)
+	}
+
+	// Tick 2: agent config grows an option_defaults.model entry. Fresh
+	// tp.Command now includes --model claude-opus-4-6. This is the scenario
+	// that broke in production: stored metadata.command was never updated.
+	afterCmd := "claude --dangerously-skip-permissions --effort max --model claude-opus-4-6"
+	ds["mayor"] = TemplateParams{TemplateName: "mayor", Command: afterCmd}
+	clk.Advance(3 * 24 * time.Hour) // 2026-04-17 → 2026-04-20
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	beads2 := allSessionBeads(t, store)
+	if len(beads2) != 1 {
+		t.Fatalf("expected 1 bead after tick 2, got %d", len(beads2))
+	}
+	if got := beads2[0].Metadata["command"]; got != afterCmd {
+		t.Errorf("tick 2: stored command was not refreshed.\n  got:  %q\n  want: %q\nthis is the option_defaults-propagation bug — stale command persists across config changes", got, afterCmd)
+	}
+
+	// Sanity: an empty tp.Command (e.g., resolution failure) must NOT clobber
+	// the stored value — the refresh is guarded on `tp.Command != ""`.
+	ds["mayor"] = TemplateParams{TemplateName: "mayor", Command: ""}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	beads3 := allSessionBeads(t, store)
+	if got := beads3[0].Metadata["command"]; got != afterCmd {
+		t.Errorf("tick 3: empty tp.Command should not clobber stored command.\n  got:  %q\n  want: %q", got, afterCmd)
+	}
+}
+
 func TestSyncSessionBeads_ConfigDrift(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

@@ -173,6 +173,12 @@ source = "../shared/gastown"
 Use the city pack's `pack.toml` for city-wide imports. Use rig-scoped
 imports in `city.toml` when a pack should compose only into one rig.
 
+For remote imports, run `gc import install` after the import declarations
+are in place. That writes or repairs `packs.lock` and materializes the
+cache. Use `gc import check` when you want a read-only validation pass:
+it reports missing or stale lock/cache state and points back to
+`gc import install` for repair.
+
 Rigs are the main thing that remain in `city.toml`. As you migrate, the
 usual pattern is:
 

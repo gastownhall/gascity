@@ -15,7 +15,7 @@ We'll pick up where Tutorial 01 left off. You should have `my-city` running with
 
 ## Defining an agent
 
-Open `city.toml`. You already have a `mayor` agent from the tutorial template.
+Open `city.toml`. You already have a `mayor` agent from the minimal template.
 Let's add a second agent that uses `codex` instead of `claude`:
 
 ```toml

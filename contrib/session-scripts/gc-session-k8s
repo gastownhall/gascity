@@ -334,7 +334,7 @@ case "$op" in
         --arg work_dir "$pod_work_dir" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
-        "${extra_jq_args[@]}" \
+        ${extra_jq_args[@]+"${extra_jq_args[@]}"} \
         '{
           apiVersion: "v1",
           kind: "Pod",
@@ -402,7 +402,7 @@ case "$op" in
         --arg work_dir "$pod_work_dir" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
-        "${extra_jq_args[@]}" \
+        ${extra_jq_args[@]+"${extra_jq_args[@]}"} \
         '{
           apiVersion: "v1",
           kind: "Pod",

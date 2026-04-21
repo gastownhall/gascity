@@ -369,27 +369,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Quick-parse city.toml (without includes) for pre-load tasks.
-	quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-
-	// Materialize gastown packs before full config load if the city
-	// references them. Covers the case where gc init wrote city.toml
-	// but failed before MaterializeGastownPacks ran.
-	if qErr == nil && usesGastownPack(quickCfg) {
-		if err := MaterializeGastownPacks(cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc start: materializing gastown packs: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-	}
-
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	allIncludes := make([]string, 0, len(extraConfigFiles)+3)
-	allIncludes = append(allIncludes, extraConfigFiles...)
-	allIncludes = append(allIncludes, builtinPackIncludes(cityPath)...)
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), allIncludes...)
+	cfg, prov, err := loadStartCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -428,14 +412,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// Materialize builtin packs (bd + dolt) so doctor checks, commands,
-	// and the bd pack's gc-beads-bd script are available.
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal: only needed if provider = "bd".
-	}
-	// Built-in prompts and formulas now arrive via the core bootstrap pack.
-	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
+	ensureInitArtifacts(cityPath, stderr, "gc start")
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
@@ -473,9 +450,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	// Materialize script symlinks before agent startup.
-	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc start: %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc start: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
 	})
 
 	// Validate agents.
@@ -646,6 +623,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func loadStartCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
 // printDryRunPreview prints what agents would be started without starting them.

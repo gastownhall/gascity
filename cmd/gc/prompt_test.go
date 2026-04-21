@@ -676,10 +676,11 @@ func TestEffectivePromptFragments(t *testing.T) {
 	got := effectivePromptFragments(
 		[]string{"global"},
 		[]string{"inject"},
+		[]string{"append"},
 		[]string{"inherited"},
 		[]string{"default"},
 	)
-	want := []string{"global", "inject", "inherited", "default"}
+	want := []string{"global", "inject", "append", "inherited", "default"}
 	if len(got) != len(want) {
 		t.Fatalf("len = %d, want %d", len(got), len(want))
 	}
@@ -688,8 +689,8 @@ func TestEffectivePromptFragments(t *testing.T) {
 			t.Fatalf("[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	if effectivePromptFragments(nil, nil, nil, nil) != nil {
-		t.Fatal("effectivePromptFragments(nil, nil, nil, nil) = non-nil, want nil")
+	if effectivePromptFragments(nil, nil, nil, nil, nil) != nil {
+		t.Fatal("effectivePromptFragments(nil, nil, nil, nil, nil) = non-nil, want nil")
 	}
 }
 
@@ -697,10 +698,11 @@ func TestEffectivePromptFragmentsDedupsAcrossLayers(t *testing.T) {
 	got := effectivePromptFragments(
 		[]string{"shared"},
 		[]string{"inject"},
+		[]string{"inject", "agent"},
 		[]string{"shared", "pack"},
 		[]string{"pack", "city"},
 	)
-	want := []string{"shared", "inject", "pack", "city"}
+	want := []string{"shared", "inject", "agent", "pack", "city"}
 	if len(got) != len(want) {
 		t.Fatalf("len = %d, want %d", len(got), len(want))
 	}

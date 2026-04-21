@@ -58,6 +58,7 @@ JSONL backups and Dolt filesystem backups provide recovery points.
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-compactor"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.commit_threshold]

@@ -53,6 +53,22 @@ mode = "on_demand"
 	}
 }
 
+func TestLoadWithIncludesLocalOnlyDoesNotRequireHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("home", "")
+
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+
+	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+		t.Fatalf("LoadWithIncludes local-only config: %v", err)
+	}
+}
+
 func TestLoadWithIncludes_ConcatServices(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
