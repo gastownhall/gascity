@@ -39,7 +39,7 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 // resolve city config → find named agent → look up its vendor sink →
 // build desired set → materialize. Never invoked by humans directly.
 func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
-	var agentName, workdir, sharedCatalogSnapshot string
+	var agentName, workdir, sharedCatalogSnapshot, sharedCatalogSnapshotFile string
 	cmd := &cobra.Command{
 		Use:    "materialize-skills",
 		Short:  "Materialize skills for one agent into one workdir",
@@ -69,10 +69,34 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc internal materialize-skills: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			var sharedCatalog *materialize.CityCatalog
+			// Resolve snapshot source: explicit --shared-catalog-snapshot-file
+			// → deterministic workdir-local snapshot file (keeps the
+			// pre-start command shape stable across upgrades) →
+			// --shared-catalog-snapshot (legacy/test path — base64 inline)
+			// → env var (legacy upgrade-compat path for sessions that were
+			// already launched before the file-indirection rollout).
+			explicitSnapshotFile := strings.TrimSpace(sharedCatalogSnapshotFile)
+			defaultSnapshotFile := ""
+			if explicitSnapshotFile == "" {
+				defaultSnapshotFile = skillSnapshotFilePath(workdir, agentName)
+			}
+			if explicitSnapshotFile != "" {
+				data, err := os.ReadFile(explicitSnapshotFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc internal materialize-skills: reading --shared-catalog-snapshot-file %q: %v (falling back to live catalog)\n", explicitSnapshotFile, err) //nolint:errcheck // best-effort stderr
+				} else {
+					sharedCatalogSnapshot = string(data)
+				}
+			}
+			if strings.TrimSpace(sharedCatalogSnapshot) == "" && defaultSnapshotFile != "" {
+				if data, err := os.ReadFile(defaultSnapshotFile); err == nil {
+					sharedCatalogSnapshot = string(data)
+				}
+			}
 			if strings.TrimSpace(sharedCatalogSnapshot) == "" {
 				sharedCatalogSnapshot = os.Getenv(sharedSkillCatalogSnapshotEnvVar)
 			}
+			var sharedCatalog *materialize.CityCatalog
 			if strings.TrimSpace(sharedCatalogSnapshot) != "" {
 				cat, err := decodeSharedCatalogSnapshot(sharedCatalogSnapshot)
 				if err != nil {
@@ -91,6 +115,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&agentName, "agent", "", "qualified agent identity (dir/name or name)")
 	cmd.Flags().StringVar(&workdir, "workdir", "", "agent working directory (skills materialize into workdir/.<vendor>/skills/)")
 	cmd.Flags().StringVar(&sharedCatalogSnapshot, "shared-catalog-snapshot", "", "base64-encoded shared catalog snapshot from the controller")
+	cmd.Flags().StringVar(&sharedCatalogSnapshotFile, "shared-catalog-snapshot-file", "", "path to a file containing the base64-encoded shared catalog snapshot (preferred over --shared-catalog-snapshot for large catalogs to avoid argv/env limits)")
 	return cmd
 }
 

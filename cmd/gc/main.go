@@ -143,7 +143,6 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
-	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),

@@ -549,6 +549,15 @@ func TestAppendMaterializeSkillsPreStart(t *testing.T) {
 	}
 }
 
+func TestSkillSnapshotFilePath(t *testing.T) {
+	t.Parallel()
+	got := skillSnapshotFilePath("/tmp/worktree", "repo/polecat")
+	want := filepath.Join("/tmp/worktree", ".gc", "tmp", "skill-catalog-repo_polecat.b64")
+	if got != want {
+		t.Fatalf("skillSnapshotFilePath() = %q, want %q", got, want)
+	}
+}
+
 // helpers
 
 func mustCreateSkill(t *testing.T, dir string) {

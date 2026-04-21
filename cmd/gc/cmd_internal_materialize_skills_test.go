@@ -352,6 +352,302 @@ template = "mayor"
 	}
 }
 
+// TestInternalMaterializeSkillsUsesSharedCatalogSnapshotFile verifies the
+// post-fix path: when the snapshot is provided via --shared-catalog-snapshot-file,
+// the materializer reads the base64 blob from disk instead of the env or
+// inline argv. This is the path used by stage-2 PreStart for catalogs
+// large enough that env injection would overflow tmux's imsg buffer.
+func TestInternalMaterializeSkillsUsesSharedCatalogSnapshotFile(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	skillsDir := filepath.Join(cityDir, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+	sharedCat, err := materialize.LoadCityCatalog(skillsDir)
+	if err != nil {
+		t.Fatalf("LoadCityCatalog: %v", err)
+	}
+	snapshot, err := encodeSharedCatalogSnapshot(sharedCat)
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot: %v", err)
+	}
+	snapshotFile := filepath.Join(t.TempDir(), "snapshot.b64")
+	if err := os.WriteFile(snapshotFile, []byte(snapshot), 0o600); err != nil {
+		t.Fatalf("WriteFile(snapshot): %v", err)
+	}
+
+	// Make the live catalog unreadable so the test definitively proves the
+	// snapshot-file path is what produced the materialization (not a
+	// silent fallback to disk).
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+		"--shared-catalog-snapshot-file", snapshotFile,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat(%s): %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+	if strings.Contains(stderr.String(), "shared skill catalog unavailable") {
+		t.Fatalf("snapshot-file run should not reload the live catalog, stderr=%q", stderr.String())
+	}
+}
+
+// TestInternalMaterializeSkillsUsesDefaultSharedCatalogSnapshotFile verifies
+// the upgrade-compatible path used by resolveTemplate: materialize-skills is
+// invoked with its legacy flags, then discovers the staged snapshot via the
+// deterministic workdir-local path.
+func TestInternalMaterializeSkillsUsesDefaultSharedCatalogSnapshotFile(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	skillsDir := filepath.Join(cityDir, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+	sharedCat, err := materialize.LoadCityCatalog(skillsDir)
+	if err != nil {
+		t.Fatalf("LoadCityCatalog: %v", err)
+	}
+	snapshot, err := encodeSharedCatalogSnapshot(sharedCat)
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot: %v", err)
+	}
+
+	workdir := t.TempDir()
+	snapshotFile := skillSnapshotFilePath(workdir, "mayor")
+	if err := os.MkdirAll(filepath.Dir(snapshotFile), 0o700); err != nil {
+		t.Fatalf("MkdirAll(snapshot dir): %v", err)
+	}
+	if err := os.WriteFile(snapshotFile, []byte(snapshot), 0o600); err != nil {
+		t.Fatalf("WriteFile(snapshot): %v", err)
+	}
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat(%s): %v", link, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+	if strings.Contains(stderr.String(), "shared skill catalog unavailable") {
+		t.Fatalf("default snapshot-file run should not reload the live catalog, stderr=%q", stderr.String())
+	}
+}
+
+func TestInternalMaterializeSkillsExplicitSnapshotFileOverridesInlineSnapshot(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	skillsDir := filepath.Join(cityDir, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+	fileSnapshotCat, err := materialize.LoadCityCatalog(skillsDir)
+	if err != nil {
+		t.Fatalf("LoadCityCatalog: %v", err)
+	}
+	fileSnapshot, err := encodeSharedCatalogSnapshot(fileSnapshotCat)
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot(file): %v", err)
+	}
+	inlineSnapshot, err := encodeSharedCatalogSnapshot(materialize.CityCatalog{})
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot(inline): %v", err)
+	}
+	snapshotFile := filepath.Join(t.TempDir(), "snapshot.b64")
+	if err := os.WriteFile(snapshotFile, []byte(fileSnapshot), 0o600); err != nil {
+		t.Fatalf("WriteFile(snapshot): %v", err)
+	}
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+		"--shared-catalog-snapshot", inlineSnapshot,
+		"--shared-catalog-snapshot-file", snapshotFile,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("explicit file should win over inline snapshot, lstat(%s): %v", link, err)
+	}
+}
+
+// TestInternalMaterializeSkillsSnapshotFileMissingFallsBackToLiveCatalog
+// verifies graceful degradation when the snapshot file is missing — the
+// command must not abort; it should warn and try the live catalog instead.
+func TestInternalMaterializeSkillsSnapshotFileMissingFallsBackToLiveCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+
+[[named_session]]
+template = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	skillsDir := filepath.Join(cityDir, "skills")
+	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdir,
+		"--shared-catalog-snapshot-file", "/nonexistent/path/that/does/not/exist.b64",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "shared-catalog-snapshot-file") {
+		t.Errorf("expected warning about unreadable snapshot file, got stderr=%q", stderr.String())
+	}
+	// Live catalog fallback should still produce the materialization.
+	link := filepath.Join(workdir, ".claude", "skills", "plan")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("lstat(%s): %v (live catalog fallback should have materialized)", link, err)
+	}
+}
+
 func TestInternalMaterializeSkillsInvalidSharedCatalogSnapshotFallsBackToLiveCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

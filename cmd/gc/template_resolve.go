@@ -391,11 +391,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
 				if sharedCatalog != nil {
 					if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
-						if env == nil {
-							env = map[string]string{}
+						if writeSkillSnapshotFile(workDir, materializeAgent, snapshot) == "" {
+							removeSkillSnapshotFile(workDir, materializeAgent)
 						}
-						env[sharedSkillCatalogSnapshotEnvVar] = snapshot
+					} else {
+						removeSkillSnapshotFile(workDir, materializeAgent)
 					}
+				} else {
+					removeSkillSnapshotFile(workDir, materializeAgent)
 				}
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
 			}
