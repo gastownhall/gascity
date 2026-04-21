@@ -15,6 +15,9 @@
 name = "gastown"
 schema = 2
 
+[imports.core]
+source = "../core"
+
 [imports.maintenance]
 source = "../maintenance"
 
