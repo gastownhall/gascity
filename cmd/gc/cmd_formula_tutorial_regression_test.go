@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestInitTutorialProviderWritesWorkspaceProvider(t *testing.T) {
+func TestInitMinimalProviderWritesWorkspaceProvider(t *testing.T) {
 	configureSupervisorHooksForTests()
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("PATH", os.Getenv("PATH"))
@@ -24,7 +24,7 @@ func TestInitTutorialProviderWritesWorkspaceProvider(t *testing.T) {
 		t.Fatalf("read city.toml: %v", err)
 	}
 	if !strings.Contains(string(data), `provider = "claude"`) {
-		t.Fatalf("tutorial init contract: city.toml should record workspace provider claude, got:\n%s", string(data))
+		t.Fatalf("minimal init contract: city.toml should record workspace provider claude, got:\n%s", string(data))
 	}
 }
 

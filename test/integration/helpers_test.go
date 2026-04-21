@@ -69,7 +69,7 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 	}
 
 	// gc init --file seeds the city directly from the intended config instead
-	// of creating the tutorial scaffold and mutating it afterward.
+	// of creating the minimal scaffold and mutating it afterward.
 	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)

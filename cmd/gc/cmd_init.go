@@ -73,7 +73,7 @@ var initConventionDirs = []string{
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
 	interactive      bool   // true if the wizard ran with user interaction
-	configName       string // "minimal", "gastown", or "custom"
+	configName       string // canonical values: "minimal", "gastown", or "custom"
 	provider         string // built-in provider key, or "" if startCommand set
 	startCommand     string // custom start command (workspace-level)
 	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
@@ -252,7 +252,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --provider to create the default mayor city
+materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
 non-interactively, or --file to initialize from an existing TOML config file.`,
 		Example: `  gc init
   gc init ~/my-city

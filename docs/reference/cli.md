@@ -1124,7 +1124,7 @@ Create a new Gas City workspace in the given directory (or cwd).
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --provider to create the default mayor city
+materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
 non-interactively, or --file to initialize from an existing TOML config file.
 
 ```

@@ -49,9 +49,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// TestInitTutorial verifies that gc init with the default tutorial
+// TestInitMinimal verifies that gc init with the default minimal
 // template creates a working city with city.toml, prompts, and formulas.
-func TestInitTutorial(t *testing.T) {
+func TestInitMinimal(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")
 
