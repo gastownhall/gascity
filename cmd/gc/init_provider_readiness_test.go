@@ -63,7 +63,7 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "", &initStdout, &initStderr)
 	if code != 0 {
@@ -314,7 +314,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "", &initStdout, &initStderr)
 	if code != 0 {
@@ -436,7 +436,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "", &initStdout, &initStderr)
 	if code != 0 {
@@ -720,7 +720,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "", &initStdout, &initStderr)
 	if code != 0 {
@@ -780,7 +780,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "", &initStdout, &initStderr)
 	if code != 0 {
@@ -829,7 +829,7 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "", &initStdout, &initStderr)
 	if code != 0 {
