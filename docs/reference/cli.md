@@ -1127,6 +1127,10 @@ the standard top-level directories, and .template.md prompt templates, then
 writes the default formulas. Use --provider to create the default mayor city
 non-interactively, or --file to initialize from an existing TOML config file.
 
+Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
+agent prompt files in the target directory (useful when bootstrapping a
+committed workspace — e.g. from a bootstrap.sh shipped in the repo).
+
 ```
 gc init [path] [flags]
 ```
@@ -1141,6 +1145,7 @@ gc init
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file city.toml --preserve-existing .
 ```
 
 | Flag | Type | Default | Description |
@@ -1149,6 +1154,7 @@ gc init
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
