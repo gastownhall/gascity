@@ -1776,7 +1776,7 @@ func (a *Agent) AttachEnabled() bool {
 
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
-// three-tier query with multi-identifier assignee resolution.
+// five-tier query with multi-identifier assignee resolution.
 //
 // Assignee resolution order: $GC_SESSION_ID (bead ID) > $GC_SESSION_NAME
 // (tmux session name) > $GC_ALIAS (named identity / qualified name).
@@ -1784,11 +1784,16 @@ func (a *Agent) AttachEnabled() bool {
 // was used when assigning.
 //
 // State priority: in_progress+assigned (crash recovery) >
-// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool) >
+// open+molecule+routed_to (formula roots) >
+// in_progress+unassigned+routed_to (orphan recovery).
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
-// the routed_to tier fires to detect new demand.
+// the routed_to tiers (pool + molecules + orphan) fire to detect new
+// demand. The orphan-recovery tier mirrors the "active" tier of
+// EffectiveScaleCheck so demand the reconciler counts is demand a
+// worker can claim.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -1823,8 +1828,14 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			// Tier 4: open routed molecule roots. scale_check already counts
 			// these, so startup must be able to see them too.
+			`r=$(bd list --metadata-field gc.routed_to=` + target +
+			` --status=open --type=molecule --no-assignee --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			// Tier 5: in_progress with no assignee routed to this config (orphan
+			// recovery). Mirrors EffectiveScaleCheck's "active" tier so the
+			// reconciler does not count demand that no worker tier can claim.
 			`bd list --metadata-field gc.routed_to=` + target +
-			` --status=open --type=molecule --no-assignee --json --limit=1 2>/dev/null'`
+			` --status=in_progress --no-assignee --json --limit=1 2>/dev/null'`
 	}
 	return `sh -c '` +
 		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).

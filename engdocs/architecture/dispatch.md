@@ -238,13 +238,71 @@ Pool agents with default queries:
 name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
-# Default work_query:  bd ready --metadata-field gc.routed_to=coder --unassigned --limit=1
+# Default work_query:  five-tier cascade — see "Work query tiers" below.
 ```
 
 System formulas are embedded in the `gc` binary and materialized to
 `.gc/system-formulas/` at startup. They form the lowest-priority formula
 layer (Layer 0) in the formula resolution stack. Pack and city-level
 formulas override system formulas by name.
+
+## Work query tiers
+
+`Agent.EffectiveWorkQuery()` (`internal/config/config.go`) returns a
+five-tier cascade when no custom `work_query` is configured. Tiers are
+evaluated in priority order — the first tier that returns a bead
+short-circuits the rest.
+
+| Tier | Query | Purpose |
+|---|---|---|
+| 1 | `bd list --status in_progress --assignee=<me>` | Crash recovery — resume work I already claimed |
+| 2 | `bd ready --assignee=<me>` | Pre-assigned — work routed to this identity |
+| 3 | `bd ready --metadata-field gc.routed_to=<target> --unassigned` | Pool queue — fresh unassigned work |
+| 4 | `bd list --metadata-field gc.routed_to=<target> --status=open --type=molecule --no-assignee` | Formula roots — open molecule containers that `bd ready` hides |
+| 5 | `bd list --metadata-field gc.routed_to=<target> --status=in_progress --no-assignee` | Orphan recovery — reclaim work abandoned by a drained worker |
+
+Tiers 1 and 2 iterate the assignee identifiers in priority order:
+`$GC_SESSION_ID` > `$GC_SESSION_NAME` > `$GC_ALIAS`. Tiers 3–5 use the
+agent's qualified name (or `pool_name` for pool instances) as
+`<target>`. Tiers 3–5 are gated on `$GC_SESSION_ORIGIN` being
+`ephemeral` or empty — named sessions do not consume the shared pool
+queue.
+
+When the reconciler evaluates work_query for demand detection, the
+identity variables are empty and `GC_SESSION_ORIGIN=""`, so tiers 1 and
+2 skip and tiers 3–5 fire. The reconciler uses the same predicate a
+worker uses to claim work — no secondary notion of "pool has demand"
+exists.
+
+### Scale-check tiers
+
+`Agent.EffectiveScaleCheck()` returns a default that sums three
+pool-wide counts:
+
+| Tier | Query | Counts |
+|---|---|---|
+| ready | `bd ready --metadata-field gc.routed_to=<target> --unassigned` | New unclaimed work |
+| active | `bd list --metadata-field gc.routed_to=<target> --status=in_progress --no-assignee` | Orphaned in-progress work |
+| molecules | `bd list --metadata-field gc.routed_to=<target> --status=open --type=molecule --no-assignee` | Formula-dispatched molecule roots `bd ready` hides |
+
+### Invariant: every scale_check tier maps to a claimable work_query tier
+
+Pool demand is a contract between the reconciler (which reads
+`scale_check` to decide whether to spawn a worker) and the worker
+(which reads `work_query` to claim work). If `scale_check` reports
+demand that `work_query` cannot produce, the reconciler keeps spawning
+workers that drain empty — a spawn storm.
+
+The default tiers hold this invariant:
+
+- scale_check `ready` ↔ work_query tier 3
+- scale_check `molecules` ↔ work_query tier 4
+- scale_check `active` ↔ work_query tier 5
+
+Overriding either query without preserving this correspondence
+introduces phantom demand. The reconciler has no other signal that a
+pool is understaffed, so drift between the two predicates is the root
+class of spawn-storm bugs.
 
 ## Testing
 

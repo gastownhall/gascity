@@ -23,6 +23,11 @@ bd ready --assignee="$GC_SESSION_NAME"
 # Step 3: If still nothing, check the pool queue
 bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned
 
+# Step 3b: If still nothing, recover orphaned work (in_progress with no assignee —
+# left behind by a drained worker). scale_check counts these; if you skip the
+# claim, the reconciler keeps spawning workers that find nothing to do.
+bd list --metadata-field gc.routed_to=$GC_TEMPLATE --status=in_progress --no-assignee
+
 # Step 4: Claim it
 bd update <id> --claim
 
@@ -83,7 +88,7 @@ the bead description directly.
 
 ## How to Work
 
-1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `bd ready --assignee="$GC_SESSION_NAME"` or `bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned`
+1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `bd ready --assignee="$GC_SESSION_NAME"` or `bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned` or `bd list --metadata-field gc.routed_to=$GC_TEMPLATE --status=in_progress --no-assignee`
 2. Claim if unclaimed: `bd update <id> --claim`
 3. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `bd mol current <mol-id>` → work each step in order (show → do → close → repeat)

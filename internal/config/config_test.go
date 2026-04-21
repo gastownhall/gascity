@@ -1323,6 +1323,35 @@ func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/polecat --status=open --type=molecule --no-assignee --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route: %q", got)
 	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/polecat --status=in_progress --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 5 orphan-recovery route: %q", got)
+	}
+}
+
+// TestEffectiveWorkQueryDefaultIncludesOrphanRecoveryTier is a regression
+// test for the reconciler/worker predicate mismatch that causes spawn
+// storms. EffectiveScaleCheck's "active" tier counts beads that are
+// in_progress with no assignee (orphaned work left behind by a drained
+// worker). The default work_query must expose a claimable tier for
+// that shape so the reconciler's demand signal stays aligned with what
+// a worker can actually claim — a mismatch causes spawn storms
+// (reconciler sees demand, worker finds nothing, drains, repeat).
+func TestEffectiveWorkQueryDefaultIncludesOrphanRecoveryTier(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "foundations", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
+	got := a.EffectiveWorkQuery()
+	want := "bd list --metadata-field gc.routed_to=foundations/worker --status=in_progress --no-assignee --json --limit=1"
+	if !strings.Contains(got, want) {
+		t.Errorf("EffectiveWorkQuery() missing orphan-recovery tier\n  want substring: %q\n  got: %q", want, got)
+	}
+	// The reconciler reads work_query with GC_SESSION_ORIGIN="" to probe
+	// for demand; the orphan tier must live after the ephemeral/"" gate
+	// so the reconciler sees it.
+	gate := `case "$GC_SESSION_ORIGIN" in ephemeral|""`
+	gateIdx := strings.Index(got, gate)
+	orphanIdx := strings.Index(got, want)
+	if gateIdx < 0 || orphanIdx < 0 || orphanIdx < gateIdx {
+		t.Errorf("orphan-recovery tier must appear after the ephemeral-origin gate\n  got: %q", got)
+	}
 }
 
 func TestEffectiveSlingQueryFixedAgent(t *testing.T) {
@@ -1375,6 +1404,9 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	}
 	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/dog --status=open --type=molecule --no-assignee --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route with pool name: %q", got)
+	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/dog --status=in_progress --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 5 orphan-recovery route with pool name: %q", got)
 	}
 }
 
