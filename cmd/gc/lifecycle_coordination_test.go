@@ -325,6 +325,105 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	}
 }
 
+func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	t.Setenv("GC_BEADS", "bd")
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	originalInitAndHook := initDirIfReadyInitAndHookDir
+	originalDelay := initDirIfReadyRetryDelay
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+		initDirIfReadyInitAndHookDir = originalInitAndHook
+		initDirIfReadyRetryDelay = originalDelay
+	})
+
+	initDirIfReadyRetryDelay = 0
+
+	var ensureCalls int
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error {
+		ensureCalls++
+		return nil
+	}
+
+	var initCalls int
+	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
+		initCalls++
+		if initCalls == 1 {
+			return fmt.Errorf("exec beads init: signal: terminated")
+		}
+		return nil
+	}
+
+	deferred, err := initDirIfReady(dir, dir, "gc")
+	if err != nil {
+		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady() deferred = true, want false")
+	}
+	if ensureCalls != 2 {
+		t.Fatalf("ensureBeadsProvider calls = %d, want 2", ensureCalls)
+	}
+	if initCalls != 2 {
+		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	}
+}
+
+func TestLifecycleCoordination_InitDirIfReady_DoesNotRetryNonManagedProviderFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	originalInitAndHook := initDirIfReadyInitAndHookDir
+	originalDelay := initDirIfReadyRetryDelay
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+		initDirIfReadyInitAndHookDir = originalInitAndHook
+		initDirIfReadyRetryDelay = originalDelay
+	})
+
+	initDirIfReadyRetryDelay = 0
+
+	var ensureCalls int
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error {
+		ensureCalls++
+		return nil
+	}
+
+	var initCalls int
+	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
+		initCalls++
+		return fmt.Errorf("exec beads init: signal: terminated")
+	}
+
+	deferred, err := initDirIfReady(dir, dir, "gc")
+	if err == nil {
+		t.Fatal("initDirIfReady() error = nil, want non-managed provider failure")
+	}
+	if deferred {
+		t.Fatal("initDirIfReady() deferred = true, want false")
+	}
+	if ensureCalls != 1 {
+		t.Fatalf("ensureBeadsProvider calls = %d, want 1", ensureCalls)
+	}
+	if initCalls != 1 {
+		t.Fatalf("initAndHookDir calls = %d, want 1", initCalls)
+	}
+}
+
 func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDatabaseWhenCanonicalUnknown(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {

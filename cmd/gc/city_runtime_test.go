@@ -1755,6 +1755,94 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	oldCfg := cr.cfg
+	oldRev := cr.configRev
+
+	prevStart := cityRuntimeStartBeadsLifecycle
+	prevDelay := cityRuntimeReloadLifecycleRetryDelay
+	var calls int
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("init city beads: exec beads init: signal: terminated")
+		}
+		return nil
+	}
+	cityRuntimeReloadLifecycleRetryDelay = 0
+	t.Cleanup(func() {
+		cityRuntimeStartBeadsLifecycle = prevStart
+		cityRuntimeReloadLifecycleRetryDelay = prevDelay
+	})
+
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if calls != 2 {
+		t.Fatalf("cityRuntimeStartBeadsLifecycle calls = %d, want 2", calls)
+	}
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeApplied)
+	}
+	if reply.Error != "" {
+		t.Fatalf("reply.Error = %q, want empty", reply.Error)
+	}
+	if !warningsContain(reply.Warnings, "transient bead lifecycle failure") {
+		t.Fatalf("reply.Warnings = %v, want transient retry warning", reply.Warnings)
+	}
+	if cr.cfg == oldCfg {
+		t.Fatal("cfg did not change after successful retry")
+	}
+	if cr.configRev == oldRev {
+		t.Fatalf("configRev = %q, want new revision", cr.configRev)
+	}
+	if lastProviderName != "fake" {
+		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
+	}
+	if !strings.Contains(stdout.String(), "Config reloaded:") {
+		t.Fatalf("stdout = %q, want reload success message", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "keeping old config") {
+		t.Fatalf("stderr = %q, want no reload failure", stderr.String())
+	}
+}
+
 func TestCityRuntimeReloadStrictWarningsReturnedOnFailure(t *testing.T) {
 	oldStrict := strictMode
 	strictMode = true
