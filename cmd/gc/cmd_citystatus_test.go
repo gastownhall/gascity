@@ -190,6 +190,16 @@ func TestCityStatusJSONEmpty(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "bright-lights"},
 	}
+	oldBaseURL := effectiveAPIBaseURLHook
+	oldClientFactory := effectiveAPIClientFactory
+	t.Cleanup(func() {
+		effectiveAPIBaseURLHook = oldBaseURL
+		effectiveAPIClientFactory = oldClientFactory
+	})
+	effectiveAPIBaseURLHook = func() (string, error) { return "http://127.0.0.1:8372", nil }
+	effectiveAPIClientFactory = func(baseURL string) effectiveAPIClient {
+		return fakeDashboardSupervisorClient{baseURL: baseURL}
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := doCityStatusJSON(sp, cfg, "/home/user/bright-lights", &stdout, &stderr)
@@ -206,6 +216,9 @@ func TestCityStatusJSONEmpty(t *testing.T) {
 	}
 	if status.CityPath != "/home/user/bright-lights" {
 		t.Errorf("city_path = %q, want %q", status.CityPath, "/home/user/bright-lights")
+	}
+	if status.EffectiveAPIURL != "http://127.0.0.1:8372" {
+		t.Errorf("effective_api_url = %q, want %q", status.EffectiveAPIURL, "http://127.0.0.1:8372")
 	}
 	if status.Controller.Running {
 		t.Error("controller should not be running")

@@ -12,6 +12,16 @@ import (
 
 func TestHandleConfigGet(t *testing.T) {
 	fs := newFakeState(t)
+	oldBaseURL := configEffectiveAPIBaseURLHook
+	oldClientFactory := configEffectiveAPIClientFactory
+	t.Cleanup(func() {
+		configEffectiveAPIBaseURLHook = oldBaseURL
+		configEffectiveAPIClientFactory = oldClientFactory
+	})
+	configEffectiveAPIBaseURLHook = func() (string, error) { return "http://127.0.0.1:8372", nil }
+	configEffectiveAPIClientFactory = func(baseURL string) effectiveAPIConfigClient {
+		return fakeConfigAPIClient{}
+	}
 	fs.cfg.Workspace.Provider = "claude"
 	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
 	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
@@ -42,6 +52,9 @@ func TestHandleConfigGet(t *testing.T) {
 	if resp.Workspace.Provider != "claude" {
 		t.Errorf("workspace.provider = %q, want %q", resp.Workspace.Provider, "claude")
 	}
+	if resp.EffectiveAPIURL != "http://127.0.0.1:8372" {
+		t.Errorf("effective_api_url = %q, want %q", resp.EffectiveAPIURL, "http://127.0.0.1:8372")
+	}
 	if len(resp.Agents) != 1 {
 		t.Errorf("agents count = %d, want 1", len(resp.Agents))
 	}
@@ -57,6 +70,12 @@ func TestHandleConfigGet(t *testing.T) {
 	if _, ok := resp.Providers["custom"]; !ok {
 		t.Error("expected 'custom' in providers")
 	}
+}
+
+type fakeConfigAPIClient struct{}
+
+func (fakeConfigAPIClient) ListCities() ([]CityInfo, error) {
+	return []CityInfo{{Name: "test-city", Path: "/tmp/test-city", Running: true}}, nil
 }
 
 func TestHandleConfigGet_OmitsNamedSessionModeWhenNoNamedSession(t *testing.T) {

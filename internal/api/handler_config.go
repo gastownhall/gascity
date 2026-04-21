@@ -9,11 +9,12 @@ import (
 // It provides a structured view of the expanded (post-pack, post-patch)
 // configuration state.
 type configResponse struct {
-	Workspace workspaceResponse           `json:"workspace"`
-	Agents    []configAgentResponse       `json:"agents"`
-	Rigs      []configRigResponse         `json:"rigs"`
-	Providers map[string]providerSpecJSON `json:"providers,omitempty"`
-	Patches   *configPatchesResponse      `json:"patches,omitempty"`
+	Workspace       workspaceResponse           `json:"workspace"`
+	EffectiveAPIURL string                      `json:"effective_api_url,omitempty"`
+	Agents          []configAgentResponse       `json:"agents"`
+	Rigs            []configRigResponse         `json:"rigs"`
+	Providers       map[string]providerSpecJSON `json:"providers,omitempty"`
+	Patches         *configPatchesResponse      `json:"patches,omitempty"`
 }
 
 type workspaceResponse struct {
@@ -65,6 +66,7 @@ func configAgentNamedSessionMode(agent config.Agent, namedSessionModes map[strin
 	}
 	return "always"
 }
+
 // agentOrigin determines the provenance of an agent. When raw config is
 // available (via RawConfigProvider), it uses two-phase detection for
 // accurate results. Otherwise falls back to the patch-presence heuristic.

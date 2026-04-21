@@ -16,13 +16,14 @@ import (
 
 // StatusJSON is the JSON output format for "gc status --json".
 type StatusJSON struct {
-	CityName   string            `json:"city_name"`
-	CityPath   string            `json:"city_path"`
-	Controller ControllerJSON    `json:"controller"`
-	Suspended  bool              `json:"suspended"`
-	Agents     []StatusAgentJSON `json:"agents"`
-	Rigs       []StatusRigJSON   `json:"rigs"`
-	Summary    StatusSummaryJSON `json:"summary"`
+	CityName        string            `json:"city_name"`
+	CityPath        string            `json:"city_path"`
+	EffectiveAPIURL string            `json:"effective_api_url,omitempty"`
+	Controller      ControllerJSON    `json:"controller"`
+	Suspended       bool              `json:"suspended"`
+	Agents          []StatusAgentJSON `json:"agents"`
+	Rigs            []StatusRigJSON   `json:"rigs"`
+	Summary         StatusSummaryJSON `json:"summary"`
 }
 
 // ControllerJSON represents controller state in JSON output.
@@ -98,7 +99,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	sp := newSessionProvider()
+	sp := newStatusSessionProvider()
 	dops := newDrainOps(sp)
 	if jsonOutput {
 		return doCityStatusJSON(sp, cfg, cityPath, stdout, stderr)
@@ -133,6 +134,7 @@ func doCityStatus(
 
 	ctrl := controllerStatusForCity(cityPath)
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(ctrl)) //nolint:errcheck // best-effort stdout
+	fmt.Fprint(stdout, effectiveAPIStatusLine(cityPath, cfg))             //nolint:errcheck // best-effort stdout
 	for _, line := range controllerStatusGuidance(ctrl, cityPath) {
 		fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
 	}
@@ -390,13 +392,14 @@ func doCityStatusJSON(
 	}
 
 	status := StatusJSON{
-		CityName:   cityName,
-		CityPath:   cityPath,
-		Controller: ctrl,
-		Suspended:  citySuspended(cfg),
-		Agents:     agents,
-		Rigs:       rigs,
-		Summary:    summary,
+		CityName:        cityName,
+		CityPath:        cityPath,
+		EffectiveAPIURL: resolveEffectiveAPIURL(cityPath, cfg),
+		Controller:      ctrl,
+		Suspended:       citySuspended(cfg),
+		Agents:          agents,
+		Rigs:            rigs,
+		Summary:         summary,
 	}
 
 	data, err := json.MarshalIndent(status, "", "  ")

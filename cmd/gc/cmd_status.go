@@ -79,7 +79,7 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	sp := newSessionProvider()
+	sp := newStatusSessionProvider()
 	dops := newDrainOps(sp)
 	return doRigStatus(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
 }

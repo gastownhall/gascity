@@ -1,1 +1,0 @@
-/data/projects/gc/.gc/system/packs/dolt/scripts/runtime.sh

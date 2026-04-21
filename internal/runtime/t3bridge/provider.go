@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,6 +28,18 @@ import (
 )
 
 var authMu sync.Mutex
+var defaultWSURLCandidates = []string{
+	"ws://127.0.0.1:3773/ws",
+	"ws://localhost:3773/ws",
+}
+
+const (
+	bridgeConnectRetryWindow = 8 * time.Second
+	bridgeConnectBaseDelay   = 100 * time.Millisecond
+	bridgeConnectMaxDelay    = 1 * time.Second
+	bridgeHTTPTimeout        = 3 * time.Second
+	bridgeWSTimeout          = 3 * time.Second
+)
 
 // Provider wraps an exec.Provider, moving the T3-specific lifecycle and turn
 // operations into native Go WebSocket calls while leaving a small helper
@@ -78,23 +92,44 @@ type execStartConfig struct {
 // NewProvider creates a t3bridge Provider with an internal exec shim for the
 // small remaining helper surface and native WebSocket calls for T3 lifecycle
 // work.
-// resolveWsURL reads the t3code WebSocket URL from the environment or
-// the ws-url file. Called on each connection so a t3code restart with
-// a new port/token is picked up without restarting gc.
-func resolveWsURL() string {
-	if v := os.Getenv("T3_WS_URL"); v != "" {
-		return v
+// resolveWsURLCandidates reads the t3code WebSocket URL from the environment,
+// the ws-url file, and finally stable loopback defaults. Called on each
+// connection so a t3code restart with a new port/token is picked up without
+// restarting gc, while still surviving stale env/file state.
+func resolveWsURLCandidates() []string {
+	candidates := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		if _, ok := seen[raw]; ok {
+			return
+		}
+		seen[raw] = struct{}{}
+		candidates = append(candidates, raw)
 	}
+	add(os.Getenv("T3_WS_URL"))
 	t3Home := os.Getenv("T3_HOME")
 	if t3Home == "" {
 		t3Home = filepath.Join(os.Getenv("HOME"), ".t3")
 	}
 	if urlBytes, err := os.ReadFile(filepath.Join(t3Home, "ws-url")); err == nil {
-		if url := strings.TrimSpace(string(urlBytes)); url != "" {
-			return url
-		}
+		add(string(urlBytes))
 	}
-	return "ws://localhost:3773/ws"
+	for _, candidate := range defaultWSURLCandidates {
+		add(candidate)
+	}
+	return candidates
+}
+
+func resolveWsURL() string {
+	candidates := resolveWsURLCandidates()
+	if len(candidates) == 0 {
+		return "ws://127.0.0.1:3773/ws"
+	}
+	return candidates[0]
 }
 
 func resolveT3ServerDir() string {
@@ -182,7 +217,8 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: bridgeHTTPTimeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request bridge ws token: %w", err)
 	}
@@ -204,8 +240,71 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 	return payload.Token, nil
 }
 
-func authenticatedWsURL() (string, error) {
-	wsURL := resolveWsURL()
+func isTransientBridgeError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset by peer",
+		"broken pipe",
+		"unexpected eof",
+		"eof",
+		"no such host",
+		"server misbehaving",
+		"tls handshake timeout",
+		"timeout awaiting response headers",
+		"status 502",
+		"status 503",
+		"status 504",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func nextBridgeRetryDelay(attempt int) time.Duration {
+	delay := bridgeConnectBaseDelay
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay >= bridgeConnectMaxDelay {
+			return bridgeConnectMaxDelay
+		}
+	}
+	if delay > bridgeConnectMaxDelay {
+		return bridgeConnectMaxDelay
+	}
+	return delay
+}
+
+func softenBridgeStartupError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, runtime.ErrSessionInitializing) {
+		return err
+	}
+	if isTransientBridgeError(err) {
+		return fmt.Errorf("%w: %v", runtime.ErrSessionInitializing, err)
+	}
+	return err
+}
+
+func isSoftBridgeUnavailable(err error) bool {
+	return errors.Is(err, runtime.ErrSessionInitializing) || isTransientBridgeError(err)
+}
+
+func authenticatedWsURL(wsURL string) (string, error) {
 	wsToken, err := issueT3WebSocketToken(wsURL)
 	if err != nil {
 		return "", err
@@ -584,64 +683,91 @@ func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[st
 	reqID := p.reqSeq
 	p.mu.Unlock()
 
-	wsURL, err := authenticatedWsURL()
-	if err != nil {
-		return nil, err
-	}
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	payload := params
-	if payload == nil {
-		payload = map[string]interface{}{}
-	}
-	request := map[string]interface{}{
-		"_tag":    "Request",
-		"id":      fmt.Sprintf("%d", reqID),
-		"tag":     method,
-		"payload": payload,
-		"headers": []interface{}{},
-	}
-	if err := conn.WriteJSON(request); err != nil {
-		return nil, err
-	}
-
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
+	deadline := time.Now().Add(bridgeConnectRetryWindow)
+	for attempt := 1; ; attempt++ {
+		result, err := p.rpcCallOnce(method, params, reqID)
+		if err == nil {
+			return result, nil
+		}
+		if !isTransientBridgeError(err) || time.Now().After(deadline) {
 			return nil, err
 		}
-		var resp struct {
-			Tag       string `json:"_tag"`
-			RequestID string `json:"requestId"`
-			Exit      *struct {
-				Tag   string                 `json:"_tag"`
-				Value map[string]interface{} `json:"value"`
-				Cause json.RawMessage        `json:"cause"`
-			} `json:"exit"`
-			Defect string `json:"defect"`
-		}
-		if err := json.Unmarshal(msg, &resp); err != nil {
-			continue
-		}
-		if resp.Tag == "Defect" {
-			return nil, fmt.Errorf("t3bridge rpc defect: %s", resp.Defect)
-		}
-		if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
-			continue
-		}
-		if resp.Exit == nil {
-			return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
-		}
-		if resp.Exit.Tag == "Failure" {
-			return nil, fmt.Errorf("t3 rpc %s: %s", method, string(resp.Exit.Cause))
-		}
-		return resp.Exit.Value, nil
+		time.Sleep(nextBridgeRetryDelay(attempt))
 	}
+}
+
+func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
+	var lastErr error
+	for _, candidate := range resolveWsURLCandidates() {
+		wsURL, err := authenticatedWsURL(candidate)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			continue
+		}
+		dialer := *websocket.DefaultDialer
+		dialer.HandshakeTimeout = bridgeWSTimeout
+		conn, _, err := dialer.Dial(wsURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			continue
+		}
+		defer conn.Close()
+
+		payload := params
+		if payload == nil {
+			payload = map[string]interface{}{}
+		}
+		request := map[string]interface{}{
+			"_tag":    "Request",
+			"id":      fmt.Sprintf("%d", reqID),
+			"tag":     method,
+			"payload": payload,
+			"headers": []interface{}{},
+		}
+		if err := conn.WriteJSON(request); err != nil {
+			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			continue
+		}
+
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				lastErr = fmt.Errorf("%s: %w", candidate, err)
+				break
+			}
+			var resp struct {
+				Tag       string `json:"_tag"`
+				RequestID string `json:"requestId"`
+				Exit      *struct {
+					Tag   string                 `json:"_tag"`
+					Value map[string]interface{} `json:"value"`
+					Cause json.RawMessage        `json:"cause"`
+				} `json:"exit"`
+				Defect string `json:"defect"`
+			}
+			if err := json.Unmarshal(msg, &resp); err != nil {
+				continue
+			}
+			if resp.Tag == "Defect" {
+				return nil, fmt.Errorf("t3bridge rpc defect: %s", resp.Defect)
+			}
+			if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
+				continue
+			}
+			if resp.Exit == nil {
+				return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
+			}
+			if resp.Exit.Tag == "Failure" {
+				return nil, fmt.Errorf("t3 rpc %s: %s", method, string(resp.Exit.Cause))
+			}
+			return resp.Exit.Value, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
+	}
+	return nil, lastErr
 }
 
 // threadSessionStatus returns the session status for a thread by checking
@@ -1079,6 +1205,22 @@ func buildThreadEnv(env map[string]string) map[string]string {
 }
 
 func buildGCMetadata(envelope StartupEnvelope, runtimeProvider, state string, sessionEnv map[string]string) map[string]interface{} {
+	groupKind := "workspace"
+	groupID := envelope.GC.CityName
+	groupLabel := strings.ToUpper(strings.TrimSpace(envelope.GC.CityName))
+	if strings.TrimSpace(envelope.GC.RigName) != "" {
+		groupKind = "rig"
+		groupID = envelope.GC.RigName
+		groupLabel = envelope.GC.RigName
+	}
+	agentQualified := envelope.GC.Agent
+	agentLabel := agentQualified
+	if slash := strings.LastIndex(agentQualified, "/"); slash >= 0 && slash+1 < len(agentQualified) {
+		agentLabel = agentQualified[slash+1:]
+	}
+	if dot := strings.LastIndex(agentLabel, "."); dot >= 0 && dot+1 < len(agentLabel) {
+		agentLabel = agentLabel[dot+1:]
+	}
 	meta := map[string]interface{}{
 		"gc.agent":             envelope.GC.Agent,
 		"gc.sessionName":       envelope.GC.SessionName,
@@ -1101,6 +1243,11 @@ func buildGCMetadata(envelope StartupEnvelope, runtimeProvider, state string, se
 		"gc.startupWorkDir":    envelope.Runtime.WorkDir,
 		"gc.molecule":          envelope.Assignment.MoleculeID,
 		"gc.formula":           envelope.Assignment.Formula,
+		"gc.groupKind":         groupKind,
+		"gc.groupId":           groupID,
+		"gc.groupLabel":        groupLabel,
+		"gc.agentQualified":    agentQualified,
+		"gc.agentLabel":        agentLabel,
 	}
 	if len(sessionEnv) > 0 {
 		if encodedEnv, err := json.Marshal(sessionEnv); err == nil {
@@ -1521,6 +1668,10 @@ func (p *Provider) stopEventWatcher(name string) {
 func (p *Provider) IsRunning(name string) bool {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if p.withinRecentStart(name, 30*time.Second) {
+			fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) — snapshot soft-unavailable during startup grace → true (%v)\n", name, err)
+			return true
+		}
 		fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) — snapshot error: %v\n", name, err)
 		return false
 	}
@@ -1544,6 +1695,10 @@ func (p *Provider) IsRunning(name string) bool {
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			fmt.Fprintf(os.Stderr, "t3bridge: ListRunning(%s) — soft-unavailable: %v\n", prefix, err)
+			return nil, nil
+		}
 		return nil, err
 	}
 	names := make([]string, 0)
@@ -1644,11 +1799,17 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	var worktreePath, worktreeBranch string
+	fail := func(err error) error {
+		if worktreePath != "" {
+			_ = p.rpcRemoveWorktree(cwd, worktreePath)
+		}
+		return softenBridgeStartupError(err)
+	}
 	if hasWorktree && cwd != "" {
 		var err error
 		worktreePath, worktreeBranch, err = p.rpcCreateWorktree(cwd, branch, newBranch, desiredPath)
 		if err != nil {
-			return fmt.Errorf("t3bridge: create worktree: %w", err)
+			return softenBridgeStartupError(fmt.Errorf("t3bridge: create worktree: %w", err))
 		}
 		cfg.WorkDir = worktreePath
 		envelope.Worktree = &WorktreeSection{
@@ -1679,10 +1840,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
-		if worktreePath != "" {
-			_ = p.rpcRemoveWorktree(cwd, worktreePath)
-		}
-		return fmt.Errorf("t3bridge: load snapshot: %w", err)
+		return fail(fmt.Errorf("t3bridge: load snapshot: %w", err))
 	}
 
 	existingThread := snapshotThreadBySessionName(snapshot, name)
@@ -1757,10 +1915,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		projectID = uuid.NewString()
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) creating project id=%s title=%s root=%s\n", name, projectID, projectTitle, projectWorkspaceRoot) //nolint:errcheck
 		if err := p.dispatchProjectCreate(projectID, projectTitle, projectWorkspaceRoot, providerName, modelName); err != nil {
-			if worktreePath != "" {
-				_ = p.rpcRemoveWorktree(cwd, worktreePath)
-			}
-			return err
+			return fail(err)
 		}
 	}
 
@@ -1784,10 +1939,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		createWorktreePath,
 		initialGCMetadata,
 	); err != nil {
-		if worktreePath != "" {
-			_ = p.rpcRemoveWorktree(cwd, worktreePath)
-		}
-		return err
+		return fail(err)
 	}
 
 	binding := threadBinding{
@@ -1821,7 +1973,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if prompt := strings.TrimSpace(envelope.Startup.StartupPrompt); prompt != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending startup prompt thread=%s len=%d\n", name, threadID, len(prompt)) //nolint:errcheck
 		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName); err != nil {
-			return err
+			return fail(err)
 		}
 		_ = p.dispatchActivity(threadID, "gc.prompt.sent", "GC startup prompt sent", "info", map[string]interface{}{
 			"textLength": len(prompt),
@@ -1834,7 +1986,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if nudgeText != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending nudge thread=%s len=%d\n", name, threadID, len(nudgeText)) //nolint:errcheck
 		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName); err != nil {
-			return err
+			return fail(err)
 		}
 		_ = p.dispatchActivity(threadID, "gc.nudge.sent", "GC nudge sent", "info", map[string]interface{}{
 			"source": func() string {
@@ -1853,6 +2005,11 @@ func (p *Provider) Stop(name string) error {
 	p.stopEventWatcher(name)
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			p.clearRecentStart(name)
+			p.clearBridgeMeta(name)
+			return nil
+		}
 		return err
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
@@ -1887,6 +2044,9 @@ func (p *Provider) Stop(name string) error {
 func (p *Provider) Interrupt(name string) error {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			return nil
+		}
 		return err
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
@@ -1918,6 +2078,9 @@ func (p *Provider) Attach(name string) error {
 func (p *Provider) ProcessAlive(name string, _ []string) bool {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if p.withinRecentStart(name, 30*time.Second) {
+			return true
+		}
 		return false
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
@@ -1931,6 +2094,9 @@ func (p *Provider) ProcessAlive(name string, _ []string) bool {
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			return nil
+		}
 		return err
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
@@ -1960,6 +2126,9 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	}
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			return nil
+		}
 		return err
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
@@ -1987,6 +2156,9 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	}
 	snapshot, loadErr := p.rpcSnapshot()
 	if loadErr != nil {
+		if isSoftBridgeUnavailable(loadErr) {
+			return nil
+		}
 		return loadErr
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
@@ -2033,6 +2205,9 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			return "t3bridge temporarily unavailable", nil
+		}
 		return "", err
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
@@ -2077,6 +2252,14 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if p.withinRecentStart(name, 30*time.Second) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			return p.recentStarts[name], nil
+		}
+		if isSoftBridgeUnavailable(err) {
+			return time.Time{}, nil
+		}
 		return time.Time{}, err
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
@@ -2101,6 +2284,9 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	}
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			return nil
+		}
 		return nil
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)

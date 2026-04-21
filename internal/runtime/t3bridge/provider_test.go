@@ -3,6 +3,7 @@ package t3bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -417,11 +418,15 @@ func TestCopyTo_UsesThreadWorkDir(t *testing.T) {
 }
 
 type t3BridgeTestServer struct {
-	t        *testing.T
-	server   *httptest.Server
-	mu       sync.Mutex
-	commands []string
-	snapshot map[string]interface{}
+	t                 *testing.T
+	server            *httptest.Server
+	mu                sync.Mutex
+	commands          []string
+	snapshot          map[string]interface{}
+	authFailures      int
+	authFailureStatus int
+	authFailureBody   string
+	authRequestCount  int
 }
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
@@ -429,9 +434,24 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 	ts := &t3BridgeTestServer{t: t, snapshot: snapshot}
 	upgrader := websocket.Upgrader{}
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/auth/ws-token" {
-			if auth := r.Header.Get("Authorization"); auth == "" {
-				http.Error(w, "missing auth", http.StatusUnauthorized)
+		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" {
+			ts.mu.Lock()
+			ts.authRequestCount++
+			failuresRemaining := ts.authFailures
+			if ts.authFailures > 0 {
+				ts.authFailures--
+			}
+			failureStatus := ts.authFailureStatus
+			failureBody := ts.authFailureBody
+			ts.mu.Unlock()
+			if failuresRemaining > 0 {
+				if failureStatus == 0 {
+					failureStatus = http.StatusServiceUnavailable
+				}
+				if failureBody == "" {
+					failureBody = "bridge warming up"
+				}
+				http.Error(w, failureBody, failureStatus)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -503,6 +523,20 @@ func (ts *t3BridgeTestServer) commandTypes() []string {
 	return append([]string(nil), ts.commands...)
 }
 
+func (ts *t3BridgeTestServer) setAuthFailures(count, status int, body string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.authFailures = count
+	ts.authFailureStatus = status
+	ts.authFailureBody = body
+}
+
+func (ts *t3BridgeTestServer) authCalls() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.authRequestCount
+}
+
 func commandType(payload map[string]interface{}) string {
 	if typ, _ := payload["type"].(string); typ != "" {
 		return typ
@@ -540,6 +574,118 @@ func TestResolveBindingProviderModel_InfersCodexFromStoredGptModel(t *testing.T)
 	}
 	if model != "gpt-5.4-mini" {
 		t.Fatalf("model = %q, want gpt-5.4-mini", model)
+	}
+}
+
+func TestRPCSnapshot_RetriesTransientBridgeAuthFailure(t *testing.T) {
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	server.setAuthFailures(2, http.StatusServiceUnavailable, "warming")
+	defer server.Close()
+
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot retry: %v", err)
+	}
+	if calls := server.authCalls(); calls < 3 {
+		t.Fatalf("auth calls = %d, want at least 3", calls)
+	}
+}
+
+func TestRPCSnapshot_FallsBackToWSURLFileWhenEnvStale(t *testing.T) {
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	defer server.Close()
+
+	t3Home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(t3Home, "ws-url"), []byte(server.wsURL()), 0o644); err != nil {
+		t.Fatalf("write ws-url: %v", err)
+	}
+	t.Setenv("T3_HOME", t3Home)
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot fallback: %v", err)
+	}
+}
+
+func TestStart_TransientBridgeFailureReturnsInitializing(t *testing.T) {
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	err := p.Start(context.Background(), "deacon", runtime.Config{
+		WorkDir: "/tmp/deacon",
+		Command: "codex",
+		Env: map[string]string{
+			"GC_CITY_PATH": "/tmp/gc",
+			"GC_TEMPLATE":  "deacon",
+			"GC_PROVIDER":  "codex",
+			"GC_MODEL":     "gpt-5.4",
+		},
+	})
+	if !errors.Is(err, runtime.ErrSessionInitializing) {
+		t.Fatalf("Start error = %v, want ErrSessionInitializing", err)
+	}
+}
+
+func TestPeek_TransientBridgeFailureSoftDegrades(t *testing.T) {
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	out, err := p.Peek("deacon", 10)
+	if err != nil {
+		t.Fatalf("Peek error = %v, want nil", err)
+	}
+	if !strings.Contains(out, "temporarily unavailable") {
+		t.Fatalf("Peek output = %q, want temporary-unavailable message", out)
 	}
 }
 
