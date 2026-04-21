@@ -931,9 +931,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		}
 	}
 
-	// Resolve script symlinks for newly activated packs.
-	resolveConfiguredScripts(cityRoot, nextCfg, func(scope string, err error) {
-		appendWarning(fmt.Sprintf("config reload: %s scripts: %v", scope, err))
+	// Prune legacy top-level scripts/ symlinks from older runtime shims.
+	pruneLegacyConfiguredScripts(cityRoot, nextCfg, func(scope string, err error) {
+		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
 	})
 
 	if providerChanged {

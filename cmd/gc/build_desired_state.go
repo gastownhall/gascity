@@ -523,15 +523,16 @@ func collectAssignedWorkBeadsWithStores(
 	for _, s := range stores {
 		seen := make(map[string]struct{})
 		// In-progress beads with an assignee (active work).
-		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress"}); err == nil {
+		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress", Live: true}); err == nil {
 			appendAssignedUnique(&result, &resultStores, inProgress, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
 		}
 		// Ready beads with an assignee (queued direct handoff work that is
-		// actually runnable, not merely open).
-		if ready, err := s.Ready(); err == nil {
+		// actually runnable, not merely open). This is a lifecycle gate, so
+		// bypass the cache when a CachingStore wrapper is present.
+		if ready, err := beads.ReadyLive(s); err == nil {
 			appendAssignedUnique(&result, &resultStores, ready, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)

@@ -9,7 +9,8 @@
 set -euo pipefail
 
 CITY="${GC_CITY:-.}"
-DOLT_PORT="${GC_DOLT_PORT:-3307}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/dolt-target.sh"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"
 LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
@@ -33,7 +34,7 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 # Discover databases. Exclude Dolt/MySQL system schemas and Gas City's internal
 # health-probe database; the remaining databases are expected to be bead stores.
-DATABASES=$(dolt sql -P "$DOLT_PORT" -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$' || true)
+DATABASES=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -vi '^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$' || true)
 if [ -z "$DATABASES" ]; then
     exit 0
 fi
@@ -61,14 +62,14 @@ for DB in $DATABASES; do
     mkdir -p "$DB_DIR"
 
     # Step 1: Export issues table.
-    if ! dolt sql -P "$DOLT_PORT" -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$DB_DIR/issues.jsonl" 2>/dev/null; then
+    if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$DB_DIR/issues.jsonl" 2>/dev/null; then
         FAILED_DBS="${FAILED_DBS}$DB "
         continue
     fi
 
     # Export supplemental tables (best-effort).
     for TABLE in comments config dependencies labels metadata; do
-        dolt sql -P "$DOLT_PORT" -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
+        dolt_sql -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
     done
 
     # Legacy flat file.

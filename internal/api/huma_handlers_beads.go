@@ -50,6 +50,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				Type:     input.Type,
 				Label:    input.Label,
 				Assignee: assignee,
+				Live:     input.Status == "in_progress",
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
@@ -127,7 +128,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	var pa partialAggregator
 	for _, rigName := range rigNames {
 		pa.attempt()
-		ready, err := stores[rigName].Ready()
+		ready, err := beads.ReadyLive(stores[rigName])
 		if err != nil {
 			pa.record("rig "+rigName, err)
 			continue

@@ -141,6 +141,15 @@
       "AgentPatch": {
         "additionalProperties": false,
         "properties": {
+          "AppendFragments": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Attach": {
             "type": [
               "boolean",
@@ -465,6 +474,7 @@
           "OverlayDir",
           "DefaultSlingFormula",
           "InjectFragments",
+          "AppendFragments",
           "Attach",
           "DependsOn",
           "ResumeCommand",

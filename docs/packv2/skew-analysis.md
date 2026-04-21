@@ -251,6 +251,7 @@ All Import fields match spec. No changes needed.
 | 🟢 | Import `shadow` field | doc-pack-v2 | Warning/silent logic in pack.go |
 | 🟢 | `orders/` top-level discovery | doc-directory-conventions | `discoverFlatFiles` in orders/discovery.go |
 | 🟢 | `commands/` convention discovery | doc-commands | `DiscoverPackCommands` in command_discovery.go |
+| 🟢 | No top-level `scripts/` surface / no `ScriptLayers` runtime shim | doc-directory-conventions, doc-loader-v2 | Implemented. Runtime no longer collects `ScriptLayers` or materializes `<city>/scripts`; startup paths only prune stale symlink-only artifacts left by older versions. |
 | 🔴 | `[defaults.rig.imports]` loader support | doc-pack-v2 | Migrate tool writes it, loader ignores it |
 | 🟢 | `gc register --name` flag | doc-pack-v2 | Implemented. The current rollout stores the chosen registration name in the machine-local supervisor registry without rewriting `city.toml`; no-flag registration uses the effective city identity (site binding / legacy config / basename) and stores the selected name only in the registry. |
 | 🔴 | `patches/` directory convention | doc-agent-v2 | Not implemented |

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -117,7 +118,25 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	if a.Rig != "" && target.RigName == "" {
 		env["GC_RIG"] = a.Rig
 	}
+	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
+	ensureProjectedDoltEnvExplicit(env)
 	return mergeRuntimeEnv(nil, env)
+}
+
+func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]string) {
+	if env == nil {
+		return
+	}
+	if strings.TrimSpace(scopeRoot) == "" {
+		scopeRoot = cityPath
+	}
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok {
+		return
+	}
+	applyCanonicalDoltTargetEnv(env, target)
+	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(target.User))
+	mirrorBeadsDoltEnv(env)
 }
 
 func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresResolver {

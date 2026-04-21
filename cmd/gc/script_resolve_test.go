@@ -9,7 +9,18 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-func writeScriptFile(t *testing.T, dir, relPath, content string) {
+func writeLegacyScriptLink(t *testing.T, dir, relPath, target string) {
+	t.Helper()
+	path := filepath.Join(dir, relPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeLegacyScriptFile(t *testing.T, dir, relPath, content string) {
 	t.Helper()
 	path := filepath.Join(dir, relPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -20,397 +31,327 @@ func writeScriptFile(t *testing.T, dir, relPath, content string) {
 	}
 }
 
-func TestResolveScripts_SingleLayer(t *testing.T) {
+func TestPruneLegacyScripts_RemovesSymlinkOnlyTree(t *testing.T) {
 	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "setup.sh", "#!/bin/sh\necho setup")
-	writeScriptFile(t, layer, "teardown.sh", "#!/bin/sh\necho teardown")
-
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("ResolveScripts: %v", err)
+	cityPath := filepath.Join(dir, "city")
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
+	}
+	srcFile := filepath.Join(packScripts, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+	reviewSrc := filepath.Join(packScripts, "checks", "review.sh")
+	if err := os.MkdirAll(filepath.Dir(reviewSrc), 0o755); err != nil {
+		t.Fatalf("MkdirAll review src: %v", err)
+	}
+	if err := os.WriteFile(reviewSrc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile review src: %v", err)
 	}
 
-	symlinkDir := filepath.Join(target, "scripts")
-	for _, name := range []string{"setup.sh", "teardown.sh"} {
-		linkPath := filepath.Join(symlinkDir, name)
-		fi, err := os.Lstat(linkPath)
-		if err != nil {
-			t.Errorf("%s: %v", name, err)
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("%s: not a symlink", name)
-		}
-		dest, err := os.Readlink(linkPath)
-		if err != nil {
-			t.Errorf("%s: readlink: %v", name, err)
-			continue
-		}
-		want := filepath.Join(layer, name)
-		if dest != want {
-			t.Errorf("%s: link target = %q, want %q", name, dest, want)
-		}
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", srcFile)
+	writeLegacyScriptLink(t, cityPath, "scripts/checks/review.sh", reviewSrc)
+
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("scripts/ should be removed after pruning, err=%v", err)
 	}
 }
 
-func TestResolveScripts_Subdirectory(t *testing.T) {
+func TestPruneLegacyScripts_LeavesRealFilesAlone(t *testing.T) {
 	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "checks/review-approved.sh", "#!/bin/sh\nexit 0")
-	writeScriptFile(t, layer, "checks/design-approved.sh", "#!/bin/sh\nexit 0")
-	writeScriptFile(t, layer, "top-level.sh", "#!/bin/sh\necho hi")
+	cityPath := filepath.Join(dir, "city")
+	writeLegacyScriptFile(t, cityPath, "scripts/run.sh", "#!/bin/sh\necho run\n")
 
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("ResolveScripts: %v", err)
+	if err := pruneLegacyScripts(cityPath, nil); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
 
-	symlinkDir := filepath.Join(target, "scripts")
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts", "run.sh")); err != nil {
+		t.Fatalf("real scripts/run.sh should remain, err=%v", err)
+	}
+}
 
-	// Check nested file.
-	linkPath := filepath.Join(symlinkDir, "checks", "review-approved.sh")
-	fi, err := os.Lstat(linkPath)
+func TestPruneLegacyScripts_LeavesMixedTreeUntouched(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
+	}
+	srcFile := filepath.Join(packScripts, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
+	}
+
+	writeLegacyScriptFile(t, cityPath, "scripts/run.sh", "#!/bin/sh\necho run\n")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", srcFile)
+
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts", "run.sh")); err != nil {
+		t.Fatalf("real scripts/run.sh should remain, err=%v", err)
+	}
+	fi, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh"))
 	if err != nil {
-		t.Fatalf("checks/review-approved.sh: %v", err)
+		t.Fatalf("symlink helper.sh should remain in mixed tree, err=%v", err)
 	}
 	if fi.Mode()&os.ModeSymlink == 0 {
-		t.Error("checks/review-approved.sh: not a symlink")
-	}
-	dest, err := os.Readlink(linkPath)
-	if err != nil {
-		t.Fatalf("readlink: %v", err)
-	}
-	if dest != filepath.Join(layer, "checks", "review-approved.sh") {
-		t.Errorf("link target = %q, want pack source", dest)
-	}
-
-	// Check top-level file.
-	if _, err := os.Lstat(filepath.Join(symlinkDir, "top-level.sh")); err != nil {
-		t.Errorf("top-level.sh should exist: %v", err)
+		t.Fatalf("helper.sh should remain a symlink in mixed tree, mode=%v", fi.Mode())
 	}
 }
 
-func TestResolveScripts_Shadow(t *testing.T) {
+func TestPruneLegacyScripts_LeavesForeignSymlinkOnlyTreeUntouched(t *testing.T) {
 	dir := t.TempDir()
-	layer1 := filepath.Join(dir, "pack1", "scripts")
-	layer2 := filepath.Join(dir, "pack2", "scripts")
+	cityPath := filepath.Join(dir, "city")
+	foreignDir := filepath.Join(dir, "foreign")
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll foreign: %v", err)
+	}
+	foreignFile := filepath.Join(foreignDir, "helper.sh")
+	if err := os.WriteFile(foreignFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile foreign: %v", err)
+	}
+	legacyOrigin := filepath.Join(dir, "packs/base/assets/scripts")
 
-	writeScriptFile(t, layer1, "setup.sh", "layer1 version")
-	writeScriptFile(t, layer1, "only-in-1.sh", "layer1 only")
-	writeScriptFile(t, layer2, "setup.sh", "layer2 version")
-	writeScriptFile(t, layer2, "only-in-2.sh", "layer2 only")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", foreignFile)
 
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	if err := ResolveScripts(target, []string{layer1, layer2}); err != nil {
-		t.Fatalf("ResolveScripts: %v", err)
+	if err := pruneLegacyScripts(cityPath, []string{legacyOrigin}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
 
-	symlinkDir := filepath.Join(target, "scripts")
-
-	// setup.sh should point to layer2 (higher priority).
-	dest, err := os.Readlink(filepath.Join(symlinkDir, "setup.sh"))
-	if err != nil {
-		t.Fatalf("setup.sh readlink: %v", err)
-	}
-	if dest != filepath.Join(layer2, "setup.sh") {
-		t.Errorf("setup.sh target = %q, want layer2 version", dest)
-	}
-
-	// only-in-1.sh should point to layer1.
-	dest, err = os.Readlink(filepath.Join(symlinkDir, "only-in-1.sh"))
-	if err != nil {
-		t.Fatalf("only-in-1.sh readlink: %v", err)
-	}
-	if dest != filepath.Join(layer1, "only-in-1.sh") {
-		t.Errorf("only-in-1.sh target = %q, want layer1 version", dest)
-	}
-
-	// only-in-2.sh should point to layer2.
-	dest, err = os.Readlink(filepath.Join(symlinkDir, "only-in-2.sh"))
-	if err != nil {
-		t.Fatalf("only-in-2.sh readlink: %v", err)
-	}
-	if dest != filepath.Join(layer2, "only-in-2.sh") {
-		t.Errorf("only-in-2.sh target = %q, want layer2 version", dest)
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("foreign symlink should remain, err=%v", err)
 	}
 }
 
-func TestResolveScripts_Idempotent(t *testing.T) {
+func TestPruneLegacyScripts_LeavesUserManagedRelayoutUntouched(t *testing.T) {
 	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "setup.sh", "#!/bin/sh\necho setup")
-
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("first ResolveScripts: %v", err)
+	cityPath := filepath.Join(dir, "city")
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
 	}
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("second ResolveScripts: %v", err)
+	srcFile := filepath.Join(packScripts, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile src: %v", err)
 	}
 
-	dest, err := os.Readlink(filepath.Join(target, "scripts", "setup.sh"))
-	if err != nil {
-		t.Fatalf("readlink: %v", err)
+	writeLegacyScriptLink(t, cityPath, "scripts/custom.sh", srcFile)
+
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
-	if dest != filepath.Join(layer, "setup.sh") {
-		t.Errorf("symlink target = %q, want %q", dest, filepath.Join(layer, "setup.sh"))
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "custom.sh")); err != nil {
+		t.Fatalf("user-managed relayout symlink should remain, err=%v", err)
 	}
 }
 
-func TestResolveScripts_StaleCleanup(t *testing.T) {
+func TestPruneLegacyScripts_LeavesSubsetOfLegacyOriginUntouched(t *testing.T) {
 	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "setup.sh", "setup")
-	writeScriptFile(t, layer, "old.sh", "old")
-
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	// First pass: both scripts.
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("first ResolveScripts: %v", err)
+	cityPath := filepath.Join(dir, "city")
+	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
+	if err := os.MkdirAll(packScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll pack scripts: %v", err)
+	}
+	helperSrc := filepath.Join(packScripts, "helper.sh")
+	if err := os.WriteFile(helperSrc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile helper src: %v", err)
+	}
+	extraSrc := filepath.Join(packScripts, "extra.sh")
+	if err := os.WriteFile(extraSrc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile extra src: %v", err)
 	}
 
-	// Remove old.sh from the layer.
-	os.Remove(filepath.Join(layer, "old.sh")) //nolint:errcheck
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", helperSrc)
 
-	// Second pass.
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("second ResolveScripts: %v", err)
+	if err := pruneLegacyScripts(cityPath, []string{packScripts}); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
-
-	// setup.sh should still exist.
-	if _, err := os.Lstat(filepath.Join(target, "scripts", "setup.sh")); err != nil {
-		t.Errorf("setup.sh should still exist: %v", err)
-	}
-
-	// old.sh should be removed.
-	if _, err := os.Lstat(filepath.Join(target, "scripts", "old.sh")); !os.IsNotExist(err) {
-		t.Error("old.sh should have been removed (stale symlink)")
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("subset of legacy origin should remain user-owned, err=%v", err)
 	}
 }
 
-func TestResolveScripts_RealFileNotOverwritten(t *testing.T) {
+func TestPruneLegacyScripts_RemovesStaleLegacyShapeWhenOriginsMissing(t *testing.T) {
 	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "setup.sh", "layer version")
+	cityPath := filepath.Join(dir, "city")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", filepath.Join(cityPath, "packs", "removed", "assets", "scripts", "helper.sh"))
 
-	target := filepath.Join(dir, "city")
-	symlinkDir := filepath.Join(target, "scripts")
-	os.MkdirAll(symlinkDir, 0o755) //nolint:errcheck
-
-	// Create a real file in the target.
-	realFile := filepath.Join(symlinkDir, "setup.sh")
-	os.WriteFile(realFile, []byte("real file"), 0o644) //nolint:errcheck
-
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("ResolveScripts: %v", err)
+	if err := pruneLegacyScripts(cityPath, nil); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
-
-	fi, err := os.Lstat(realFile)
-	if err != nil {
-		t.Fatalf("Lstat: %v", err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("real file should not have been replaced with symlink")
-	}
-	content, err := os.ReadFile(realFile)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(content) != "real file" {
-		t.Errorf("real file content = %q, want %q", content, "real file")
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy-shaped scripts/ should be removed, err=%v", err)
 	}
 }
 
-func TestResolveScripts_EmptyLayers(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "city")
-	if err := ResolveScripts(target, nil); err != nil {
-		t.Errorf("nil layers should be no-op: %v", err)
-	}
-	if err := ResolveScripts(target, []string{}); err != nil {
-		t.Errorf("empty layers should be no-op: %v", err)
-	}
-}
-
-func TestResolveScripts_EmptyLayersCleanStaleSymlinks(t *testing.T) {
-	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "setup.sh", "setup")
-
-	target := filepath.Join(dir, "city")
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		t.Fatalf("MkdirAll target: %v", err)
-	}
-
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("first ResolveScripts: %v", err)
-	}
-
-	if err := ResolveScripts(target, nil); err != nil {
-		t.Fatalf("second ResolveScripts: %v", err)
-	}
-
-	if _, err := os.Lstat(filepath.Join(target, "scripts", "setup.sh")); !os.IsNotExist(err) {
-		t.Fatalf("setup.sh should have been removed after empty-layer cleanup, err=%v", err)
-	}
-}
-
-func TestResolveScripts_MissingLayerDir(t *testing.T) {
-	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "setup.sh", "setup")
-
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	// Include a missing dir — should be skipped.
-	if err := ResolveScripts(target, []string{"/nonexistent", layer}); err != nil {
-		t.Fatalf("ResolveScripts: %v", err)
-	}
-
-	if _, err := os.Lstat(filepath.Join(target, "scripts", "setup.sh")); err != nil {
-		t.Errorf("setup.sh should exist: %v", err)
-	}
-}
-
-func TestResolveScripts_EmptySubdirCleanup(t *testing.T) {
-	dir := t.TempDir()
-	layer := filepath.Join(dir, "pack", "scripts")
-	writeScriptFile(t, layer, "checks/review.sh", "review")
-
-	target := filepath.Join(dir, "city")
-	os.MkdirAll(target, 0o755) //nolint:errcheck
-
-	// First pass: creates checks/ subdir.
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("first ResolveScripts: %v", err)
-	}
-
-	// Remove the script from the layer.
-	os.Remove(filepath.Join(layer, "checks", "review.sh")) //nolint:errcheck
-
-	// Second pass: stale symlink and empty dir should be cleaned.
-	if err := ResolveScripts(target, []string{layer}); err != nil {
-		t.Fatalf("second ResolveScripts: %v", err)
-	}
-
-	checksDir := filepath.Join(target, "scripts", "checks")
-	if _, err := os.Stat(checksDir); !os.IsNotExist(err) {
-		t.Errorf("empty checks/ subdir should have been removed, err=%v", err)
-	}
-}
-
-func TestResolveConfiguredScripts_CleansCityAndRigWhenLayersDisappear(t *testing.T) {
+func TestPruneLegacyConfiguredScripts_PrunesCityAndRigOnly(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	cityLayer := filepath.Join(dir, "pack", "scripts")
-	rigLayer := filepath.Join(dir, "rig-pack", "scripts")
-	writeScriptFile(t, cityLayer, "city.sh", "city")
-	writeScriptFile(t, rigLayer, "rig.sh", "rig")
-
 	cityPath := filepath.Join(dir, "city")
 	rigPath := filepath.Join(cityPath, "rig")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatalf("MkdirAll city: %v", err)
+	cityPackScripts := filepath.Join(dir, "packs/city/assets/scripts")
+	rigPackScripts := filepath.Join(dir, "packs/rig/assets/scripts")
+	if err := os.MkdirAll(cityPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll city pack scripts: %v", err)
 	}
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatalf("MkdirAll rig: %v", err)
+	if err := os.MkdirAll(rigPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll rig pack scripts: %v", err)
 	}
-	cwdStale := filepath.Join(dir, "scripts", "stale.sh")
-	if err := os.MkdirAll(filepath.Dir(cwdStale), 0o755); err != nil {
-		t.Fatalf("MkdirAll cwd scripts: %v", err)
+	citySrcFile := filepath.Join(cityPackScripts, "city.sh")
+	if err := os.WriteFile(citySrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile city src: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "unbound.sh"), cwdStale); err != nil {
-		t.Fatalf("cwd stale symlink: %v", err)
+	rigSrcFile := filepath.Join(rigPackScripts, "rig.sh")
+	if err := os.WriteFile(rigSrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile rig src: %v", err)
 	}
 
+	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", citySrcFile)
+	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigSrcFile)
+	writeLegacyScriptLink(t, dir, "scripts/cwd.sh", citySrcFile)
+
 	cfg := &config.City{
+		PackDirs: []string{filepath.Join(dir, "packs/city")},
 		Rigs: []config.Rig{
 			{Name: "app", Path: "rig"},
 			{Name: "unbound"},
 		},
-		ScriptLayers: config.ScriptLayers{
-			City: []string{cityLayer},
-			Rigs: map[string][]string{"app": {cityLayer, rigLayer}},
+		RigPackDirs: map[string][]string{
+			"app": {filepath.Join(dir, "packs/rig")},
 		},
 	}
+
 	var warnings []string
-	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
 		warnings = append(warnings, scope+": "+err.Error())
 	})
 	if len(warnings) > 0 {
-		t.Fatalf("resolveConfiguredScripts warnings: %v", warnings)
+		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
 	}
 
-	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
-		t.Fatalf("city script should exist: %v", err)
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("city scripts/ should be pruned, err=%v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
-		t.Fatalf("rig script should exist: %v", err)
+	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("rig scripts/ should be pruned, err=%v", err)
 	}
-
-	cfg.ScriptLayers = config.ScriptLayers{Rigs: map[string][]string{}}
-	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		warnings = append(warnings, scope+": "+err.Error())
-	})
-	if len(warnings) > 0 {
-		t.Fatalf("resolveConfiguredScripts cleanup warnings: %v", warnings)
-	}
-
-	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); !os.IsNotExist(err) {
-		t.Fatalf("city script should be cleaned after layers disappear, err=%v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); !os.IsNotExist(err) {
-		t.Fatalf("rig script should be cleaned after layers disappear, err=%v", err)
-	}
-	if _, err := os.Lstat(cwdStale); err != nil {
-		t.Fatalf("blank rig path should not clean cwd scripts, err=%v", err)
+	if _, err := os.Lstat(filepath.Join(dir, "scripts", "cwd.sh")); err != nil {
+		t.Fatalf("blank rig path should not prune cwd scripts, err=%v", err)
 	}
 }
 
-func TestPrepareCityForSupervisorCleansScriptsWhenLayersDisappear(t *testing.T) {
+func TestPruneLegacyConfiguredScripts_FallsBackToScopeAssetsWhenPackDirsMissing(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	rigPath := filepath.Join(cityPath, "rig")
+
+	cityAsset := filepath.Join(cityPath, "assets", "scripts", "city.sh")
+	if err := os.MkdirAll(filepath.Dir(cityAsset), 0o755); err != nil {
+		t.Fatalf("MkdirAll city assets: %v", err)
+	}
+	if err := os.WriteFile(cityAsset, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile city asset: %v", err)
+	}
+	rigAsset := filepath.Join(rigPath, "assets", "scripts", "rig.sh")
+	if err := os.MkdirAll(filepath.Dir(rigAsset), 0o755); err != nil {
+		t.Fatalf("MkdirAll rig assets: %v", err)
+	}
+	if err := os.WriteFile(rigAsset, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile rig asset: %v", err)
+	}
+
+	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", cityAsset)
+	writeLegacyScriptLink(t, rigPath, "scripts/city.sh", cityAsset)
+	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigAsset)
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "app", Path: rigPath}},
+	}
+
+	var warnings []string
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		warnings = append(warnings, scope+": "+err.Error())
+	})
+	if len(warnings) > 0 {
+		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("city scripts/ should be pruned via local assets fallback, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("rig scripts/ should be pruned via local assets fallback, err=%v", err)
+	}
+}
+
+func TestPruneLegacyConfiguredScripts_FallbackPreservesTopLevelScriptsTargets(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", filepath.Join(cityPath, "scripts", "generated", "helper.sh"))
+
+	var warnings []string
+	pruneLegacyConfiguredScripts(cityPath, &config.City{}, func(scope string, err error) {
+		warnings = append(warnings, scope+": "+err.Error())
+	})
+	if len(warnings) > 0 {
+		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("user-managed top-level scripts symlink should remain, err=%v", err)
+	}
+}
+
+func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")
 	rigPath := filepath.Join(dir, "rig")
-	if err := os.MkdirAll(filepath.Join(cityPath, "scripts"), 0o755); err != nil {
-		t.Fatalf("MkdirAll city scripts: %v", err)
+	cityPackScripts := filepath.Join(dir, "packs/city/assets/scripts")
+	rigPackScripts := filepath.Join(dir, "packs/rig/assets/scripts")
+	if err := os.MkdirAll(cityPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll city pack scripts: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(rigPath, "scripts"), 0o755); err != nil {
-		t.Fatalf("MkdirAll rig scripts: %v", err)
+	if err := os.MkdirAll(rigPackScripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll rig pack scripts: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "old-city.sh"), filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
-		t.Fatalf("city symlink: %v", err)
+	citySrcFile := filepath.Join(cityPackScripts, "city.sh")
+	if err := os.WriteFile(citySrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile city src: %v", err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "old-rig.sh"), filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
-		t.Fatalf("rig symlink: %v", err)
+	rigSrcFile := filepath.Join(rigPackScripts, "rig.sh")
+	if err := os.WriteFile(rigSrcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile rig src: %v", err)
 	}
+
+	writeLegacyScriptLink(t, cityPath, "scripts/city.sh", citySrcFile)
+	writeLegacyScriptLink(t, rigPath, "scripts/city.sh", citySrcFile)
+	writeLegacyScriptLink(t, rigPath, "scripts/rig.sh", rigSrcFile)
 
 	logFile := filepath.Join(t.TempDir(), "beads.log")
 	t.Setenv("GC_BEADS", "exec:"+writeSpyScript(t, logFile))
 
 	cfg := config.DefaultCity("bright-lights")
 	cfg.Rigs = []config.Rig{{Name: "app", Path: rigPath}}
-	cfg.ScriptLayers = config.ScriptLayers{Rigs: map[string][]string{}}
+	cfg.PackDirs = []string{filepath.Join(dir, "packs/city")}
+	cfg.RigPackDirs = map[string][]string{
+		"app": {filepath.Join(dir, "packs/rig")},
+	}
 
 	if err := prepareCityForSupervisor(cityPath, "bright-lights", &cfg, io.Discard, nil); err != nil {
 		t.Fatalf("prepareCityForSupervisor: %v", err)
 	}
 
-	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); !os.IsNotExist(err) {
-		t.Fatalf("city script should be cleaned by supervisor start path, err=%v", err)
+	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("city scripts/ should be pruned by supervisor start path, err=%v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); !os.IsNotExist(err) {
-		t.Fatalf("rig script should be cleaned by supervisor start path, err=%v", err)
+	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
+		t.Fatalf("rig scripts/ should be pruned by supervisor start path, err=%v", err)
 	}
 }

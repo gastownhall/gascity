@@ -238,7 +238,7 @@
         },
         "session_setup_script": {
           "type": "string",
-          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the city directory. The script receives\ncontext via environment variables (GC_SESSION plus existing GC_* vars)."
+          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root.\nThe script receives context via environment variables (GC_SESSION plus\nexisting GC_* vars)."
         },
         "session_live": {
           "items": {
@@ -261,6 +261,13 @@
           },
           "type": "array",
           "description": "InjectFragments lists named template fragments to append to this agent's\nrendered prompt. Fragments come from shared template directories across\nall loaded packs. Each name must match a {{ define \"name\" }} block."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments is the V2 per-agent alias for prompt fragment injection.\nIt layers after InjectFragments and before inherited/default fragments."
         },
         "inject_assigned_skills": {
           "type": "boolean",
@@ -472,7 +479,7 @@
         },
         "session_setup_script": {
           "type": "string",
-          "description": "SessionSetupScript overrides the agent's session_setup_script path.\nRelative paths resolve against the city directory."
+          "description": "SessionSetupScript overrides the agent's session_setup_script path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "session_live": {
           "items": {
@@ -495,6 +502,13 @@
           },
           "type": "array",
           "description": "InjectFragments overrides the agent's inject_fragments list."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments appends named template fragments to this agent's rendered\nprompt. It is the V2 spelling for per-agent fragment selection."
         },
         "pre_start_append": {
           "items": {
@@ -722,7 +736,7 @@
         },
         "session_setup_script": {
           "type": "string",
-          "description": "SessionSetupScript overrides the agent's session_setup_script path.\nRelative paths resolve against the city directory."
+          "description": "SessionSetupScript overrides the agent's session_setup_script path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "session_live": {
           "items": {
@@ -745,6 +759,13 @@
           },
           "type": "array",
           "description": "InjectFragments overrides the agent's inject_fragments list."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments overrides the agent's append_fragments list."
         },
         "attach": {
           "type": "boolean",
@@ -1966,7 +1987,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Name is the human-readable name for this city."
+          "description": "Name is the legacy checked-in city name. Runtime identity now resolves\nfrom site binding (.gc/site.toml workspace_name), declared config, and\nbasename precedence instead; gc init writes the machine-local name to\nsite.toml and omits it from city.toml."
         },
         "prefix": {
           "type": "string",
@@ -2023,9 +2044,6 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
       "description": "Workspace holds city-level metadata and optional defaults that apply to all agents unless overridden per-agent."
     }
   },

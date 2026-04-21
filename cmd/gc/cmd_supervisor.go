@@ -1650,12 +1650,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		}
 	}
 
-	// Resolve script symlinks, including empty layer sets so stale links are pruned.
+	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
 	if progress != nil {
-		progress("resolving_scripts")
+		progress("pruning_legacy_scripts")
 	}
-	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': pruning legacy %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
 	})
 
 	// Validate agents.

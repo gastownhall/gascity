@@ -102,6 +102,9 @@ func TestDoInitFromDirRestoresLegacyIdentityWhenSiteBindingWriteFails(t *testing
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), srcData, 0o644); err != nil {
 		t.Fatalf("write source city.toml: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte("[pack]\nname = \"declared-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("write source pack.toml: %v", err)
+	}
 
 	cityPath := filepath.Join(t.TempDir(), "target-city")
 	fs := &failSiteBindingRenameFS{target: filepath.Join(cityPath, ".gc", "site.toml")}

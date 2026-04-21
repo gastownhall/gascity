@@ -367,6 +367,82 @@ func TestHandleSessionGet(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListActiveBeadUsesCachedLookup(t *testing.T) {
+	fs := newSessionFakeState(t)
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	fs.stores["myrig"] = cache
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	work, err := backing.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := info.ID
+	if err := backing.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	reassigned := "other-session"
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &reassigned}); err != nil {
+		t.Fatalf("reassign backing work: %v", err)
+	}
+
+	resp := sessionResponse{}
+	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
+		state: worker.State{Phase: worker.PhaseReady},
+	}, false, false)
+
+	if !resp.Running {
+		t.Fatal("Running = false, want true")
+	}
+	if got := resp.ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
+	}
+}
+
+func TestHandleSessionGetActiveBeadUsesLiveLookup(t *testing.T) {
+	fs := newSessionFakeState(t)
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	fs.stores["myrig"] = cache
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	work, err := backing.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := info.ID
+	if err := backing.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	reassigned := "other-session"
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &reassigned}); err != nil {
+		t.Fatalf("reassign backing work: %v", err)
+	}
+
+	resp := sessionResponse{}
+	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
+		state: worker.State{Phase: worker.PhaseReady},
+	}, false, true)
+
+	if !resp.Running {
+		t.Fatal("Running = false, want true")
+	}
+	if got := resp.ActiveBead; got != "" {
+		t.Fatalf("active_bead = %q, want empty after external reassignment", got)
+	}
+}
+
 func TestHandleSessionGetNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

@@ -393,25 +393,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			cfg.RigOverlayDirs[rig.Name] = rigOverlayDirs
 		}
 
-		// Collect scripts dirs from rig pack dirs. V2 packs ship scripts
-		// under assets/scripts/; legacy packs may still use scripts/ at
-		// the pack root.
-		var rigScriptDirs []string
-		for _, dir := range rigTopoDirs {
-			for _, rel := range []string{"scripts", filepath.Join("assets", "scripts")} {
-				sd := filepath.Join(dir, rel)
-				if info, sErr := fs.Stat(sd); sErr == nil && info.IsDir() {
-					rigScriptDirs = appendUnique(rigScriptDirs, sd)
-				}
-			}
-		}
-		if len(rigScriptDirs) > 0 {
-			if cfg.RigScriptDirs == nil {
-				cfg.RigScriptDirs = make(map[string][]string)
-			}
-			cfg.RigScriptDirs[rig.Name] = rigScriptDirs
-		}
-
 		// Resolve fallback agents before collision detection.
 		rigAgents = resolveFallbackAgents(rigAgents)
 
@@ -752,19 +733,6 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		}
 	}
 
-	// Collect scripts dirs from pack dirs. V2 packs ship scripts under
-	// assets/scripts/; legacy packs may still use scripts/ at the pack
-	// root. Scan both so `gc` continues to symlink scripts into
-	// <city>/scripts/ regardless of where the source pack put them.
-	for _, dir := range allPackDirs {
-		for _, rel := range []string{"scripts", filepath.Join("assets", "scripts")} {
-			sd := filepath.Join(dir, rel)
-			if info, err := fs.Stat(sd); err == nil && info.IsDir() {
-				cfg.PackScriptDirs = appendUnique(cfg.PackScriptDirs, sd)
-			}
-		}
-	}
-
 	// Resolve fallback agents before collision detection.
 	allAgents = resolveFallbackAgents(allAgents)
 
@@ -879,29 +847,6 @@ func ComputeFormulaLayers(cityTopoFormulas []string, cityLocalFormulas string, r
 	}
 
 	return fl
-}
-
-// ComputeScriptLayers builds the ScriptLayers from the resolved script
-// directories. Each layer slice is ordered lowest→highest priority.
-// City pack scripts form the base; rig pack scripts layer on top.
-func ComputeScriptLayers(cityPackScripts []string, rigPackScripts map[string][]string, rigs []Rig) ScriptLayers {
-	sl := ScriptLayers{
-		Rigs: make(map[string][]string),
-	}
-	sl.City = append([]string{}, cityPackScripts...)
-
-	for _, r := range rigs {
-		layers := make([]string, len(cityPackScripts))
-		copy(layers, cityPackScripts)
-		if sds, ok := rigPackScripts[r.Name]; ok {
-			layers = append(layers, sds...)
-		}
-		if len(layers) > 0 {
-			sl.Rigs[r.Name] = layers
-		}
-	}
-
-	return sl
 }
 
 // resolveFallbackAgents resolves fallback agent collisions. When agents
@@ -1403,11 +1348,9 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			agents[i].PromptTemplate = adjustFragmentPath(
 				agents[i].PromptTemplate, topoDir, cityRoot)
 		}
-		// Resolve session_setup_script paths relative to pack directory.
-		if agents[i].SessionSetupScript != "" {
-			agents[i].SessionSetupScript = adjustFragmentPath(
-				agents[i].SessionSetupScript, topoDir, cityRoot)
-		}
+		// Leave session_setup_script as-authored and resolve it at runtime
+		// against SourceDir so pack-local script paths do not collapse back
+		// into city-root-relative strings.
 		// Resolve overlay_dir paths relative to pack directory.
 		if agents[i].OverlayDir != "" {
 			agents[i].OverlayDir = adjustFragmentPath(
@@ -1564,6 +1507,7 @@ func deepCopyAgents(in []Agent) []Agent {
 		out[i].SessionSetup = append([]string(nil), in[i].SessionSetup...)
 		out[i].SessionLive = append([]string(nil), in[i].SessionLive...)
 		out[i].InjectFragments = append([]string(nil), in[i].InjectFragments...)
+		out[i].AppendFragments = append([]string(nil), in[i].AppendFragments...)
 		out[i].DependsOn = append([]string(nil), in[i].DependsOn...)
 		out[i].MaxActiveSessions = copyIntPtr(in[i].MaxActiveSessions)
 		out[i].MinActiveSessions = copyIntPtr(in[i].MinActiveSessions)
@@ -2167,13 +2111,15 @@ func resolveConfigDirInCommands(cmds []string, configDir string) []string {
 }
 
 // adjustPackPatchPaths resolves file-path fields in patches relative to
-// the pack directory, matching how agent fields are resolved during
-// pack loading.
+// the pack directory. session_setup_script is resolved all the way to an
+// absolute path because patches do not retain independent source provenance
+// after application; prompt_template and overlay_dir keep the existing
+// city-root-relative representation used elsewhere in composition.
 func adjustPackPatchPaths(patches *Patches, topoDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
 		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {
-			v := adjustFragmentPath(*p.SessionSetupScript, topoDir, cityRoot)
+			v := resolveConfigPath(*p.SessionSetupScript, topoDir, cityRoot)
 			p.SessionSetupScript = &v
 		}
 		if p.PromptTemplate != nil && *p.PromptTemplate != "" {
@@ -2455,6 +2401,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	if len(ov.InjectFragments) > 0 {
 		a.InjectFragments = append([]string(nil), ov.InjectFragments...)
+	}
+	if len(ov.AppendFragments) > 0 {
+		a.AppendFragments = append([]string(nil), ov.AppendFragments...)
 	}
 	if len(ov.InjectFragmentsAppend) > 0 {
 		a.InjectFragments = append(a.InjectFragments, ov.InjectFragmentsAppend...)

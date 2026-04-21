@@ -41,7 +41,7 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 }
 
-func TestCachingStoreListInProgressUsesBackingStore(t *testing.T) {
+func TestCachingStoreListInProgressUsesCacheByDefault(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
@@ -67,8 +67,39 @@ func TestCachingStoreListInProgressUsesBackingStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
+	if len(got) != 0 {
+		t.Fatalf("List(in_progress) = %+v, want cached result before reconcile", got)
+	}
+}
+
+func TestCachingStoreListLiveBypassesCache(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "claimed work",
+		Assignee: "worker",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+
+	got, err := cache.List(ListQuery{Status: "in_progress", Live: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
 	if len(got) != 1 || got[0].ID != bead.ID {
-		t.Fatalf("List(in_progress) = %+v, want %s from backing store", got, bead.ID)
+		t.Fatalf("List(in_progress, Live) = %+v, want %s from backing store", got, bead.ID)
 	}
 }
 

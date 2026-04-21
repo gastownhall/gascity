@@ -255,11 +255,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
-	// imported-pack [agent_defaults].append_fragments, then city-level
-	// [agent_defaults].append_fragments.
+	// per-agent append_fragments, imported-pack [agent_defaults].append_fragments,
+	// then city-level [agent_defaults].append_fragments.
 	fragments := effectivePromptFragments(
 		p.globalFragments,
 		cfgAgent.InjectFragments,
+		cfgAgent.AppendFragments,
 		cfgAgent.InheritedAppendFragments,
 		p.appendFragments,
 	)
@@ -356,7 +357,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = expanded[0]
 	}
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
-	resolvedScript := resolveSetupScript(cfgAgent.SessionSetupScript, p.cityPath)
+	resolvedScript := resolveSetupScript(cfgAgent.SessionSetupScript, cfgAgent.SourceDir, p.cityPath)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
 	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
 

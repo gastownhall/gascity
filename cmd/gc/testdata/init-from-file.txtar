@@ -22,8 +22,9 @@ stdout 'worker'
 stdout 'max_active_sessions = 5'
 
 # gc init --file uses the target dir basename unless --name overrides it.
-exec grep 'name = "my-city"' $WORK/my-city/city.toml
-! exec grep 'name = "placeholder"' $WORK/my-city/city.toml
+exec grep 'name = "my-city"' $WORK/my-city/pack.toml
+! exec grep 'name = "placeholder"' $WORK/my-city/pack.toml
+exec grep 'workspace_name = "my-city"' $WORK/my-city/.gc/site.toml
 
 # gc init --file rejects already-initialized city.
 ! exec gc init --file $WORK/configs/08-agent-pools.toml $WORK/my-city

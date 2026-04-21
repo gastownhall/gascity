@@ -115,7 +115,6 @@ type City struct {
     NamedSessions      []NamedSession
     Providers          map[string]ProviderSpec
     FormulaLayers      FormulaLayers
-    ScriptLayers       ScriptLayers
     OverlayLayers      OverlayLayers
     Patches            Patches             // applied during compose
 

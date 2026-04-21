@@ -604,6 +604,75 @@ prompt_template = "agents/mayor/prompt.template.md"
 	}
 }
 
+func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+	[workspace]
+	name = "test"
+	includes = ["packs/imported"]
+	`)
+	write("packs/imported/pack.toml", `
+	[pack]
+	name = "imported"
+	schema = 2
+	`)
+	write("packs/imported/agents/mayor/agent.toml", `
+	scope = "city"
+	append_fragments = ["discord-v0"]
+	`)
+	write("packs/imported/agents/mayor/prompt.template.md", "Hello")
+	write("packs/imported/agents/mayor/template-fragments/discord-v0.template.md", `{{ define "discord-v0" }}Discord Ready{{ end }}`)
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var agentCfg config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if !a.Implicit && a.Name == "mayor" {
+			agentCfg = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected explicit imported mayor agent, got %v", cfg.Agents)
+	}
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "test",
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		packDirs:        cfg.PackDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Discord Ready") {
+		t.Fatalf("prompt missing per-agent append fragment: %q", tp.Prompt)
+	}
+}
+
 func TestResolveTemplateNestedIncludedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
 	cityPath := t.TempDir()
 	write := func(rel, data string) {

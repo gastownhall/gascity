@@ -67,22 +67,24 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 }
 
 func decodeCacheEvent(payload json.RawMessage) (Bead, error) {
-	var b Bead
-	if err := json.Unmarshal(payload, &b); err != nil {
+	var wire struct {
+		Bead
+		Metadata   StringMap `json:"metadata,omitempty"`
+		TypeCompat string    `json:"type,omitempty"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
 		return Bead{}, err
+	}
+	b := wire.Bead
+	if wire.Metadata != nil {
+		b.Metadata = map[string]string(wire.Metadata)
 	}
 	if b.ID == "" {
 		return Bead{}, fmt.Errorf("missing bead id")
 	}
-	// bd hook payloads use "issue_type" while Bead uses "type". If Type
-	// wasn't populated from "type", check for the bd field name.
-	if b.Type == "" {
-		var bdCompat struct {
-			IssueType string `json:"issue_type"`
-		}
-		if err := json.Unmarshal(payload, &bdCompat); err == nil && bdCompat.IssueType != "" {
-			b.Type = bdCompat.IssueType
-		}
+	// bd hook payloads use "issue_type" while exec-style payloads may use "type".
+	if b.Type == "" && wire.TypeCompat != "" {
+		b.Type = wire.TypeCompat
 	}
 	return b, nil
 }

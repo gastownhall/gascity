@@ -202,14 +202,25 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
-// findActiveBead returns the ID of the first in_progress bead assigned to the
-// given agent. If rig is non-empty, only that rig's store is searched;
-// otherwise all stores are searched. Returns "" if no match.
-//
-// Uses ListByAssignee with limit=1 instead of List() to avoid fetching all
-// beads from every store — a critical performance fix when bead counts are
-// large (e.g., 2200+ beads × 102 agents = ~186 full-list subprocess spawns).
+// findActiveBeadForAssignees returns the ID of the first in_progress bead
+// assigned to the given identities using the cached active snapshot. If rig is
+// non-empty, only that rig's store is searched; otherwise all stores are
+// searched. Returns "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
+	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
+}
+
+// findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
+// assigned to the given identities, bypassing the cache. Use this on
+// lower-frequency detail views where external reassignment freshness matters.
+func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
+	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
+}
+
+// findActiveBeadForAssigneesWithFreshness uses a targeted ListQuery with
+// Limit=1 instead of broad scans so active-bead lookup stays cheap even when
+// bead counts are large.
+func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
 	if rig != "" {
@@ -235,6 +246,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 			matches, err := stores[rn].List(beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
+				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			})

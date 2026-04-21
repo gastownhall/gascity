@@ -524,6 +524,17 @@ func newInitPackConfig(cityName string) initPackConfig {
 	}
 }
 
+// splitInitConfig separates a composed init template City into its
+// portable pack-first shape and the machine-local city runtime shape:
+//
+//   - pack.toml owns the portable definition: [pack], [[agent]],
+//     [[named_session]], [imports.*], [providers.*], agent/service
+//     patches, formulas, and agent_defaults.
+//   - city.toml keeps only runtime-local deployment settings (e.g.
+//     workspace.provider, workspace.start_command, api, daemon, beads).
+//   - workspace.name and workspace.prefix migrate to .gc/site.toml via
+//     persistInitWorkspaceIdentity, so they are cleared here to avoid
+//     duplicating the city's machine-local identity in city.toml.
 func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.City) {
 	packCfg := newInitPackConfig(cityName)
 	if cfg == nil {
@@ -531,12 +542,52 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 	}
 
 	cityCfg := *cfg
+	cityCfg.Agents = nil
+	cityCfg.NamedSessions = nil
+	cityCfg.Imports = nil
+	cityCfg.Providers = nil
+	cityCfg.Services = nil
+	cityCfg.Formulas = config.FormulasConfig{}
+	cityCfg.Patches = config.Patches{}
+	cityCfg.AgentDefaults = config.AgentDefaults{}
+	cityCfg.AgentsDefaults = config.AgentDefaults{}
+	cityCfg.Workspace.Name = ""
+	cityCfg.Workspace.Prefix = ""
+
+	packCfg.Agents = append([]config.Agent(nil), cfg.Agents...)
+	packCfg.NamedSessions = append([]config.NamedSession(nil), cfg.NamedSessions...)
 	if len(cfg.Imports) > 0 {
 		packCfg.Imports = make(map[string]config.Import, len(cfg.Imports))
 		for name, imp := range cfg.Imports {
 			packCfg.Imports[name] = imp
 		}
-		cityCfg.Imports = nil
+	}
+	if len(cfg.Providers) > 0 {
+		packCfg.Providers = make(map[string]config.ProviderSpec, len(cfg.Providers))
+		for name, spec := range cfg.Providers {
+			packCfg.Providers[name] = spec
+		}
+	}
+	packCfg.AgentDefaults = cfg.AgentDefaults
+	if isZeroValue(packCfg.AgentDefaults) && !isZeroValue(cfg.AgentsDefaults) {
+		packCfg.AgentDefaults = cfg.AgentsDefaults
+	}
+	packCfg.Formulas = cfg.Formulas
+	packCfg.Patches = cfg.Patches
+	for _, svc := range cfg.Services {
+		if svc.PublishMode == "direct" {
+			cityCfg.Services = append(cityCfg.Services, svc)
+			continue
+		}
+		packCfg.Services = append(packCfg.Services, svc)
+	}
+
+	if len(cfg.Workspace.Includes) > 0 {
+		packCfg.Pack.Includes = appendUniqueStrings(
+			append([]string(nil), packCfg.Pack.Includes...),
+			cfg.Workspace.Includes...,
+		)
+		cityCfg.Workspace.Includes = nil
 	}
 	if len(cfg.DefaultRigImports) > 0 {
 		defaults := packDefaults{
@@ -673,6 +724,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
 		return code
 	}
+	// Rewrite legacy prompt paths on the composed config before splitting so
+	// the pack-owned [[agent]] entries pick up the V2 agents/<name>/
+	// prompt.template.md paths we actually scaffold.
+	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
 	if err := writeInitPackToml(fs, cityPath, packCfg); err != nil {
@@ -684,10 +739,6 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 	}
-
-	// Rewrite legacy prompt paths only after we've copied the embedded prompt
-	// scaffolds that still live under prompts/.
-	rewriteInitPromptTemplates(&cityCfg)
 
 	// Re-marshal so the name and rewritten prompt paths are updated.
 	content, err := cityCfg.Marshal()
@@ -812,8 +863,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// Write city.toml — wizard path gets one agent + provider/startCommand;
 	// --provider path gets the same city shape non-interactively;
 	// custom path gets one mayor + no provider (user configures manually).
+	// Rewrite legacy prompt paths on the composed config before splitting so
+	// the pack-owned [[agent]] entries pick up the V2 agents/<name>/
+	// prompt.template.md paths we actually scaffold.
+	rewriteInitPromptTemplates(&cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, &cfg)
-	rewriteInitPromptTemplates(&cityCfg)
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -951,6 +1005,71 @@ func initFromSkip(relPath string, isDir bool) bool {
 	return false
 }
 
+// initFromSkipForSource returns the source-aware skip policy for gc init --from.
+// PackV2 templates should not carry the deprecated top-level scripts/ shim
+// forward into the new city, but real files and foreign symlink trees remain
+// user-owned and are copied through unchanged.
+func initFromSkipForSource(srcDir string) overlay.SkipFunc {
+	return initFromSkipForSourceFS(fsys.OSFS{}, srcDir)
+}
+
+func initFromSkipForSourceFS(srcFS fsys.FS, srcDir string) overlay.SkipFunc {
+	skipTopLevelScripts := shouldSkipLegacyTopLevelScripts(srcFS, srcDir)
+	return func(relPath string, isDir bool) bool {
+		if skipTopLevelScripts {
+			top, _, _ := strings.Cut(relPath, string(filepath.Separator))
+			if top == "scripts" {
+				return true
+			}
+		}
+		return initFromSkip(relPath, isDir)
+	}
+}
+
+func shouldSkipLegacyTopLevelScripts(srcFS fsys.FS, srcDir string) bool {
+	if sourceTemplatePackSchemaFS(srcFS, srcDir) < initPackSchemaVersion {
+		return false
+	}
+	_, ok, err := legacyShimLinksFS(srcDir, sourceTemplateLegacyScriptOriginsFS(srcFS, srcDir), srcFS, srcDir)
+	return err == nil && ok
+}
+
+func sourceTemplateLegacyScriptOriginsFS(srcFS fsys.FS, srcDir string) []string {
+	seen := make(map[string]struct{})
+	var dirs []string
+	add := func(candidates []string) {
+		for _, dir := range candidates {
+			dir = filepath.Clean(dir)
+			if _, ok := seen[dir]; ok {
+				continue
+			}
+			seen[dir] = struct{}{}
+			dirs = append(dirs, dir)
+		}
+	}
+
+	add(legacyLocalScriptOriginsFS(srcFS, srcDir))
+
+	cfg, _, err := config.LoadWithIncludes(srcFS, filepath.Join(srcDir, "city.toml"))
+	if err == nil {
+		add(legacyScriptSourceDirsFS(srcFS, cfg.PackDirs))
+	}
+
+	return dirs
+}
+
+func sourceTemplatePackSchemaFS(srcFS fsys.FS, srcDir string) int {
+	data, err := srcFS.ReadFile(filepath.Join(srcDir, "pack.toml"))
+	if err != nil {
+		return 0
+	}
+	var pc initPackConfig
+	if _, err := toml.Decode(string(data), &pc); err != nil {
+		return 0
+	}
+	return pc.Pack.Schema
+}
+
 // overrideCityName reads an existing city.toml, updates workspace.name, and writes it back.
 func overrideCityName(f fsys.FS, tomlPath, name string, stderr io.Writer) int {
 	cfg, err := loadCityConfigForEditFS(f, tomlPath)
@@ -1007,7 +1126,8 @@ func cmdInitFromDirWithOptions(fromDir string, args []string, nameOverride strin
 }
 
 // doInitFromDir copies an example city directory to a new city path,
-// updates workspace.name, creates .gc/, and installs hooks.
+// writes machine-local workspace identity to .gc/site.toml, and
+// installs the standard runtime scaffold.
 func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 	return doInitFromDirWithOptions(srcDir, cityPath, "", stdout, stderr, false)
 }
@@ -1025,101 +1145,26 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkip, stderr); err != nil {
+	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkipForSourceFS(fs, srcDir), stderr); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	copiedToml := filepath.Join(cityPath, "city.toml")
-	data, err := os.ReadFile(copiedToml)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: reading copied city.toml: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cfg, err := config.Parse(data)
+	cfg, cityName, cityPrefix, persistSiteIdentity, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityName := resolveCityName(nameOverride, cfg.Workspace.Name, cityPath)
-	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	cfg.Workspace.Name = cityName
-	cfg.Workspace.Prefix = cityPrefix
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return doInitFromDirWithOptions(srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness)
-}
-
-func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
-	fs := fsys.OSFS{}
-	// Validate source has city.toml.
-	srcToml := filepath.Join(srcDir, "city.toml")
-	if _, err := os.Stat(srcToml); err != nil {
-		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	// Check target not already initialized.
-	if cityAlreadyInitializedFS(fs, cityPath) {
-		return initAlreadyInitialized(stderr)
-	}
-
-	// Create target directory if needed.
-	if err := fs.MkdirAll(cityPath, 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	// Copy directory tree (skip .gc/ and *_test.go).
-	if err := overlay.CopyDirWithSkip(srcDir, cityPath, initFromSkip, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	copiedToml := filepath.Join(cityPath, "city.toml")
-	data, err := os.ReadFile(copiedToml)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: reading copied city.toml: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cityName := resolveCityName(nameOverride, "", cityPath)
-	cfg.Workspace.Name = cityName
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, strings.TrimSpace(cfg.Workspace.Prefix)); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	if persistSiteIdentity {
+		if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Create runtime scaffold.
-	if err := ensureCityScaffold(cityPath); err != nil {
+	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1149,8 +1194,8 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		}
 	}
 	if loadErr == nil {
-		resolveConfiguredScripts(cityPath, expandedCfg, func(scope string, err error) {
-			fmt.Fprintf(stderr, "gc init: resolving %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+		pruneLegacyConfiguredScripts(cityPath, expandedCfg, func(scope string, err error) {
+			fmt.Fprintf(stderr, "gc init: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
 		})
 	}
 
@@ -1160,6 +1205,246 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 	})
+}
+
+func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
+	return doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness)
+}
+
+func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, error) {
+	copiedToml := filepath.Join(cityPath, "city.toml")
+	data, err := fs.ReadFile(copiedToml)
+	if err != nil {
+		return nil, "", "", false, fmt.Errorf("reading copied city.toml: %w", err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+
+	cityName := resolveCityName(nameOverride, "", cityPath)
+	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	packPath := filepath.Join(cityPath, "pack.toml")
+	if _, err := fs.Stat(packPath); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, "", "", false, err
+		}
+		cfg.Workspace.Name = cityName
+		content, err := cfg.Marshal()
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
+			return nil, "", "", false, err
+		}
+		return cfg, cityName, cityPrefix, false, nil
+	}
+	cfg.Workspace.Name = ""
+	cfg.Workspace.Prefix = ""
+
+	content, err := cfg.Marshal()
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
+		return nil, "", "", false, err
+	}
+	if err := rewriteCopiedInitPackName(fs, cityPath, cityName); err != nil {
+		return nil, "", "", false, err
+	}
+	return cfg, cityName, cityPrefix, true, nil
+}
+
+func rewriteCopiedInitPackName(fs fsys.FS, cityPath, cityName string) error {
+	packPath := filepath.Join(cityPath, "pack.toml")
+	data, err := fs.ReadFile(packPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading copied pack.toml: %w", err)
+	}
+
+	updated, err := rewritePackNameInCopiedPackToml(data, cityName)
+	if err != nil {
+		return fmt.Errorf("updating copied pack.toml: %w", err)
+	}
+	if err := fsys.WriteFileAtomic(fs, packPath, updated, 0o644); err != nil {
+		return fmt.Errorf("writing copied pack.toml: %w", err)
+	}
+	return nil
+}
+
+func rewritePackNameInCopiedPackToml(data []byte, cityName string) ([]byte, error) {
+	lines := splitPreserveNewlines(string(data))
+	lineEnding := "\n"
+	for _, line := range lines {
+		if strings.HasSuffix(line, "\n") {
+			lineEnding = "\n"
+			break
+		}
+	}
+
+	inPackTable := false
+	sawPackTable := false
+	multilineDelimiter := ""
+	for i, line := range lines {
+		if multilineDelimiter != "" {
+			if multilineStringEndsOnLine(line, multilineDelimiter) {
+				multilineDelimiter = ""
+			}
+			continue
+		}
+
+		trimmed := strings.TrimSpace(line)
+		if isTOMLTableHeader(trimmed) {
+			if inPackTable {
+				lines = insertPackNameLine(lines, i, cityName, lineEnding)
+				return []byte(strings.Join(lines, "")), nil
+			}
+			inPackTable = isPackTableHeader(trimmed)
+			if inPackTable {
+				sawPackTable = true
+			}
+			continue
+		}
+		if !inPackTable {
+			continue
+		}
+		key, _, hasAssignment := strings.Cut(stripTOMLInlineComment(trimmed), "=")
+		if hasAssignment && strings.TrimSpace(key) == "name" {
+			lines[i] = rewritePackNameLine(line, cityName)
+			return []byte(strings.Join(lines, "")), nil
+		}
+		if delimiter := startsUnterminatedTOMLMultilineString(line); delimiter != "" {
+			multilineDelimiter = delimiter
+		}
+	}
+
+	if !sawPackTable {
+		return nil, fmt.Errorf("pack.toml missing [pack] table")
+	}
+	lines = insertPackNameLine(lines, len(lines), cityName, lineEnding)
+	return []byte(strings.Join(lines, "")), nil
+}
+
+func splitPreserveNewlines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	var lines []string
+	start := 0
+	for i, r := range text {
+		if r != '\n' {
+			continue
+		}
+		lines = append(lines, text[start:i+1])
+		start = i + 1
+	}
+	if start < len(text) {
+		lines = append(lines, text[start:])
+	}
+	return lines
+}
+
+func isTOMLTableHeader(line string) bool {
+	return strings.HasPrefix(line, "[")
+}
+
+func isPackTableHeader(line string) bool {
+	if !strings.HasPrefix(line, "[") {
+		return false
+	}
+	end := strings.Index(line, "]")
+	if end == -1 {
+		return false
+	}
+	return strings.TrimSpace(line[1:end]) == "pack"
+}
+
+func insertPackNameLine(lines []string, idx int, cityName, lineEnding string) []string {
+	inserted := "name = " + strconv.Quote(cityName) + lineEnding
+	lines = append(lines, "")
+	copy(lines[idx+1:], lines[idx:])
+	lines[idx] = inserted
+	return lines
+}
+
+func rewritePackNameLine(line, cityName string) string {
+	indentLen := len(line) - len(strings.TrimLeft(line, " \t"))
+	indent := line[:indentLen]
+	lineEnding := ""
+	if strings.HasSuffix(line, "\n") {
+		lineEnding = "\n"
+	}
+	comment := ""
+	if suffix := tomlInlineCommentSuffix(strings.TrimRight(line, "\n")); suffix != "" {
+		comment = " " + suffix
+	}
+	return indent + "name = " + strconv.Quote(cityName) + comment + lineEnding
+}
+
+func startsUnterminatedTOMLMultilineString(line string) string {
+	code := stripTOMLInlineComment(line)
+	for _, delimiter := range []string{`"""`, `'''`} {
+		if strings.Count(code, delimiter)%2 == 1 {
+			return delimiter
+		}
+	}
+	return ""
+}
+
+func multilineStringEndsOnLine(line, delimiter string) bool {
+	return strings.Count(line, delimiter)%2 == 1
+}
+
+func stripTOMLInlineComment(line string) string {
+	if suffix := tomlInlineCommentSuffix(line); suffix != "" {
+		return strings.TrimSuffix(line, suffix)
+	}
+	return line
+}
+
+func tomlInlineCommentSuffix(line string) string {
+	inBasic := false
+	inLiteral := false
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch {
+		case inBasic:
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inBasic = false
+			}
+		case inLiteral:
+			if ch == '\'' {
+				inLiteral = false
+			}
+		default:
+			switch ch {
+			case '#':
+				return line[i:]
+			case '"':
+				if strings.HasPrefix(line[i:], `"""`) {
+					return ""
+				}
+				inBasic = true
+			case '\'':
+				if strings.HasPrefix(line[i:], `'''`) {
+					return ""
+				}
+				inLiteral = true
+			}
+		}
+	}
+	return ""
 }
 
 func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {

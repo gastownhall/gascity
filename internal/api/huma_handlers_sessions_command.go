@@ -164,7 +164,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
 		resp.SubmissionCapabilities = caps
 	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
+	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false, true)
 
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
 	out.Body = resp
@@ -292,7 +292,7 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
 		resp.SubmissionCapabilities = caps
 	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
+	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false, true)
 
 	out := &SessionCreateOutput{Status: http.StatusCreated}
 	out.Body = resp

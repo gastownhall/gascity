@@ -511,21 +511,55 @@ func TestExpandSessionSetup_Empty(t *testing.T) {
 }
 
 func TestResolveSetupScript_Relative(t *testing.T) {
-	got := resolveSetupScript("scripts/setup.sh", "/home/user/city")
-	if got != "/home/user/city/scripts/setup.sh" {
+	got := resolveSetupScript("scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
 		t.Errorf("got %q, want absolute path", got)
 	}
 }
 
+func TestResolveSetupScript_DoubleSlashUsesCityRoot(t *testing.T) {
+	got := resolveSetupScript("//scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/scripts/setup.sh" {
+		t.Errorf("got %q, want city-root path", got)
+	}
+}
+
+func TestResolveSetupScript_LegacyCityRelativeStillWorks(t *testing.T) {
+	got := resolveSetupScript("packs/gastown/scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
+		t.Errorf("got %q, want legacy city-root-relative path to remain supported", got)
+	}
+}
+
+func TestResolveSetupScript_LegacySharedCityRelativeFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	sourceDir := filepath.Join(cityPath, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityScript := filepath.Join(cityPath, "packs", "shared", "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(cityScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cityScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveSetupScript("packs/shared/scripts/setup.sh", sourceDir, cityPath)
+	if got != cityScript {
+		t.Errorf("got %q, want legacy shared city-root-relative path to remain supported", got)
+	}
+}
+
 func TestResolveSetupScript_Absolute(t *testing.T) {
-	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city")
+	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
 	if got != "/usr/local/bin/setup.sh" {
 		t.Errorf("got %q, want unchanged absolute path", got)
 	}
 }
 
 func TestResolveSetupScript_Empty(t *testing.T) {
-	got := resolveSetupScript("", "/home/user/city")
+	got := resolveSetupScript("", "/home/user/city/packs/gastown", "/home/user/city")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
@@ -632,6 +666,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		DefaultSlingFormula:          strPtr("mol-work"),
 		InheritedDefaultSlingFormula: strPtr("mol-pack"),
 		InjectFragments:              []string{"frag1"},
+		AppendFragments:              []string{"agent-footer"},
 		InheritedAppendFragments:     []string{"pack-footer"},
 		Attach:                       &trueVal,
 		Fallback:                     true,
@@ -705,6 +740,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	src.Args[0] = "MUTATED"
 	src.ProcessNames[0] = "MUTATED"
 	src.InjectFragments[0] = "MUTATED"
+	src.AppendFragments[0] = "MUTATED"
 	src.InheritedAppendFragments[0] = "MUTATED"
 	src.InstallAgentHooks[0] = "MUTATED"
 	newMin := 999
@@ -727,6 +763,9 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	}
 	if dst.InjectFragments[0] == "MUTATED" {
 		t.Error("InjectFragments is not a deep copy")
+	}
+	if dst.AppendFragments[0] == "MUTATED" {
+		t.Error("AppendFragments is not a deep copy")
 	}
 	if dst.InheritedAppendFragments[0] == "MUTATED" {
 		t.Error("InheritedAppendFragments is not a deep copy")

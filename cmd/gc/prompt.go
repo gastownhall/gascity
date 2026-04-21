@@ -201,8 +201,9 @@ func mergeFragmentLists(global, perAgent []string) []string {
 }
 
 // effectivePromptFragments applies the runtime fragment layering contract.
-func effectivePromptFragments(global, inject, inherited, defaults []string) []string {
+func effectivePromptFragments(global, inject, appendFragments, inherited, defaults []string) []string {
 	fragments := mergeFragmentLists(global, inject)
+	fragments = mergeFragmentLists(fragments, appendFragments)
 	fragments = mergeFragmentLists(fragments, inherited)
 	return mergeFragmentLists(fragments, defaults)
 }

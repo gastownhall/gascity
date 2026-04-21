@@ -1143,7 +1143,7 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 				continue
 			}
 			seen[key] = struct{}{}
-			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
+			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
 			if err != nil {
 				return false, err
 			}
@@ -1498,6 +1498,7 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		assigned, err := store.List(beads.ListQuery{
 			Assignee: assignee,
 			Status:   "in_progress",
+			Live:     true,
 			Sort:     beads.SortCreatedDesc,
 		})
 		if err != nil {
