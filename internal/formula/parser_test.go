@@ -173,6 +173,78 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	}
 }
 
+func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-implicit-v2",
+		Version: 2,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "work",
+				Title: "Do the work",
+				Retry: &RetrySpec{MaxAttempts: 2},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should reject graph-only v2 workflow without contract")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	}
+}
+
+func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-implicit-fanout",
+		Version: 2,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.items",
+					Bond:    "mol-item",
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should reject graph-only on_complete workflow without contract")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	}
+}
+
+func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-detached-v1",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:       "work",
+				Title:    "Do the work",
+				Metadata: map[string]string{"gc.kind": "retry"},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should reject detached graph metadata without contract")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	}
+}
+
 func TestValidate_ValidTimeout(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout",
@@ -776,6 +848,170 @@ func TestParseFile_AndResolve(t *testing.T) {
 	}
 	if resolved.Steps[1].ID != "deploy" {
 		t.Errorf("Steps[1].ID = %q, want 'deploy' (child)", resolved.Steps[1].ID)
+	}
+}
+
+func TestResolve_InheritsGraphContractFromParent(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "graph-parent",
+  "version": 2,
+  "type": "workflow",
+  "contract": "graph.v2",
+  "steps": [
+    {"id": "init", "title": "Initialize"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	child := `{
+  "formula": "graph-child",
+  "version": 2,
+  "type": "workflow",
+  "extends": ["graph-parent"],
+  "steps": [
+    {"id": "follow-up", "title": "Follow up", "depends_on": ["init"]}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "graph-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := resolved.Contract; got != "graph.v2" {
+		t.Fatalf("resolved.Contract = %q, want graph.v2", got)
+	}
+}
+
+func TestResolve_ExpansionExtendsPreservesTemplateAndInheritedContract(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "graph-expansion-parent",
+  "version": 2,
+  "type": "expansion",
+  "contract": "graph.v2"
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-expansion-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	child := `{
+  "formula": "graph-expansion-child",
+  "version": 2,
+  "type": "expansion",
+  "extends": ["graph-expansion-parent"],
+  "template": [
+    {
+      "id": "{target}.attempt",
+      "title": "Attempt",
+      "retry": {"max_attempts": 2}
+    }
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "graph-expansion-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := resolved.Contract; got != "graph.v2" {
+		t.Fatalf("resolved.Contract = %q, want graph.v2", got)
+	}
+	if len(resolved.Template) != 1 {
+		t.Fatalf("len(resolved.Template) = %d, want 1", len(resolved.Template))
+	}
+	if got := resolved.Template[0].ID; got != "{target}.attempt" {
+		t.Fatalf("resolved.Template[0].ID = %q, want {target}.attempt", got)
+	}
+	if resolved.Template[0].Retry == nil {
+		t.Fatal("resolved.Template[0].Retry = nil, want retry spec preserved")
+	}
+}
+
+func TestResolve_ExpansionExtendsInheritsParentTemplateAndChildOverrides(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "template-parent",
+  "version": 2,
+  "type": "expansion",
+  "contract": "graph.v2",
+  "template": [
+    {"id": "{target}.prepare", "title": "Prepare"},
+    {"id": "{target}.shared", "title": "Parent shared"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "template-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	child := `{
+  "formula": "template-child",
+  "version": 2,
+  "type": "expansion",
+  "extends": ["template-parent"],
+  "template": [
+    {"id": "{target}.shared", "title": "Child shared"}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "template-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resolved.Template) != 2 {
+		t.Fatalf("len(resolved.Template) = %d, want 2", len(resolved.Template))
+	}
+	if got := resolved.Template[0].ID; got != "{target}.prepare" {
+		t.Fatalf("resolved.Template[0].ID = %q, want {target}.prepare", got)
+	}
+	if got := resolved.Template[1].Title; got != "Child shared" {
+		t.Fatalf("resolved.Template[1].Title = %q, want Child shared", got)
 	}
 }
 

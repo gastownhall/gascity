@@ -174,6 +174,7 @@ func TestCompileControlSpecBeadsAreNotWorkflowSinks(t *testing.T) {
 	formulaContent := `
 formula = "control-spec-demo"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "review"

@@ -73,7 +73,7 @@ var initConventionDirs = []string{
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
 	interactive      bool   // true if the wizard ran with user interaction
-	configName       string // "tutorial", "gastown", or "custom"
+	configName       string // canonical values: "minimal", "gastown", or "custom"
 	provider         string // built-in provider key, or "" if startCommand set
 	startCommand     string // custom start command (workspace-level)
 	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
@@ -82,7 +82,7 @@ type wizardConfig struct {
 // defaultWizardConfig returns a non-interactive wizardConfig that produces
 // a single mayor agent with no provider.
 func defaultWizardConfig() wizardConfig {
-	return wizardConfig{configName: "tutorial"}
+	return wizardConfig{configName: "minimal"}
 }
 
 func canBootstrapExistingCity(wiz wizardConfig) bool {
@@ -126,23 +126,23 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 	fmt.Fprintln(stdout, "Welcome to Gas City SDK!")                                //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "")                                                        //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "Choose a config template:")                               //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "  1. tutorial  — default coding agent (default)")         //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  1. minimal   — default coding agent (default)")         //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  2. gastown   — multi-agent orchestration pack")         //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  3. custom    — empty workspace, configure it yourself") //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "Template [1]: ")                                           //nolint:errcheck // best-effort stdout
 
 	configChoice := readLine(br)
-	configName := "tutorial"
+	configName := "minimal"
 
 	switch configChoice {
-	case "", "1", "tutorial":
-		configName = "tutorial"
+	case "", "1", "minimal", "tutorial":
+		configName = "minimal"
 	case "2", "gastown":
 		configName = "gastown"
 	case "3", "custom":
 		configName = "custom"
 	default:
-		fmt.Fprintf(stdout, "Unknown template %q, using tutorial.\n", configChoice) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Unknown template %q, using minimal.\n", configChoice) //nolint:errcheck // best-effort stdout
 	}
 
 	// Custom config → skip agent question, return minimal config.
@@ -218,7 +218,7 @@ func resolveAgentChoice(input string, order []string, builtins map[string]config
 	return ""
 }
 
-const initProgressSteps = 9
+const initProgressSteps = 8
 
 // initExitAlreadyInitialized is the process exit code for an init request
 // that targets an already-initialized city. The supervisor API depends on
@@ -252,7 +252,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-writes the default formulas. Use --provider to create the default mayor city
+materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
 non-interactively, or --file to initialize from an existing TOML config file.`,
 		Example: `  gc init
   gc init ~/my-city
@@ -363,7 +363,7 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 		return wizardConfig{}, err
 	}
 	return wizardConfig{
-		configName:       "tutorial",
+		configName:       "minimal",
 		provider:         provider,
 		bootstrapProfile: bootstrapProfile,
 	}, nil
@@ -720,10 +720,6 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return code
 	}
 
-	// Write default formulas.
-	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
-		return code
-	}
 	// Rewrite legacy prompt paths on the composed config before splitting so
 	// the pack-owned [[agent]] entries pick up the V2 agents/<name>/
 	// prompt.template.md paths we actually scaffold.
@@ -778,7 +774,7 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 }
 
 // doInit is the pure logic for "gc init". It creates the city directory
-// structure and writes city.toml. Tutorial configs use WizardCity
+// structure and writes city.toml. Minimal configs use WizardCity
 // when a provider or start command is supplied; otherwise init writes the
 // default mayor-only city. Errors if the runtime scaffold already exists. Accepts an
 // injected FS for testability.
@@ -849,12 +845,6 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return code
 	}
 
-	// Write default formula files.
-	logInitProgress(stdout, 4, "Writing default formulas")
-	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
-		return code
-	}
-
 	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -873,12 +863,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logInitProgress(stdout, 5, "Writing pack.toml")
+	logInitProgress(stdout, 4, "Writing pack.toml")
 	if err := writeInitPackToml(fs, cityPath, packCfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logInitProgress(stdout, 6, "Writing city configuration")
+	logInitProgress(stdout, 5, "Writing city configuration")
 	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1165,6 +1155,10 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 
 	// Create runtime scaffold.
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

@@ -32,6 +32,7 @@ The goal is parity of outcome, not a verbatim port of upstream's convoy DSL.
 """
 formula = "mol-idea-to-plan"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.problem]

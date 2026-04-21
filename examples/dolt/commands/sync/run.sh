@@ -48,7 +48,7 @@ fi
 
 # Check if server is running.
 is_running() {
-  lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
+  lsof -nP -iTCP:"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
 }
 
 # routes_files — emit one routes.jsonl path per line.

@@ -224,10 +224,3 @@ func pruneEmptyDirs(dir, stop string) {
 		dir = filepath.Dir(cleanDir)
 	}
 }
-
-// MaterializeGastownPacks is a compatibility shim for callers that still
-// reference it. With all packs now materialized by MaterializeBuiltinPacks,
-// this is a no-op. It will be removed once all callers are updated.
-func MaterializeGastownPacks(_ string) error {
-	return nil
-}

@@ -771,7 +771,7 @@ Rationale:
 - `witness`: proactive patrol loop per rig
 - `refinery`: canonical merge queue endpoint, wake on work
 
-For the lifecycle/tutorial packs, `refinery` should also be expressed as
+For the lifecycle and minimal packs, `refinery` should also be expressed as
 an `on_demand` named session instead of an implicit singleton.
 
 ### Refinery does not need a new "check" feature
@@ -913,7 +913,7 @@ identity.
    helpers in desired-state and wake evaluation.
 3. Centralize configured-session materialization through one aliased
    helper and switch mail/nudge/sling/workflow to use it.
-4. Update Gastown and tutorial/lifecycle packs to declare explicit named
+4. Update Gastown and the minimal/lifecycle packs to declare explicit named
    sessions.
 5. Update status output and tests so canonical named sessions, not plain
    templates, define singleton runtime presence.
@@ -945,5 +945,5 @@ identity.
 - `gc session new <template>` continues to create fresh ordinary
   sessions even when a configured named session reserves the same
   qualified identity.
-- Gastown and lifecycle/tutorial configs work through explicit named
+- Gastown and lifecycle/minimal configs work through explicit named
   sessions instead of implicit singleton templates.

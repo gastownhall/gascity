@@ -192,10 +192,12 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Formula:     formula.Formula,
 		Description: formula.Description,
 		Version:     formula.Version,
+		Contract:    formula.Contract,
 		Type:        formula.Type,
 		Source:      formula.Source,
 		Vars:        make(map[string]*VarDef),
 		Steps:       nil,
+		Template:    nil,
 		Compose:     nil,
 	}
 
@@ -212,6 +214,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
 
+		if merged.Contract == "" {
+			merged.Contract = parent.Contract
+		}
+
 		// Merge parent vars (parent vars are inherited, child overrides)
 		for name, varDef := range parent.Vars {
 			if _, exists := merged.Vars[name]; !exists {
@@ -221,6 +227,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 
 		// Merge parent steps (append, child steps come after)
 		merged.Steps = append(merged.Steps, parent.Steps...)
+
+		// Parent templates append in declaration order. Only the child gets
+		// override semantics so parent-parent conflicts still surface later.
+		merged.Template = append(merged.Template, parent.Template...)
 
 		// Merge parent compose rules
 		merged.Compose = mergeComposeRules(merged.Compose, parent.Compose)
@@ -234,6 +244,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	// Merge child steps: override parent steps by ID (preserving position),
 	// append new child steps at the end.
 	merged.Steps = mergeSteps(merged.Steps, formula.Steps)
+	merged.Template = mergeSteps(merged.Template, formula.Template)
 
 	merged.Compose = mergeComposeRules(merged.Compose, formula.Compose)
 

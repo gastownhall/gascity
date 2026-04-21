@@ -754,7 +754,7 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 		return false
 	}
 	expectedDataDir := filepath.Join(cityPath, ".beads", "dolt")
-	if filepath.Clean(strings.TrimSpace(state.DataDir)) != filepath.Clean(expectedDataDir) {
+	if !samePath(strings.TrimSpace(state.DataDir), expectedDataDir) {
 		return false
 	}
 	if !pidAlive(state.PID) {
@@ -1231,6 +1231,7 @@ func runProviderProbe(script, cityPath, provider string) bool {
 }
 
 func providerLifecycleDoltPathEnv(cityPath string) []string {
+	cityPath = normalizePathForCompare(cityPath)
 	packStateDir := citylayout.PackStateDir(cityPath, "dolt")
 	dataDir := filepath.Join(cityPath, ".beads", "dolt")
 	return []string{
@@ -1248,6 +1249,7 @@ func providerLifecycleProcessEnv(cityPath, provider string) []string {
 	if strings.TrimSpace(cityPath) == "" {
 		return nil
 	}
+	cityPath = normalizePathForCompare(cityPath)
 	env := cityRuntimeProcessEnv(cityPath)
 	if !providerUsesBdStoreContract(provider) {
 		return env

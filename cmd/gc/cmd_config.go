@@ -22,6 +22,20 @@ func jsonEncoder(w io.Writer) *json.Encoder {
 	return enc
 }
 
+func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+}
+
+func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		return nil, nil, fmt.Errorf("materializing builtin packs: %w", err)
+	}
+	allIncludes := make([]string, 0, len(includes)+3)
+	allIncludes = append(allIncludes, includes...)
+	allIncludes = append(allIncludes, builtinPackIncludes(cityPath)...)
+	return config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), allIncludes...)
+}
+
 func newConfigCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
@@ -86,7 +100,7 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -442,7 +456,7 @@ func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -563,7 +577,7 @@ func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io
 		}
 	}
 
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	cfg, _, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
 		return 1

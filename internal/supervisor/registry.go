@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // validCityName matches names safe for use in URL path segments.
@@ -88,13 +89,9 @@ func (r *Registry) List() ([]CityEntry, error) {
 func (r *Registry) Register(cityPath, effectiveName string) error {
 	r.refuseHostRegistryDuringTests()
 
-	abs, err := filepath.Abs(cityPath)
+	abs, err := resolveAbsPath(cityPath)
 	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-	abs, err = filepath.EvalSymlinks(abs)
-	if err != nil {
-		return fmt.Errorf("resolving symlinks: %w", err)
+		return err
 	}
 	if effectiveName == "" {
 		effectiveName = filepath.Base(abs)
@@ -118,7 +115,7 @@ func (r *Registry) Register(cityPath, effectiveName string) error {
 	}
 
 	for i, e := range entries {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			if e.Name == effectiveName {
 				return nil // already registered with same name — idempotent
 			}
@@ -146,15 +143,9 @@ func (r *Registry) Register(cityPath, effectiveName string) error {
 func (r *Registry) Unregister(cityPath string) error {
 	r.refuseHostRegistryDuringTests()
 
-	abs, err := filepath.Abs(cityPath)
+	abs, err := resolveAbsPath(cityPath)
 	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-	// Best-effort symlink resolution: if the directory was deleted before
-	// unregister, EvalSymlinks fails. Fall back to the absolute path so
-	// stale entries can still be removed.
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
+		return err
 	}
 
 	r.mu.Lock()
@@ -174,7 +165,7 @@ func (r *Registry) Unregister(cityPath string) error {
 	found := false
 	filtered := entries[:0]
 	for _, e := range entries {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			found = true
 			continue
 		}
@@ -321,7 +312,7 @@ func (r *Registry) RegisterRig(rigPath, name, defaultCity string) error {
 	}
 
 	for i, e := range rf.Rigs {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			// Same path — update name and default if needed.
 			if e.Name != name {
 				// Check new name doesn't conflict.
@@ -377,7 +368,7 @@ func (r *Registry) UnregisterRig(rigPath string) error {
 	found := false
 	filtered := rf.Rigs[:0]
 	for _, e := range rf.Rigs {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			found = true
 			continue
 		}
@@ -410,9 +401,11 @@ func (r *Registry) LookupRigByPath(dir string) (RigEntry, bool) {
 	var best RigEntry
 	bestLen := 0
 	for _, e := range rf.Rigs {
-		if pathHasPrefix(abs, e.Path) && len(e.Path) > bestLen {
+		entryPath := pathutil.NormalizePathForCompare(e.Path)
+		if pathHasPrefix(abs, entryPath) && len(entryPath) > bestLen {
+			e.Path = entryPath
 			best = e
-			bestLen = len(e.Path)
+			bestLen = len(entryPath)
 		}
 	}
 	return best, bestLen > 0
@@ -462,12 +455,17 @@ func (r *Registry) SetRigDefault(rigPath, defaultCity string) error {
 	}
 
 	for i, e := range rf.Rigs {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			rf.Rigs[i].DefaultCity = defaultCity
 			return r.saveAllLocked(rf)
 		}
 	}
 	return fmt.Errorf("rig at %s is not registered", abs)
+}
+
+type rigState struct {
+	name   string
+	cities map[string]bool
 }
 
 // ReconcileRigs rebuilds the rig index from city configurations. For each
@@ -493,10 +491,6 @@ func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
 	}
 
 	// Build desired state: rig path → {name, set of cities}.
-	type rigState struct {
-		name   string
-		cities map[string]bool
-	}
 	desired := make(map[string]*rigState)
 	for _, m := range rigCityMap {
 		rigPath, err := resolveAbsPath(m.RigPath)
@@ -519,16 +513,22 @@ func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
 	seen := make(map[string]bool)
 	kept := rf.Rigs[:0]
 	for _, e := range rf.Rigs {
-		s, ok := desired[e.Path]
+		desiredPath, s, ok := desiredRigStateForEntry(desired, e.Path)
 		if !ok {
 			// Rig no longer in any city — drop it.
 			continue
 		}
-		seen[e.Path] = true
+		seen[desiredPath] = true
+		e.Path = desiredPath
 		e.Name = s.name
 		// Clear stale default.
-		if e.DefaultCity != "" && !s.cities[e.DefaultCity] {
-			e.DefaultCity = ""
+		if e.DefaultCity != "" {
+			defaultCity := pathutil.NormalizePathForCompare(e.DefaultCity)
+			if !s.cities[defaultCity] {
+				e.DefaultCity = ""
+			} else {
+				e.DefaultCity = defaultCity
+			}
 		}
 		// Auto-set default when exactly one city.
 		if e.DefaultCity == "" && len(s.cities) == 1 {
@@ -565,21 +565,36 @@ type RigCityMapping struct {
 	CityPath string
 }
 
-// resolveAbsPath resolves a path to absolute, following symlinks.
+// resolveAbsPath resolves a path to an absolute canonical comparison form.
 func resolveAbsPath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", fmt.Errorf("resolving path: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
+	return pathutil.NormalizePathForCompare(abs), nil
+}
+
+func sameRegistryPath(a, b string) bool {
+	return pathutil.SamePath(a, b)
+}
+
+func desiredRigStateForEntry(desired map[string]*rigState, entryPath string) (string, *rigState, bool) {
+	if s, ok := desired[entryPath]; ok {
+		return entryPath, s, true
 	}
-	return abs, nil
+	for path, s := range desired {
+		if sameRegistryPath(path, entryPath) {
+			return path, s, true
+		}
+	}
+	return "", nil, false
 }
 
 // pathHasPrefix reports whether path starts with prefix as a directory
 // boundary (not just a string prefix). e.g. /a/bc is not under /a/b.
 func pathHasPrefix(path, prefix string) bool {
+	path = pathutil.NormalizePathForCompare(path)
+	prefix = pathutil.NormalizePathForCompare(prefix)
 	if path == prefix {
 		return true
 	}

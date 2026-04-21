@@ -492,24 +492,3 @@ func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 		t.Errorf("maintenance pack not found in bd includes: %v", includes)
 	}
 }
-
-func TestMaterializeGastownPacks(t *testing.T) {
-	dir := t.TempDir()
-
-	// MaterializeGastownPacks is a no-op shim — verify it returns nil.
-	if err := MaterializeGastownPacks(dir); err != nil {
-		t.Fatalf("MaterializeGastownPacks() error: %v", err)
-	}
-}
-
-func TestMaterializeGastownPacks_Idempotent(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeGastownPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-	// Second call should succeed without error.
-	if err := MaterializeGastownPacks(dir); err != nil {
-		t.Fatalf("second call failed: %v", err)
-	}
-}

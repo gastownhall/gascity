@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -67,6 +68,8 @@ var (
 	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
 	openCityStoreAtForStatus      = openCityStoreAt
 )
+
+var controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
 
 // newStatusCmd creates the "gc status [path]" command.
 func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -207,9 +210,11 @@ func doCityStatusJSON(
 
 func controllerStatusForCity(cityPath string) ControllerJSON {
 	_, registered, err := registeredCityEntry(cityPath)
+	supervisorWasAlive := false
 	if err == nil && registered {
 		ctrl := ControllerJSON{Mode: "supervisor"}
 		if pid := supervisorAliveHook(); pid != 0 {
+			supervisorWasAlive = true
 			ctrl.PID = pid
 			if running, status, known := supervisorCityRunningHook(cityPath); known {
 				ctrl.Running = running
@@ -222,6 +227,11 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 			}
 		}
 	}
+	if supervisorWasAlive {
+		if pid := controllerAliveWithin(cityPath, controllerStatusStandaloneFallbackTimeout); pid != 0 {
+			return ControllerJSON{Running: true, PID: pid, Mode: "supervisor"}
+		}
+	}
 	if pid := controllerAlive(cityPath); pid != 0 {
 		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
 	}
@@ -229,6 +239,22 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 		return ControllerJSON{Mode: "supervisor"}
 	}
 	return ControllerJSON{}
+}
+
+func controllerAliveWithin(cityPath string, timeout time.Duration) int {
+	if timeout <= 0 {
+		return controllerAlive(cityPath)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if pid := controllerAlive(cityPath); pid != 0 {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			return 0
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func controllerSupervisorStatusText(status string) string {

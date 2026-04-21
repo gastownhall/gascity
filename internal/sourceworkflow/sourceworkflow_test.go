@@ -3,6 +3,7 @@ package sourceworkflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -278,5 +279,131 @@ func TestListLiveRootsTreatsLegacyRootAsStoreScoped(t *testing.T) {
 	}
 	if len(betaRoots) != 0 {
 		t.Fatalf("ListLiveRoots(beta) = %#v, want 0 roots", betaRoots)
+	}
+}
+
+type parentLastCloseStore struct {
+	*beads.MemStore
+}
+
+func (s *parentLastCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	positions := make(map[string]int, len(ids))
+	for i, id := range ids {
+		positions[id] = i
+	}
+	all, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		return 0, err
+	}
+	for _, bead := range all {
+		if bead.ID == "" || bead.ParentID == "" {
+			continue
+		}
+		parentPos, parentOK := positions[bead.ParentID]
+		childPos, childOK := positions[bead.ID]
+		if parentOK && childOK && parentPos < childPos {
+			return 0, fmt.Errorf("parent %s closed before child %s", bead.ParentID, bead.ID)
+		}
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+func TestCloseWorkflowSubtreeClosesDeepestChildrenFirst(t *testing.T) {
+	store := &parentLastCloseStore{MemStore: beads.NewMemStore()}
+
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := store.DepAdd(child.ID, root.ID, "parent-child"); err != nil {
+		t.Fatalf("DepAdd(child): %v", err)
+	}
+	grandchild, err := store.Create(beads.Bead{
+		Title:    "grandchild",
+		Type:     "task",
+		ParentID: child.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(grandchild): %v", err)
+	}
+	if err := store.DepAdd(grandchild.ID, child.ID, "parent-child"); err != nil {
+		t.Fatalf("DepAdd(grandchild): %v", err)
+	}
+
+	closed, err := CloseWorkflowSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtree: %v", err)
+	}
+	if closed != 3 {
+		t.Fatalf("CloseWorkflowSubtree closed %d beads, want 3", closed)
+	}
+	for _, id := range []string{root.ID, child.ID, grandchild.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("bead %s status = %q, want closed", id, bead.Status)
+		}
+	}
+}
+
+func TestCloseWorkflowSubtreeHandlesParentCycles(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		ID:     "wf-root",
+		Title:  "root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := store.Update(root.ID, beads.UpdateOpts{ParentID: &child.ID}); err != nil {
+		t.Fatalf("Update(root.ParentID): %v", err)
+	}
+	if err := store.DepAdd(child.ID, root.ID, "parent-child"); err != nil {
+		t.Fatalf("DepAdd(child): %v", err)
+	}
+
+	closed, err := CloseWorkflowSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtree: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("CloseWorkflowSubtree closed %d beads, want 2", closed)
+	}
+	for _, id := range []string{root.ID, child.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("bead %s status = %q, want closed", id, bead.Status)
+		}
 	}
 }

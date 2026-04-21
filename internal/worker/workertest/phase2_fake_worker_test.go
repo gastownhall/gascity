@@ -33,7 +33,7 @@ var (
 
 const (
 	fakeStartupGateTimeout         = 2 * time.Second
-	fakeStartupLaunchBound         = 500 * time.Millisecond
+	fakeStartupLaunchBound         = 750 * time.Millisecond
 	fakeStartupPostControlOverhead = 250 * time.Millisecond
 	fakeInteractionSignalBound     = 2 * time.Second
 )

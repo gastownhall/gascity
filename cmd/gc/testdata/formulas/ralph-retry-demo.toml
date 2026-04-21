@@ -1,4 +1,5 @@
 formula = "ralph-retry-demo"
+contract = "graph.v2"
 description = "Inline Check demo that fails once and then passes"
 
 [[steps]]

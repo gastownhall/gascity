@@ -42,7 +42,7 @@ managed_runtime_port() (
     kill -0 "$pid" 2>/dev/null || return 0
 
     if command -v lsof >/dev/null 2>&1; then
-        holder_pid=$(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+        holder_pid=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
         [ -n "$holder_pid" ] || return 0
         [ "$holder_pid" = "$pid" ] || return 0
     else

@@ -3,6 +3,7 @@ package workdir
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -156,5 +157,15 @@ func TestConfiguredRigNameMatchesSymlinkAliasPath(t *testing.T) {
 	}, []config.Rig{{Name: "demo", Path: rigPath}})
 	if got != "demo" {
 		t.Fatalf("ConfiguredRigName() = %q, want %q", got, "demo")
+	}
+}
+
+func TestSamePathUsesSharedPathNormalization(t *testing.T) {
+	a := "/private/tmp/gc-home"
+	b := "/tmp/gc-home"
+	got := samePath(a, b)
+	want := runtime.GOOS == "darwin"
+	if got != want {
+		t.Fatalf("samePath(%q, %q) = %v, want %v", a, b, got, want)
 	}
 }

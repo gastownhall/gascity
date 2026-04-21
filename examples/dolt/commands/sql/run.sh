@@ -23,7 +23,7 @@ is_running() {
     return 1
   fi
   # Local server — check if anything listens on the port.
-  lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
+  lsof -nP -iTCP:"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
 }
 
 if is_running; then

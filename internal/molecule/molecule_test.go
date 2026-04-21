@@ -96,6 +96,7 @@ func TestCookTeardownRetryBlocksOnAttempt(t *testing.T) {
 	toml := `
 formula = "scoped-teardown"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "body"
@@ -1565,6 +1566,9 @@ timeout = "2m"
 	if result.Created != 5 {
 		t.Fatalf("Created = %d, want 5 (root + design + control + spec + iteration)", result.Created)
 	}
+	if result.GraphWorkflow {
+		t.Fatal("result.GraphWorkflow = true, want false without graph.v2 contract")
+	}
 
 	root, err := store.Get(result.RootID)
 	if err != nil {
@@ -1586,11 +1590,11 @@ timeout = "2m"
 	if control.Metadata["gc.kind"] != "ralph" {
 		t.Fatalf("control gc.kind = %q, want ralph", control.Metadata["gc.kind"])
 	}
-	if root.Metadata["gc.kind"] != "workflow" {
-		t.Fatalf("root gc.kind = %q, want workflow", root.Metadata["gc.kind"])
+	if root.Metadata["gc.kind"] != "" {
+		t.Fatalf("root gc.kind = %q, want empty", root.Metadata["gc.kind"])
 	}
-	if root.Type != "task" {
-		t.Fatalf("root type = %q, want task", root.Type)
+	if root.Type != "molecule" {
+		t.Fatalf("root type = %q, want molecule", root.Type)
 	}
 	if control.Metadata["gc.check_mode"] != "exec" {
 		t.Fatalf("control gc.check_mode = %q, want exec", control.Metadata["gc.check_mode"])
@@ -1623,11 +1627,11 @@ timeout = "2m"
 	if iteration.Metadata["gc.attempt"] != "1" {
 		t.Fatalf("iteration gc.attempt = %q, want 1", iteration.Metadata["gc.attempt"])
 	}
-	if iteration.ParentID != "" {
-		t.Fatalf("iteration ParentID = %q, want detached graph node", iteration.ParentID)
+	if iteration.ParentID != result.RootID {
+		t.Fatalf("iteration ParentID = %q, want root %q for molecule flow", iteration.ParentID, result.RootID)
 	}
-	if iteration.Metadata["gc.root_bead_id"] != result.RootID {
-		t.Fatalf("iteration gc.root_bead_id = %q, want %q", iteration.Metadata["gc.root_bead_id"], result.RootID)
+	if iteration.Metadata["gc.root_bead_id"] != "" {
+		t.Fatalf("iteration gc.root_bead_id = %q, want empty for molecule flow", iteration.Metadata["gc.root_bead_id"])
 	}
 	if iteration.Metadata["custom"] != "value" {
 		t.Fatalf("iteration custom metadata = %q, want value", iteration.Metadata["custom"])
@@ -1648,30 +1652,6 @@ timeout = "2m"
 	if !foundIterBlock {
 		t.Fatalf("control bead does not block on iteration bead; deps=%v", controlDeps)
 	}
-
-	rootDeps, err := store.DepList(root.ID, "down")
-	if err != nil {
-		t.Fatalf("dep list root: %v", err)
-	}
-	foundDesignBlock := false
-	foundControlBlock := false
-	for _, dep := range rootDeps {
-		if dep.Type != "blocks" {
-			continue
-		}
-		switch dep.DependsOnID {
-		case result.IDMapping["ralph-demo.design"]:
-			foundDesignBlock = true
-		case control.ID:
-			foundControlBlock = true
-		}
-	}
-	if !foundDesignBlock {
-		t.Fatalf("root bead does not block on design bead; deps=%v", rootDeps)
-	}
-	if !foundControlBlock {
-		t.Fatalf("root bead does not block on control bead; deps=%v", rootDeps)
-	}
 }
 
 func TestCookEndToEndScopedWorkflowStampsRootAndScopeMetadata(t *testing.T) {
@@ -1680,6 +1660,7 @@ func TestCookEndToEndScopedWorkflowStampsRootAndScopeMetadata(t *testing.T) {
 	toml := `
 formula = "scoped-demo"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "body"

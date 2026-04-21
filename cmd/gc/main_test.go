@@ -1477,6 +1477,9 @@ func TestDoInitSuccess(t *testing.T) {
 	if !strings.HasSuffix(explicit[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md")) {
 		t.Errorf("explicitAgents[0].PromptTemplate = %q, want suffix %q", explicit[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md"))
 	}
+	if _, ok := f.Files[filepath.Join("/bright-lights", "formulas", "mol-scoped-work.toml")]; ok {
+		t.Fatal("doInit should not seed builtin formulas into city-local formulas/")
+	}
 }
 
 func TestDoInitWritesExpectedTOML(t *testing.T) {
@@ -1827,7 +1830,7 @@ func TestSettingsArgsMissingFile(t *testing.T) {
 // --- runWizard ---
 
 func TestRunWizardDefaults(t *testing.T) {
-	// Two enters → default template (tutorial) + default agent (claude).
+	// Two enters → default template (minimal) + default agent (claude).
 	stdin := strings.NewReader("\n\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -1835,8 +1838,8 @@ func TestRunWizardDefaults(t *testing.T) {
 	if !wiz.interactive {
 		t.Error("expected interactive = true")
 	}
-	if wiz.configName != "tutorial" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "tutorial")
+	if wiz.configName != "minimal" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
 	if wiz.provider != "claude" {
 		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
@@ -1861,8 +1864,8 @@ func TestRunWizardNilStdin(t *testing.T) {
 	if wiz.interactive {
 		t.Error("expected interactive = false for nil stdin")
 	}
-	if wiz.configName != "tutorial" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "tutorial")
+	if wiz.configName != "minimal" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
 	if wiz.provider != "" {
 		t.Errorf("provider = %q, want empty", wiz.provider)
@@ -1941,6 +1944,19 @@ func TestRunWizardGastownByName(t *testing.T) {
 	}
 }
 
+func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
+	stdin := strings.NewReader("tutorial\n\n")
+	var stdout bytes.Buffer
+	wiz := runWizard(stdin, &stdout)
+
+	if wiz.configName != "minimal" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
+	}
+	if wiz.provider != "claude" {
+		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	}
+}
+
 func TestRunWizardSelectCursorByNumber(t *testing.T) {
 	// Cursor is #4 in the order.
 	stdin := strings.NewReader("\n4\n")
@@ -1993,8 +2009,8 @@ func TestRunWizardEOFStdin(t *testing.T) {
 	wiz := runWizard(stdin, &stdout)
 
 	// EOF means default for both questions.
-	if wiz.configName != "tutorial" {
-		t.Errorf("configName = %q, want %q", wiz.configName, "tutorial")
+	if wiz.configName != "minimal" {
+		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
 	if wiz.provider != "claude" {
 		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
@@ -2005,7 +2021,7 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		interactive: true,
-		configName:  "tutorial",
+		configName:  "minimal",
 		provider:    "claude",
 	}
 
@@ -2020,7 +2036,7 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 
 	// Verify output message.
 	out := stdout.String()
-	if !strings.Contains(out, "Created tutorial config") {
+	if !strings.Contains(out, "Created minimal config") {
 		t.Errorf("stdout missing wizard message: %q", out)
 	}
 
@@ -2059,7 +2075,7 @@ func TestDoInitWithCustomCommand(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		interactive:  true,
-		configName:   "tutorial",
+		configName:   "minimal",
 		startCommand: "my-agent --auto",
 	}
 
@@ -2179,7 +2195,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
-		configName:       "tutorial",
+		configName:       "minimal",
 		provider:         "codex",
 		bootstrapProfile: bootstrapProfileK8sCell,
 	}
@@ -2224,7 +2240,7 @@ func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
 func TestDoInitWithOpenCodeProviderInstallsWorkspaceHooks(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "opencode",
 	}
 
@@ -2253,7 +2269,7 @@ func TestDoInitWithOpenCodeProviderInstallsWorkspaceHooks(t *testing.T) {
 func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}
 
@@ -2719,7 +2735,7 @@ func TestInitNameFlagWithBareInit(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
 	}, "my-bare-name", &stdout, &stderr)
 	if code != 0 {

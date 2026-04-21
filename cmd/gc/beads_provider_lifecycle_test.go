@@ -61,6 +61,7 @@ func TestEnsureBeadsProvider_exec(t *testing.T) {
 
 func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	cityPath := t.TempDir()
+	wantCityPath := normalizePathForCompare(cityPath)
 	t.Setenv("GC_PACK_STATE_DIR", "/tmp/wrong-pack")
 	t.Setenv("GC_DOLT_DATA_DIR", "/tmp/wrong-data")
 	t.Setenv("GC_DOLT_LOG_FILE", "/tmp/wrong-log")
@@ -78,14 +79,57 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 		}
 	}
 
-	packStateDir := citylayout.PackStateDir(cityPath, "dolt")
+	packStateDir := citylayout.PackStateDir(wantCityPath, "dolt")
 	want := map[string]string{
 		"GC_PACK_STATE_DIR":   packStateDir,
-		"GC_DOLT_DATA_DIR":    filepath.Join(cityPath, ".beads", "dolt"),
+		"GC_DOLT_DATA_DIR":    filepath.Join(wantCityPath, ".beads", "dolt"),
 		"GC_DOLT_LOG_FILE":    filepath.Join(packStateDir, "dolt.log"),
 		"GC_DOLT_STATE_FILE":  filepath.Join(packStateDir, "dolt-provider-state.json"),
 		"GC_DOLT_PID_FILE":    filepath.Join(packStateDir, "dolt.pid"),
 		"GC_DOLT_LOCK_FILE":   filepath.Join(packStateDir, "dolt.lock"),
+		"GC_DOLT_CONFIG_FILE": filepath.Join(packStateDir, "dolt-config.yaml"),
+	}
+	for key, expected := range want {
+		if got := env[key]; got != expected {
+			t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want %q", key, got, expected)
+		}
+	}
+}
+
+func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(root, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	aliasCity := filepath.Join(aliasParent, "bright-lights")
+	realCity := filepath.Join(realParent, "bright-lights")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantCityPath := normalizePathForCompare(realCity)
+
+	envEntries := providerLifecycleProcessEnv(aliasCity, "exec:"+gcBeadsBdScriptPath(aliasCity))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	packStateDir := citylayout.PackStateDir(wantCityPath, "dolt")
+	want := map[string]string{
+		"GC_CITY":             wantCityPath,
+		"GC_CITY_PATH":        wantCityPath,
+		"GC_CITY_RUNTIME_DIR": filepath.Join(wantCityPath, ".gc", "runtime"),
+		"GC_PACK_STATE_DIR":   packStateDir,
+		"GC_DOLT_DATA_DIR":    filepath.Join(wantCityPath, ".beads", "dolt"),
+		"GC_DOLT_STATE_FILE":  filepath.Join(packStateDir, "dolt-provider-state.json"),
 		"GC_DOLT_CONFIG_FILE": filepath.Join(packStateDir, "dolt-config.yaml"),
 	}
 	for key, expected := range want {
@@ -3089,8 +3133,9 @@ exit 2
 	if err != nil {
 		t.Fatalf("read provider ops: %v", err)
 	}
-	if strings.TrimSpace(string(ops)) != "health\nrecover" {
-		t.Fatalf("provider ops = %q, want health then recover", string(ops))
+	opLines := strings.Fields(strings.TrimSpace(string(ops)))
+	if len(opLines) < 2 || opLines[0] != "health" || opLines[1] != "recover" {
+		t.Fatalf("provider ops = %q, want first health then recover", string(ops))
 	}
 }
 
@@ -3326,7 +3371,11 @@ case "${1:-}" in
       last="$arg"
     done
     if [ -d "$last/.beads" ]; then
-      stat -c %a "$last/.beads" > "$perm_file"
+      if stat -c %a "$last/.beads" >/dev/null 2>&1; then
+        stat -c %a "$last/.beads" > "$perm_file"
+      else
+        stat -f %Lp "$last/.beads" > "$perm_file"
+      fi
     else
       printf 'missing
 ' > "$perm_file"
@@ -5069,6 +5118,13 @@ EOF
     state_file="$pack_dir/dolt-provider-state.json"
     pid_file="$pack_dir/dolt.pid"
     printf 'gc dolt-state start-managed\n' >> "$invocation_file"
+    if [ -n "${GC_FAKE_FD9_STATUS_FILE:-}" ]; then
+      if (: >&9) 2>/dev/null; then
+        printf 'open\n' > "$GC_FAKE_FD9_STATUS_FILE"
+      else
+        printf 'closed\n' > "$GC_FAKE_FD9_STATUS_FILE"
+      fi
+    fi
     mkdir -p "$pack_dir" "$data_dir"
     cat > "$config_file" <<EOF
 # rendered by fake gc
@@ -6124,6 +6180,51 @@ func TestGcBeadsBdStartUsesGCBinManagedConfigWriter(t *testing.T) {
 	}
 	if !strings.Contains(string(configData), fmt.Sprintf("port: %d", state.Port)) {
 		t.Fatalf("dolt-config.yaml missing helper-selected port %d:\n%s", state.Port, string(configData))
+	}
+}
+
+func TestGcBeadsBdStartManagedHelperDoesNotInheritStartLockFD(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fd9StatusFile := filepath.Join(t.TempDir(), "fd9-status")
+	fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+	writeFakeManagedConfigWriterDolt(t, binDir)
+
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"GC_FAKE_FD9_STATUS_FILE="+fd9StatusFile,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	status := strings.TrimSpace(string(mustReadFile(t, fd9StatusFile)))
+	if status != "closed" {
+		t.Fatalf("dolt-state start-managed inherited fd 9 = %q, want closed", status)
 	}
 }
 

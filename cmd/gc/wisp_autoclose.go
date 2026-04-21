@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +23,7 @@ func newWispCmd(stdout, stderr io.Writer) *cobra.Command {
 func newWispAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:    "autoclose <bead-id>",
-		Short:  "Auto-close open molecule children of a closed bead",
+		Short:  "Auto-close open molecule descendants of a closed bead",
 		Hidden: true,
 		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -49,11 +50,11 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	doWispAutocloseWith(store, beadID, stdout)
 }
 
-// doWispAutocloseWith closes any open attached molecule/workflow roots for the
-// given bead. Metadata-based attachments are preferred, with child traversal as
-// a fallback for legacy data. Called from the bd on_close hook to ensure
-// attached wisps don't outlive their parent work bead. All errors are silently
-// swallowed — this is best-effort infrastructure.
+// doWispAutocloseWith closes any open attached molecule/workflow roots and
+// their descendants for the given bead. Metadata-based attachments are
+// preferred, with child traversal as a fallback for legacy data. Called from
+// the bd on_close hook to ensure attached wisps don't outlive their parent work
+// bead. All errors are silently swallowed — this is best-effort infrastructure.
 func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 	parent, err := store.Get(beadID)
 	if err != nil {
@@ -64,12 +65,14 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 		return
 	}
 	for _, attached := range attachments {
-		if attached.Status == "closed" {
-			continue
-		}
-		if err := store.Close(attached.ID); err != nil {
+		closed, err := closeAttachedWispSubtree(store, attached)
+		if err != nil || closed == 0 {
 			continue
 		}
 		fmt.Fprintf(stdout, "Auto-closed %s %s on %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort stdout
 	}
+}
+
+func closeAttachedWispSubtree(store beads.Store, attached beads.Bead) (int, error) {
+	return sling.CloseAttachedSubtree(store, attached)
 }

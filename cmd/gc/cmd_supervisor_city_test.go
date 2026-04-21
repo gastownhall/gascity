@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -329,9 +330,9 @@ func TestRegisterCityWithSupervisorWaitsForConfiguredStartupTimeout(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS),
-	// so compare against the resolved path.
-	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	// Registry.Register stores the same canonical comparison form used by
+	// runtime path comparisons.
+	resolvedCityPath := canonicalTestPath(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Fatalf("expected retained registry entry for %s, got %v", resolvedCityPath, entries)
 	}
@@ -410,6 +411,129 @@ func TestEffectiveCityNameUsesWorkspaceSiteBinding(t *testing.T) {
 	}
 	if name != "site-city" {
 		t.Fatalf("effectiveCityName = %q, want %q", name, "site-city")
+	}
+}
+
+func writeCityWithUnmaterializedGastownImport(t *testing.T) string {
+	t.Helper()
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packToml := `[pack]
+name = "bright-lights"
+schema = 2
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
+
+func TestEffectiveCityNameMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	name, err := effectiveCityName(cityPath)
+	if err != nil {
+		t.Fatalf("effectiveCityName returned error: %v", err)
+	}
+	if name != "bright-lights" {
+		t.Fatalf("effectiveCityName = %q, want %q", name, "bright-lights")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("expected gastown builtin pack to be materialized before config load: %v", err)
+	}
+}
+
+func TestLoadSupervisorCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	cfg, _, err := loadSupervisorCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadSupervisorCityConfig returned error: %v", err)
+	}
+	if cfg.Workspace.Name != "bright-lights" {
+		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("expected gastown builtin pack to be materialized before supervisor config load: %v", err)
+	}
+}
+
+func TestLoadStartCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	cfg, _, err := loadStartCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadStartCityConfig returned error: %v", err)
+	}
+	if cfg.Workspace.Name != "bright-lights" {
+		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("expected gastown builtin pack to be materialized before start config load: %v", err)
+	}
+}
+
+func TestLoadSlingCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	cfg, _, err := loadSlingCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadSlingCityConfig returned error: %v", err)
+	}
+	if cfg.Workspace.Name != "bright-lights" {
+		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("expected gastown builtin pack to be materialized before sling config load: %v", err)
+	}
+}
+
+func TestLoadConfigCommandCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	cfg, _, err := loadConfigCommandCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadConfigCommandCityConfig returned error: %v", err)
+	}
+	if cfg.Workspace.Name != "bright-lights" {
+		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("expected gastown builtin pack to be materialized before config command load: %v", err)
+	}
+}
+
+func TestRegisterCityWithSupervisorNameOverrideMaterializesBuiltinPackImports(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisorNamed(cityPath, "machine-alias", &stdout, &stderr, "gc register", false)
+	if code != 0 {
+		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("expected gastown builtin pack to be materialized before alias registration: %v", err)
 	}
 }
 
@@ -792,9 +916,9 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS),
-	// so compare against the resolved path.
-	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	// Registry.Register stores the same canonical comparison form used by
+	// runtime path comparisons.
+	resolvedCityPath := canonicalTestPath(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)
 	}
@@ -1028,7 +1152,7 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationWhenControllerStopWaitF
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	resolvedCityPath := canonicalTestPath(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)
 	}

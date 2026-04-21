@@ -43,9 +43,9 @@ func TestConfigLoad_GastownCityAgents(t *testing.T) {
 	}
 }
 
-// TestConfigLoad_TutorialAgent verifies the tutorial config produces
+// TestConfigLoad_MinimalAgent verifies the minimal config produces
 // at least one agent.
-func TestConfigLoad_TutorialAgent(t *testing.T) {
+func TestConfigLoad_MinimalAgent(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")
 
@@ -55,7 +55,7 @@ func TestConfigLoad_TutorialAgent(t *testing.T) {
 	}
 
 	if !strings.Contains(out, "Agent:") {
-		t.Fatal("config explain shows no agents for tutorial config")
+		t.Fatal("config explain shows no agents for minimal config")
 	}
 }
 

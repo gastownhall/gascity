@@ -596,7 +596,7 @@ fi
 
 is_running() {
   [ -n "${GC_DOLT_PORT:-}" ] || return 1
-  lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
+  lsof -nP -iTCP:"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
 }
 
 routes_files() {

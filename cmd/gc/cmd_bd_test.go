@@ -430,13 +430,13 @@ set -eu
 			got[key] = value
 		}
 	}
-	if got["pwd"] != rigDir {
+	if !samePath(got["pwd"], rigDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], rigDir)
 	}
 	if got["args"] != "show repo-abc" {
 		t.Fatalf("args = %q, want %q", got["args"], "show repo-abc")
 	}
-	if got["GC_STORE_ROOT"] != rigDir {
+	if !samePath(got["GC_STORE_ROOT"], rigDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], rigDir)
 	}
 	if got["GC_STORE_SCOPE"] != "rig" {
@@ -457,13 +457,13 @@ set -eu
 	if got["BEADS_DOLT_SERVER_PORT"] != wantPort {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got["BEADS_DOLT_SERVER_PORT"], wantPort)
 	}
-	if got["BEADS_DIR"] != filepath.Join(rigDir, ".beads") {
+	if !samePath(got["BEADS_DIR"], filepath.Join(rigDir, ".beads")) {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(rigDir, ".beads"))
 	}
 	if got["GC_RIG"] != "repo" {
 		t.Fatalf("GC_RIG = %q, want %q", got["GC_RIG"], "repo")
 	}
-	if got["GC_RIG_ROOT"] != rigDir {
+	if !samePath(got["GC_RIG_ROOT"], rigDir) {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got["GC_RIG_ROOT"], rigDir)
 	}
 }
@@ -536,13 +536,13 @@ set -eu
 			got[key] = value
 		}
 	}
-	if got["pwd"] != cityDir {
+	if !samePath(got["pwd"], cityDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], cityDir)
 	}
 	if got["args"] != "list --label repo-open" {
 		t.Fatalf("args = %q, want %q", got["args"], "list --label repo-open")
 	}
-	if got["GC_STORE_ROOT"] != cityDir {
+	if !samePath(got["GC_STORE_ROOT"], cityDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], cityDir)
 	}
 	if got["GC_STORE_SCOPE"] != "city" {
@@ -551,7 +551,7 @@ set -eu
 	if got["GC_BEADS_PREFIX"] != "de" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got["GC_BEADS_PREFIX"], "de")
 	}
-	if got["BEADS_DIR"] != filepath.Join(cityDir, ".beads") {
+	if !samePath(got["BEADS_DIR"], filepath.Join(cityDir, ".beads")) {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(cityDir, ".beads"))
 	}
 }
@@ -682,13 +682,13 @@ set -eu
 			got[key] = value
 		}
 	}
-	if got["pwd"] != rigDir {
+	if !samePath(got["pwd"], rigDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], rigDir)
 	}
 	if got["args"] != "list" {
 		t.Fatalf("args = %q, want %q", got["args"], "list")
 	}
-	if got["BEADS_DIR"] != filepath.Join(rigDir, ".beads") {
+	if !samePath(got["BEADS_DIR"], filepath.Join(rigDir, ".beads")) {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(rigDir, ".beads"))
 	}
 }
@@ -1341,13 +1341,13 @@ set -eu
 			got[key] = value
 		}
 	}
-	if got["pwd"] != cityDir {
+	if !samePath(got["pwd"], cityDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], cityDir)
 	}
 	if got["args"] != "context --json" {
 		t.Fatalf("args = %q, want %q", got["args"], "context --json")
 	}
-	if got["GC_STORE_ROOT"] != cityDir {
+	if !samePath(got["GC_STORE_ROOT"], cityDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], cityDir)
 	}
 	if got["GC_STORE_SCOPE"] != "city" {
@@ -1423,13 +1423,13 @@ set -eu
 			got[key] = value
 		}
 	}
-	if got["pwd"] != rigDir {
+	if !samePath(got["pwd"], rigDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], rigDir)
 	}
 	if got["args"] != "context --json" {
 		t.Fatalf("args = %q, want %q", got["args"], "context --json")
 	}
-	if got["GC_STORE_ROOT"] != rigDir {
+	if !samePath(got["GC_STORE_ROOT"], rigDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], rigDir)
 	}
 	if got["GC_STORE_SCOPE"] != "rig" {

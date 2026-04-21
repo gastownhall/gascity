@@ -1637,6 +1637,7 @@ func TestProcessFanoutSpawnsFragmentsAndClosesOnSecondPass(t *testing.T) {
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -1765,6 +1766,7 @@ func TestProcessFanoutResumesExistingFragmentsWithoutDuplicates(t *testing.T) {
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -1868,6 +1870,7 @@ func TestProcessFanoutSequentialChainsFragments(t *testing.T) {
 formula = "expansion-seq"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -1971,6 +1974,7 @@ func TestProcessFanoutSequentialResumeRestoresExternalDeps(t *testing.T) {
 formula = "expansion-seq"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2088,6 +2092,7 @@ func TestProcessFanoutSequentialChainSurvivesEmptyMiddleFragment(t *testing.T) {
 formula = "expansion-seq-conditional"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2208,6 +2213,7 @@ func TestProcessFanoutRecoversPartialFragmentInstance(t *testing.T) {
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2307,6 +2313,7 @@ func TestProcessFanoutRecoversIncompletelyWiredFragmentInstance(t *testing.T) {
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2604,6 +2611,7 @@ func TestProcessFanoutClosesScopeWhenLastMember(t *testing.T) {
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"

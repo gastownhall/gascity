@@ -55,6 +55,9 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 }
 
 func effectiveCityName(cityPath string) (string, error) {
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		return "", fmt.Errorf("materializing builtin packs: %w", err)
+	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {
@@ -83,7 +86,7 @@ func normalizeRegisteredCityPath(cityPath string) (string, error) {
 	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
 		abs = resolved
 	}
-	return abs, nil
+	return normalizePathForCompare(abs), nil
 }
 
 func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
@@ -97,7 +100,7 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 		return supervisor.CityEntry{}, false, err
 	}
 	for _, entry := range entries {
-		if entry.Path == normalized {
+		if samePath(entry.Path, normalized) {
 			return entry, true, nil
 		}
 	}
@@ -160,17 +163,12 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 			return 1
 		}
 	}
-	// Materialize gastown packs before config load if the city references them.
-	// This must succeed — without packs, config.LoadWithIncludes will fail
-	// with a confusing "pack.toml: no such file" error downstream.
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && usesGastownPack(quickCfg) {
-		if err := MaterializeGastownPacks(cityPath); err != nil {
-			fmt.Fprintf(stderr, "%s: materializing gastown packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: materializing builtin packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	name, err := registeredCityName(cityPath, nameOverride)
@@ -225,7 +223,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 	}
 	if supervisorAliveHook() != 0 {
 		if showProgress {
-			logInitProgress(stdout, 9, "Waiting for supervisor to start city")
+			logInitProgress(stdout, 8, "Waiting for supervisor to start city")
 		} else if stdout != nil {
 			fmt.Fprintln(stdout, "Waiting for supervisor to start city...") //nolint:errcheck // best-effort stdout
 		}

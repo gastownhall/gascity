@@ -540,7 +540,7 @@ run_preflight_cleanup() {
 # find_port_holder returns the PID of the process listening on DOLT_PORT.
 
 find_port_holder() {
-    run_lsof -i :"$DOLT_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1
+    run_lsof -nP -t -iTCP:"$DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1
 }
 
 # verify_our_server checks if a PID belongs to our server (matching data-dir).
@@ -937,7 +937,7 @@ load_start_managed_from_gc() {
     GC_START_ADDRESS_IN_USE="false"
     [ -n "$gc_bin" ] || return 1
     GC_START_MANAGED_USED="true"
-    output=$("$gc_bin" dolt-state start-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
+    output=$("$gc_bin" dolt-state start-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 9>&- </dev/null 2>/dev/null)
     status=$?
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
@@ -1210,7 +1210,7 @@ allocate_port() {
     local port="$hash_val"
     local attempts=0
     while [ "$attempts" -lt 100 ]; do
-        if ! run_lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! run_lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$port"
             return
         fi
@@ -1232,7 +1232,7 @@ next_available_port() {
         if [ "$port" -gt 60000 ]; then
             port=10000
         fi
-        if ! run_lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! run_lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$port"
             return
         fi

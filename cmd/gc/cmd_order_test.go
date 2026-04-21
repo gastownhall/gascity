@@ -740,6 +740,7 @@ max_active_sessions = 1
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"

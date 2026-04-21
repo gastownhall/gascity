@@ -68,10 +68,16 @@ type Formula struct {
 	// Description explains what this formula does.
 	Description string `json:"description,omitempty"`
 
-	// Version is the schema version.
-	// Version 1 uses the legacy hierarchy-first compilation model.
-	// Version 2 opts into graph-first workflow compilation.
+	// Version is the formula revision.
+	// It is intentionally not a graph.v2 opt-in: legacy molecule formulas use
+	// this field for their own revisions and must keep hierarchy-first
+	// molecule semantics unless they explicitly declare a graph contract or use
+	// graph-only step constructs.
 	Version int `json:"version"`
+
+	// Contract opts the formula into a specific runtime contract.
+	// "graph.v2" enables graph-first workflow compilation when formula_v2 is enabled.
+	Contract string `json:"contract,omitempty" toml:"contract,omitempty"`
 
 	// Type categorizes the formula: workflow, expansion, or aspect.
 	Type Type `json:"type"`
@@ -873,6 +879,83 @@ type AroundAdvice struct {
 	After []*AdviceStep `json:"after,omitempty"`
 }
 
+func requiresExplicitGraphContract(f *Formula) bool {
+	if f == nil || strings.TrimSpace(f.Contract) != "" {
+		return false
+	}
+	if f.Version < 2 {
+		if stepsRequireDetachedGraphContract(f.Steps) {
+			return true
+		}
+		return stepsRequireDetachedGraphContract(f.Template)
+	}
+	if stepsRequireGraphContract(f.Steps) {
+		return true
+	}
+	return stepsRequireGraphContract(f.Template)
+}
+
+func stepsRequireDetachedGraphContract(steps []*Step) bool {
+	for _, step := range steps {
+		if stepRequiresDetachedGraphContract(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func stepRequiresDetachedGraphContract(step *Step) bool {
+	if step == nil {
+		return false
+	}
+	if metadataRequiresGraphContract(step.Metadata) {
+		return true
+	}
+	if step.Loop != nil && stepsRequireDetachedGraphContract(step.Loop.Body) {
+		return true
+	}
+	return stepsRequireDetachedGraphContract(step.Children)
+}
+
+func stepsRequireGraphContract(steps []*Step) bool {
+	for _, step := range steps {
+		if stepRequiresGraphContract(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func stepRequiresGraphContract(step *Step) bool {
+	if step == nil {
+		return false
+	}
+	if step.Ralph != nil || step.Retry != nil || step.OnComplete != nil || metadataRequiresGraphContract(step.Metadata) {
+		return true
+	}
+	if step.Loop != nil && stepsRequireGraphContract(step.Loop.Body) {
+		return true
+	}
+	return stepsRequireGraphContract(step.Children)
+}
+
+func metadataRequiresGraphContract(metadata map[string]string) bool {
+	for rawKey, rawValue := range metadata {
+		key := strings.TrimSpace(rawKey)
+		value := strings.TrimSpace(rawValue)
+		switch key {
+		case "gc.kind":
+			switch value {
+			case "scope", "cleanup", "scope-check", "workflow-finalize", "retry", "retry-run", "retry-eval", "ralph", "run", "check":
+				return true
+			}
+		case "gc.scope_name", "gc.scope_role", "gc.scope_ref", "gc.continuation_group", "gc.on_fail":
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
@@ -883,6 +966,13 @@ func (f *Formula) Validate() error {
 
 	if f.Version < 1 {
 		errs = append(errs, "version: must be >= 1")
+	}
+
+	if contract := strings.TrimSpace(f.Contract); contract != "" && !strings.EqualFold(contract, "graph.v2") {
+		errs = append(errs, fmt.Sprintf("contract: invalid value %q (must be graph.v2)", f.Contract))
+	}
+	if requiresExplicitGraphContract(f) {
+		errs = append(errs, `contract: formulas that use graph-only constructs must declare contract = "graph.v2" explicitly`)
 	}
 
 	if f.Type != "" && !f.Type.IsValid() {

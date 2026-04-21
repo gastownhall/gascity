@@ -1,4 +1,5 @@
 formula = "ralph-demo"
+contract = "graph.v2"
 description = "Minimal inline Check demo"
 
 [[steps]]

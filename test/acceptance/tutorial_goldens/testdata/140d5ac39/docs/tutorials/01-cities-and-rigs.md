@@ -46,7 +46,7 @@ $ gc init ~/my-city
 Welcome to Gas City SDK!
 
 Choose a config template:
-  1. tutorial  — default coding agent (default)
+  1. minimal   — default coding agent (default)
   2. gastown   — multi-agent orchestration pack
   3. custom    — empty workspace, configure it yourself
 Template [1]:
@@ -69,7 +69,7 @@ Agent [1]:
 [3/8] Scaffolding agent prompts
 [4/8] Writing pack.toml
 [5/8] Writing city configuration
-Created tutorial config (Level 1) in "my-city".
+Created minimal config (Level 1) in "my-city".
 [6/8] Checking provider readiness
 [7/8] Registering city with supervisor
 Registered city 'my-city' (/Users/csells/my-city)
@@ -112,7 +112,7 @@ At the top level of the city directory:
 
 This city comes with a built-in `mayor` agent. The mayor's prompt lives at
 `agents/mayor/prompt.template.md`, and `pack.toml` defines the always-on mayor
-session that uses it. Assuming you chose the default `tutorial` config
+session that uses it. Assuming you chose the default `minimal` config
 template and default provider, `city.toml` keeps the city-local runtime
 settings:
 
