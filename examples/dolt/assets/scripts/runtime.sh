@@ -27,16 +27,59 @@ DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
 
+read_runtime_state_flag() (
+  state_file="$1"
+  key="$2"
+  [ -f "$state_file" ] || return 0
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\(true\\|false\\).*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
+)
+
+read_runtime_state_number() (
+  state_file="$1"
+  key="$2"
+  [ -f "$state_file" ] || return 0
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
+)
+
+read_runtime_state_string() (
+  state_file="$1"
+  key="$2"
+  [ -f "$state_file" ] || return 0
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
+)
+
+managed_runtime_port() (
+  state_file="$1"
+  expected_data_dir="$2"
+
+  [ -f "$state_file" ] || return 0
+
+  running=$(read_runtime_state_flag "$state_file" running)
+  pid=$(read_runtime_state_number "$state_file" pid)
+  port=$(read_runtime_state_number "$state_file" port)
+  data_dir=$(read_runtime_state_string "$state_file" data_dir)
+
+  [ "$running" = "true" ] || return 0
+  [ -n "$pid" ] || return 0
+  [ -n "$port" ] || return 0
+  [ "$data_dir" = "$expected_data_dir" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  if command -v lsof >/dev/null 2>&1; then
+    holder_pid=$(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+    [ -n "$holder_pid" ] || return 0
+    [ "$holder_pid" = "$pid" ] || return 0
+  else
+    return 0
+  fi
+
+  printf '%s\n' "$port"
+)
+
 # Resolve GC_DOLT_PORT if not already set by the caller.
-# Priority: env override > port file > state file > default 3307.
+# Priority: env override > validated managed runtime state > default 3307.
 if [ -z "$GC_DOLT_PORT" ]; then
-  _port_file="$GC_CITY_PATH/.beads/dolt-server.port"
-  if [ -f "$_port_file" ]; then
-    GC_DOLT_PORT=$(cat "$_port_file" 2>/dev/null)
-  fi
-  if [ -z "$GC_DOLT_PORT" ] && [ -f "$DOLT_STATE_FILE" ]; then
-    GC_DOLT_PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$DOLT_STATE_FILE" | head -1)
-  fi
+  GC_DOLT_PORT=$(managed_runtime_port "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt")
   : "${GC_DOLT_PORT:=3307}"
 fi
 

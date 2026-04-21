@@ -52,7 +52,12 @@ Check basic server health and measure latency.
 
 **1. Connectivity check:**
 ```bash
-dolt sql -q "SELECT active_branch()"
+DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt \
+  --host "${GC_DOLT_HOST:-127.0.0.1}" \
+  --port "${GC_DOLT_PORT:-{{port}}}" \
+  --user "${GC_DOLT_USER:-root}" \
+  --no-tls \
+  sql -q "SELECT active_branch()"
 ```
 Use active_branch() — lightweight probe that won't block behind queued queries
 (per Dolt CEO recommendation).
