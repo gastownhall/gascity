@@ -7269,6 +7269,13 @@ dolt.port: "4406"
 	}
 
 	t.Setenv("GC_BEADS", "exec:"+script)
+
+	// Defensively ensure the call log does not pre-exist. t.TempDir()
+	// provides a fresh directory, but other test-global resolution paths
+	// (e.g., beadsProvider → gcBeadsBdScriptPath) may resolve to the same
+	// script location and invoke it before this test reaches the SUT call.
+	_ = os.Remove(callLog)
+
 	err := healthBeadsProvider(cityPath)
 	if err == nil || !strings.Contains(err.Error(), "exec beads health: health failed") {
 		t.Fatalf("healthBeadsProvider() error = %v, want direct external health failure", err)
