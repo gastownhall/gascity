@@ -250,10 +250,15 @@ Violations indicate bugs.
   wisp beads. Subsequent trigger checks use `AfterSeq` filtering to avoid
   reprocessing already-handled events.
 
-- **Dispatch is fire-and-forget**: Once a goroutine is launched, the
-  controller does not track its completion. Failed orders emit
-  `order.failed` events but do not retry. The tracking bead
-  prevents re-fire within the same cooldown window.
+- **Dispatch goroutines are drained on controller exit**: Each due
+  order launches a goroutine whose completion is tracked by a
+  `sync.WaitGroup` on the dispatcher. Controller shutdown and
+  config reload call `orderDispatcher.drain(ctx)` with a bounded
+  timeout so tracking bead outcomes and `order.failed` /
+  `order.completed` events are persisted before the dispatcher is
+  discarded. Failed orders emit `order.failed` events but do not
+  retry; the tracking bead prevents re-fire within the same
+  cooldown window.
 
 - **No role names in Go code**: The order subsystem operates on
   config-driven pool names and formula references. No line of Go

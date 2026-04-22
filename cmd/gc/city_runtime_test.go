@@ -3341,6 +3341,70 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 	}
 }
 
+// recordingOrderDispatcher records drain invocations so tests can assert
+// the shutdown path calls drain before returning.
+type recordingOrderDispatcher struct {
+	drainCalls  int
+	drainCtxErr error
+}
+
+func (r *recordingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
+
+func (r *recordingOrderDispatcher) drain(ctx context.Context) {
+	r.drainCalls++
+	r.drainCtxErr = ctx.Err()
+}
+
+// TestCityRuntimeShutdownDrainsOrderDispatch verifies shutdown invokes
+// orderDispatcher.drain with a fresh (non-canceled) context before
+// stopping sessions — regression for #991.
+func TestCityRuntimeShutdownDrainsOrderDispatch(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{}
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if od.drainCalls != 1 {
+		t.Fatalf("drainCalls = %d, want 1", od.drainCalls)
+	}
+	if od.drainCtxErr != nil {
+		t.Fatalf("drain received a canceled ctx (%v); shutdown must pass a fresh context", od.drainCtxErr)
+	}
+}
+
+// TestCityRuntimeShutdownNilODIsSafe verifies shutdown does not panic when
+// cr.od is nil — preserves behavior of runtimes built without orders.
+func TestCityRuntimeShutdownNilODIsSafe(_ *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "0s"
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        runtime.NewFake(),
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+}
+
 func TestCityRuntimeShutdownWarnsWhenSessionListingIsPartial(t *testing.T) {
 	sp := &partialListPoolProvider{
 		Fake:      runtime.NewFake(),

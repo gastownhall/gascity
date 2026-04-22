@@ -27,6 +27,13 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
+// reloadOrderDrainTimeout bounds how long config reload will wait for
+// the outgoing order dispatcher's in-flight goroutines before replacing
+// it. Reload runs on the tick loop, so a larger budget would stall all
+// other subsystems; orphan tracking beads are compensated by the next
+// startup sweep.
+const reloadOrderDrainTimeout = 1 * time.Second
+
 // CityRuntime holds all running state for a single city's reconciliation
 // loop. It encapsulates the per-city lifecycle that was previously spread
 // across runController and controllerLoop. A machine-wide supervisor can
@@ -1070,6 +1077,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.wg = nil
 	}
 
+	// Drain the outgoing dispatcher before replacing it so in-flight
+	// dispatchOne goroutines persist their tracking-bead outcomes against
+	// the store they were scheduled against. Reload runs on the same
+	// goroutine as tick, so no concurrent dispatch can race Add against
+	// Wait here. The reload budget is capped at reloadOrderDrainTimeout
+	// so a wedged exec order cannot stall the tick loop — orphaned
+	// tracking beads are cleaned up by the next-boot startup sweep.
+	if cr.od != nil {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), reloadOrderDrainTimeout)
+		cr.od.drain(drainCtx)
+		drainCancel()
+	}
 	cr.od = buildOrderDispatcher(cityRoot, nextCfg, cr.rec, cr.stderr)
 
 	cr.serviceStateMu.Lock()
@@ -1904,7 +1923,19 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: service shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}
-		timeout := cr.cfg.Daemon.ShutdownTimeoutDuration()
+		// Slice the shutdown budget so order-dispatch drain and session
+		// graceful-stop share it. Drain uses a fresh context because the
+		// tick ctx is already canceled at this point, which would make
+		// drain a no-op. Orphaned tracking beads (if drain times out)
+		// are closed by sweepOrphanedOrderTrackingRetry on next start.
+		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
+		drainTimeout := total / 2
+		gracefulTimeout := total - drainTimeout
+		if cr.od != nil {
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
+			cr.od.drain(drainCtx)
+			drainCancel()
+		}
 		running, listErr := cr.sp.ListRunning("")
 		if listErr != nil {
 			if runtime.IsPartialListError(listErr) {
@@ -1915,6 +1946,6 @@ func (cr *CityRuntime) shutdown() {
 		}
 		store := cr.cityBeadStore()
 		markCityStopSessionSleepReason(store, cr.stderr)
-		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
+		gracefulStopAll(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr)
 	})
 }

@@ -151,9 +151,7 @@ func TestOrderDispatchCooldownDue(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-
-	// Wait briefly for goroutine to complete.
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// Verify tracking bead was created.
 	all := trackingBeads(t, store, "order-run:test-order")
@@ -507,9 +505,7 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-
-	// Wait briefly.
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// Should still have only the seed bead.
 	all, _ := store.ListOpen()
@@ -540,9 +536,7 @@ func TestOrderDispatchMultiple(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-
-	// Wait briefly for goroutine.
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// Should have the seed bead + 1 tracking bead for order-a.
 	all := trackingBeads(t, store, "order-run:order-a")
@@ -707,7 +701,7 @@ func TestOrderDispatchExecDue(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if !ran {
 		t.Error("exec runner was not called")
@@ -863,7 +857,7 @@ func TestOrderDispatchFormulaCookFailureLabelsTrackingBead(t *testing.T) {
 	mad.rec = &rec
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:fail-formula")
 	hasFailed := false
@@ -982,7 +976,7 @@ func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
 	mad.stderr = &stderr
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:fail-label")
 	hasFailed := false
@@ -1028,7 +1022,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if ran {
 		t.Error("exec should not have run — cooldown not elapsed")
@@ -1054,7 +1048,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), "/city-root", time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	foundDir := false
 	foundCity := false
@@ -1108,7 +1102,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), "/city-root", time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	foundPackDir := false
 	foundAutoDir := false
@@ -1297,7 +1291,7 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), "/city-root", time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	for _, e := range gotEnv {
 		if strings.HasPrefix(e, "PACK_DIR=") {
@@ -1345,7 +1339,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if gotDir != rigDir {
 		t.Fatalf("exec dir = %q, want %q", gotDir, rigDir)
@@ -1671,7 +1665,7 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(300 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// Should have failed due to timeout.
 	if !rec.hasType(events.OrderFailed) {
@@ -1727,7 +1721,7 @@ func TestOrderDispatchSkipsSuspendedRig(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// No tracking bead should be created for a suspended rig.
 	all := trackingBeads(t, store, "order-run:rig-order:rig:demo")
@@ -1759,7 +1753,7 @@ func TestOrderDispatchSkipsSuspendedRigQualifiedPool(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:city-order")
 	if len(all) != 0 {
@@ -1790,7 +1784,7 @@ func TestOrderDispatchAllowsNonSuspendedRig(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:rig-order:rig:demo")
 	if len(all) == 0 {
@@ -1821,7 +1815,7 @@ func TestOrderDispatchSkipsCitySuspended(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:city-order")
 	if len(all) != 0 {
@@ -1850,7 +1844,7 @@ func TestOrderDispatchSkipsSuspendedRigExec(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:exec-order:rig:demo")
 	if len(all) != 0 {
@@ -2315,7 +2309,7 @@ func TestOrderDispatchRigScoped(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	work := workBeadByOrderLabel(t, store, "order-run:db-health:rig:demo-repo")
 	if !slicesContain(work.Labels, "order-run:db-health:rig:demo-repo") {
@@ -2348,7 +2342,7 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// rig-b should have a tracking bead, rig-a should not.
 	all := trackingBeads(t, store, "order-run:db-health:rig:rig-b")
@@ -2533,7 +2527,7 @@ pool = "worker"
 	}
 
 	ad.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	store, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {
@@ -2602,7 +2596,7 @@ pool = "worker"
 	}
 
 	ad.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	cityStore, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {
@@ -2691,7 +2685,7 @@ pool = "worker"
 	}
 
 	ad.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	rigStore, err := openStoreAtForCity(rigDir, cityDir)
 	if err != nil {
@@ -2735,7 +2729,7 @@ func TestOrderDispatchSkipsRigOrderWhenLegacyCityFallbackUnavailable(t *testing.
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
 	if len(rigRuns) != 0 {
@@ -2785,7 +2779,7 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	rigRuns := trackingBeads(t, rigStore, "order-run:release-watch:rig:frontend")
 	if len(rigRuns) != 0 {
@@ -2837,7 +2831,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 	}
 
 	m.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
 	if len(rigRuns) != 0 {
@@ -2919,7 +2913,7 @@ func TestOrderDispatchSkipsRigCooldownWhenLegacyLastRunReadFails(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
 	if len(rigRuns) != 0 {
@@ -2975,7 +2969,7 @@ pool = "worker"
 	}
 
 	ad.dispatch(context.Background(), cityDir, time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	results := trackingBeads(t, store, "order-run:file-order")
 	tracking := 0
@@ -3303,7 +3297,7 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	// Tracking bead should be closed after dispatch completes.
 	all := trackingBeads(t, store, "order-run:health-check")
@@ -3347,7 +3341,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if ran {
 		t.Error("exec should not have run — open work exists")
@@ -3424,7 +3418,7 @@ func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 
 	// Use a future "now" so cooldown trigger sees the seed bead as old enough.
 	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if !ran {
 		t.Error("exec should have run — all previous work is closed")
@@ -3477,5 +3471,133 @@ func TestResolveOrderExecTarget_BoundRigDispatchesNormally(t *testing.T) {
 	}
 	if target.ScopeRoot != "/home/user/frontend" {
 		t.Errorf("ScopeRoot = %q, want %q", target.ScopeRoot, "/home/user/frontend")
+	}
+}
+
+// --- drain tests (#991) ---
+
+// TestOrderDispatcherDrainWaitsForInFlightDispatch confirms drain blocks
+// until all in-flight dispatchOne goroutines finish, so the tracking bead
+// outcome label is written before the controller exit path returns.
+func TestOrderDispatcherDrainWaitsForInFlightDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		return []byte("ok\n"), nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "drain-test",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/drain.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	drainDone := make(chan struct{})
+	go func() {
+		ad.drain(context.Background())
+		close(drainDone)
+	}()
+
+	select {
+	case <-drainDone:
+		t.Fatal("drain returned before in-flight dispatch completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-drainDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not return after in-flight dispatch released")
+	}
+
+	all := trackingBeads(t, store, "order-run:drain-test")
+	hasExec := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "exec" {
+				hasExec = true
+			}
+		}
+	}
+	if !hasExec {
+		t.Fatalf("tracking bead missing exec outcome label after drain; beads=%+v", all)
+	}
+}
+
+// TestOrderDispatcherDrainRespectsContext verifies drain returns when the
+// provided context expires, so shutdown remains bounded even when a
+// dispatch goroutine is wedged. Compensating control: startup sweep closes
+// any orphaned tracking beads on the next boot.
+func TestOrderDispatcherDrainRespectsContext(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	defer close(release)
+	execStarted := make(chan struct{})
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "wedged",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/wedged.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	ad.drain(ctx)
+	elapsed := time.Since(start)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("drain exceeded context deadline by too much: %v", elapsed)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("expected context to be expired after drain returned")
+	}
+}
+
+// TestOrderDispatcherDrainIdleReturnsImmediately verifies drain is a no-op
+// when no dispatchOne goroutines are in flight.
+func TestOrderDispatcherDrainIdleReturnsImmediately(t *testing.T) {
+	aa := []orders.Order{{Name: "noop", Trigger: "cooldown", Interval: "2m", Exec: "true"}}
+	ad := buildOrderDispatcherFromListExec(aa, beads.NewMemStore(), nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	done := make(chan struct{})
+	go func() {
+		ad.drain(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("drain on idle dispatcher did not return promptly")
 	}
 }

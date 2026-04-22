@@ -88,6 +88,7 @@ gc start --foreground
   │                 └─ orderDispatcher.dispatch()
   │
   └─ shutdown:
+        ├─ orderDispatcher.drain(ctx) →  wait for in-flight order goroutines
         ├─ gracefulStopAll()         →  interrupt → wait → kill
         ├─ record controller.stopped event
         └─ release lock + remove socket + pid
