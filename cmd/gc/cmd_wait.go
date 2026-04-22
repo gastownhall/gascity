@@ -62,6 +62,7 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringSliceVar(&depIDs, "on-beads", nil, "bead IDs to watch")
 	cmd.Flags().BoolVar(&matchAny, "any", false, "wake when any watched bead closes (default: all)")

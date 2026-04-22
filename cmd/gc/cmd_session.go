@@ -96,6 +96,7 @@ according to the selected semantic intent.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
 	return cmd
@@ -955,6 +956,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -1115,6 +1117,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -1195,6 +1198,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -1253,6 +1257,7 @@ func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -1394,6 +1399,7 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().IntVar(&lines, "lines", 50, "number of lines to capture")
 	return cmd
@@ -1456,6 +1462,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
@@ -1529,6 +1536,7 @@ joined automatically.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
 	return cmd

@@ -27,6 +27,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 }
 
