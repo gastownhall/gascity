@@ -2236,10 +2236,10 @@ func TestAgentMatchesIdentity(t *testing.T) {
 
 func TestMatchesRoutedTo(t *testing.T) {
 	tests := []struct {
-		name    string
-		agent   Agent
-		routed  string
-		want    bool
+		name   string
+		agent  Agent
+		routed string
+		want   bool
 	}{
 		{
 			name:   "exact qualified match",
