@@ -1038,6 +1038,77 @@ func TestDoSlingNoAutoNudgeForSuspendedAgent(t *testing.T) {
 	}
 }
 
+// TestDoSlingNoAutoNudgeOnIdempotentSling verifies that an idempotent sling
+// (bead already routed to this target, printed "already routed … skipping")
+// does not auto-nudge. Nudging after a no-op would wake the worker for no
+// new work — misleading and wastes a turn. The explicit --nudge path also
+// skips via the existing routed>0 guard at sling_core.go; auto-nudge should
+// match. Regression guard for PR #1130 review feedback.
+func TestDoSlingNoAutoNudgeOnIdempotentSling(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
+	sp.Calls = nil
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	// fakeQuerier bead is already routed to "mayor" — sling detects idempotency.
+	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "mayor"}}}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already routed") {
+		t.Fatalf("stdout = %q, want idempotent skip message (test precondition)", stdout.String())
+	}
+	for _, c := range sp.Calls {
+		if c.Method == "Nudge" || c.Method == "NudgeNow" {
+			t.Errorf("unexpected %s call on idempotent sling (no new work routed): %+v", c.Method, c)
+		}
+	}
+}
+
+// TestDoSlingBatchNoAutoNudgeWhenAllIdempotent verifies that a batch sling
+// (convoy expansion) where all children are already routed does not
+// auto-nudge. Mirrors the existing routed>0 gate from sling_core.go:927 into
+// the auto-nudge code path. Regression guard for PR #1130 review feedback.
+func TestDoSlingBatchNoAutoNudgeWhenAllIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
+	sp.Calls = nil
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Status: "open", Assignee: "mayor"},
+		{ID: "BL-2", Status: "open", Assignee: "mayor"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	// opts.Nudge = false (default) — exercises the auto-nudge path.
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, c := range sp.Calls {
+		if c.Method == "Nudge" || c.Method == "NudgeNow" {
+			t.Errorf("all-idempotent batch must not auto-nudge (routed=0): %+v", c)
+		}
+	}
+}
+
 func TestDoSlingCustomSlingQuery(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

@@ -673,7 +673,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 	}
 	if result.NudgeAgent != nil {
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
-	} else if opts.Target.Name != "" {
+	} else if opts.Target.Name != "" && !result.Idempotent {
 		doSlingAutoNudge(&opts.Target, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
@@ -765,7 +765,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 	}
 	if result.NudgeAgent != nil {
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
-	} else if opts.Target.Name != "" {
+	} else if opts.Target.Name != "" && result.Routed > 0 {
 		doSlingAutoNudge(&opts.Target, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
