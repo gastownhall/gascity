@@ -245,9 +245,6 @@ func (f *Fake) Rename(oldpath, newpath string) error {
 		return err
 	}
 	if target, ok := f.Symlinks[oldpath]; ok {
-		if f.Symlinks == nil {
-			f.Symlinks = make(map[string]string)
-		}
 		f.Symlinks[newpath] = target
 		delete(f.Symlinks, oldpath)
 		return nil

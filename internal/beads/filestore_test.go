@@ -32,6 +32,42 @@ func (f *statRaceFS) Stat(name string) (os.FileInfo, error) {
 	return f.FS.Stat(name)
 }
 
+type toggledErrorFS struct {
+	fsys.FS
+	path    string
+	statErr error
+	readErr error
+}
+
+func (f *toggledErrorFS) Stat(name string) (os.FileInfo, error) {
+	if name == f.path && f.statErr != nil {
+		return nil, f.statErr
+	}
+	return f.FS.Stat(name)
+}
+
+func (f *toggledErrorFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path && f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.FS.ReadFile(name)
+}
+
+type oneShotStatErrorFS struct {
+	fsys.FS
+	path  string
+	err   error
+	fired bool
+}
+
+func (f *oneShotStatErrorFS) Stat(name string) (os.FileInfo, error) {
+	if name == f.path && !f.fired {
+		f.fired = true
+		return nil, f.err
+	}
+	return f.FS.Stat(name)
+}
+
 func TestFileStore(t *testing.T) {
 	factory := func() beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")
@@ -485,6 +521,305 @@ func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
 	}
 	if readCalls != 1 {
 		t.Fatalf("ReadFile(%s) calls = %d, want 1 after same-size rewrite", path, readCalls)
+	}
+}
+
+func TestFileStoreRefreshFallbackReloadsWhenStatFails(t *testing.T) {
+	base := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	writer, err := beads.OpenFileStore(base, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := writer.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readerFS := &oneShotStatErrorFS{
+		FS:   base,
+		path: path,
+		err:  fmt.Errorf("stat unavailable"),
+	}
+	reader, err := beads.OpenFileStore(readerFS, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := reader.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after Stat failure fallback: %v", created.ID, err)
+	}
+	if got.Title != "alpha" {
+		t.Fatalf("Get(%q) title = %q, want alpha", created.ID, got.Title)
+	}
+}
+
+func TestFileStoreCreateRewarmsAfterFreshnessStatFailure(t *testing.T) {
+	base := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+	fs := &toggledErrorFS{
+		FS:      base,
+		path:    path,
+		statErr: fmt.Errorf("stat unavailable"),
+	}
+
+	s, err := beads.OpenFileStore(fs, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatalf("Create() with post-save Stat failure: %v", err)
+	}
+
+	fs.statErr = nil
+	base.Calls = nil
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after clearing Stat failure: %v", created.ID, err)
+	}
+	if got.Title != "alpha" {
+		t.Fatalf("Get(%q) title = %q, want alpha", created.ID, got.Title)
+	}
+
+	var readCalls int
+	for _, call := range base.Calls {
+		if call.Method == "ReadFile" && call.Path == path {
+			readCalls++
+		}
+	}
+	if readCalls == 0 {
+		t.Fatalf("expected Get(%q) to re-read %s after freshness cache was cleared", created.ID, path)
+	}
+}
+
+func TestFileStoreReadWrappersPropagateRefreshErrors(t *testing.T) {
+	base := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+	fs := &toggledErrorFS{FS: base, path: path}
+
+	s, err := beads.OpenFileStore(fs, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.statErr = fmt.Errorf("stat boom")
+	fs.readErr = fmt.Errorf("read boom")
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "Get",
+			call: func() error {
+				_, err := s.Get("gc-1")
+				return err
+			},
+		},
+		{
+			name: "List",
+			call: func() error {
+				_, err := s.List(beads.ListQuery{})
+				return err
+			},
+		},
+		{
+			name: "ListOpen",
+			call: func() error {
+				_, err := s.ListOpen()
+				return err
+			},
+		},
+		{
+			name: "Ready",
+			call: func() error {
+				_, err := s.Ready()
+				return err
+			},
+		},
+		{
+			name: "Children",
+			call: func() error {
+				_, err := s.Children("gc-1")
+				return err
+			},
+		},
+		{
+			name: "ListByLabel",
+			call: func() error {
+				_, err := s.ListByLabel("x", 0)
+				return err
+			},
+		},
+		{
+			name: "ListByAssignee",
+			call: func() error {
+				_, err := s.ListByAssignee("mayor", "open", 0)
+				return err
+			},
+		},
+		{
+			name: "ListByMetadata",
+			call: func() error {
+				_, err := s.ListByMetadata(map[string]string{"k": "v"}, 0)
+				return err
+			},
+		},
+		{
+			name: "DepList",
+			call: func() error {
+				_, err := s.DepList("gc-1", "down")
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatalf("%s() err = nil, want refresh error", tc.name)
+			}
+			if !strings.Contains(err.Error(), "read boom") {
+				t.Fatalf("%s() err = %v, want read boom", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestFileStoreMutatorsPropagateRefreshErrors(t *testing.T) {
+	base := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+	fs := &toggledErrorFS{FS: base, path: path}
+
+	s, err := beads.OpenFileStore(fs, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.statErr = fmt.Errorf("stat boom")
+	fs.readErr = fmt.Errorf("read boom")
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "Create",
+			call: func() error {
+				_, err := s.Create(beads.Bead{Title: "x"})
+				return err
+			},
+		},
+		{
+			name: "Update",
+			call: func() error {
+				return s.Update("gc-1", beads.UpdateOpts{Title: ptr("updated")})
+			},
+		},
+		{
+			name: "Close",
+			call: func() error {
+				return s.Close("gc-1")
+			},
+		},
+		{
+			name: "Delete",
+			call: func() error {
+				return s.Delete("gc-1")
+			},
+		},
+		{
+			name: "CloseAll",
+			call: func() error {
+				_, err := s.CloseAll([]string{"gc-1"}, map[string]string{"phase": "done"})
+				return err
+			},
+		},
+		{
+			name: "SetMetadata",
+			call: func() error {
+				return s.SetMetadata("gc-1", "k", "v")
+			},
+		},
+		{
+			name: "SetMetadataBatch",
+			call: func() error {
+				return s.SetMetadataBatch("gc-1", map[string]string{"k": "v"})
+			},
+		},
+		{
+			name: "DepAdd",
+			call: func() error {
+				return s.DepAdd("gc-1", "gc-2", "blocks")
+			},
+		},
+		{
+			name: "DepRemove",
+			call: func() error {
+				return s.DepRemove("gc-1", "gc-2")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatalf("%s() err = nil, want refresh error", tc.name)
+			}
+			if !strings.Contains(err.Error(), "read boom") {
+				t.Fatalf("%s() err = %v, want read boom", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestFileStoreCloseAllRefreshesAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := s1.Create(beads.Bead{Title: "first", Labels: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s1.Create(beads.Bead{Title: "second", Labels: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	closed, err := s1.CloseAll([]string{first.ID, second.ID}, map[string]string{"gc.batch": "done"})
+	if err != nil {
+		t.Fatalf("CloseAll(): %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("CloseAll() closed = %d, want 2", closed)
+	}
+
+	open, err := s2.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() after CloseAll: %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("ListOpen() after CloseAll = %+v, want empty", open)
+	}
+
+	got, err := s2.ListByMetadata(map[string]string{"gc.batch": "done"}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByMetadata() after CloseAll: %v", err)
+	}
+	if len(got) != 2 || !hasBeadID(got, first.ID) || !hasBeadID(got, second.ID) {
+		t.Fatalf("ListByMetadata() after CloseAll = %+v, want %s and %s", got, first.ID, second.ID)
 	}
 }
 
