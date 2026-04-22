@@ -15,6 +15,23 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+type statRaceFS struct {
+	fsys.FS
+	path            string
+	beforeFirstStat func()
+	fired           bool
+}
+
+func (f *statRaceFS) Stat(name string) (os.FileInfo, error) {
+	if name == f.path && !f.fired {
+		f.fired = true
+		if f.beforeFirstStat != nil {
+			f.beforeFirstStat()
+		}
+	}
+	return f.FS.Stat(name)
+}
+
 func TestFileStore(t *testing.T) {
 	factory := func() beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")
@@ -140,6 +157,255 @@ func TestFileStoreMetadataPersistence(t *testing.T) {
 	}
 }
 
+func TestFileStoreRefreshesReadsAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{
+		Title:  "manual session",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.SetMetadata(created.ID, "state", "creating"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) from second handle: %v", created.ID, err)
+	}
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("Get(%q) metadata[state] = %q, want %q", created.ID, got.Metadata["state"], "creating")
+	}
+
+	sessions, err := s2.List(beads.ListQuery{Label: "gc:session"})
+	if err != nil {
+		t.Fatalf("List(session label) from second handle: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != created.ID {
+		t.Fatalf("List(session label) = %+v, want only %s", sessions, created.ID)
+	}
+}
+
+func TestFileStoreRefreshesAfterOpenRace(t *testing.T) {
+	path := "/city/.gc/beads.json"
+	base := fsys.NewFake()
+
+	s1, err := beads.OpenFileStore(base, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s1.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	racyFS := &statRaceFS{
+		FS:   base,
+		path: path,
+		beforeFirstStat: func() {
+			if err := s1.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
+				t.Fatalf("Update(%q) during open race: %v", created.ID, err)
+			}
+		},
+	}
+
+	s2, err := beads.OpenFileStore(racyFS, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after open race: %v", created.ID, err)
+	}
+	if got.Title != "bravo" {
+		t.Fatalf("Title after open race = %q, want bravo", got.Title)
+	}
+}
+
+func TestFileStoreSkipsReadReloadWhenFileIsUnchanged(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "cached bead"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Calls = nil
+	for i := 0; i < 2; i++ {
+		if _, err := s2.Get(created.ID); err != nil {
+			t.Fatalf("Get(%q) #%d: %v", created.ID, i+1, err)
+		}
+	}
+
+	var statCalls, readCalls int
+	for _, call := range f.Calls {
+		if call.Path != path {
+			continue
+		}
+		switch call.Method {
+		case "Stat":
+			statCalls++
+		case "ReadFile":
+			readCalls++
+		}
+	}
+	if statCalls != 2 {
+		t.Fatalf("Stat(%s) calls = %d, want 2", path, statCalls)
+	}
+	if readCalls != 1 {
+		t.Fatalf("ReadFile(%s) calls = %d, want 1 after cache warmup", path, readCalls)
+	}
+}
+
+func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	beforeLen := len(f.Files[path])
+	if err := s1.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
+		t.Fatal(err)
+	}
+	afterLen := len(f.Files[path])
+	if beforeLen != afterLen {
+		t.Fatalf("expected same-size rewrite, got %d -> %d bytes", beforeLen, afterLen)
+	}
+
+	f.Calls = nil
+	got, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after same-size update: %v", created.ID, err)
+	}
+	if got.Title != "bravo" {
+		t.Fatalf("Title after same-size update = %q, want bravo", got.Title)
+	}
+
+	var readCalls int
+	for _, call := range f.Calls {
+		if call.Method == "ReadFile" && call.Path == path {
+			readCalls++
+		}
+	}
+	if readCalls != 1 {
+		t.Fatalf("ReadFile(%s) calls = %d, want 1 after same-size rewrite", path, readCalls)
+	}
+}
+
+func TestFileStoreClearsCacheWhenBackingFileDisappears(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "ephemeral"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	if err := f.Remove(path); err != nil {
+		t.Fatalf("Remove(%s): %v", path, err)
+	}
+
+	if _, err := s2.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%q) after external delete err = %v, want ErrNotFound", created.ID, err)
+	}
+
+	got, err := s2.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() after external delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListOpen() after external delete = %+v, want empty", got)
+	}
+}
+
+func TestFileStoreDeletePersistsAcrossOpenInstances(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "ephemeral"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	if err := s1.Delete(created.ID); err != nil {
+		t.Fatalf("Delete(%q): %v", created.ID, err)
+	}
+
+	if _, err := s2.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%q) after persisted delete err = %v, want ErrNotFound", created.ID, err)
+	}
+
+	got, err := s2.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() after persisted delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListOpen() after persisted delete = %+v, want empty", got)
+	}
+}
+
 func TestFileStoreDeletePersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "beads.json")
 
@@ -164,6 +430,10 @@ func TestFileStoreDeletePersistence(t *testing.T) {
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("Get(%q) after reopen = %v, want ErrNotFound", b.ID, err)
 	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 func TestFileStoreChildrenExcludeClosedByDefault(t *testing.T) {
