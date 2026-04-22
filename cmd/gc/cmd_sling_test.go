@@ -883,6 +883,161 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	}
 }
 
+// TestDoSlingAutoNudgesRunningFixedAgent verifies that a default sling (no
+// --nudge flag) to a running fixed-agent session directly delivers a
+// sling-source nudge via the runtime's immediate-nudge path. Without this
+// behavior, routed beads stall on warm-idle workers until a manual
+// `gc session nudge` runs (see issue #1129). Immediate (rather than WaitIdle)
+// delivery is intentional: mid-turn workers surface routed work via their
+// existing Stop-hook path; auto-nudge must not block `gc sling` for 30s.
+func TestDoSlingAutoNudgesRunningFixedAgent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
+	sp.Calls = nil
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+
+	opts := testOpts(a, "BL-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	nudgeNowCalls := 0
+	for _, c := range sp.Calls {
+		if c.Method == "NudgeNow" && c.Name == "mayor" {
+			nudgeNowCalls++
+		}
+		if c.Method == "WaitForIdle" {
+			t.Errorf("unexpected WaitForIdle call — auto-nudge must use Immediate delivery to avoid blocking sling: %+v", c)
+		}
+	}
+	if nudgeNowCalls != 1 {
+		t.Fatalf("NudgeNow calls on mayor = %d, want 1 (auto-nudge should deliver immediately to running session)", nudgeNowCalls)
+	}
+	if !strings.Contains(stdout.String(), "Nudged mayor") {
+		t.Errorf("stdout = %q, want 'Nudged mayor'", stdout.String())
+	}
+}
+
+// TestDoSlingNoAutoNudgeWhenTargetNotRunning verifies that a default sling
+// (no --nudge) to an agent with no running session is a pure routing operation
+// — no queued nudge, no poke, no NudgeNow call. Callers who want to wake a
+// cold target must opt in explicitly with --nudge (preserving the existing
+// explicit-opt-in path).
+func TestDoSlingNoAutoNudgeWhenTargetNotRunning(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+
+	opts := testOpts(a, "BL-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, c := range sp.Calls {
+		if c.Method == "Nudge" || c.Method == "NudgeNow" {
+			t.Errorf("unexpected %s call on cold target: %+v", c.Method, c)
+		}
+	}
+	pending, _, dead, err := listQueuedNudges(deps.CityPath, "mayor", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d dead=%d, want 0/0 (no auto-nudge for cold target)", len(pending), len(dead))
+	}
+}
+
+// TestDoSlingAutoNudgesRunningPoolMember verifies that a default sling to a
+// pool agent with at least one running instance auto-nudges that specific
+// instance (not instance 1 or any other slot). Pools without running members
+// get no auto-nudge (consistent with the fixed cold-target case — --nudge
+// remains the explicit opt-in).
+func TestDoSlingAutoNudgesRunningPoolMember(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "hw--polecat-2", runtime.Config{})
+	sp.Calls = nil
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+	// Agent must be in cfg.Agents so resolveAgentIdentity can map the pool
+	// instance qualified name back to a config.Agent for nudge targeting.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+
+	opts := testOpts(a, "BL-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	nudgedSessions := make(map[string]int)
+	for _, c := range sp.Calls {
+		if c.Method == "NudgeNow" {
+			nudgedSessions[c.Name]++
+		}
+		if c.Method == "WaitForIdle" {
+			t.Errorf("unexpected WaitForIdle call — auto-nudge must use Immediate delivery: %+v", c)
+		}
+	}
+	if nudgedSessions["hw--polecat-2"] != 1 {
+		t.Fatalf("NudgeNow calls on running instance hw--polecat-2 = %d, want 1 (all nudges: %v)", nudgedSessions["hw--polecat-2"], nudgedSessions)
+	}
+	if nudgedSessions["hw--polecat-1"] != 0 || nudgedSessions["hw--polecat-3"] != 0 {
+		t.Errorf("auto-nudge targeted non-running instances (bad pool-scan): %v", nudgedSessions)
+	}
+}
+
+// TestDoSlingNoAutoNudgeForSuspendedAgent verifies that a default sling to a
+// suspended agent is silent — no "cannot nudge" warning and no delivery
+// attempt. The warning remains a property of the explicit --nudge path,
+// which is a user signal of intent.
+func TestDoSlingNoAutoNudgeForSuspendedAgent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
+	sp.Calls = nil
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", Suspended: true, MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+
+	opts := testOpts(a, "BL-1")
+	opts.Force = true // allow sling-to-suspended
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "cannot nudge") {
+		t.Errorf("stderr = %q, want no 'cannot nudge' warning on auto-nudge path", stderr.String())
+	}
+	for _, c := range sp.Calls {
+		if c.Method == "Nudge" || c.Method == "NudgeNow" {
+			t.Errorf("unexpected %s call on suspended agent: %+v", c.Method, c)
+		}
+	}
+}
+
 func TestDoSlingCustomSlingQuery(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

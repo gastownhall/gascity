@@ -103,7 +103,7 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVarP(&formula, "formula", "f", false, "treat argument as formula name")
-	cmd.Flags().BoolVar(&nudge, "nudge", false, "nudge target after routing")
+	cmd.Flags().BoolVar(&nudge, "nudge", false, "force nudge even for cold targets (running sessions auto-nudge)")
 	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow graph workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
 	cmd.Flags().StringVarP(&title, "title", "t", "", "wisp root bead title (with --formula or --on)")
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "variable substitution for formula (key=value, repeatable)")
@@ -673,6 +673,8 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 	}
 	if result.NudgeAgent != nil {
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
+	} else if opts.Target.Name != "" {
+		doSlingAutoNudge(&opts.Target, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
 }
@@ -763,6 +765,8 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 	}
 	if result.NudgeAgent != nil {
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
+	} else if opts.Target.Name != "" {
+		doSlingAutoNudge(&opts.Target, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
 }
@@ -1290,6 +1294,25 @@ func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResul
 	return sling.CheckBeadState(q, beadID, a, deps)
 }
 
+// firstRunningPoolMember scans a multi-session agent's pool instances and
+// returns the qualified name + session name of the first running member.
+// ok=false if no instance is running. Callers handle identity-resolution and
+// cold-target policy themselves — this helper only answers "is anyone home?".
+func firstRunningPoolMember(
+	a *config.Agent, cityName, cityPath string, cfg *config.City,
+	sp runtime.Provider, store beads.Store, st string,
+) (qn, sessionName string, ok bool) {
+	sp0 := scaleParamsFor(a)
+	for _, instanceQN := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
+		sn := lookupSessionNameOrLegacy(store, cityName, instanceQN, st)
+		running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
+		if err == nil && running {
+			return instanceQN, sn, true
+		}
+	}
+	return "", "", false
+}
+
 // doSlingNudge sends a nudge to the target agent after routing.
 // For multi-session configs, nudges the first running instance. If the target is not
 // running, pokes the controller to trigger an immediate reconciler tick
@@ -1305,23 +1328,16 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	}
 
 	if a.SupportsInstanceExpansion() {
-		// Find a running multi-session instance to nudge.
-		sp0 := scaleParamsFor(a)
-		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
-			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
-			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
-			if err == nil && running {
-				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
-				if !ok {
-					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
-					return
-				}
-				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, store, sn)
-				deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+		if qn, sn, ok := firstRunningPoolMember(a, cityName, cityPath, cfg, sp, store, st); ok {
+			member, resolved := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
+			if !resolved {
+				fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
 				return
 			}
+			target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, store, sn)
+			deliverSlingNudge(target, sp, store, cityPath, worker.NudgeDeliveryWaitIdle, stdout, stderr)
+			return
 		}
-		// No running config session — poke controller for immediate wake.
 		if err := pokeController(cityPath); err != nil {
 			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
@@ -1333,7 +1349,46 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	// Fixed agent: nudge directly.
 	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
 	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, store, sn)
-	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+	deliverSlingNudge(target, sp, store, cityPath, worker.NudgeDeliveryWaitIdle, stdout, stderr)
+}
+
+// doSlingAutoNudge wakes a warm-idle target session after a default `gc sling`
+// (no --nudge flag). It is a no-op when no running session exists — cold-target
+// wake-up remains an explicit opt-in via --nudge. Uses Immediate delivery to
+// avoid the 30s WaitIdle block on mid-turn sessions: busy workers will surface
+// the routed work via their existing Stop-hook path when the turn ends.
+//
+// Closes issue #1129: routed beads otherwise stall indefinitely on workers
+// that ran `gc prime` but have no active turn to trigger the Stop hook.
+func doSlingAutoNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
+	sp runtime.Provider, store beads.Store, stdout, stderr io.Writer,
+) {
+	if a.Suspended {
+		return
+	}
+	st := cfg.Workspace.SessionTemplate
+
+	if a.SupportsInstanceExpansion() {
+		qn, sn, ok := firstRunningPoolMember(a, cityName, cityPath, cfg, sp, store, st)
+		if !ok {
+			return
+		}
+		member, resolved := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
+		if !resolved {
+			return
+		}
+		target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, store, sn)
+		deliverSlingNudge(target, sp, store, cityPath, worker.NudgeDeliveryImmediate, stdout, stderr)
+		return
+	}
+
+	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
+	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, store, sn)
+	obs, err := workerObserveNudgeTarget(target, store, sp)
+	if err != nil || !obs.Running {
+		return
+	}
+	deliverSlingNudge(target, sp, store, cityPath, worker.NudgeDeliveryImmediate, stdout, stderr)
 }
 
 // pokeController sends a "poke" command to the controller socket to
@@ -1393,7 +1448,7 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 	})
 }
 
-func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
+func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, delivery worker.NudgeDelivery, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
 	obs, err := workerObserveNudgeTarget(target, store, sp)
 	running := err == nil && obs.Running
@@ -1403,7 +1458,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
 				Text:     msg,
-				Delivery: worker.NudgeDeliveryWaitIdle,
+				Delivery: delivery,
 				Source:   "sling",
 				Wake:     worker.NudgeWakeLiveOnly,
 			})

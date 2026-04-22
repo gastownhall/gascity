@@ -2489,7 +2489,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--merge` | string |  | merge strategy: direct, mr, or local |
 | `--no-convoy` | bool |  | skip auto-convoy creation |
 | `--no-formula` | bool |  | suppress default formula (route raw bead) |
-| `--nudge` | bool |  | nudge target after routing |
+| `--nudge` | bool |  | force nudge even for cold targets (running sessions auto-nudge) |
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
 | `--scope-kind` | string |  | logical workflow scope kind for graph.v2 launches |

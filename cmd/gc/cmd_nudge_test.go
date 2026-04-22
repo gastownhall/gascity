@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type noActivityCapabilityProvider struct {
@@ -1179,7 +1180,7 @@ func TestDeliverSlingNudgeWaitIdleWrapsInSystemReminder(t *testing.T) {
 
 	store := openNudgeBeadStore(dir)
 	var stdout, stderr bytes.Buffer
-	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+	deliverSlingNudge(target, fake, store, dir, worker.NudgeDeliveryWaitIdle, &stdout, &stderr)
 
 	var nudgeNowCalls int
 	var delivered string

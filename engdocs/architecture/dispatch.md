@@ -75,7 +75,8 @@ CLI layer (cmd/gc/cmd_sling.go)
               +-- telemetry.RecordSling()
               +-- store.SetMetadata()   [if --merge] merge strategy
               +-- store.Create(convoy)  [if auto-convoy] tracking wrapper
-              +-- doSlingNudge()        [if --nudge] wake the agent
+              +-- doSlingNudge()        [if --nudge] wake target (queues for cold targets)
+              +-- doSlingAutoNudge()    [default] wake target only if session running
 ```
 
 ### Data Flow
@@ -100,7 +101,10 @@ CLI layer (cmd/gc/cmd_sling.go)
 10. If auto-convoy is enabled (not `--no-convoy`, not `--formula`),
     creates a convoy bead and sets the routed bead's ParentID to the
     convoy.
-11. If `--nudge`, sends a nudge to the target agent.
+11. Nudges the target. Default: auto-nudge only if the target has a
+    running session (wakes warm-idle workers so routed beads do not stall).
+    `--nudge` forces a nudge even for cold targets (queues a reminder and
+    pokes the controller).
 
 **Container expansion** (`gc sling <agent> <convoy-id>`):
 
@@ -110,8 +114,9 @@ CLI layer (cmd/gc/cmd_sling.go)
 4. Routes each open child individually through `buildSlingCommand` +
    `runner`. No auto-convoy is created -- the container IS the convoy.
 5. Reports per-child success/failure and a summary line.
-6. Nudges once after all children are routed (if `--nudge` and at
-   least one succeeded).
+6. Nudges once after all children are routed. Auto-nudge fires when the
+   target session is running; `--nudge` additionally forces a queued
+   reminder for cold targets.
 
 ### Key Types
 
@@ -164,7 +169,9 @@ CLI layer (cmd/gc/cmd_sling.go)
 
 8. **Pool nudge targets the first running instance.** When nudging a
    pool, dispatch iterates pool instances in order and nudges the first
-   one with a running session. If none are running, a warning is emitted.
+   one with a running session. If none are running under the default
+   (auto-nudge) path, sling is silent; under explicit `--nudge`, a warning
+   is emitted and the controller is poked to schedule a wake.
 
 9. **System formulas are idempotent.** `MaterializeSystemFormulas`
    always overwrites files to match the binary version and removes stale
@@ -298,8 +305,8 @@ both `sling_query` and `work_query` together or neither.
   first-served.
 
 - **Nudge targets only one pool instance.** After slinging to a pool,
-  `--nudge` wakes the first running instance found. Other instances
-  discover work on their next poll cycle.
+  the nudge (auto or `--nudge`) wakes the first running instance found.
+  Other instances discover work on their next poll cycle.
 
 - **No dry-run mode.** There is no way to preview what a sling command
   would do without actually executing it. The pre-flight `checkBeadState`
