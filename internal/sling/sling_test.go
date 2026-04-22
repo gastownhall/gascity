@@ -2689,6 +2689,132 @@ func TestFinalizeAutoConvoy(t *testing.T) {
 	}
 }
 
+// TestFinalizeAutoConvoyPreservesEpicParent is a regression test for the
+// bug where `gc sling` re-parented a bead to its auto-convoy via
+// `bd update --parent`, silently evicting the bead's existing
+// parent-child edge to its epic. After this fix, the auto-convoy links
+// to the bead via a "tracks" dep instead, leaving the epic parent
+// intact.
+func TestFinalizeAutoConvoyPreservesEpicParent(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+
+	epic, err := deps.Store.Create(beads.Bead{Title: "epic", Type: "epic"})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	child, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", ParentID: epic.ID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: child.ID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.ConvoyID == "" {
+		t.Fatal("expected auto-convoy creation")
+	}
+
+	got, err := deps.Store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if got.ParentID != epic.ID {
+		t.Errorf("child parent = %q, want %q (epic parent evicted by sling)", got.ParentID, epic.ID)
+	}
+
+	epicChildren, err := deps.Store.Children(epic.ID)
+	if err != nil {
+		t.Fatalf("epic children: %v", err)
+	}
+	var found bool
+	for _, c := range epicChildren {
+		if c.ID == child.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("epic %s children missing %s; got %d children", epic.ID, child.ID, len(epicChildren))
+	}
+
+	convoyOut, err := deps.Store.DepList(result.ConvoyID, "down")
+	if err != nil {
+		t.Fatalf("DepList convoy: %v", err)
+	}
+	var tracks bool
+	for _, d := range convoyOut {
+		if d.DependsOnID == child.ID && d.Type == "tracks" {
+			tracks = true
+			break
+		}
+	}
+	if !tracks {
+		t.Errorf("convoy %s has no tracks dep to %s; got deps=%v", result.ConvoyID, child.ID, convoyOut)
+	}
+}
+
+// failingDepAddStore wraps a beads.Store and returns an error when
+// DepAdd is called with a specific dep type. Used to exercise error
+// branches in code that links beads via DepAdd.
+type failingDepAddStore struct {
+	beads.Store
+	failType string
+	err      error
+}
+
+func (f *failingDepAddStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if depType == f.failType {
+		return f.err
+	}
+	return f.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
+// TestFinalizeAutoConvoyTracksDepAddError covers the error branch of
+// the auto-convoy linking step: if DepAdd("tracks") fails, the failure
+// is recorded in result.MetadataErrors rather than bubbled up.
+func TestFinalizeAutoConvoyTracksDepAddError(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = &failingDepAddStore{
+		Store:    deps.Store,
+		failType: "tracks",
+		err:      errors.New("injected DepAdd failure"),
+	}
+
+	b, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: b.ID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	// When DepAdd fails, result.ConvoyID is intentionally left unset and
+	// the error is appended to MetadataErrors (soft failure — sling
+	// itself still succeeds).
+	if result.ConvoyID != "" {
+		t.Errorf("result.ConvoyID = %q, want empty (DepAdd failed)", result.ConvoyID)
+	}
+
+	var found bool
+	for _, e := range result.MetadataErrors {
+		if strings.Contains(e, "linking bead to convoy") && strings.Contains(e, "injected DepAdd failure") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected MetadataErrors to include tracks DepAdd failure; got %v", result.MetadataErrors)
+	}
+}
+
 func TestFinalizeNoConvoyWhenSuppressed(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}

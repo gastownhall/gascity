@@ -406,8 +406,12 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 				result.MetadataErrors = append(result.MetadataErrors,
 					fmt.Sprintf("creating auto-convoy: %v", err))
 			} else {
-				parentID := convoy.ID
-				if err := deps.Store.Update(beadID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
+				// Use a "tracks" dep (convoy → bead) instead of parent-child
+				// so the bead's existing parent (e.g. its epic) is preserved.
+				// bd update --parent evicts any prior parent-child edge; the
+				// tracks dep is additive and does not disturb the epic
+				// rollup.
+				if err := deps.Store.DepAdd(convoy.ID, beadID, "tracks"); err != nil {
 					result.MetadataErrors = append(result.MetadataErrors,
 						fmt.Sprintf("linking bead to convoy: %v", err))
 				} else {
