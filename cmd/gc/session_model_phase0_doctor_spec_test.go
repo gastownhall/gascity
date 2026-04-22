@@ -308,6 +308,42 @@ mode = "on_demand"
 	}
 }
 
+func TestPhase0DoctorAcceptsShortFormRoutedTo(t *testing.T) {
+	cityPath, store := newPhase0DoctorCityWithConfig(t, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "dog"
+binding_name = "gastown"
+start_command = "true"
+pool_min = 0
+pool_max = 3
+`)
+
+	if _, err := store.Create(beads.Bead{
+		Type:   "task",
+		Status: "open",
+		Title:  "dog maintenance order",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+		},
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if strings.Contains(out, "stale-routed-config") {
+		t.Fatalf("doctor should not report stale-routed-config for short-form routed_to that matches a configured agent:\n%s", out)
+	}
+}
+
 func newPhase0DoctorCity(t *testing.T) (string, *beads.FileStore) {
 	t.Helper()
 

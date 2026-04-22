@@ -57,6 +57,29 @@ func FindAgent(cfg *City, identity string) *Agent {
 	return nil
 }
 
+// FindAgentByRoutedTo returns the configured agent that matches a
+// gc.routed_to value, accepting both canonical ("rig/binding.name") and
+// short-form ("name" or "rig/name") identifiers. Returns nil when no
+// agent matches or the match is ambiguous.
+func FindAgentByRoutedTo(cfg *City, routedTo string) *Agent {
+	if cfg == nil || routedTo == "" {
+		return nil
+	}
+	if a := FindAgent(cfg, routedTo); a != nil {
+		return a
+	}
+	var match *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].MatchesRoutedTo(routedTo) {
+			if match != nil {
+				return nil // ambiguous
+			}
+			match = &cfg.Agents[i]
+		}
+	}
+	return match
+}
+
 // EffectiveCityName returns the name used for deterministic runtime naming.
 // Loaded configs should populate ResolvedWorkspaceName with the effective
 // site-bound/declared/basename result; raw parsed configs may still rely on

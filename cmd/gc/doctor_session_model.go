@@ -95,7 +95,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		}
 		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
 			cityName := config.EffectiveCityName(c.cfg, "")
-			if config.FindAgent(c.cfg, routedTo) == nil {
+			if config.FindAgentByRoutedTo(c.cfg, routedTo) == nil {
 				if _, ok, _ := resolveNamedSessionSpecForConfigTarget(c.cfg, cityName, routedTo, currentRigContext(c.cfg)); !ok {
 					findings = append(findings, fmt.Sprintf("stale-routed-config: %s routes to missing config target %q", b.ID, routedTo))
 				}

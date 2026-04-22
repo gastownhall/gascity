@@ -2302,6 +2302,46 @@ func TestMatchesRoutedTo(t *testing.T) {
 	}
 }
 
+func TestFindAgentByRoutedTo(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "dog", BindingName: "gastown"},
+			{Name: "polecat", BindingName: "atlas", Dir: "backend"},
+			{Name: "polecat", BindingName: "atlas", Dir: "ios"},
+		},
+	}
+	tests := []struct {
+		name    string
+		routed  string
+		wantNil bool
+		wantQN  string
+	}{
+		{"exact qualified", "gastown.dog", false, "gastown.dog"},
+		{"short form bare name", "dog", false, "gastown.dog"},
+		{"short form with rig", "backend/polecat", false, "backend/atlas.polecat"},
+		{"truly missing", "nonexistent", true, ""},
+		{"ambiguous bare name", "polecat", true, ""},
+		{"empty", "", true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FindAgentByRoutedTo(cfg, tt.routed)
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("FindAgentByRoutedTo(%q) = %s, want nil", tt.routed, got.QualifiedName())
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("FindAgentByRoutedTo(%q) = nil, want %s", tt.routed, tt.wantQN)
+			}
+			if got.QualifiedName() != tt.wantQN {
+				t.Errorf("FindAgentByRoutedTo(%q).QualifiedName() = %s, want %s", tt.routed, got.QualifiedName(), tt.wantQN)
+			}
+		})
+	}
+}
+
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
 		name   string
