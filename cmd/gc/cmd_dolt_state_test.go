@@ -2174,7 +2174,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   "sql-server --config "*)
-    config_file=${*#sql-server --config }
+    config_file=$3
     port=$(awk '/port:/ {print $2; exit}' "$config_file")
     data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
     exec python3 - "$port" "$data_dir" <<'INNERPY'
@@ -2603,7 +2603,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   "sql-server --config "*)
-    config_file=${*#sql-server --config }
+    config_file=$3
     port=$(awk '/port:/ {print $2; exit}' "$config_file")
     data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
     exec python3 - "$port" "$data_dir" <<'INNERPY'
