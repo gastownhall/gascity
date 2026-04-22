@@ -311,9 +311,11 @@ func TestCityRuntimeAsyncStartLimiterResizePreservesInFlightBudget(t *testing.T)
 }
 
 type recordingOrderDispatcher struct {
-	called     atomic.Bool
-	calls      atomic.Int32
-	onDispatch func(context.Context, string, time.Time)
+	called      atomic.Bool
+	calls       atomic.Int32
+	onDispatch  func(context.Context, string, time.Time)
+	drainCalls  int
+	drainCtxErr error
 }
 
 func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string, now time.Time) {
@@ -322,6 +324,11 @@ func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string
 	if r.onDispatch != nil {
 		r.onDispatch(ctx, cityRoot, now)
 	}
+}
+
+func (r *recordingOrderDispatcher) drain(ctx context.Context) {
+	r.drainCalls++
+	r.drainCtxErr = ctx.Err()
 }
 
 func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
@@ -3341,20 +3348,6 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Stopped agent 'probe-session'") {
 		t.Fatalf("stdout = %q, want shutdown stop message", stdout.String())
 	}
-}
-
-// recordingOrderDispatcher records drain invocations so tests can assert
-// the shutdown path calls drain before returning.
-type recordingOrderDispatcher struct {
-	drainCalls  int
-	drainCtxErr error
-}
-
-func (r *recordingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
-
-func (r *recordingOrderDispatcher) drain(ctx context.Context) {
-	r.drainCalls++
-	r.drainCtxErr = ctx.Err()
 }
 
 // orderingFakeProvider appends "stop:<name>" to seq when Stop is called so

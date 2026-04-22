@@ -75,24 +75,27 @@ type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 
 // memoryOrderDispatcher is the production implementation.
 //
-// inflight tracks dispatchOne goroutines spawned by dispatch so drain can
-// wait for them before shutdown or config reload. dispatch is only ever
-// called from the tick goroutine, so inflight.Add happens-before
-// inflight.Wait without additional synchronization.
+// inflightCount + inflightDone together track dispatchOne goroutines so
+// drain can select on either completion or ctx.Done without spawning an
+// orphaned waiter goroutine. dispatch is only ever called from the tick
+// goroutine, so addInflight's check-and-create happens-before any
+// concurrent drain call on the same instance.
 type memoryOrderDispatcher struct {
-	aa         []orders.Order
-	storeFn    orderStoreFunc
-	ep         events.Provider
-	execRun    ExecRunner
-	rec        events.Recorder
-	stderr     io.Writer
-	maxTimeout time.Duration
-	cfg        *config.City
-	cityName   string
+	aa           []orders.Order
+	storeFn      orderStoreFunc
+	ep           events.Provider
+	execRun      ExecRunner
+	rec          events.Recorder
+	stderr       io.Writer
+	maxTimeout   time.Duration
+	cfg          *config.City
+	cityName     string
 	cacheMu      sync.Mutex
 	lastRunCache map[string]time.Time
 
-	inflight sync.WaitGroup
+	inflightMu   sync.Mutex
+	inflightN    int
+	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -265,22 +268,48 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// drain can wait for tracking-bead outcome persistence before
 		// controller exit or config reload.
 		a := a // capture loop variable
-		m.inflight.Add(1)
+		m.addInflight()
 		go m.dispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
 	}
 }
 
+// addInflight increments the in-flight count and lazily creates the done
+// signal. Called synchronously from dispatch on the tick goroutine.
+func (m *memoryOrderDispatcher) addInflight() {
+	m.inflightMu.Lock()
+	m.inflightN++
+	if m.inflightN == 1 {
+		m.inflightDone = make(chan struct{})
+	}
+	m.inflightMu.Unlock()
+}
+
+// doneInflight decrements the count and signals completion when the last
+// goroutine finishes. Called from dispatchOne's deferred cleanup.
+func (m *memoryOrderDispatcher) doneInflight() {
+	m.inflightMu.Lock()
+	m.inflightN--
+	if m.inflightN == 0 && m.inflightDone != nil {
+		close(m.inflightDone)
+		m.inflightDone = nil
+	}
+	m.inflightMu.Unlock()
+}
+
 // drain blocks until all in-flight dispatchOne goroutines complete or ctx
-// expires. When ctx expires, any still-running dispatches keep running
-// (they will still write tracking-bead outcomes via ctx-unaware store
-// calls). The startup sweep closes orphaned tracking beads on the next
-// boot if drain did not have enough time to let them finish.
+// expires. Returns immediately if nothing is in flight. When ctx expires,
+// any still-running dispatches keep running (they will still write
+// tracking-bead outcomes via ctx-unaware store calls); the startup sweep
+// closes orphaned tracking beads on the next boot if drain did not have
+// enough time to let them finish. Unlike a naive WaitGroup wrap, this
+// design spawns no waiter goroutine and cannot leak state past return.
 func (m *memoryOrderDispatcher) drain(ctx context.Context) {
-	done := make(chan struct{})
-	go func() {
-		m.inflight.Wait()
-		close(done)
-	}()
+	m.inflightMu.Lock()
+	done := m.inflightDone
+	m.inflightMu.Unlock()
+	if done == nil {
+		return
+	}
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -348,7 +377,7 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
 func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
-	defer m.inflight.Done()
+	defer m.doneInflight()
 	defer store.Close(trackingID) //nolint:errcheck // best-effort close
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
