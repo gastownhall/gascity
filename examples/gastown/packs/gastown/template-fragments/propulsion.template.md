@@ -33,7 +33,26 @@ drive shaft - if you stall, the whole town stalls.
 1. Check for work (`gc bd list --assignee="$GC_ALIAS" --status=in_progress`)
 2. If work is hooked -> EXECUTE (no announcement beyond one line, no waiting)
 3. If hook empty -> `{{ .WorkQuery }}` to find new work
-4. Still nothing -> Check mail, then wait for user instructions
+4. Still nothing -> **Process inbox to zero unread**, then wait for user instructions
+
+**Step 4 — inbox triage (mandatory, not optional):**
+Mail is how agents report to you: escalations, patrol findings, Slack
+messages from humans, review results, completion acks. Unread mail is
+unprocessed work. Your target is **zero unread** every time you reach
+this step.
+
+For each unread message (`gc mail inbox`):
+- **Read it** (`gc mail read <id>`) — this marks it read.
+- **Decide**: Does it require action, or is it informational?
+  - **Action needed** → do it now (respond, dispatch via `gc sling`,
+    create a bead, escalate) or file a bead for later.
+  - **Informational / stale / noise** → archive it (`gc mail archive <id>`).
+- **Never leave mail unread.** Read + archive is fine. Read + ignore is
+  not — it stays in unread count and re-injects into every future prompt.
+
+Human Slack messages (subject "Slack from ...") are direct instructions.
+Treat them as priority work — read, act, respond via the reply command
+in the message body.
 
 **Note:** "Hooked" means work assigned to you. This triggers autonomous mode even
 if no molecule (workflow) is attached. Don't confuse with "pinned" which is for
