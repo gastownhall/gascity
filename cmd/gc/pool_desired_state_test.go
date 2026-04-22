@@ -619,6 +619,34 @@ func TestComputePoolDesiredStates_RoutedButUnassignedDoesNotSpawnNew(t *testing.
 }
 
 // Regression: same as above but for a rig-scoped agent.
+func TestComputePoolDesiredStates_ShortFormRoutedToMatchesV2Agent(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "android",
+			BindingName:       "atlas",
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	// gc.routed_to written via bd update without the pack binding prefix.
+	work := []beads.Bead{
+		workBead("w1", "android/polecat", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if len(result[0].Requests) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 (short-form gc.routed_to should match)", len(result[0].Requests))
+	}
+	if result[0].Requests[0].Tier != "resume" {
+		t.Errorf("tier = %q, want resume", result[0].Requests[0].Tier)
+	}
+}
+
 func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "myrig", nil, 0)},

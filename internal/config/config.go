@@ -112,6 +112,21 @@ func AgentMatchesIdentity(a *Agent, identity string) bool {
 	return false
 }
 
+// MatchesRoutedTo reports whether routedTo identifies this agent. Unlike
+// AgentMatchesIdentity, it always accepts the short form "dir/name" without a
+// pack binding prefix, because gc.routed_to values are frequently written by
+// external tools (bd update) that don't know the binding.
+func (a *Agent) MatchesRoutedTo(routedTo string) bool {
+	if routedTo == "" {
+		return false
+	}
+	if a.QualifiedName() == routedTo {
+		return true
+	}
+	dir, name := ParseQualifiedName(routedTo)
+	return a.Dir == dir && a.Name == name
+}
+
 // City is the top-level configuration for a Gas City instance.
 // Parsed from city.toml at the root of a city directory.
 type City struct {

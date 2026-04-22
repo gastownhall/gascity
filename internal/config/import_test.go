@@ -2234,6 +2234,74 @@ func TestAgentMatchesIdentity(t *testing.T) {
 	}
 }
 
+func TestMatchesRoutedTo(t *testing.T) {
+	tests := []struct {
+		name    string
+		agent   Agent
+		routed  string
+		want    bool
+	}{
+		{
+			name:   "exact qualified match",
+			agent:  Agent{Name: "polecat", BindingName: "atlas", Dir: "android"},
+			routed: "android/atlas.polecat",
+			want:   true,
+		},
+		{
+			name:   "short form without binding",
+			agent:  Agent{Name: "polecat", BindingName: "atlas", Dir: "android"},
+			routed: "android/polecat",
+			want:   true,
+		},
+		{
+			name:   "bare name for city-scoped agent",
+			agent:  Agent{Name: "mayor"},
+			routed: "mayor",
+			want:   true,
+		},
+		{
+			name:   "city-scoped V2 short form",
+			agent:  Agent{Name: "mayor", BindingName: "gastown"},
+			routed: "mayor",
+			want:   true,
+		},
+		{
+			name:   "wrong rig",
+			agent:  Agent{Name: "polecat", BindingName: "atlas", Dir: "android"},
+			routed: "ios/polecat",
+			want:   false,
+		},
+		{
+			name:   "wrong agent name",
+			agent:  Agent{Name: "polecat", BindingName: "atlas", Dir: "android"},
+			routed: "android/refinery",
+			want:   false,
+		},
+		{
+			name:   "empty routed_to",
+			agent:  Agent{Name: "polecat", BindingName: "atlas", Dir: "android"},
+			routed: "",
+			want:   false,
+		},
+		{
+			name:   "V1 agent exact match",
+			agent:  Agent{Name: "polecat", Dir: "android"},
+			routed: "android/polecat",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.agent.MatchesRoutedTo(tt.routed)
+			if got != tt.want {
+				t.Errorf("Agent{%s}.MatchesRoutedTo(%q) = %v, want %v",
+					tt.agent.QualifiedName(), tt.routed, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
 		name   string

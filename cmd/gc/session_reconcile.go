@@ -443,8 +443,10 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	return work
 }
 
-// findAgentByTemplate looks up a config agent by template name.
-// Returns nil if not found.
+// findAgentByTemplate looks up a config agent by template name. Accepts
+// both the canonical QualifiedName ("rig/binding.agent") and the short
+// form without the pack binding ("rig/agent"). When the short form matches
+// more than one agent the result is nil (ambiguous).
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	if cfg == nil || template == "" {
 		return nil
@@ -454,7 +456,17 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 			return &cfg.Agents[i]
 		}
 	}
-	return nil
+	dir, name := config.ParseQualifiedName(template)
+	var match *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Dir == dir && cfg.Agents[i].Name == name {
+			if match != nil {
+				return nil
+			}
+			match = &cfg.Agents[i]
+		}
+	}
+	return match
 }
 
 // healExpiredTimers clears expired held_until and quarantined_until.

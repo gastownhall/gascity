@@ -1745,6 +1745,33 @@ func TestFindAgentByTemplate(t *testing.T) {
 	}
 }
 
+func TestFindAgentByTemplate_ShortFormResolvesV2Agent(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "android", BindingName: "atlas"},
+			{Name: "mayor", BindingName: "gastown"},
+		},
+	}
+	if a := findAgentByTemplate(cfg, "android/polecat"); a == nil || a.QualifiedName() != "android/atlas.polecat" {
+		t.Errorf("short form 'android/polecat' should resolve to android/atlas.polecat, got %v", a)
+	}
+	if a := findAgentByTemplate(cfg, "mayor"); a == nil || a.QualifiedName() != "gastown.mayor" {
+		t.Errorf("short form 'mayor' should resolve to gastown.mayor, got %v", a)
+	}
+}
+
+func TestFindAgentByTemplate_AmbiguousShortFormReturnsNil(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "android", BindingName: "atlas"},
+			{Name: "polecat", Dir: "android", BindingName: "other"},
+		},
+	}
+	if a := findAgentByTemplate(cfg, "android/polecat"); a != nil {
+		t.Errorf("ambiguous short form should return nil, got %v", a.QualifiedName())
+	}
+}
+
 // --- isKnownState tests (Phase 0b: forward compatibility) ---
 
 func TestIsKnownState_KnownStates(t *testing.T) {

@@ -287,6 +287,29 @@ func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCheckBeadStateShortFormRoutedToIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "android/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{
+		Name:        "polecat",
+		Dir:         "android",
+		BindingName: "atlas",
+	}, SlingDeps{})
+
+	if !result.Idempotent {
+		t.Fatalf("short-form gc.routed_to should be idempotent, got %+v", result)
+	}
+}
+
 func TestBeadPrefixSling(t *testing.T) {
 	tests := []struct {
 		id   string

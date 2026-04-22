@@ -348,7 +348,7 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 	}
 
 	target := a.QualifiedName()
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == target {
+	if a.MatchesRoutedTo(strings.TrimSpace(b.Metadata["gc.routed_to"])) {
 		if b.Assignee == "" || b.Assignee == target {
 			return BeadCheckResult{Idempotent: true}
 		}

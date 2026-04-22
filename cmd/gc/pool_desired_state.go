@@ -134,7 +134,7 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
-			if routedTo != template {
+			if !agent.MatchesRoutedTo(routedTo) {
 				continue
 			}
 			if sessionBeadID != "" {
