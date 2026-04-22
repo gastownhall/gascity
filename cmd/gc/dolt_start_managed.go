@@ -20,10 +20,10 @@ type managedDoltStartReport struct {
 }
 
 func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
-	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, timeout, true)
+	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
 }
 
-func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -44,6 +44,15 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	// Resolve archive level: explicit argument > env var > default (0).
+	if archiveLevel < 0 {
+		archiveLevel = 0
+		if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
+			if parsed, parseErr := strconv.Atoi(v); parseErr == nil {
+				archiveLevel = parsed
+			}
+		}
+	}
 
 	report := managedDoltStartReport{}
 	currentPort := portNum
@@ -54,7 +63,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
-		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel); err != nil {
+		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, archiveLevel); err != nil {
 			return report, err
 		}
 
