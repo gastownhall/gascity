@@ -1822,8 +1822,11 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
 		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
 	}
-	if got.Metadata["pending_create_claim"] != "" {
-		t.Fatalf("pending_create_claim = %q, want cleared after durable restart request", got.Metadata["pending_create_claim"])
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating for immediate fresh restart", got.Metadata["state"])
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true after durable restart request", got.Metadata["pending_create_claim"])
 	}
 }
 
@@ -2948,8 +2951,46 @@ func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *te
 	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
 		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
 	}
-	if got.Metadata["pending_create_claim"] != "" {
-		t.Fatalf("pending_create_claim = %q, want cleared after durable dead-session restart request", got.Metadata["pending_create_claim"])
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating for immediate fresh restart", got.Metadata["state"])
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true after durable dead-session restart request", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestReconcileSessionBeads_StaleCreatingRestartRequestReclaimsCreateLease(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "creating",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+		"pending_create_claim":       "",
+	})
+	env.clk.Time = session.CreatedAt.Add(staleCreatingStateTimeout + time.Second)
+
+	env.reconcile([]beads.Bead{session})
+
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating", got.Metadata["state"])
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true to survive stale creating recovery", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared", got.Metadata["restart_requested"])
 	}
 }
 

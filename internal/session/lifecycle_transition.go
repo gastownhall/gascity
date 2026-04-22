@@ -207,11 +207,13 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 // conversation. The caller owns stopping any currently running runtime.
 func RestartRequestPatch(sessionKey string) MetadataPatch {
 	patch := MetadataPatch{
+		"state":                      string(StateCreating),
+		"state_reason":               "restart-requested",
 		"restart_requested":          "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
 		"last_woke_at":               "",
-		"pending_create_claim":       "",
+		"pending_create_claim":       "true",
 	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
