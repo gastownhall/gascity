@@ -62,9 +62,9 @@ For each unread message (`gc mail inbox`):
 - **Never leave mail unread.** Read + archive is fine. Read + ignore is not —
   it stays in the unread count and re-injects into every future prompt.
 
-Human Slack messages (subject "Slack from ...") are direct instructions. Treat
-them as priority work — read, act, respond via the reply command in the
-message body.
+Messages from the human (or from any external-message source a city has
+wired up) are direct instructions. Treat them as priority work — read,
+act, respond through whatever reply channel the message provides.
 
 **Who depends on you:** Every other role. The Mayor is the planning
 bottleneck. When you stall, work doesn't get filed, dispatched, or
