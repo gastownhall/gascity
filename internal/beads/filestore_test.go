@@ -198,6 +198,164 @@ func TestFileStoreRefreshesReadsAcrossOpenInstances(t *testing.T) {
 	}
 }
 
+func TestFileStoreReadyRefreshesAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := s1.Create(beads.Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s1.Create(beads.Bead{Title: "target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := s2.Ready()
+	if err != nil {
+		t.Fatalf("Ready() before dep add: %v", err)
+	}
+	if !hasBeadID(ready, blocker.ID) || !hasBeadID(ready, target.ID) {
+		t.Fatalf("Ready() before dep add = %+v, want %s and %s", ready, blocker.ID, target.ID)
+	}
+
+	if err := s1.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(%s, %s): %v", target.ID, blocker.ID, err)
+	}
+
+	ready, err = s2.Ready()
+	if err != nil {
+		t.Fatalf("Ready() after dep add: %v", err)
+	}
+	if !hasBeadID(ready, blocker.ID) {
+		t.Fatalf("Ready() after dep add = %+v, want blocker %s", ready, blocker.ID)
+	}
+	if hasBeadID(ready, target.ID) {
+		t.Fatalf("Ready() after dep add still contains blocked bead %s: %+v", target.ID, ready)
+	}
+}
+
+func TestFileStoreChildrenRefreshesAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent, err := s1.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	children, err := s2.Children(parent.ID)
+	if err != nil {
+		t.Fatalf("Children(%q) before child create: %v", parent.ID, err)
+	}
+	if len(children) != 0 {
+		t.Fatalf("Children(%q) before child create = %+v, want empty", parent.ID, children)
+	}
+
+	child, err := s1.Create(beads.Bead{Title: "child", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	children, err = s2.Children(parent.ID)
+	if err != nil {
+		t.Fatalf("Children(%q) after child create: %v", parent.ID, err)
+	}
+	if len(children) != 1 || children[0].ID != child.ID {
+		t.Fatalf("Children(%q) after child create = %+v, want only %s", parent.ID, children, child.ID)
+	}
+}
+
+func TestFileStoreDepListRefreshesAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := s1.Create(beads.Bead{Title: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s1.Create(beads.Bead{Title: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deps, err := s2.DepList(a.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%q, down) before dep add: %v", a.ID, err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("DepList(%q, down) before dep add = %+v, want empty", a.ID, deps)
+	}
+
+	if err := s1.DepAdd(a.ID, b.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(%s, %s): %v", a.ID, b.ID, err)
+	}
+
+	deps, err = s2.DepList(a.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%q, down) after dep add: %v", a.ID, err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != b.ID {
+		t.Fatalf("DepList(%q, down) after dep add = %+v, want one dep on %s", a.ID, deps, b.ID)
+	}
+}
+
+func TestFileStoreListByAssigneeRefreshesAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assigned, err := s2.ListByAssignee("mayor", "open", 0)
+	if err != nil {
+		t.Fatalf("ListByAssignee before create: %v", err)
+	}
+	if len(assigned) != 0 {
+		t.Fatalf("ListByAssignee before create = %+v, want empty", assigned)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "owned", Assignee: "mayor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assigned, err = s2.ListByAssignee("mayor", "open", 0)
+	if err != nil {
+		t.Fatalf("ListByAssignee after create: %v", err)
+	}
+	if len(assigned) != 1 || assigned[0].ID != created.ID {
+		t.Fatalf("ListByAssignee after create = %+v, want only %s", assigned, created.ID)
+	}
+}
+
 func TestFileStoreRefreshesAfterOpenRace(t *testing.T) {
 	path := "/city/.gc/beads.json"
 	base := fsys.NewFake()
@@ -434,6 +592,15 @@ func TestFileStoreDeletePersistence(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func hasBeadID(beadsList []beads.Bead, id string) bool {
+	for _, b := range beadsList {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFileStoreChildrenExcludeClosedByDefault(t *testing.T) {
