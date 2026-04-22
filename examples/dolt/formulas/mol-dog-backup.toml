@@ -1,16 +1,18 @@
 description = """
 Sync Dolt database backups to local and offsite storage.
 
-The Backup Dog runs `dolt backup sync` for each production database, then
-rsyncs the local backup directory to offsite storage for replication.
+The Backup Dog discovers configured backup remotes for each production
+database, syncs them, then rsyncs the local backup directory to offsite
+storage for replication.
 
 ## Dog Contract
 
 This is infrastructure work. You:
-1. Sync each production database to its backup remote
-2. Rsync local backups to offsite storage
-3. Report results and exit
-4. Return to kennel
+1. Discover backup remotes configured by gc init
+2. Sync each production database to its backup remote
+3. Rsync local backups to offsite storage
+4. Report results and exit
+5. Return to kennel
 
 ## Variables
 
@@ -25,7 +27,7 @@ overwrites the backup destination, but that is the intended behavior.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-backup"
-version = 1
+version = 2
 
 [vars]
 [vars.databases]
@@ -64,7 +66,7 @@ id = "sync"
 title = "Sync databases to backup remotes"
 needs = ["preflight"]
 description = """
-Run dolt backup sync for each production database.
+Discover and sync backup remotes for each production database.
 
 **1. Verify preflight passed:**
 Before running any `dolt backup sync`, read the `preflight` bead in this
@@ -75,17 +77,30 @@ sync. This formula does not wire scoped-abort metadata; this check is the
 enforcement point.
 
 **2. Determine databases:**
-Use configured databases list, or auto-discover databases with
-`<name>-backup` remotes configured.
+Use configured databases list, or auto-discover all databases in the
+data directory (skip __gc_probe and other internal databases).
 
-**3. For each database:**
+**3. For each database, discover its backup remote:**
 ```bash
 cd <data_dir>/<db>
-dolt backup sync <db>-backup
+dolt backup
+```
+This lists configured backup names. Use whatever name `dolt backup`
+returns — do NOT assume a naming convention. The remote name was set
+by `gc init` and may be `backup_export`, `<db>-backup`, or any other
+valid name.
+
+If `dolt backup` returns no configured backups, skip the database and
+record it as "no backup configured".
+
+**4. Sync each discovered backup:**
+```bash
+dolt backup sync <backup_name>
 ```
 
-**4. Record results:**
-- Databases synced successfully
+**5. Record results:**
+- Databases synced successfully (with backup remote name used)
+- Databases skipped (no backup configured)
 - Databases that failed (with error)
 - Duration per database
 
@@ -98,16 +113,22 @@ needs = ["sync"]
 description = """
 Rsync local backups to offsite storage for replication.
 
-**1. Check prerequisites:**
-- .dolt-backup/ directory exists
+**1. Locate backup directory:**
+Check the backup remote URL from the sync step to find the local
+backup path. The path is encoded in the dolt backup URL
+(e.g., `file:///path/to/.beads/backup`). Use `dolt backup -v` in
+any synced database to discover it if needed.
+
+**2. Check prerequisites:**
+- Backup directory exists and has content
 - Offsite path is accessible
 
-**2. Run offsite sync:**
+**3. Run offsite sync:**
 ```bash
-rsync -a --delete .dolt-backup/ <offsite_path>/
+rsync -a --delete <backup_dir>/ <offsite_path>/
 ```
 
-**3. Record results:**
+**4. Record results:**
 - Success/failure
 - Duration
 
@@ -124,8 +145,9 @@ Generate summary and signal completion.
 
 **1. Generate report summary:**
 - Databases synced: count/total
+- Databases skipped (no backup configured): count
 - Offsite sync status
-- Per-database breakdown: status, duration
+- Per-database breakdown: backup remote name, status, duration
 - Any failures
 
 **2. Signal completion:**
