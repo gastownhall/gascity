@@ -40,7 +40,7 @@ func newResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume [path]",
 		Short: "Resume a suspended city",
-		Long: `Resume a suspended city by clearing workspace.suspended in city.toml.
+		Long: `Resume a suspended city by setting workspace.suspended = false in city.toml.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume

@@ -473,7 +473,7 @@ func (cs *controllerState) SuspendAgent(name string) error {
 	})
 }
 
-// ResumeAgent clears suspended in durable agent config.
+// ResumeAgent writes suspended=false in durable agent config.
 func (cs *controllerState) ResumeAgent(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeAgent(name)
@@ -487,7 +487,7 @@ func (cs *controllerState) SuspendRig(name string) error {
 	})
 }
 
-// ResumeRig clears suspended on the rig in city.toml.
+// ResumeRig writes suspended=false on the rig in city.toml.
 func (cs *controllerState) ResumeRig(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeRig(name)

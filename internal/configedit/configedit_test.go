@@ -344,6 +344,9 @@ suspended = true
 	if cfg.Agents[0].Suspended {
 		t.Error("expected mayor to not be suspended")
 	}
+	if !strings.Contains(string(mustReadFile(t, path)), "suspended = false") {
+		t.Fatal("expected inline agent suspended field to remain explicit false")
+	}
 }
 
 func TestSuspendAgent_LocalDiscovered(t *testing.T) {
@@ -420,8 +423,8 @@ schema = 2
 	if !strings.Contains(agentToml, "provider = \"codex\"") {
 		t.Fatalf("agent.toml = %q, want provider preserved", agentToml)
 	}
-	if strings.Contains(agentToml, "suspended") {
-		t.Fatalf("agent.toml = %q, want suspended cleared", agentToml)
+	if !strings.Contains(agentToml, "suspended = false") {
+		t.Fatalf("agent.toml = %q, want suspended = false", agentToml)
 	}
 
 	cfg := readExpandedTOML(t, path)
@@ -569,7 +572,7 @@ schema = 2
 	if !strings.Contains(raw, `provider = "codex"`) {
 		t.Fatalf("non-Suspended patch fields should be preserved:\n%s", raw)
 	}
-	if strings.Contains(raw, "suspended =") {
+	if strings.Contains(raw, "name = \"worker\"\nsuspended =") {
 		t.Fatalf("Suspended override should be removed from patch:\n%s", raw)
 	}
 }
@@ -699,6 +702,9 @@ suspended = true
 	if cfg.Rigs[0].Suspended {
 		t.Error("expected my-rig to not be suspended")
 	}
+	if !strings.Contains(string(mustReadFile(t, path)), "suspended = false") {
+		t.Fatal("expected rig suspended field to remain explicit false")
+	}
 }
 
 func mustReadFile(t *testing.T, path string) []byte {
@@ -752,6 +758,9 @@ suspended = true
 	cfg := readTOML(t, path)
 	if cfg.Workspace.Suspended {
 		t.Error("expected workspace to not be suspended")
+	}
+	if !strings.Contains(string(mustReadFile(t, path)), "suspended = false") {
+		t.Fatal("expected workspace suspended field to remain explicit false")
 	}
 }
 

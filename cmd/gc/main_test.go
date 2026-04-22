@@ -4725,9 +4725,9 @@ func TestDoAgentResume(t *testing.T) {
 	if got.Agents[1].Suspended {
 		t.Error("Agents[1].Suspended = true after resume, want false")
 	}
-	// Verify TOML omits the field (omitempty).
-	if strings.Contains(string(written), "suspended") {
-		t.Errorf("written TOML should omit 'suspended' when false:\n%s", written)
+	// Verify TOML keeps an explicit false value.
+	if !strings.Contains(string(written), "suspended = false") {
+		t.Errorf("written TOML should keep 'suspended = false':\n%s", written)
 	}
 }
 

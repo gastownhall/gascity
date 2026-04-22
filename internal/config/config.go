@@ -415,7 +415,7 @@ type Rig struct {
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
-	Suspended bool `toml:"suspended,omitempty"`
+	Suspended bool `toml:"suspended"`
 	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
 	// pack formulas for this rig by filename.
 	// Relative paths resolve against the city directory.
@@ -790,7 +790,7 @@ type Workspace struct {
 	// agents are effectively suspended: the reconciler won't spawn them,
 	// and gc hook/prime return empty. Inherits downward — individual
 	// agent/rig suspended fields are checked independently.
-	Suspended bool `toml:"suspended,omitempty"`
+	Suspended bool `toml:"suspended"`
 	// MaxActiveSessions is the workspace-level cap on total concurrent sessions.
 	// Nil means unlimited. Agents and rigs inherit this if they don't set their own.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
@@ -1468,7 +1468,7 @@ type Agent struct {
 	// agents; inline agents in city.toml use Dir directly.
 	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
 	// Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume.
-	Suspended bool `toml:"suspended,omitempty"`
+	Suspended bool `toml:"suspended"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
 	// pod/container for exec providers. Template variables same as session_setup.

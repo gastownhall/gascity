@@ -56,7 +56,7 @@ func TestSuspendResume(t *testing.T) {
 		t.Errorf("stdout = %q, want resume message", stdout.String())
 	}
 
-	// Verify config was updated (suspended field dropped via omitempty).
+	// Verify config was updated and keeps an explicit false value.
 	written = f.Files[filepath.Join(cityPath, "city.toml")]
 	got, err = config.Parse(written)
 	if err != nil {
@@ -65,8 +65,8 @@ func TestSuspendResume(t *testing.T) {
 	if got.Workspace.Suspended {
 		t.Error("Workspace.Suspended = true after resume, want false")
 	}
-	if strings.Contains(string(written), "suspended") {
-		t.Errorf("written TOML should omit 'suspended' when false:\n%s", written)
+	if !strings.Contains(string(written), "suspended = false") {
+		t.Errorf("written TOML should keep 'suspended = false':\n%s", written)
 	}
 }
 

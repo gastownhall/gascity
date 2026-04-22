@@ -196,8 +196,8 @@ suspended = true
 	if !strings.Contains(stdout.String(), "Resumed agent 'mayor'") {
 		t.Fatalf("stdout = %q, want resume message", stdout.String())
 	}
-	if strings.Contains(string(fs.Files["/city/pack.toml"]), "suspended = true") {
-		t.Fatalf("pack.toml should clear suspended flag:\n%s", string(fs.Files["/city/pack.toml"]))
+	if !strings.Contains(string(fs.Files["/city/pack.toml"]), "suspended = false") {
+		t.Fatalf("pack.toml should retain suspended = false:\n%s", string(fs.Files["/city/pack.toml"]))
 	}
 	renamed := false
 	for _, call := range fs.Calls {
@@ -502,7 +502,7 @@ func TestDoAgentSuspendScaffoldedAgentWritesAgentToml(t *testing.T) {
 	}
 }
 
-func TestDoAgentResumeScaffoldedAgentClearsAgentTomlSuspended(t *testing.T) {
+func TestDoAgentResumeScaffoldedAgentKeepsAgentTomlSuspendedFalse(t *testing.T) {
 	fs := v2CityWithPack(t)
 	if err := fs.MkdirAll("/city/agents/worker", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -526,8 +526,8 @@ func TestDoAgentResumeScaffoldedAgentClearsAgentTomlSuspended(t *testing.T) {
 	if !strings.Contains(string(agentToml), "provider = \"codex\"") {
 		t.Errorf("agent.toml = %q, want provider preserved", agentToml)
 	}
-	if strings.Contains(string(agentToml), "suspended") {
-		t.Errorf("agent.toml = %q, want suspended cleared", agentToml)
+	if !strings.Contains(string(agentToml), "suspended = false") {
+		t.Errorf("agent.toml = %q, want suspended = false", agentToml)
 	}
 	if strings.Contains(string(fs.Files["/city/city.toml"]), "[[patches.agent]]") {
 		t.Errorf("city.toml should not gain agent patch:\n%s", fs.Files["/city/city.toml"])
