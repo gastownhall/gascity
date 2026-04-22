@@ -1084,8 +1084,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// Wait here. The reload budget is capped at reloadOrderDrainTimeout
 	// so a wedged exec order cannot stall the tick loop — orphaned
 	// tracking beads are cleaned up by the next-boot startup sweep.
+	// Deriving from ctx (the tick ctx) lets a shutdown racing with reload
+	// short-circuit the drain instead of waiting the full 1s.
 	if cr.od != nil {
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), reloadOrderDrainTimeout)
+		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
 		cr.od.drain(drainCtx)
 		drainCancel()
 	}
@@ -1923,15 +1925,18 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: service shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}
-		// Slice the shutdown budget so order-dispatch drain and session
-		// graceful-stop share it. Drain uses a fresh context because the
-		// tick ctx is already canceled at this point, which would make
-		// drain a no-op. Orphaned tracking beads (if drain times out)
-		// are closed by sweepOrphanedOrderTrackingRetry on next start.
+		// When an order dispatcher is active, slice the shutdown budget
+		// 50/50 so drain and graceful session-stop each get part of it.
+		// Drain uses a fresh context because the tick ctx is already
+		// canceled at this point, which would make drain a no-op.
+		// Orphaned tracking beads (if drain times out) are closed by
+		// sweepOrphanedOrderTrackingRetry on next start. Runtimes with
+		// no orders keep the full budget for gracefulStopAll.
 		total := cr.cfg.Daemon.ShutdownTimeoutDuration()
-		drainTimeout := total / 2
-		gracefulTimeout := total - drainTimeout
+		gracefulTimeout := total
 		if cr.od != nil {
+			drainTimeout := total / 2
+			gracefulTimeout = total - drainTimeout
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 			cr.od.drain(drainCtx)
 			drainCancel()

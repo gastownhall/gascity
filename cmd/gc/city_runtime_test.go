@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
@@ -3355,6 +3357,27 @@ func (r *recordingOrderDispatcher) drain(ctx context.Context) {
 	r.drainCtxErr = ctx.Err()
 }
 
+// orderingFakeProvider appends "stop:<name>" to seq when Stop is called so
+// tests can assert ordering relative to other lifecycle events.
+type orderingFakeProvider struct {
+	*runtime.Fake
+	mu  sync.Mutex
+	seq []string
+}
+
+func (p *orderingFakeProvider) Stop(name string) error {
+	p.mu.Lock()
+	p.seq = append(p.seq, "stop:"+name)
+	p.mu.Unlock()
+	return p.Fake.Stop(name)
+}
+
+func (p *orderingFakeProvider) events() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.seq...)
+}
+
 // TestCityRuntimeShutdownDrainsOrderDispatch verifies shutdown invokes
 // orderDispatcher.drain with a fresh (non-canceled) context before
 // stopping sessions — regression for #991.
@@ -3383,6 +3406,107 @@ func TestCityRuntimeShutdownDrainsOrderDispatch(t *testing.T) {
 	}
 	if od.drainCtxErr != nil {
 		t.Fatalf("drain received a canceled ctx (%v); shutdown must pass a fresh context", od.drainCtxErr)
+	}
+}
+
+// TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop
+// is the AC regression for #991: "a blocked/fake dispatch cannot let
+// controller exit before the tracking bead is closed or failure metadata
+// is persisted." It starts a real memoryOrderDispatcher, wedges its exec
+// until after shutdown is invoked, and asserts both that the tracking
+// bead is closed before shutdown returns AND that session Stop happens
+// AFTER the dispatch finishes — proving drain blocks gracefulStopAll.
+func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	execDone := make(chan struct{})
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		close(execDone)
+		return []byte("ok\n"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec(
+		[]orders.Order{{Name: "blocked", Trigger: "cooldown", Interval: "2m", Exec: "scripts/blocked.sh"}},
+		store, nil, fakeExec, nil,
+	)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	sp := &orderingFakeProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "5s"
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        ad,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+
+	// shutdown must not return while exec is blocked.
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown returned before drain waited for in-flight dispatch")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Session must not have been stopped yet — drain is still waiting.
+	if got := sp.events(); len(got) != 0 {
+		t.Fatalf("session lifecycle ran before drain completed: %v", got)
+	}
+
+	close(release)
+	<-execDone
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not return after dispatch completed")
+	}
+
+	// Tracking bead outcome must be persisted before shutdown returned.
+	all, err := store.ListByLabel("order-run:blocked", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	foundExecLabel := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "exec" {
+				foundExecLabel = true
+			}
+		}
+	}
+	if !foundExecLabel {
+		t.Fatalf("tracking bead missing exec outcome label after shutdown; beads=%+v", all)
+	}
+
+	// gracefulStopAll must have run after drain.
+	got := sp.events()
+	if len(got) == 0 || got[0] != "stop:probe" {
+		t.Fatalf("expected stop:probe after drain, got %v", got)
 	}
 }
 
