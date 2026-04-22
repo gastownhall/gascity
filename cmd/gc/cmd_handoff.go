@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -22,6 +24,45 @@ import (
 // reconciler, missed flag, hook fired outside a managed session), we
 // exit cleanly so callers like PreCompact don't hang Claude indefinitely.
 const handoffRestartWait = 30 * time.Second
+
+// readClaudeHookEventName best-effort reads the Claude Code hook payload
+// from stdin and returns the hook_event_name field. Returns "" if stdin
+// is a TTY, empty, or not a valid hook payload — i.e. when gc handoff is
+// invoked manually rather than from a hook.
+//
+// Claude Code passes a JSON object to every hook on stdin; the field
+// hook_event_name distinguishes PreCompact from SessionStart, Stop,
+// PostToolUse, etc. We use this to detect when handoff is being called
+// from PreCompact, where killing the session mid-compaction discards
+// in-flight context (the compaction summary the user wants to keep).
+func readClaudeHookEventName(r io.Reader) string {
+	if r == nil {
+		return ""
+	}
+	if f, ok := r.(*os.File); ok {
+		info, err := f.Stat()
+		if err != nil {
+			return ""
+		}
+		// TTY → no hook payload to read; don't block on user input.
+		if info.Mode()&os.ModeCharDevice != 0 {
+			return ""
+		}
+	}
+	// Hook payloads are tiny (low-KB). Cap the read so a misconfigured
+	// pipe can't make us swallow megabytes.
+	data, err := io.ReadAll(io.LimitReader(r, 64*1024))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var payload struct {
+		HookEventName string `json:"hook_event_name"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	return payload.HookEventName
+}
 
 func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
@@ -70,6 +111,11 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 		return cmdHandoffRemote(args, target, stdout, stderr)
 	}
 
+	// Detect Claude Code hook context BEFORE doing anything else — stdin is
+	// consumed by the read and we want this to drive whether we even
+	// consider requesting a restart.
+	hookEvent := readClaudeHookEventName(os.Stdin)
+
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -88,7 +134,15 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	persistRestart := sessionRestartPersister(current.cityPath, store, sp, cfg, current.sessionName)
 
-	outcome := doHandoffWithOutcome(store, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr)
+	// PreCompact hooks must finish without killing the session: Claude is
+	// in the middle of producing the compaction summary, and tearing the
+	// process tree down here discards everything in flight (the user's
+	// "the mayor crashed and lost context" symptom). Send the handoff
+	// mail so the post-compact session sees it, then return so compaction
+	// proceeds normally.
+	opts := handoffOptions{forceSkipRestart: hookEvent == "PreCompact"}
+
+	outcome := doHandoffWithOptions(store, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr, opts)
 	if outcome.code != 0 {
 		return outcome.code
 	}
@@ -153,6 +207,16 @@ type handoffOutcome struct {
 	restartRequested bool
 }
 
+// handoffOptions holds optional parameters for doHandoffWithOptions. Zero
+// value preserves the historical doHandoffWithOutcome behavior.
+type handoffOptions struct {
+	// forceSkipRestart, when true, prevents the restart-requested flag from
+	// being set regardless of session classification. Use for callers that
+	// know killing the session here would lose data — e.g. PreCompact, where
+	// Claude is mid-compaction and the kill discards the in-flight summary.
+	forceSkipRestart bool
+}
+
 // doHandoff sends a handoff mail to self and requests restart when the
 // controller can restart the current session. Testable: does not block.
 func doHandoff(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
@@ -163,6 +227,12 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps, persistRes
 
 func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
+) handoffOutcome {
+	return doHandoffWithOptions(store, rec, dops, persistRestart, sessionAddress, sessionName, args, stdout, stderr, handoffOptions{})
+}
+
+func doHandoffWithOptions(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
+	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer, opts handoffOptions,
 ) handoffOutcome {
 	subject := args[0]
 	var message string
@@ -195,16 +265,27 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
-	// On-demand named sessions are human-attended and the controller cannot
-	// respawn their process after a restart request. Preserve the handoff
-	// mail so context survives, but skip both restart flags. Regression
-	// guard: gastownhall/gascity#744.
+	// PreCompact (and other callers that explicitly forbid the restart kill)
+	// override the bead-derived classification — even an always-mode session
+	// must not be torn down here, because Claude's compaction is in flight
+	// and the kill discards the in-flight summary.
+	if opts.forceSkipRestart {
+		restartable = false
+	}
+	// Non-restartable sessions: on-demand configured-named beads, pool-managed
+	// ephemeral beads (which are user-attended through tmux), and any caller
+	// with forceSkipRestart set. Preserve the handoff mail; skip both restart
+	// flags. Regression guard: gastownhall/gascity#744.
 	if !restartable {
 		if err := clearRestartRequest(store, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
 			return handoffOutcome{code: 1, restartRequested: false}
 		}
-		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
+		msg := "named session; restart skipped"
+		if opts.forceSkipRestart {
+			msg = "PreCompact context; restart skipped to preserve in-flight context"
+		}
+		fmt.Fprintf(stdout, "Handoff: sent mail %s (%s).\n", b.ID, msg) //nolint:errcheck // best-effort stdout
 		return handoffOutcome{code: 0, restartRequested: false}
 	}
 

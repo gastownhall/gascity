@@ -299,6 +299,97 @@ func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 	}
 }
 
+// PreCompact context: even an always-mode named session (e.g. the
+// gastown.mayor in atlas) must NOT be torn down via gc handoff. The
+// restart kill happens mid-compaction and discards the in-flight
+// summary the user is trying to keep. forceSkipRestart=true models the
+// path cmdHandoff takes when readClaudeHookEventName returns "PreCompact".
+func TestDoHandoffWithOptions_PreCompactSkipsRestartEvenForAlwaysMode(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	b, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{"gc:session"},
+	})
+	if err != nil {
+		t.Fatalf("seeding session bead: %v", err)
+	}
+	for k, v := range map[string]string{
+		"session_name":             "gastown__mayor",
+		"configured_named_session": "true",
+		"configured_named_mode":    "always",
+		"configured_named_identity": "gastown.mayor",
+	} {
+		if err := store.SetMetadata(b.ID, k, v); err != nil {
+			t.Fatalf("set %s: %v", k, err)
+		}
+	}
+
+	persistCalled := false
+	outcome := doHandoffWithOptions(store, rec, dops, func() error {
+		persistCalled = true
+		return nil
+	}, "gastown.mayor", "gastown__mayor",
+		[]string{"context cycle"}, &stdout, &stderr,
+		handoffOptions{forceSkipRestart: true},
+	)
+	if outcome.code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
+	}
+	if outcome.restartRequested {
+		t.Fatal("restartRequested = true, want false in PreCompact context (always mode must still skip the kill)")
+	}
+	if dops.restartRequested["gastown__mayor"] {
+		t.Error("restart-requested flag set — PreCompact context must skip the kill")
+	}
+	if persistCalled {
+		t.Error("persistRestart called — PreCompact context must skip persisted restart")
+	}
+
+	mailFound := false
+	all, _ := store.ListOpen()
+	for _, got := range all {
+		if got.Title == "context cycle" && got.Type == "message" {
+			mailFound = true
+			break
+		}
+	}
+	if !mailFound {
+		t.Fatalf("handoff mail not created; beads=%v", all)
+	}
+	if !strings.Contains(stdout.String(), "PreCompact context") {
+		t.Errorf("stdout = %q, want PreCompact-context note", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "requesting restart") {
+		t.Errorf("stdout = %q, must not promise a restart in PreCompact context", stdout.String())
+	}
+}
+
+func TestReadClaudeHookEventName_ParsesPreCompact(t *testing.T) {
+	r := strings.NewReader(`{"hook_event_name":"PreCompact","session_id":"x","trigger":"auto"}`)
+	if got := readClaudeHookEventName(r); got != "PreCompact" {
+		t.Errorf("got %q, want %q", got, "PreCompact")
+	}
+}
+
+func TestReadClaudeHookEventName_HandlesEmptyAndGarbage(t *testing.T) {
+	if got := readClaudeHookEventName(strings.NewReader("")); got != "" {
+		t.Errorf("empty: got %q, want empty", got)
+	}
+	if got := readClaudeHookEventName(strings.NewReader("not-json")); got != "" {
+		t.Errorf("garbage: got %q, want empty", got)
+	}
+	if got := readClaudeHookEventName(nil); got != "" {
+		t.Errorf("nil: got %q, want empty", got)
+	}
+	if got := readClaudeHookEventName(strings.NewReader(`{"unrelated":"field"}`)); got != "" {
+		t.Errorf("no hook_event_name: got %q, want empty", got)
+	}
+}
+
 func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()
