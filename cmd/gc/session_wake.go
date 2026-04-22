@@ -542,7 +542,11 @@ func advanceSessionDrainsWithSessionsTraced(
 	}
 }
 
-// completeDrain writes drain-complete metadata to the bead.
+// completeDrain writes drain-complete metadata to the bead and re-routes
+// any work beads that were assigned to the now-retired session back to the
+// pool (via gc.routed_to fallback). Without this, drained pool sessions
+// leave orphaned work beads with no assignee and no route — the pool
+// reconciler never sees work to scale for, creating a permanent deadlock.
 func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock) {
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
 	if store != nil {
@@ -556,6 +560,12 @@ func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk c
 	for k, v := range batch {
 		session.Metadata[k] = v
 	}
+
+	// Re-route orphaned work beads back to the pool template so the
+	// reconciler can scale a replacement. Uses the same fallback logic
+	// as named-session retirement: template > agent_name.
+	fallback := retiredSessionFallbackRoute(*session)
+	unclaimWorkAssignedToRetiredSessionBead(store, session.ID, fallback, os.Stderr)
 }
 
 // verifiedStop stops a session after verifying the instance_token matches.

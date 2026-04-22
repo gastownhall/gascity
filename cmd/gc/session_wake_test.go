@@ -1286,6 +1286,106 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	}
 }
 
+func TestCompleteDrain_UnclaimsAssignedWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	sessionBead, _ := store.Create(beads.Bead{
+		Title: "polecat session",
+		Metadata: map[string]string{
+			"session_name": "polecat-test",
+			"template":     "android/atlas.polecat",
+		},
+	})
+
+	workBead, _ := store.Create(beads.Bead{
+		Title:    "open work assigned to polecat",
+		Type:     "task",
+		Status:   "open",
+		Assignee: sessionBead.ID,
+	})
+
+	ds := &drainState{reason: "config-drift"}
+	completeDrain(&sessionBead, store, ds, clk)
+
+	got, _ := store.Get(workBead.ID)
+	if got.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty after drain", got.Assignee)
+	}
+	if got.Metadata["gc.routed_to"] != "android/atlas.polecat" {
+		t.Errorf("gc.routed_to = %q, want %q", got.Metadata["gc.routed_to"], "android/atlas.polecat")
+	}
+}
+
+func TestCompleteDrain_UnclaimsInProgressWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	sessionBead, _ := store.Create(beads.Bead{
+		Title: "polecat session",
+		Metadata: map[string]string{
+			"session_name": "polecat-test",
+			"template":     "backend/atlas.polecat",
+			"agent_name":   "backend/furiosa",
+		},
+	})
+
+	workBead, _ := store.Create(beads.Bead{
+		Title:    "in-progress work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: sessionBead.ID,
+	})
+
+	ds := &drainState{reason: "pool-excess"}
+	completeDrain(&sessionBead, store, ds, clk)
+
+	got, _ := store.Get(workBead.ID)
+	if got.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty after drain", got.Assignee)
+	}
+	if got.Metadata["gc.routed_to"] != "backend/atlas.polecat" {
+		t.Errorf("gc.routed_to = %q, want %q (fallback from template)", got.Metadata["gc.routed_to"], "backend/atlas.polecat")
+	}
+}
+
+func TestCompleteDrain_PreservesExistingRoute(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	sessionBead, _ := store.Create(beads.Bead{
+		Title: "polecat session",
+		Metadata: map[string]string{
+			"session_name": "polecat-test",
+			"template":     "android/atlas.polecat",
+		},
+	})
+
+	workBead, _ := store.Create(beads.Bead{
+		Title:    "routed work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{
+			"gc.routed_to": "android/atlas.refinery",
+		},
+	})
+
+	ds := &drainState{reason: "config-drift"}
+	completeDrain(&sessionBead, store, ds, clk)
+
+	got, _ := store.Get(workBead.ID)
+	if got.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty after drain", got.Assignee)
+	}
+	if got.Metadata["gc.routed_to"] != "android/atlas.refinery" {
+		t.Errorf("gc.routed_to = %q, want %q (should preserve existing route)", got.Metadata["gc.routed_to"], "android/atlas.refinery")
+	}
+}
+
 func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
