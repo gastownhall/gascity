@@ -175,6 +175,90 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	}
 }
 
+// Regression for the pool-managed extension of #744:
+// gc handoff on a pool-managed session bead (mayor in atlas after the
+// pool migration) used to call setRestartRequested because the bead
+// lacked configured_named_session metadata — even though the session
+// is attached to a human tmux/iTerm window. Killing it mid-PreCompact
+// crashed the visible terminal and discarded the in-flight compaction
+// summary. doHandoff must treat pool-managed beads the same way it
+// treats on-demand named sessions: keep the mail, skip the restart.
+func TestDoHandoff_PoolManagedSessionSkipsRestart(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	b, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{"gc:session", "agent:gastown.mayor"},
+	})
+	if err != nil {
+		t.Fatalf("seeding session bead: %v", err)
+	}
+	for k, v := range map[string]string{
+		"session_name":               "gastown__mayor-at-yxbh",
+		"pool_managed":               "true",
+		"pool_slot":                  "1",
+		"session_origin":             "ephemeral",
+		"template":                   "gastown.mayor",
+		"agent_name":                 "gastown.mayor-1",
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	} {
+		if err := store.SetMetadata(b.ID, k, v); err != nil {
+			t.Fatalf("set %s: %v", k, err)
+		}
+	}
+	dops.restartRequested["gastown__mayor-at-yxbh"] = true
+
+	persistCalled := false
+	outcome := doHandoffWithOutcome(store, rec, dops, func() error {
+		persistCalled = true
+		return nil
+	}, "gastown.mayor-1", "gastown__mayor-at-yxbh",
+		[]string{"context cycle"}, &stdout, &stderr)
+	if outcome.code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
+	}
+	if outcome.restartRequested {
+		t.Fatal("restartRequested = true, want false for pool-managed session")
+	}
+	if dops.restartRequested["gastown__mayor-at-yxbh"] {
+		t.Error("restart-requested flag is still set — pool-managed sessions must skip restart")
+	}
+	if persistCalled {
+		t.Error("persistRestart was called — pool-managed sessions must skip persisted restart requests")
+	}
+
+	refreshed, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("fetching seeded bead: %v", err)
+	}
+	if refreshed.Metadata["restart_requested"] != "" {
+		t.Errorf("bead restart_requested = %q, want cleared", refreshed.Metadata["restart_requested"])
+	}
+	if refreshed.Metadata["continuation_reset_pending"] != "" {
+		t.Errorf("continuation_reset_pending = %q, want cleared", refreshed.Metadata["continuation_reset_pending"])
+	}
+
+	mailFound := false
+	all, _ := store.ListOpen()
+	for _, got := range all {
+		if got.Title == "context cycle" && got.Type == "message" {
+			mailFound = true
+			break
+		}
+	}
+	if !mailFound {
+		t.Fatalf("handoff mail not created; beads=%v", all)
+	}
+
+	if strings.Contains(stdout.String(), "requesting restart") {
+		t.Errorf("stdout = %q, must not promise a restart for pool-managed sessions", stdout.String())
+	}
+}
+
 func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()

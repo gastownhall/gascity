@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -14,6 +15,13 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
+
+// handoffRestartWait bounds how long the handoff process blocks after
+// requesting a controller restart. The controller normally tears the
+// process tree down well within this window; if it doesn't (broken
+// reconciler, missed flag, hook fired outside a managed session), we
+// exit cleanly so callers like PreCompact don't hang Claude indefinitely.
+const handoffRestartWait = 30 * time.Second
 
 func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
@@ -88,8 +96,14 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	// Block until the controller tears the process tree down, with a bounded
+	// timeout so a stuck or unreachable controller can't hang the caller
+	// (e.g. PreCompact) forever. A timeout means the controller didn't act on
+	// the persisted restart_requested flag in time; the flag stays set so the
+	// next reconcile cycle can still pick it up.
+	<-time.After(handoffRestartWait)
+	fmt.Fprintf(stderr, "gc handoff: controller did not stop session within %s; exiting hook (restart flag remains set)\n", handoffRestartWait) //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and stops the target
@@ -231,10 +245,21 @@ func sessionRestartableByController(store beads.Store, sessionName string) (bool
 	if err != nil {
 		return false, fmt.Errorf("loading session %q: %w", id, err)
 	}
-	if !isNamedSessionBead(b) {
-		return true, nil
+	if isNamedSessionBead(b) {
+		return namedSessionMode(b) == "always", nil
 	}
-	return namedSessionMode(b) == "always", nil
+	// Pool-managed (and otherwise ephemeral) session beads are commonly
+	// attached to a human tmux/iTerm window via `gc session attach`. Killing
+	// them mid-PreCompact discards in-flight context (the compaction summary
+	// is never written) and crashes the visible terminal even though the
+	// controller will eventually spin up a fresh pool slot. Treat them like
+	// on-demand named sessions for handoff purposes: keep the handoff mail,
+	// skip the restart kill. Regression: pool-managed mayor crashed on every
+	// PreCompact because the #744 fix only protected configured_named beads.
+	if isPoolManagedSessionBead(b) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func clearRestartRequest(store beads.Store, dops drainOps, sessionName string) error {
