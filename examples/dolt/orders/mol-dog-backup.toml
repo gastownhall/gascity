@@ -1,6 +1,8 @@
+# Converted from formula+pool to exec. All backup operations are
+# deterministic: dolt backup sync per DB, rsync to offsite path.
+# No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Sync Dolt backups to configured remotes"
-formula = "mol-dog-backup"
+exec = "$PACK_DIR/assets/scripts/mol-dog-backup.sh"
 trigger = "cooldown"
 interval = "6h"
-pool = "dog"
