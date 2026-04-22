@@ -1068,7 +1068,7 @@ func runController(
 	}()
 
 	convergenceReqCh := make(chan convergenceRequest, 16)
-	reloadReqCh := make(chan reloadRequest)
+	reloadReqCh := make(chan reloadRequest, 1) // buffered so gc reload can enqueue during mid-tick reconciliation
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}

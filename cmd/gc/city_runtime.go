@@ -707,6 +707,15 @@ func (cr *CityRuntime) tick(
 		cr.stderr,
 	)
 
+	// Rebase session config hashes after successful manual reload to
+	// prevent the reconciler from treating the new config as drift.
+	// This implements "gc reload = accept new baseline" semantics.
+	if manualReload != nil && manualReply.Outcome == reloadOutcomeApplied {
+		if n := rebaseSessionConfigHashes(cr.cityBeadStore(), cr.cfg, result.State, sessionBeads, cr.stdout, cr.stderr); n > 0 {
+			sessionBeads = cr.loadSessionBeadSnapshot()
+		}
+	}
+
 	// Bead-driven reconciliation (requires bead store / drain tracker).
 	if cr.sessionDrains != nil {
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace)
