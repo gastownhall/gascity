@@ -678,7 +678,11 @@ func healthBeadsProvider(cityPath string) error {
 			}
 			// Jitter before recovery to stagger reconnect attempts when
 			// multiple callers detect dolt failure simultaneously.
-			time.Sleep(providerRecoveryJitter())
+			// Skip jitter when the provider script doesn't exist —
+			// there's no dolt process to stagger against.
+			if _, statErr := os.Stat(script); statErr == nil {
+				time.Sleep(providerRecoveryJitter())
+			}
 			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
 			}
