@@ -2730,6 +2730,22 @@ type StatusWorkCounts struct {
 	Ready int64 `json:"ready"`
 }
 
+// StoreMaintenanceDonePayload defines model for StoreMaintenanceDonePayload.
+type StoreMaintenanceDonePayload struct {
+	AfterBytes   int64   `json:"after_bytes"`
+	BeforeBytes  int64   `json:"before_bytes"`
+	DurationS    float64 `json:"duration_s"`
+	SnapshotPath string  `json:"snapshot_path"`
+}
+
+// StoreMaintenanceFailedPayload defines model for StoreMaintenanceFailedPayload.
+type StoreMaintenanceFailedPayload struct {
+	DurationS    float64 `json:"duration_s"`
+	ErrorMsg     string  `json:"error_msg"`
+	SnapshotPath *string `json:"snapshot_path,omitempty"`
+	Stage        string  `json:"stage"`
+}
+
 // SubmissionCapabilities defines model for SubmissionCapabilities.
 type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
@@ -3094,6 +3110,30 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedEventStreamEnvelopeGcStoreMaintenanceDone.
+type TypedEventStreamEnvelopeGcStoreMaintenanceDone struct {
+	Actor    string                      `json:"actor"`
+	Message  *string                     `json:"message,omitempty"`
+	Payload  StoreMaintenanceDonePayload `json:"payload"`
+	Seq      int64                       `json:"seq"`
+	Subject  *string                     `json:"subject,omitempty"`
+	Ts       time.Time                   `json:"ts"`
+	Type     string                      `json:"type"`
+	Workflow *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeGcStoreMaintenanceFailed defines model for TypedEventStreamEnvelopeGcStoreMaintenanceFailed.
+type TypedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
+	Actor    string                        `json:"actor"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  StoreMaintenanceFailedPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailArchived defines model for TypedEventStreamEnvelopeMailArchived.
@@ -3755,6 +3795,32 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone.
+type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone struct {
+	Actor    string                      `json:"actor"`
+	City     string                      `json:"city"`
+	Message  *string                     `json:"message,omitempty"`
+	Payload  StoreMaintenanceDonePayload `json:"payload"`
+	Seq      int64                       `json:"seq"`
+	Subject  *string                     `json:"subject,omitempty"`
+	Ts       time.Time                   `json:"ts"`
+	Type     string                      `json:"type"`
+	Workflow *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed.
+type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
+	Actor    string                        `json:"actor"`
+	City     string                        `json:"city"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  StoreMaintenanceFailedPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailArchived defines model for TypedTaggedEventStreamEnvelopeMailArchived.
@@ -5882,6 +5948,58 @@ func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceed
 	return err
 }
 
+// AsStoreMaintenanceDonePayload returns the union data inside the EventPayload as a StoreMaintenanceDonePayload
+func (t EventPayload) AsStoreMaintenanceDonePayload() (StoreMaintenanceDonePayload, error) {
+	var body StoreMaintenanceDonePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreMaintenanceDonePayload overwrites any union data inside the EventPayload as the provided StoreMaintenanceDonePayload
+func (t *EventPayload) FromStoreMaintenanceDonePayload(v StoreMaintenanceDonePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreMaintenanceDonePayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceDonePayload
+func (t *EventPayload) MergeStoreMaintenanceDonePayload(v StoreMaintenanceDonePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStoreMaintenanceFailedPayload returns the union data inside the EventPayload as a StoreMaintenanceFailedPayload
+func (t EventPayload) AsStoreMaintenanceFailedPayload() (StoreMaintenanceFailedPayload, error) {
+	var body StoreMaintenanceFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreMaintenanceFailedPayload overwrites any union data inside the EventPayload as the provided StoreMaintenanceFailedPayload
+func (t *EventPayload) FromStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreMaintenanceFailedPayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceFailedPayload
+func (t *EventPayload) MergeStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSupervisorFSPressureSkippedTickPayload returns the union data inside the EventPayload as a SupervisorFSPressureSkippedTickPayload
 func (t EventPayload) AsSupervisorFSPressureSkippedTickPayload() (SupervisorFSPressureSkippedTickPayload, error) {
 	var body SupervisorFSPressureSkippedTickPayload
@@ -6606,6 +6724,62 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgUnbound(v T
 // MergeTypedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v TypedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeGcStoreMaintenanceDone returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreMaintenanceDone
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreMaintenanceDone() (TypedEventStreamEnvelopeGcStoreMaintenanceDone, error) {
+	var body TypedEventStreamEnvelopeGcStoreMaintenanceDone
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeGcStoreMaintenanceDone overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreMaintenanceDone
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedEventStreamEnvelopeGcStoreMaintenanceDone) error {
+	v.Type = "gc.store.maintenance.done"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeGcStoreMaintenanceDone performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreMaintenanceDone
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedEventStreamEnvelopeGcStoreMaintenanceDone) error {
+	v.Type = "gc.store.maintenance.done"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreMaintenanceFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed() (TypedEventStreamEnvelopeGcStoreMaintenanceFailed, error) {
+	var body TypedEventStreamEnvelopeGcStoreMaintenanceFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeGcStoreMaintenanceFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreMaintenanceFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
+	v.Type = "gc.store.maintenance.failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeGcStoreMaintenanceFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreMaintenanceFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
+	v.Type = "gc.store.maintenance.failed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -7622,6 +7796,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "gc.store.maintenance.done":
+		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceDone()
+	case "gc.store.maintenance.failed":
+		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed()
 	case "mail.archived":
 		return t.AsTypedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
@@ -8225,6 +8403,62 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone() (TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone, error) {
+	var body TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) error {
+	v.Type = "gc.store.maintenance.done"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) error {
+	v.Type = "gc.store.maintenance.done"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed() (TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
+	v.Type = "gc.store.maintenance.failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
+	v.Type = "gc.store.maintenance.failed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9241,6 +9475,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "gc.store.maintenance.done":
+		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone()
+	case "gc.store.maintenance.failed":
+		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed()
 	case "mail.archived":
 		return t.AsTypedTaggedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
