@@ -9199,6 +9199,7 @@ export interface operations {
             /** @description OK */
             200: {
                 headers: {
+                    "X-GC-Cache-Age-S"?: number;
                     "X-GC-Index"?: number;
                     "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
                     [name: string]: unknown;
@@ -9284,6 +9285,7 @@ export interface operations {
             /** @description OK */
             200: {
                 headers: {
+                    "X-GC-Cache-Age-S"?: number;
                     "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
                     [name: string]: unknown;
                 };
@@ -9323,6 +9325,7 @@ export interface operations {
             /** @description OK */
             200: {
                 headers: {
+                    "X-GC-Cache-Age-S"?: number;
                     "X-GC-Index"?: number;
                     "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
                     [name: string]: unknown;
@@ -11160,6 +11163,8 @@ export interface operations {
             query?: {
                 /** @description Include last output preview. */
                 peek?: boolean;
+                /** @description Number of lines to include in the last output preview when peek=true. Defaults to 5. */
+                peek_lines?: number;
             };
             header?: never;
             path: {

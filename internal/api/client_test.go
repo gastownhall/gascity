@@ -1209,6 +1209,209 @@ func TestCacheAgeFromResponse(t *testing.T) {
 	}
 }
 
+func TestClientListMailInbox(t *testing.T) {
+	var gotQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/mail" {
+			t.Fatalf("path = %q, want /v0/city/alpha/mail", r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total": 1,
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.ListMailInbox("mayor", "")
+	if err != nil {
+		t.Fatalf("ListMailInbox: %v", err)
+	}
+	if len(got.Body) != 1 || got.Body[0].ID != "msg-1" || got.Body[0].From != "alice" {
+		t.Errorf("got.Body = %+v", got.Body)
+	}
+	if got.AgeSeconds != 2 {
+		t.Errorf("AgeSeconds = %v, want 2", got.AgeSeconds)
+	}
+	if !strings.Contains(gotQuery, "agent=mayor") {
+		t.Errorf("query = %q, missing agent=mayor", gotQuery)
+	}
+}
+
+func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "cache_not_live: supervisor cache is priming",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListMailInbox("mayor", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListMailInbox("mayor", "")
+	if err == nil {
+		t.Fatal("expected connection error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for conn error: %v", err)
+	}
+}
+
+func TestClientGetMail(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/mail/msg-1" {
+			t.Fatalf("path = %q, want /v0/city/alpha/mail/msg-1", r.URL.Path)
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "5")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"id":         "msg-1",
+			"from":       "alice",
+			"to":         "mayor",
+			"subject":    "hi",
+			"body":       "hello",
+			"created_at": "2026-04-23T10:00:00Z",
+			"read":       true,
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.GetMail("msg-1", "")
+	if err != nil {
+		t.Fatalf("GetMail: %v", err)
+	}
+	if got.Body.ID != "msg-1" || got.Body.From != "alice" || !got.Body.Read {
+		t.Errorf("got.Body = %+v", got.Body)
+	}
+	if got.AgeSeconds != 5 {
+		t.Errorf("AgeSeconds = %v, want 5", got.AgeSeconds)
+	}
+}
+
+func TestClientGetMail_CacheNotLiveFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "cache_not_live: supervisor cache is priming",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.GetMail("msg-1", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientGetMail_ConnErrorFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.GetMail("msg-1", "")
+	if err == nil {
+		t.Fatal("expected connection error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for conn error: %v", err)
+	}
+}
+
+func TestClientCountMail(t *testing.T) {
+	var gotQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/mail/count" {
+			t.Fatalf("path = %q, want /v0/city/alpha/mail/count", r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("X-GC-Cache-Age-S", "1")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"total": 5, "unread": 2}) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.CountMail("mayor", "myrig")
+	if err != nil {
+		t.Fatalf("CountMail: %v", err)
+	}
+	if got.Body.Total != 5 || got.Body.Unread != 2 {
+		t.Errorf("got.Body = %+v", got.Body)
+	}
+	if got.AgeSeconds != 1 {
+		t.Errorf("AgeSeconds = %v, want 1", got.AgeSeconds)
+	}
+	if !strings.Contains(gotQuery, "agent=mayor") || !strings.Contains(gotQuery, "rig=myrig") {
+		t.Errorf("query = %q, missing agent=mayor / rig=myrig", gotQuery)
+	}
+}
+
+func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "cache_not_live: supervisor cache is priming",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.CountMail("mayor", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientCountMail_ConnErrorFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.CountMail("mayor", "")
+	if err == nil {
+		t.Fatal("expected connection error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for conn error: %v", err)
+	}
+}
+
 func TestClientCSRFHeader(t *testing.T) {
 	var gotHeader string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

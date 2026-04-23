@@ -9694,6 +9694,10 @@ export type GetV0CityByCityNameSessionByIdData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Number of lines to include in the last output preview when peek=true. Defaults to 5.
+         */
+        peek_lines?: number;
     };
     url: '/v0/city/{cityName}/session/{id}';
 };

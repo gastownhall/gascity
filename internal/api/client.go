@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -646,6 +647,100 @@ func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
 	}
 	return CachedRead[ConvoyCheckView]{
 		Body:       convoyCheckFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListMailInbox fetches unread messages for the given agent recipient via
+// GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
+// default caller identity (same resolution path the CLI would take locally).
+// rig narrows the query to a single rig's provider when set. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListMailInbox(agent, rig string) (CachedRead[[]mail.Message], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]mail.Message]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailParams{}
+	if agent != "" {
+		params.Agent = &agent
+	}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]mail.Message]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]mail.Message]{}, err
+	}
+	return CachedRead[[]mail.Message]{
+		Body:       mailMessagesFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetMail fetches a single message by ID via GET /v0/city/{cityName}/mail/{id}.
+// rig is an optional hint for O(1) lookup when the caller already knows which
+// rig owns the message.
+func (c *Client) GetMail(id, rig string) (CachedRead[mail.Message], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[mail.Message]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailByIdParams{}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailByIdWithResponse(context.Background(), c.cityName, id, params)
+	if err != nil {
+		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[mail.Message]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[mail.Message]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[mail.Message]{
+		Body:       mailMessageFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CountMail fetches total/unread message counts via
+// GET /v0/city/{cityName}/mail/count. An empty agent lets the server choose
+// the default caller identity; rig narrows to a single rig's provider.
+func (c *Client) CountMail(agent, rig string) (CachedRead[MailCountView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MailCountView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailCountParams{}
+	if agent != "" {
+		params.Agent = &agent
+	}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailCountWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[MailCountView]{}, err
+	}
+	return CachedRead[MailCountView]{
+		Body:       mailCountFromGen(resp.JSON200),
 		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
 	}, nil
 }
