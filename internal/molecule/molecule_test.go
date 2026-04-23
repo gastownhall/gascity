@@ -2475,9 +2475,9 @@ func TestNonRootStepBeadType(t *testing.T) {
 	}
 }
 
-// TestInstantiate_DeferredStepsStayGate verifies that graph-workflow steps
-// converted to "gate" by deferBeadRouting are NOT overridden to "step" by
-// the #1039 non-root type coercion. Gate-ness wins.
+// TestInstantiate_DeferredStepsStayGate verifies that deferBeadRouting's
+// "gate" type is preserved for deferred non-root steps in non-graph
+// workflows and is not coerced to "step" by the #1039 non-root type coercion.
 func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
