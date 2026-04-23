@@ -2058,10 +2058,10 @@ func TestGracePeriod_ProtectsManualFromIdleSleep(t *testing.T) {
 			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
 			CreatedAt: now.Add(-3 * time.Minute),
 		}},
-		RunningSessions:    map[string]bool{"s-mc-1": true},
-		ChatIdleTimeout:    2 * time.Minute,
-		ManualGracePeriod:  10 * time.Minute,
-		Now:                now,
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
 	})
 	assertAwake(t, result, "s-mc-1")
 }
@@ -2076,10 +2076,10 @@ func TestGracePeriod_Expired_IdleSleepApplies(t *testing.T) {
 			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
 			CreatedAt: now.Add(-15 * time.Minute),
 		}},
-		RunningSessions:    map[string]bool{"s-mc-1": true},
-		ChatIdleTimeout:    2 * time.Minute,
-		ManualGracePeriod:  10 * time.Minute,
-		Now:                now,
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
 	})
 	assertAsleep(t, result, "s-mc-1")
 }
@@ -2128,10 +2128,10 @@ func TestGracePeriod_ReasonIsGracePeriod(t *testing.T) {
 			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
 			CreatedAt: now.Add(-3 * time.Minute),
 		}},
-		RunningSessions:    map[string]bool{"s-mc-1": true},
-		ChatIdleTimeout:    2 * time.Minute,
-		ManualGracePeriod:  10 * time.Minute,
-		Now:                now,
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
 	})
 	assertReason(t, result, "s-mc-1", "manual")
 }
