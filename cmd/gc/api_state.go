@@ -31,24 +31,25 @@ import (
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu            sync.RWMutex
-	cfg           *config.City
-	sp            runtime.Provider
-	cacheCtx      context.Context
-	beadStores    map[string]beads.Store
-	cityBeadStore beads.Store   // city-level store for session beads
-	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv     events.Provider
-	editor        *configedit.Editor
-	cityName      string
-	cityPath      string
-	version       string
-	startedAt     time.Time
-	ct            crashTracker  // nil if crash tracking disabled
-	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	services      workspacesvc.Registry
-	extmsgSvc     *extmsg.Services
-	adapterReg    *extmsg.AdapterRegistry
+	mu               sync.RWMutex
+	cfg              *config.City
+	sp               runtime.Provider
+	cacheCtx         context.Context
+	beadStores       map[string]beads.Store
+	cityBeadStore    beads.Store   // city-level store for session beads
+	cityMailProv     mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv        events.Provider
+	editor           *configedit.Editor
+	cityName         string
+	cityPath         string
+	version          string
+	startedAt        time.Time
+	ct               crashTracker  // nil if crash tracking disabled
+	pokeCh           chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	services         workspacesvc.Registry
+	extmsgSvc        *extmsg.Services
+	adapterReg       *extmsg.AdapterRegistry
+	maintenanceLoop  *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 }
 
 // newControllerState creates a controllerState with per-rig stores.
@@ -256,6 +257,12 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		Mail:      mailProv,
 		LastRunAt: supervisor.SeedLastRunAt(cs.eventProv),
 	})
+	// Retain the handle so the API layer can expose
+	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
+	// without a separate wiring path.
+	cs.mu.Lock()
+	cs.maintenanceLoop = loop
+	cs.mu.Unlock()
 	go loop.Run(ctx)
 }
 
@@ -322,6 +329,19 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 }
 
 // --- api.State implementation ---
+
+// MaintenanceLoop exposes the Dolt store maintenance loop to the API
+// layer, returning nil when [maintenance.dolt] is disabled. The
+// concrete *supervisor.StoreMaintenanceLoop satisfies
+// api.MaintenanceProvider directly.
+func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.maintenanceLoop == nil {
+		return nil
+	}
+	return cs.maintenanceLoop
+}
 
 // Config returns the current city config snapshot.
 func (cs *controllerState) Config() *config.City {
