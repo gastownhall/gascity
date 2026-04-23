@@ -62,6 +62,11 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 
+	cityStore := s.state.CityBeadStore()
+	if err := cacheLiveOr503(cityStore); err != nil {
+		return nil, err
+	}
+
 	pp := pageParams{Limit: 50}
 	if input.Limit > 0 {
 		pp.Limit = input.Limit
@@ -98,13 +103,15 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	}
 
 	index := s.latestIndex()
+	cacheAge := cacheAgeSeconds(cityStore)
 	if !pp.IsPaging {
 		total := len(convoys)
 		if pp.Limit < len(convoys) {
 			convoys = convoys[:pp.Limit]
 		}
 		return &ListOutput[beads.Bead]{
-			Index: index,
+			Index:     index,
+			CacheAgeS: cacheAge,
 			Body: ListBody[beads.Bead]{
 				Items:         convoys,
 				Total:         total,
@@ -119,7 +126,8 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		page = []beads.Bead{}
 	}
 	return &ListOutput[beads.Bead]{
-		Index: index,
+		Index:     index,
+		CacheAgeS: cacheAge,
 		Body: ListBody[beads.Bead]{
 			Items:         page,
 			Total:         total,
@@ -134,6 +142,11 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (*IndexOutput[convoyGetResponse], error) {
 	id := input.ID
 
+	cityStore := s.state.CityBeadStore()
+	if err := cacheLiveOr503(cityStore); err != nil {
+		return nil, err
+	}
+
 	// Formula-compiled convoy (graph workflow): build the full DAG snapshot.
 	if isGraphConvoyID(s, id) {
 		index := s.latestIndex()
@@ -145,8 +158,9 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			return nil, huma.Error500InternalServerError("workflow snapshot failed")
 		}
 		return &IndexOutput[convoyGetResponse]{
-			Index: index,
-			Body:  convoyGetResponse{workflowSnapshotResponse: snapshot},
+			Index:     index,
+			CacheAgeS: cacheAgeSeconds(cityStore),
+			Body:      convoyGetResponse{workflowSnapshotResponse: snapshot},
 		}, nil
 	}
 
@@ -181,7 +195,8 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 		}
 
 		return &IndexOutput[convoyGetResponse]{
-			Index: s.latestIndex(),
+			Index:     s.latestIndex(),
+			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyGetResponse{
 				Convoy:   &b,
 				Children: children,
@@ -379,6 +394,12 @@ func rollbackConvoyMembershipRemoval(store beads.Store, convoyID string, applied
 // humaHandleConvoyCheck is the Huma-typed handler for GET /v0/convoy/{id}/check.
 func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInput) (*IndexOutput[convoyCheckResponse], error) {
 	id := input.ID
+
+	cityStore := s.state.CityBeadStore()
+	if err := cacheLiveOr503(cityStore); err != nil {
+		return nil, err
+	}
+
 	stores := s.state.BeadStores()
 
 	for _, rigName := range sortedRigNames(stores) {
@@ -409,7 +430,8 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 
 		complete := total > 0 && closed == total
 		return &IndexOutput[convoyCheckResponse]{
-			Index: s.latestIndex(),
+			Index:     s.latestIndex(),
+			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyCheckResponse{
 				ConvoyID: id,
 				Total:    total,
