@@ -527,7 +527,11 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 // doOrderRunExec runs an exec order directly via shell.
 func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) int {
-	timeout := a.TimeoutOrDefault()
+	var maxTimeout time.Duration
+	if cfg != nil {
+		maxTimeout = cfg.Orders.MaxTimeoutDuration()
+	}
+	timeout := effectiveTimeout(a, maxTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

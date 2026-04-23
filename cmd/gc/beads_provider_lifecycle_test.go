@@ -6456,6 +6456,8 @@ type managedDoltConfigForTest struct {
 		Port               int    `yaml:"port"`
 		Host               string `yaml:"host"`
 		MaxConnections     int    `yaml:"max_connections"`
+		BackLog            int    `yaml:"back_log"`
+		MaxConnTimeoutMS   int    `yaml:"max_connections_timeout_millis"`
 		ReadTimeoutMillis  int    `yaml:"read_timeout_millis"`
 		WriteTimeoutMillis int    `yaml:"write_timeout_millis"`
 	} `yaml:"listener"`

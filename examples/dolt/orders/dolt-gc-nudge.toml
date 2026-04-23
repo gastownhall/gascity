@@ -3,4 +3,4 @@ description = "Size-triggered CALL DOLT_GC() when a Dolt database grows past thr
 trigger = "cooldown"
 interval = "6h"
 exec = "gc dolt gc-nudge"
-timeout = "35m"
+timeout = "24h"

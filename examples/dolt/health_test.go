@@ -542,11 +542,15 @@ func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, por
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	payload := []byte(fmt.Sprintf(
 		`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
 		pid,
 		port,
-		filepath.Join(cityPath, ".beads", "dolt"),
+		dataDir,
 	))
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
 		t.Fatal(err)

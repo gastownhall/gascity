@@ -50,6 +50,72 @@ prefix = "fe"
 	}
 }
 
+func TestManagedDoltOpsCheckSkipKeepsCityManagedWorkspaceEnabled(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Rigs: nil}
+	if managedDoltOpsCheckSkip(cityDir, cfg, nil) {
+		t.Fatal("managedDoltOpsCheckSkip() = true, want false for city-managed workspace without rigs")
+	}
+}
+
+func TestManagedDoltOpsCheckSkipOnConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !managedDoltOpsCheckSkip(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("managedDoltOpsCheckSkip() = false, want true when city config failed to load")
+	}
+}
+
+func TestManagedDoltOpsCheckUsesDoctorApplicabilityOnConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if managedDoltOpsCheckSkip(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("managedDoltOpsCheckSkip() = true, want false when broken city still has managed bd metadata")
+	}
+	if !doctor.ManagedLocalDoltChecksApplicableForConfig(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("doctor applicability = false, want true for same broken managed city")
+	}
+}
+
+func TestManagedDoltOpsCheckDiscoversRigMetadataOnConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if managedDoltOpsCheckSkip(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("managedDoltOpsCheckSkip() = true, want false when broken city still has managed rig metadata")
+	}
+}
+
 func TestDoDoctorRunsCityDoltCheckForInheritedBdRigUnderFileBackedCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

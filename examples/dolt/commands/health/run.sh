@@ -123,15 +123,20 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
-    # Reject names with anything outside [A-Za-z0-9_] before interpolating
-    # into the SQL identifier. Dolt permits directory names that shell
+    # Reject names with anything outside [A-Za-z0-9_-] before interpolating
+    # into the SQL identifier. The first byte must still be alnum/underscore
+    # so the command-side contract matches gc-nudge and avoids option-shaped
+    # names. Dolt permits directory names that shell
     # basename happily returns (e.g. backticks, semicolons) but which
     # would break out of the identifier and execute attacker-chosen SQL
     # as the patrol user. Not an external-attack surface today — data
     # directories are server-controlled — but fragile enough under
     # config drift that it's worth skipping rather than probing.
     case "$name" in
-      *[!A-Za-z0-9_]*|'') continue ;;
+      [A-Za-z0-9_]*)
+        case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
+        ;;
+      *) continue ;;
     esac
     # Count commits via SQL (bounded). 0 on timeout or error — keep
     # going rather than hang the whole report. Extract the first

@@ -34,10 +34,11 @@ and verifying the result.
 - **Free disk space.** Dolt GC rewrites chunks into a new store before
   swapping; budget at least **2× the current `.dolt/` size** in free space
   on the same filesystem.
-- **Dolt 1.75.0 or newer.** This matches the floor the `dolt-version`
-  doctor check warns below and ensures default-on auto-GC + archive
-  storage. Check with `dolt version`. If your binary rejects
-  `--archive-level=1` (rare on 1.75+), drop the flag and run plain
+- **Dolt 1.86.1 or newer.** This matches the floor enforced by Gas City's
+  managed Dolt tooling and ensures the listener/config knobs used by the
+  pack plus modern auto-GC behavior are available. Check with
+  `dolt version`. If your binary rejects `--archive-level=1` (rare on
+  modern releases), drop the flag and run plain
   `dolt gc` — archive compression is default-on in 1.75+ so the flag is
   an optimization, not a requirement.
 
@@ -80,7 +81,8 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 ## Prevention
 
-- **Keep Dolt at 1.75.0 or newer.** This is what the `dolt-version` doctor check warns below; newer releases ship improved auto-GC
+- **Keep Dolt at 1.86.1 or newer.** This matches Gas City's managed-Dolt
+  floor; newer releases ship improved auto-GC
   heuristics and default archive compression.
 - **Let the dolt pack's `dolt-gc-nudge` order run continuously.** It
   ships embedded in the dolt pack and fires every 6h by default. The
@@ -91,9 +93,9 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   via the `GC_DOLT_GC_THRESHOLD_BYTES` environment variable
   (default: 2 GiB) in the city's environment.
 - **Mind `orders.max_timeout` if you set one.** The nudge order asks
-  for a 35-minute timeout to accommodate `CALL DOLT_GC()` on large
-  stores. A city-level `orders.max_timeout` below 35m will cap the
-  nudge and may kill an in-progress GC — raise the cap or leave it
+  for a 24-hour timeout to accommodate serialized `CALL DOLT_GC()` runs
+  on large stores. A city-level `orders.max_timeout` below 24h will cap the
+  nudge and may kill an in-progress GC; raise the cap or leave it
   unset if you want unattended recovery on big databases.
 - **Run `gc doctor` regularly.** A daily cron or CI job is enough. The
   `dolt-noms-size` check gives early warning well before users notice.

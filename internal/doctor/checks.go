@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -871,7 +874,12 @@ func activeBDStoreFromMetadata(path string) (string, string) {
 }
 
 func sameDoctorScope(a, b string) bool {
-	return filepath.Clean(a) == filepath.Clean(b)
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && filepath.Clean(resolvedA) == filepath.Clean(resolvedB)
 }
 
 func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRepos []string) []string {
@@ -1566,36 +1574,573 @@ const (
 	doltNomsErrorBytes = int64(20) * 1024 * 1024 * 1024 // 20 GB
 )
 
-// Minimum and recommended Dolt versions for managed operation.
-const (
-	doltMinVersion         = "1.50.0"
-	doltRecommendedVersion = "1.75.0"
-)
+var doltVersionCommandTimeout = 10 * time.Second
+
+const doltDirMeasureTimeout = 60 * time.Second
 
 // resolveManagedDoltDataDir returns the effective Dolt data directory for the
-// managed provider, honoring the GC_DOLT_DATA_DIR override used by
-// cmd/gc/dolt_runtime_layout.go.
+// managed provider. Doctor resolves the inspected city from disk, not ambient
+// GC_DOLT_* shell overrides that may point at a different city.
 func resolveManagedDoltDataDir(cityPath string) string {
-	if v := strings.TrimSpace(os.Getenv("GC_DOLT_DATA_DIR")); v != "" {
-		return v
+	if dataDir := publishedManagedDoltDataDir(cityPath); dataDir != "" {
+		return dataDir
 	}
-	return filepath.Join(cityPath, ".beads", "dolt")
+	beadsDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if info, err := os.Stat(beadsDataDir); err == nil && info.IsDir() {
+		return beadsDataDir
+	}
+
+	packDataDir := filepath.Join(doctorDoltPackStateDir(cityPath), "dolt-data")
+	legacyDataDir := filepath.Join(cityPath, ".gc", "dolt-data")
+	if info, err := os.Stat(legacyDataDir); err == nil && info.IsDir() {
+		return legacyDataDir
+	}
+	if info, err := os.Stat(doctorDoltPackStateDir(cityPath)); err == nil && info.IsDir() {
+		return packDataDir
+	}
+	return packDataDir
 }
 
 // resolveManagedDoltConfigPath returns the effective path to the managed
-// dolt-config.yaml, honoring the GC_DOLT_CONFIG_FILE override used by
-// cmd/gc/dolt_runtime_layout.go.
+// dolt-config.yaml for the inspected city, ignoring ambient GC_DOLT_* shell
+// overrides that may point at a different city.
 func resolveManagedDoltConfigPath(cityPath string) string {
-	if v := strings.TrimSpace(os.Getenv("GC_DOLT_CONFIG_FILE")); v != "" {
-		return v
+	return filepath.Join(doctorDoltPackStateDir(cityPath), "dolt-config.yaml")
+}
+
+type managedDoltDoctorRuntimeState struct {
+	Running bool   `json:"running"`
+	PID     int    `json:"pid"`
+	Port    int    `json:"port"`
+	DataDir string `json:"data_dir"`
+}
+
+func publishedManagedDoltDataDir(cityPath string) string {
+	stateFile := filepath.Join(doctorDoltPackStateDir(cityPath), "dolt-state.json")
+	data, err := os.ReadFile(stateFile) //nolint:gosec // path is derived from managed city layout
+	if err != nil {
+		return ""
 	}
-	return filepath.Join(citylayout.PackStateDir(cityPath, "dolt"), "dolt-config.yaml")
+	var state managedDoltDoctorRuntimeState
+	if json.Unmarshal(data, &state) != nil {
+		return ""
+	}
+	dataDir := strings.TrimSpace(state.DataDir)
+	if dataDir == "" {
+		return ""
+	}
+	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+		return ""
+	}
+	if state.Running && !validPublishedManagedDoltDoctorState(cityPath, state, dataDir) {
+		return ""
+	}
+	if !state.Running && managedDoltDoctorDefaultDataDirExists(cityPath, dataDir) {
+		return ""
+	}
+	return dataDir
+}
+
+func doctorDoltPackStateDir(cityPath string) string {
+	return filepath.Join(doctorCityRuntimeDir(cityPath), "packs", "dolt")
+}
+
+func doctorCityRuntimeDir(cityPath string) string {
+	runtimeDir := strings.TrimSpace(os.Getenv("GC_CITY_RUNTIME_DIR"))
+	if runtimeDir != "" {
+		for _, key := range []string{"GC_CITY_PATH", "GC_CITY"} {
+			if sameDoctorScope(strings.TrimSpace(os.Getenv(key)), cityPath) {
+				return filepath.Clean(runtimeDir)
+			}
+		}
+	}
+	return citylayout.RuntimeDataDir(cityPath)
+}
+
+func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoctorRuntimeState, dataDir string) bool {
+	if state.PID <= 0 || state.Port <= 0 {
+		return false
+	}
+	if !pidutil.Alive(state.PID) {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(state.Port)), 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	holderPID := managedDoltDoctorPortHolderPID(state.Port)
+	if holderPID > 0 {
+		return holderPID == state.PID
+	}
+	return managedDoltDoctorProcessOwnsRuntime(state.PID, dataDir, resolveManagedDoltConfigPath(cityPath))
+}
+
+func managedDoltDoctorProcessOwnsRuntime(pid int, dataDir, configPath string) bool {
+	cmdline := managedDoltDoctorProcCmdline(pid)
+	if cmdline != "" {
+		if strings.Contains(cmdline, dataDir) || strings.Contains(cmdline, configPath) {
+			return true
+		}
+	}
+	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+	if err == nil && sameDoctorScope(cwd, dataDir) {
+		return true
+	}
+	return false
+}
+
+func managedDoltDoctorProcCmdline(pid int) string {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err == nil {
+		return strings.ReplaceAll(string(data), "\x00", " ")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func managedDoltDoctorPortHolderPID(port int) int {
+	if port <= 0 {
+		return 0
+	}
+	if pid, checked := managedDoltDoctorPortHolderFromProc(uint16(port)); checked {
+		return pid
+	}
+	return managedDoltDoctorPortHolderFromLsof(port)
+}
+
+func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
+	inodes := map[string]struct{}{}
+	checked := false
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		checked = true
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 10 || fields[3] != "0A" {
+				continue
+			}
+			_, portHex, ok := strings.Cut(fields[1], ":")
+			if !ok {
+				continue
+			}
+			gotPort, err := strconv.ParseUint(portHex, 16, 16)
+			if err != nil || uint16(gotPort) != port {
+				continue
+			}
+			inodes[fields[9]] = struct{}{}
+		}
+	}
+	if !checked {
+		return 0, false
+	}
+	if len(inodes) == 0 {
+		return 0, true
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, true
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !pidutil.Alive(pid) {
+			continue
+		}
+		fdDir := filepath.Join("/proc", entry.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
+				continue
+			}
+			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
+			if _, ok := inodes[inode]; ok {
+				return pid, true
+			}
+		}
+	}
+	return 0, true
+}
+
+func managedDoltDoctorPortHolderFromLsof(port int) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	if err != nil {
+		return 0
+	}
+	for _, field := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(field)
+		if err == nil && pidutil.Alive(pid) {
+			return pid
+		}
+	}
+	return 0
+}
+
+func managedDoltDoctorDefaultDataDirExists(cityPath, dataDir string) bool {
+	for _, candidate := range []string{
+		filepath.Join(cityPath, ".beads", "dolt"),
+		filepath.Join(cityPath, ".gc", "dolt-data"),
+	} {
+		if sameDoctorScope(candidate, dataDir) {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+type doltDataScanTarget struct {
+	Database string
+	ScanRoot string
+	Orphan   bool
+}
+
+func isManagedDoltSystemDatabase(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "information_schema", "mysql", "dolt_cluster", "__gc_probe":
+		return true
+	default:
+		return false
+	}
+}
+
+func isManagedDoltUserDatabase(name string) bool {
+	name = strings.TrimSpace(name)
+	if isManagedDoltSystemDatabase(name) {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		valid := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
+		if i > 0 {
+			valid = valid || c == '-'
+		}
+		if !valid {
+			return false
+		}
+	}
+	return true
+}
+
+func appendDoltDataScanTarget(targets *[]doltDataScanTarget, seenRoots map[string]struct{}, db, scanRoot string, orphan bool) {
+	if _, seen := seenRoots[scanRoot]; seen {
+		return
+	}
+	seenRoots[scanRoot] = struct{}{}
+	*targets = append(*targets, doltDataScanTarget{
+		Database: db,
+		ScanRoot: scanRoot,
+		Orphan:   orphan,
+	})
+}
+
+func managedDoltScopeRootsFromConfig(cityPath string, cfg *config.City) []string {
+	scopeRoots := []string{cityPath}
+	if cfg == nil {
+		return scopeRoots
+	}
+	for _, rig := range cfg.Rigs {
+		rigPath := strings.TrimSpace(rig.Path)
+		if rigPath == "" {
+			continue
+		}
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		scopeRoots = append(scopeRoots, rigPath)
+	}
+	return scopeRoots
+}
+
+func managedDoltScopeRootsForConfig(cityPath string, cfg *config.City, cfgErr error) []string {
+	if cfgErr != nil {
+		return managedDoltScopeRootsFromFilesystem(cityPath)
+	}
+	return managedDoltScopeRootsFromConfig(cityPath, cfg)
+}
+
+func managedDoltScopeRootsFromFilesystem(cityPath string) []string {
+	scopeRoots := []string{cityPath}
+	seen := map[string]struct{}{filepath.Clean(cityPath): {}}
+	err := filepath.WalkDir(cityPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			switch name {
+			case ".git", ".gc":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if name != "metadata.json" || filepath.Base(filepath.Dir(path)) != ".beads" {
+			return nil
+		}
+		scopeRoot := filepath.Clean(filepath.Dir(filepath.Dir(path)))
+		if _, ok := seen[scopeRoot]; ok {
+			return nil
+		}
+		seen[scopeRoot] = struct{}{}
+		scopeRoots = append(scopeRoots, scopeRoot)
+		return nil
+	})
+	if err != nil {
+		return []string{cityPath}
+	}
+	return scopeRoots
+}
+
+func managedDoltScopeRoots(cityPath string) []string {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return managedDoltScopeRootsFromFilesystem(cityPath)
+	}
+	return managedDoltScopeRootsFromConfig(cityPath, cfg)
+}
+
+// managedLocalDoltScanTargets returns distinct local Dolt databases referenced
+// by the workspace plus orphaned on-disk databases under the managed data dir.
+// External targets are skipped because their disk footprint is not local state.
+func managedLocalDoltScanTargets(cityPath string) ([]doltDataScanTarget, bool) {
+	return managedLocalDoltScanTargetsForScopeRoots(cityPath, managedDoltScopeRoots(cityPath))
+}
+
+func managedLocalDoltScanTargetsForScopeRoots(cityPath string, scopeRoots []string) ([]doltDataScanTarget, bool) {
+	dataDir := resolveManagedDoltDataDir(cityPath)
+	seenRoots := map[string]struct{}{}
+	targets := make([]doltDataScanTarget, 0, len(scopeRoots))
+	unresolved := false
+	for _, scopeRoot := range scopeRoots {
+		target, _, active, err := validateBDStoreTarget(cityPath, scopeRoot)
+		if err == nil {
+			if !active || target.External {
+				continue
+			}
+			db := strings.TrimSpace(target.Database)
+			if !isManagedDoltUserDatabase(db) {
+				continue
+			}
+			scanRoot := dataDir
+			if db != "" {
+				scanRoot = filepath.Join(dataDir, db, ".dolt")
+			}
+			appendDoltDataScanTarget(&targets, seenRoots, db, scanRoot, false)
+			continue
+		}
+		if !active {
+			continue
+		}
+
+		resolved, resolveErr := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+		if resolveErr != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
+			unresolved = true
+			continue
+		}
+		switch resolved.State.EndpointOrigin {
+		case contract.EndpointOriginManagedCity, contract.EndpointOriginInheritedCity:
+		default:
+			continue
+		}
+		db, ok, dbErr := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+		if dbErr != nil {
+			unresolved = true
+			continue
+		}
+		if !ok {
+			db = "beads"
+		}
+		db = strings.TrimSpace(db)
+		if !isManagedDoltUserDatabase(db) {
+			continue
+		}
+		scanRoot := dataDir
+		if db != "" {
+			scanRoot = filepath.Join(dataDir, db, ".dolt")
+		}
+		appendDoltDataScanTarget(&targets, seenRoots, db, scanRoot, false)
+	}
+
+	if entries, err := os.ReadDir(dataDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			db := entry.Name()
+			if isManagedDoltSystemDatabase(db) {
+				continue
+			}
+			scanRoot := filepath.Join(dataDir, db, ".dolt")
+			if info, statErr := os.Stat(scanRoot); statErr != nil || !info.IsDir() {
+				continue
+			}
+			appendDoltDataScanTarget(&targets, seenRoots, db, scanRoot, true)
+		}
+	} else if !os.IsNotExist(err) {
+		unresolved = true
+	}
+
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Database == targets[j].Database {
+			return targets[i].ScanRoot < targets[j].ScanRoot
+		}
+		return targets[i].Database < targets[j].Database
+	})
+	return targets, unresolved
+}
+
+func workspaceHasLocalManagedDoltTarget(cityPath string) bool {
+	targets, _ := managedLocalDoltScanTargets(cityPath)
+	return len(targets) > 0
+}
+
+// ManagedLocalDoltChecksApplicableForConfig reports whether managed-local Dolt
+// doctor checks apply, using an already-loaded city config when available.
+func ManagedLocalDoltChecksApplicableForConfig(cityPath string, cfg *config.City, cfgErr error) bool {
+	return managedLocalDoltChecksApplicableForScopeRoots(cityPath, managedDoltScopeRootsForConfig(cityPath, cfg, cfgErr), cfgErr != nil)
+}
+
+// ManagedLocalDoltChecksApplicable reports whether managed-local Dolt doctor
+// checks apply for a city path.
+func ManagedLocalDoltChecksApplicable(cityPath string) bool {
+	return managedLocalDoltChecksApplicable(cityPath)
+}
+
+func managedLocalDoltChecksApplicable(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return true
+	}
+
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	cityHasConfig := false
+	if info, err := os.Stat(cityConfigPath); err == nil && !info.IsDir() {
+		cityHasConfig = true
+	}
+	if cityHasConfig {
+		cfg, err := config.Load(fsys.OSFS{}, cityConfigPath)
+		if err != nil {
+			return managedLocalDoltChecksApplicableForScopeRoots(cityPath, managedDoltScopeRootsFromFilesystem(cityPath), true)
+		}
+		return managedLocalDoltChecksApplicableForScopeRoots(cityPath, managedDoltScopeRootsFromConfig(cityPath, cfg), false)
+	}
+
+	return managedLocalDoltChecksApplicableForScopeRoots(cityPath, managedDoltScopeRootsFromConfig(cityPath, nil), false)
+}
+
+func managedLocalDoltChecksApplicableForScopeRoots(cityPath string, scopeRoots []string, configLoadErr bool) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return true
+	}
+	cityHasConfig := false
+	if info, err := os.Stat(filepath.Join(cityPath, "city.toml")); err == nil && !info.IsDir() {
+		cityHasConfig = true
+	}
+
+	seenScopes := map[string]struct{}{}
+	for _, scopeRoot := range scopeRoots {
+		scopeRoot = resolveDoctorScopePath(cityPath, scopeRoot)
+		if _, seen := seenScopes[scopeRoot]; seen {
+			continue
+		}
+		seenScopes[scopeRoot] = struct{}{}
+
+		if sameDoctorScope(scopeRoot, cityPath) && !cityHasConfig && !doctorScopeHasBDMetadata(scopeRoot) {
+			continue
+		}
+		if configLoadErr && sameDoctorScope(scopeRoot, cityPath) && !doctorScopeHasBDMetadata(scopeRoot) {
+			continue
+		}
+		if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
+			continue
+		}
+
+		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+		if err != nil {
+			if doctorRawScopeUsesManagedCity(cityPath, scopeRoot) {
+				return true
+			}
+			continue
+		}
+		switch resolved.Kind {
+		case contract.ScopeConfigMissing:
+			return true
+		case contract.ScopeConfigAuthoritative:
+			switch resolved.State.EndpointOrigin {
+			case contract.EndpointOriginManagedCity:
+				return true
+			case contract.EndpointOriginInheritedCity:
+				if inheritedDoctorScopeUsesManagedCity(cityPath) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func inheritedDoctorScopeUsesManagedCity(cityPath string) bool {
+	cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil || cityResolved.Kind != contract.ScopeConfigAuthoritative {
+		return false
+	}
+	return cityResolved.State.EndpointOrigin == contract.EndpointOriginManagedCity
+}
+
+func doctorRawScopeUsesManagedCity(cityPath, scopeRoot string) bool {
+	state, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil || !ok {
+		return false
+	}
+	switch state.EndpointOrigin {
+	case contract.EndpointOriginManagedCity:
+		return true
+	case contract.EndpointOriginInheritedCity:
+		return inheritedDoctorScopeUsesManagedCity(cityPath)
+	default:
+		return false
+	}
+}
+
+func managedDoltRuntimeMaterialized(cityPath string) bool {
+	for _, path := range []string{
+		resolveManagedDoltDataDir(cityPath),
+		filepath.Join(cityPath, ".beads", "dolt"),
+		filepath.Join(cityPath, ".gc", "dolt-data"),
+		doctorDoltPackStateDir(cityPath),
+	} {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // sumDirBytes walks root recursively and returns the total size of regular
 // files found. Missing roots return (0, false, nil); any other walk error is
 // returned.
 func sumDirBytes(root string) (int64, bool, error) {
+	return sumDirBytesWithContext(context.Background(), root)
+}
+
+func sumDirBytesWithContext(ctx context.Context, root string) (int64, bool, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1608,6 +2153,9 @@ func sumDirBytes(root string) (int64, bool, error) {
 	}
 	var total int64
 	err = filepath.WalkDir(root, func(_ string, d fs.DirEntry, walkErr error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -1629,6 +2177,54 @@ func sumDirBytes(root string) (int64, bool, error) {
 	return total, true, nil
 }
 
+func boundedSumDirBytes(root string) (int64, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), doltDirMeasureTimeout)
+	defer cancel()
+	return sumDirBytesWithContext(ctx, root)
+}
+
+func duDirBytes(root string) (int64, bool, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if !info.IsDir() {
+		return 0, false, fmt.Errorf("%s is not a directory", root)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), doltDirMeasureTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "du", "-sk", root)
+	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		total, exists, fallbackErr := boundedSumDirBytes(root)
+		if fallbackErr != nil {
+			return 0, true, fmt.Errorf("measure dolt data dir: du -sk timed out after %s; fallback walk: %w", doltDirMeasureTimeout, fallbackErr)
+		}
+		return total, exists, nil
+	}
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return boundedSumDirBytes(root)
+		}
+		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: %w", err)
+	}
+
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: empty output")
+	}
+	kb, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: parse %q: %w", fields[0], err)
+	}
+	return kb * 1024, true, nil
+}
+
 func formatGB(bytes int64) string {
 	gb := float64(bytes) / (1024.0 * 1024.0 * 1024.0)
 	return fmt.Sprintf("%.2f GB", gb)
@@ -1637,83 +2233,135 @@ func formatGB(bytes int64) string {
 // DoltNomsSizeCheck warns when the managed Dolt database's on-disk footprint
 // is approaching or exceeds operator-set thresholds.
 type DoltNomsSizeCheck struct {
-	cityPath string
-	skip     bool
+	cityPath        string
+	skip            bool
+	measureDir      func(string) (int64, bool, error)
+	applicableKnown bool
+	applicable      bool
+	scopeRoots      []string
 }
 
 // NewDoltNomsSizeCheck creates a Dolt noms/on-disk size check.
 func NewDoltNomsSizeCheck(cityPath string, skip bool) *DoltNomsSizeCheck {
-	return &DoltNomsSizeCheck{cityPath: cityPath, skip: skip}
+	return &DoltNomsSizeCheck{cityPath: cityPath, skip: skip, measureDir: duDirBytes}
+}
+
+// NewDoltNomsSizeCheckForConfig creates a Dolt size check using preloaded city config.
+func NewDoltNomsSizeCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltNomsSizeCheck {
+	return &DoltNomsSizeCheck{
+		cityPath:        cityPath,
+		skip:            skip,
+		measureDir:      duDirBytes,
+		applicableKnown: true,
+		applicable:      ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+		scopeRoots:      managedDoltScopeRootsForConfig(cityPath, cfg, cfgErr),
+	}
+}
+
+func (c *DoltNomsSizeCheck) managedApplicable() bool {
+	if c.applicableKnown {
+		return c.applicable
+	}
+	return managedLocalDoltChecksApplicable(c.cityPath)
 }
 
 // Name returns the check identifier.
 func (c *DoltNomsSizeCheck) Name() string { return "dolt-noms-size" }
 
-// Run sums bytes under <dataDir>/<database>/.dolt/ and compares to thresholds.
+// Run inspects the workspace's managed local Dolt databases and compares the
+// largest footprint to warning/error thresholds.
 func (c *DoltNomsSizeCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	if c.skip {
+	if c.skip || !c.managedApplicable() {
 		r.Status = StatusOK
-		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
 		return r
 	}
 
-	target, _, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
-	if err != nil {
-		// Let the beads-store / dolt-server checks report resolution errors.
-		r.Status = StatusOK
-		r.Message = "skipped (dolt target unresolved)"
-		return r
+	targets, unresolved := managedLocalDoltScanTargets(c.cityPath)
+	if c.applicableKnown {
+		targets, unresolved = managedLocalDoltScanTargetsForScopeRoots(c.cityPath, c.scopeRoots)
 	}
-	if !active {
+	if len(targets) == 0 {
+		if unresolved {
+			// Let the beads-store / dolt-server checks report resolution errors.
+			r.Status = StatusOK
+			r.Message = "skipped (dolt target unresolved)"
+			return r
+		}
 		r.Status = StatusOK
-		r.Message = "skipped (not a managed dolt backend)"
-		return r
-	}
-	if target.External {
-		// External endpoints (DoltHub, remote DB) aren't our disk to measure;
-		// any local `.dolt/` tree would be stale from a prior managed config.
-		r.Status = StatusOK
-		r.Message = "skipped (external dolt endpoint)"
+		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
 		return r
 	}
 
-	dataDir := resolveManagedDoltDataDir(c.cityPath)
-	db := strings.TrimSpace(target.Database)
-	var scanRoot string
-	switch {
-	case db != "":
-		scanRoot = filepath.Join(dataDir, db, ".dolt")
-	default:
-		// No database pinned — sum the entire data dir (still meaningful).
-		scanRoot = dataDir
+	var (
+		worstTarget doltDataScanTarget
+		worstBytes  int64
+		totalBytes  int64
+		existsCount int
+	)
+	measureDir := c.measureDir
+	if measureDir == nil {
+		measureDir = duDirBytes
 	}
-
-	total, exists, err := sumDirBytes(scanRoot)
-	if err != nil {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("scan dolt data dir: %v", err)
-		return r
+	for _, target := range targets {
+		total, exists, err := measureDir(target.ScanRoot)
+		if err != nil {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("scan dolt data dir: %v", err)
+			return r
+		}
+		if !exists {
+			continue
+		}
+		existsCount++
+		totalBytes += total
+		if total > worstBytes {
+			worstBytes = total
+			worstTarget = target
+		}
 	}
-	if !exists {
+	if existsCount == 0 {
 		r.Status = StatusOK
 		r.Message = "no dolt data yet"
 		return r
 	}
 
-	size := formatGB(total)
+	targetLabel := strings.TrimSpace(worstTarget.Database)
+	if targetLabel == "" {
+		targetLabel = "managed dolt data"
+	} else if worstTarget.Orphan {
+		targetLabel = "orphan database " + targetLabel
+	}
+	size := formatGB(worstBytes)
+	scopeNote := ""
+	if existsCount > 1 {
+		scopeNote = fmt.Sprintf(" (largest of %d databases)", existsCount)
+	}
 	switch {
-	case total >= doltNomsErrorBytes:
+	case worstBytes >= doltNomsErrorBytes:
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt noms directory is %s — excessive; recovery recommended", size)
+		r.Message = fmt.Sprintf("dolt noms directory for %s is %s%s — excessive; recovery recommended", targetLabel, size, scopeNote)
 		r.FixHint = "see docs/troubleshooting/dolt-bloat-recovery.md"
-	case total >= doltNomsWarnBytes:
+	case totalBytes >= doltNomsErrorBytes:
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("aggregate dolt data footprint is %s across %d databases — excessive; recovery recommended", formatGB(totalBytes), existsCount)
+		r.FixHint = "see docs/troubleshooting/dolt-bloat-recovery.md"
+	case worstBytes >= doltNomsWarnBytes:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("dolt noms directory is %s — approaching threshold", size)
+		r.Message = fmt.Sprintf("dolt noms directory for %s is %s%s — approaching threshold", targetLabel, size, scopeNote)
+		r.FixHint = "see docs/troubleshooting/dolt-bloat-recovery.md"
+	case totalBytes >= doltNomsWarnBytes:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("aggregate dolt data footprint is %s across %d databases — approaching threshold", formatGB(totalBytes), existsCount)
 		r.FixHint = "see docs/troubleshooting/dolt-bloat-recovery.md"
 	default:
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("dolt data footprint %s", size)
+		if existsCount > 1 {
+			r.Message = fmt.Sprintf("aggregate dolt data footprint is %s across %d databases (largest %s: %s)", formatGB(totalBytes), existsCount, targetLabel, size)
+		} else {
+			r.Message = fmt.Sprintf("dolt data footprint for %s %s%s", targetLabel, size, scopeNote)
+		}
 	}
 	return r
 }
@@ -1724,20 +2372,23 @@ func (c *DoltNomsSizeCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *DoltNomsSizeCheck) Fix(_ *CheckContext) error { return nil }
 
-// doltConfigExpectedValues captures the keys and expected values asserted by
-// DoltConfigCheck against the managed dolt-config.yaml. Keys are
-// dotted paths into the YAML document.
-//
-// Any key added here must match the value emitted by
-// writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go.
-func doltConfigExpectedValues() []struct {
+// DoltConfigExpectedValue is a dotted YAML path and value expected in the
+// managed dolt-config.yaml.
+type DoltConfigExpectedValue struct {
 	Path  string
 	Value any
-} {
-	return []struct {
-		Path  string
-		Value any
-	}{
+}
+
+// DoltConfigExpectedValues returns the load-bearing managed Dolt config keys
+// asserted by DoltConfigCheck.
+//
+// This is intentionally a contract subset, not a byte-for-byte mirror of
+// writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go. It covers the keys
+// whose drift would change managed runtime behavior materially. Dynamic values
+// such as data_dir are checked by DoltConfigCheck because they depend on the
+// inspected city path.
+func DoltConfigExpectedValues() []DoltConfigExpectedValue {
+	return []DoltConfigExpectedValue{
 		{"behavior.auto_gc_behavior.enable", true},
 		{"behavior.auto_gc_behavior.archive_level", 1},
 		{"listener.read_timeout_millis", 300000},
@@ -1786,15 +2437,34 @@ func yamlIntEqual(got any, want int) bool {
 }
 
 // DoltConfigCheck verifies the managed dolt-config.yaml exists and contains
-// the expected keys/values written by writeManagedDoltConfigFile.
+// the load-bearing keys/values required by Gas City's managed Dolt contract.
 type DoltConfigCheck struct {
-	cityPath string
-	skip     bool
+	cityPath        string
+	skip            bool
+	applicableKnown bool
+	applicable      bool
 }
 
 // NewDoltConfigCheck creates a managed Dolt config drift check.
 func NewDoltConfigCheck(cityPath string, skip bool) *DoltConfigCheck {
 	return &DoltConfigCheck{cityPath: cityPath, skip: skip}
+}
+
+// NewDoltConfigCheckForConfig creates a managed Dolt config drift check using preloaded city config.
+func NewDoltConfigCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltConfigCheck {
+	return &DoltConfigCheck{
+		cityPath:        cityPath,
+		skip:            skip,
+		applicableKnown: true,
+		applicable:      ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+	}
+}
+
+func (c *DoltConfigCheck) managedApplicable() bool {
+	if c.applicableKnown {
+		return c.applicable
+	}
+	return managedLocalDoltChecksApplicable(c.cityPath)
 }
 
 // Name returns the check identifier.
@@ -1803,9 +2473,9 @@ func (c *DoltConfigCheck) Name() string { return "dolt-config" }
 // Run parses the managed dolt-config.yaml and verifies required keys/values.
 func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	if c.skip {
+	if c.skip || !c.managedApplicable() {
 		r.Status = StatusOK
-		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
 		return r
 	}
 
@@ -1813,6 +2483,11 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	data, err := os.ReadFile(path) //nolint:gosec // path is derived from city layout
 	if err != nil {
 		if os.IsNotExist(err) {
+			if !managedDoltRuntimeMaterialized(c.cityPath) {
+				r.Status = StatusOK
+				r.Message = "managed dolt-config.yaml not yet generated (run gc start to materialize)"
+				return r
+			}
 			r.Status = StatusWarning
 			r.Message = "managed dolt-config.yaml not found"
 			r.FixHint = "run gc start (or gc dolt restart) to regenerate"
@@ -1833,7 +2508,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	var drifted []string
-	for _, exp := range doltConfigExpectedValues() {
+	for _, exp := range DoltConfigExpectedValues() {
 		got, present := lookupYAMLPath(doc, exp.Path)
 		if !present {
 			drifted = append(drifted, exp.Path+" (missing)")
@@ -1853,6 +2528,14 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 			if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %v)", exp.Path, got, want))
 			}
+		}
+	}
+	if got, present := lookupYAMLPath(doc, "data_dir"); !present {
+		drifted = append(drifted, "data_dir (missing)")
+	} else {
+		want := resolveManagedDoltDataDir(c.cityPath)
+		if !sameDoctorScope(fmt.Sprintf("%v", got), want) {
+			drifted = append(drifted, fmt.Sprintf("data_dir (got %v, want %s)", got, want))
 		}
 	}
 
@@ -1959,24 +2642,60 @@ func compareDoltVersion(a, b doltVersionInfo) int {
 	return 0
 }
 
-// DoltVersionCheck shells out to `dolt version` and reports drift from the
-// minimum and recommended versions for managed operation.
+// DoltVersionCheck shells out to `dolt version` and verifies the managed-Dolt
+// minimum version requirement.
 type DoltVersionCheck struct {
+	cityPath string
 	// versionOutput is injectable for tests. Nil means exec `dolt version`.
-	versionOutput func() (string, error)
+	versionOutput   func() (string, error)
+	skip            bool
+	applicableKnown bool
+	applicable      bool
 }
 
 // NewDoltVersionCheck creates a dolt binary version check.
-func NewDoltVersionCheck() *DoltVersionCheck {
-	return &DoltVersionCheck{}
+func NewDoltVersionCheck(skip ...bool) *DoltVersionCheck {
+	return NewScopedDoltVersionCheck("", skip...)
+}
+
+// NewScopedDoltVersionCheck creates a dolt binary version check for a
+// specific workspace scope so external-only targets can be skipped cleanly.
+func NewScopedDoltVersionCheck(cityPath string, skip ...bool) *DoltVersionCheck {
+	c := &DoltVersionCheck{cityPath: cityPath}
+	if len(skip) > 0 {
+		c.skip = skip[0]
+	}
+	return c
+}
+
+// NewScopedDoltVersionCheckForConfig creates a scoped Dolt version check using preloaded city config.
+func NewScopedDoltVersionCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltVersionCheck {
+	return &DoltVersionCheck{
+		cityPath:        cityPath,
+		skip:            skip,
+		applicableKnown: true,
+		applicable:      ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+	}
+}
+
+func (c *DoltVersionCheck) managedApplicable() bool {
+	if c.applicableKnown {
+		return c.applicable
+	}
+	return managedLocalDoltChecksApplicable(c.cityPath)
 }
 
 // Name returns the check identifier.
 func (c *DoltVersionCheck) Name() string { return "dolt-version" }
 
-// Run invokes `dolt version` and compares against {min, recommended}.
+// Run invokes `dolt version` and compares against the managed-Dolt minimum.
 func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if c.skip || (c.cityPath != "" && !c.managedApplicable()) {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
+		return r
+	}
 
 	getOutput := c.versionOutput
 	if getOutput == nil {
@@ -1985,8 +2704,13 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 			if lookErr != nil {
 				return "", lookErr
 			}
-			cmd := exec.Command(path, "version")
+			ctx, cancel := context.WithTimeout(context.Background(), doltVersionCommandTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, path, "version")
 			out, err := cmd.CombinedOutput()
+			if ctx.Err() == context.DeadlineExceeded {
+				return string(out), fmt.Errorf("dolt version timed out after %s", doltVersionCommandTimeout)
+			}
 			return string(out), err
 		}
 	}
@@ -2010,22 +2734,16 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	minVer, _ := parseDoltVersion(doltMinVersion)
-	recVer, _ := parseDoltVersion(doltRecommendedVersion)
+	minVer, _ := parseDoltVersion(doltversion.ManagedMin)
 
-	switch {
-	case compareDoltVersion(info, minVer) < 0:
+	if compareDoltVersion(info, minVer) < 0 {
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltMinVersion)
+		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltversion.ManagedMin)
 		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
-	case compareDoltVersion(info, recVer) < 0:
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("dolt version %s is below recommended %s; upgrade for default-on auto-GC + archive storage", info.Raw, doltRecommendedVersion)
-		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
-	default:
-		r.Status = StatusOK
-		r.Message = fmt.Sprintf("dolt %s", info.Raw)
+		return r
 	}
+	r.Status = StatusOK
+	r.Message = fmt.Sprintf("dolt %s", info.Raw)
 	return r
 }
 
