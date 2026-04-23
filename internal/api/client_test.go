@@ -940,6 +940,118 @@ func TestClientListRigs_ConnErrorFallback(t *testing.T) {
 	}
 }
 
+func TestClientListSessions(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/sessions" {
+			t.Fatalf("path = %q, want /v0/city/alpha/sessions", r.URL.Path)
+		}
+		// Verify query parameters were propagated by the wrapper.
+		if got, want := r.URL.Query().Get("state"), "active"; got != want {
+			t.Errorf("state query = %q, want %q", got, want)
+		}
+		if got, want := r.URL.Query().Get("template"), "mayor"; got != want {
+			t.Errorf("template query = %q, want %q", got, want)
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2.5")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{
+					"id":           "gc-abc",
+					"template":     "mayor",
+					"state":        "active",
+					"title":        "Overseer",
+					"session_name": "mayor",
+					"provider":     "claude",
+					"created_at":   "2026-04-23T10:00:00Z",
+					"attached":     true,
+					"running":      true,
+				},
+			},
+			"total": 1,
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.ListSessions("active", "mayor", false)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(got.Body) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Body))
+	}
+	if got.Body[0].ID != "gc-abc" || got.Body[0].Template != "mayor" {
+		t.Errorf("got[0] = %+v", got.Body[0])
+	}
+	if got.AgeSeconds != 2.5 {
+		t.Errorf("AgeSeconds = %v, want 2.5", got.AgeSeconds)
+	}
+}
+
+func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "cache_not_live: supervisor cache is priming",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListSessions("", "", false)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientGetSession(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/session/mayor" {
+			t.Fatalf("path = %q, want /v0/city/alpha/session/mayor", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("peek"); got != "true" {
+			t.Errorf("peek query = %q, want true", got)
+		}
+		if got := r.URL.Query().Get("peek_lines"); got != "25" {
+			t.Errorf("peek_lines query = %q, want 25", got)
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "0.5")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"id":           "gc-xyz",
+			"template":     "mayor",
+			"state":        "active",
+			"title":        "",
+			"session_name": "mayor",
+			"provider":     "claude",
+			"created_at":   "2026-04-23T10:00:00Z",
+			"attached":     true,
+			"running":      true,
+			"last_output":  "hello\n",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.GetSession("mayor", true, 25)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.Body.ID != "gc-xyz" || got.Body.LastOutput != "hello\n" {
+		t.Errorf("body = %+v", got.Body)
+	}
+	if got.AgeSeconds != 0.5 {
+		t.Errorf("AgeSeconds = %v, want 0.5", got.AgeSeconds)
+	}
+}
+
 func TestCacheAgeFromResponse(t *testing.T) {
 	cases := []struct {
 		name   string

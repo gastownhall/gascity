@@ -253,7 +253,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false)
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -310,7 +310,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -534,9 +534,17 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rresp)
 }
 
+// defaultSessionPeekLines is the preview line count used when a caller
+// requests peek=true without specifying peek_lines. Matches the long-standing
+// 5-line dashboard preview.
+const defaultSessionPeekLines = 5
+
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool) {
+//
+// peekLines controls the line count for the preview when wantPeek is true.
+// Zero means "use default" (defaultSessionPeekLines).
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
 	if info.State != session.StateActive {
 		return
 	}
@@ -591,9 +599,15 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 	}
 
-	// Peek preview (opt-in, only when running).
+	// Peek preview (opt-in, only when running). peekLines=0 means "use
+	// default" so existing callers that omit the query param keep the
+	// historical 5-line preview.
 	if wantPeek && resp.Running && peekHandle != nil {
-		if output, err := peekHandle.Peek(context.Background(), 5); err == nil {
+		lines := peekLines
+		if lines <= 0 {
+			lines = defaultSessionPeekLines
+		}
+		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
 			resp.LastOutput = output
 		}
 	}

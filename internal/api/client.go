@@ -473,6 +473,78 @@ func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (C
 	}, nil
 }
 
+// ListSessions fetches the current set of sessions via
+// GET /v0/city/{cityName}/sessions. The stateFilter and templateFilter
+// arguments correspond to the state/template query parameters (empty means
+// omit). peek controls the optional last-output preview. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age from
+// the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
+// on --json output and a staleness banner on human output.
+func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]SessionView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameSessionsParams{}
+	if stateFilter != "" {
+		params.State = &stateFilter
+	}
+	if templateFilter != "" {
+		params.Template = &templateFilter
+	}
+	if peek {
+		params.Peek = &peek
+	}
+	resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]SessionView]{}, err
+	}
+	return CachedRead[[]SessionView]{
+		Body:       sessionsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetSession fetches one session by ID or alias via
+// GET /v0/city/{cityName}/session/{id}. peek=true asks the server to include
+// the last-output preview; peekLines selects the preview line count (0 means
+// "use the server default").
+func (c *Client) GetSession(id string, peek bool, peekLines int) (CachedRead[SessionView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[SessionView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameSessionByIdParams{}
+	if peek {
+		params.Peek = &peek
+	}
+	if peekLines > 0 {
+		pl := int64(peekLines)
+		params.PeekLines = &pl
+	}
+	resp, err := c.cw.GetV0CityByCityNameSessionByIdWithResponse(context.Background(), c.cityName, id, params)
+	if err != nil {
+		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[SessionView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[SessionView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[SessionView]{
+		Body:       sessionViewFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // ListRigs fetches the current set of configured rigs via
 // GET /v0/city/{cityName}/rigs. The CachedRead.AgeSeconds field carries the
 // supervisor CachingStore age from the X-GC-Cache-Age-S response header so
