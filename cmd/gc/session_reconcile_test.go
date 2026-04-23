@@ -2383,3 +2383,270 @@ func TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate(t *testing.T) {
 		t.Errorf("beta probe command = %q, want expanded gc.routed_to=beta/worker", got)
 	}
 }
+
+func TestNudgeRoutedWorkSessions_NudgesAliveSession(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID:     "ses-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{
+		{session: session, alive: true},
+	}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if !strings.Contains(stdout.String(), "Queued routed-work nudge") {
+		t.Errorf("expected nudge queued output, got: %q", stdout.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestNudgeRoutedWorkSessions_SkipsDeadSession(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID:     "ses-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{
+		{session: session, alive: false},
+	}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "routed"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not nudge dead session, got: %q", stdout.String())
+	}
+}
+
+func TestNudgeRoutedWorkSessions_NudgesOncePerTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	targets := []wakeTarget{
+		{
+			session: &beads.Bead{
+				ID: "ses-1", Status: "open",
+				Metadata: map[string]string{
+					"session_name": "polecat-1",
+					"template":     "gascity/polecat",
+					"state":        "active",
+				},
+			},
+			alive: true,
+		},
+		{
+			session: &beads.Bead{
+				ID: "ses-2", Status: "open",
+				Metadata: map[string]string{
+					"session_name": "polecat-2",
+					"template":     "gascity/polecat",
+					"state":        "active",
+				},
+			},
+			alive: true,
+		},
+	}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+		"polecat-2": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	nudgeCount := 0
+	for _, line := range lines {
+		if strings.Contains(line, "Queued routed-work nudge") {
+			nudgeCount++
+		}
+	}
+	if nudgeCount != 1 {
+		t.Errorf("expected exactly 1 nudge per template, got %d", nudgeCount)
+	}
+}
+
+func TestNudgeRoutedWorkSessions_SkipsNoWorkTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "config"},
+	}
+	workSet := map[string]bool{} // no routed work
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not nudge when no routed work, got: %q", stdout.String())
+	}
+}
+
+func TestNudgeRoutedWorkSessions_SkipsTemplateNotInWorkSet(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+			{Name: "refinery", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	// workSet has routed work, but for a different template than the target.
+	workSet := map[string]bool{"gascity/refinery": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not nudge when target template has no routed work, got: %q", stdout.String())
+	}
+}
+
+func TestNudgeRoutedWorkSessions_SkipsEmptySessionName(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "", // missing session_name -> cannot queue a nudge
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not nudge session with empty session_name, got: %q", stdout.String())
+	}
+}
+
+func TestNudgeRoutedWorkSessions_SkipsShouldNotWakeDecision(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	// Session IS alive and matches routed work, but the awake decision says
+	// it should not wake (e.g., held under churn/quarantine rules). Don't nudge.
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: false, Reason: "quarantined"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not nudge when decision.ShouldWake=false, got: %q", stdout.String())
+	}
+}
+
+func TestNudgeRoutedWorkSessions_SkipsMissingDecision(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	// No entry for "polecat-1" in the decisions map — treat as "no desire to wake".
+	decisions := map[string]AwakeDecision{}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not nudge when session is missing from decisions map, got: %q", stdout.String())
+	}
+}

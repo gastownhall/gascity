@@ -449,6 +449,57 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	return work
 }
 
+// nudgeRoutedWorkSessions queues nudges for alive sessions whose templates
+// have pending routed work. This bridges the gap where scale_check/pool
+// desired correctly wake or keep sessions alive, but the session itself
+// hasn't polled its hook for newly arrived gc.routed_to work.
+func nudgeRoutedWorkSessions(
+	cityPath string,
+	cfg *config.City,
+	_ runtime.Provider,
+	store beads.Store,
+	targets []wakeTarget,
+	awakeDecisions map[string]AwakeDecision,
+	workSet map[string]bool,
+	stdout, stderr io.Writer,
+) {
+	if len(workSet) == 0 || len(targets) == 0 {
+		return
+	}
+	nudged := make(map[string]bool)
+	for _, target := range targets {
+		if !target.alive {
+			continue
+		}
+		template := normalizedSessionTemplate(*target.session, cfg)
+		if !workSet[template] {
+			continue
+		}
+		if nudged[template] {
+			continue
+		}
+		name := strings.TrimSpace(target.session.Metadata["session_name"])
+		if name == "" {
+			continue
+		}
+		decision, ok := awakeDecisions[name]
+		if !ok || !decision.ShouldWake {
+			continue
+		}
+		ref := &nudgeReference{Kind: "routed-work", ID: template}
+		item := newQueuedNudgeWithOptions(name, "routed work available", "reconciler", time.Now(), queuedNudgeOptions{
+			SessionID: target.session.ID,
+			Reference: ref,
+		})
+		if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+			fmt.Fprintf(stderr, "nudgeRoutedWork: %s: %v\n", name, err) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stdout, "Queued routed-work nudge for %s (%s)\n", name, template) //nolint:errcheck
+		nudged[template] = true
+	}
+}
+
 // findAgentByTemplate looks up a config agent by template name.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {

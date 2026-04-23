@@ -27,15 +27,16 @@ func buildAwakeInputFromReconciler(
 	clk time.Time,
 ) AwakeInput {
 	input := AwakeInput{
-		ScaleCheckCounts:   poolDesired,
-		NamedSessionDemand: cloneBoolMap(namedSessionDemand),
-		WorkSet:            workSet,
-		ReadyWaitSet:       readyWaitSet,
-		RunningSessions:    make(map[string]bool),
-		AttachedSessions:   make(map[string]bool),
-		PendingSessions:    make(map[string]bool),
-		ChatIdleTimeout:    cfg.ChatSessions.IdleTimeoutDuration(),
-		Now:                clk,
+		ScaleCheckCounts:    poolDesired,
+		NamedSessionDemand:  cloneBoolMap(namedSessionDemand),
+		WorkSet:             workSet,
+		ReadyWaitSet:        readyWaitSet,
+		RoutedWorkTemplates: workSet,
+		RunningSessions:     make(map[string]bool),
+		AttachedSessions:    make(map[string]bool),
+		PendingSessions:     make(map[string]bool),
+		ChatIdleTimeout:     cfg.ChatSessions.IdleTimeoutDuration(),
+		Now:                 clk,
 	}
 
 	// Agents
@@ -153,6 +154,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakeWait}
 			case "assigned-work", "named-demand", "work-query":
 				reasons = []WakeReason{WakeWork}
+			case "routed":
+				reasons = []WakeReason{WakeRouted}
 			default:
 				reasons = []WakeReason{WakeConfig}
 			}

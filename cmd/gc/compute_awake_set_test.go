@@ -1546,3 +1546,190 @@ func TestScaledPool_NotAffectedByRunningOverride(t *testing.T) {
 	})
 	assertAsleep(t, result, "polecat-mc-1")
 }
+
+// ---------------------------------------------------------------------------
+// RoutedWorkTemplates — gc.routed_to wake signal + nudge enabler
+// ---------------------------------------------------------------------------
+
+func TestRoutedWork_WakesActiveSession(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "routed")
+}
+
+func TestRoutedWork_NoOpWhenScaleCheckCovers(t *testing.T) {
+	// When ScaleCheckCounts already covers the template, RoutedWork defers
+	// to ScaleCheck (same gate as WorkSet). Nudge dispatch in the
+	// reconciler handles alive sessions independently.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+			{ID: "mc-2", SessionName: "polecat-mc-2", Template: "hello-world/polecat", State: "active"},
+		},
+		ScaleCheckCounts:    map[string]int{"hello-world/polecat": 1},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true, "polecat-mc-2": true},
+		Now:                 now,
+	})
+	awake := 0
+	for _, d := range result {
+		if d.ShouldWake {
+			awake++
+		}
+	}
+	if awake != 1 {
+		t.Errorf("ScaleCheck=1 should cap to 1, RoutedWork should not add more, got %d awake", awake)
+	}
+	assertReason(t, result, "polecat-mc-1", "scaled:demand")
+}
+
+func TestRoutedWork_DoesNotOverrideExistingReason(t *testing.T) {
+	// When a session is already desired (e.g. via ScaleCheck), RoutedWork
+	// should not overwrite the existing reason.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+		},
+		ScaleCheckCounts:    map[string]int{"hello-world/polecat": 1},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "scaled:demand")
+}
+
+func TestRoutedWork_SkipsSuspendedAgent(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", Suspended: true}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestRoutedWork_SkipsDrained(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active", Drained: true},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestRoutedWork_SkipsDependencyOnly(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active", DependencyOnly: true},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestRoutedWork_SkipsNamedSession(t *testing.T) {
+	// RoutedWorkTemplates skips named-session templates. The named-session
+	// pass handles those independently.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/worker", Template: "hello-world/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "worker", Template: "hello-world/worker", State: "asleep", NamedIdentity: "hello-world/worker"},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/worker": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "worker")
+}
+
+func TestRoutedWork_FallsBackToCreating(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "creating"},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		Now:                 now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "routed")
+}
+
+func TestRoutedWork_SuppressedByHeldUntil(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active",
+				HeldUntil: now.Add(5 * time.Minute),
+			},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": true},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestRoutedWork_FalseValue_NoEffect(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+		},
+		RoutedWorkTemplates: map[string]bool{"hello-world/polecat": false},
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestRoutedWork_NilMap_NoEffect(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+		},
+		RoutedWorkTemplates: nil,
+		RunningSessions:     map[string]bool{"polecat-mc-1": true},
+		Now:                 now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestRoutedWork_BridgeMapsToWakeRouted(t *testing.T) {
+	decisions := map[string]AwakeDecision{
+		"polecat-mc-1": {ShouldWake: true, Reason: "routed"},
+	}
+	beads := []AwakeSessionBead{
+		{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat"},
+	}
+	evals := awakeSetToWakeEvals(decisions, beads)
+	eval, ok := evals["mc-1"]
+	if !ok {
+		t.Fatal("expected eval for mc-1")
+	}
+	if len(eval.Reasons) != 1 || eval.Reasons[0] != WakeRouted {
+		t.Errorf("reasons = %v, want [%s]", eval.Reasons, WakeRouted)
+	}
+}

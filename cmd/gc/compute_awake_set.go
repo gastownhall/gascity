@@ -16,19 +16,20 @@ const defaultOnDemandIdleTimeout = 5 * time.Minute
 // should be awake. All external I/O (shell commands, tmux checks, store
 // queries) happens before this function is called.
 type AwakeInput struct {
-	Agents             []AwakeAgent
-	NamedSessions      []AwakeNamedSession
-	SessionBeads       []AwakeSessionBead
-	WorkBeads          []AwakeWorkBead
-	ScaleCheckCounts   map[string]int  // agent template → scale_check count
-	NamedSessionDemand map[string]bool // named-session identity → routed/assigned work demand
-	WorkSet            map[string]bool // agent template → work_query found pending work
-	RunningSessions    map[string]bool // session name → tmux exists
-	AttachedSessions   map[string]bool // session name → user attached
-	PendingSessions    map[string]bool // session name → pending interaction
-	ReadyWaitSet       map[string]bool // session bead ID → durable wait is ready
-	ChatIdleTimeout    time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
-	Now                time.Time
+	Agents              []AwakeAgent
+	NamedSessions       []AwakeNamedSession
+	SessionBeads        []AwakeSessionBead
+	WorkBeads           []AwakeWorkBead
+	ScaleCheckCounts    map[string]int  // agent template → scale_check count
+	NamedSessionDemand  map[string]bool // named-session identity → routed/assigned work demand
+	WorkSet             map[string]bool // agent template → work_query found pending work
+	RunningSessions     map[string]bool // session name → tmux exists
+	AttachedSessions    map[string]bool // session name → user attached
+	PendingSessions     map[string]bool // session name → pending interaction
+	ReadyWaitSet        map[string]bool // session bead ID → durable wait is ready
+	ChatIdleTimeout     time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
+	RoutedWorkTemplates map[string]bool // agent template → has unprocessed gc.routed_to work
+	Now                 time.Time
 }
 
 // AwakeAgent represents an [[agent]] config entry.
@@ -199,6 +200,34 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 		if creating := collectCreatingBeads(input.SessionBeads, template); len(creating) > 0 {
 			desired[creating[0].SessionName] = "work-query"
+		}
+	}
+
+	// RoutedWorkTemplates: when beads carry gc.routed_to for a template,
+	// ensure at least one session is desired with reason "routed". Fires
+	// only when ScaleCheckCounts hasn't caught up (same gate as WorkSet).
+	// The "routed" reason upgrades "work-query" from WorkSet so the
+	// bridge emits WakeRouted for tracing and nudge dispatch.
+	for template, hasWork := range input.RoutedWorkTemplates {
+		if !hasWork {
+			continue
+		}
+		if input.ScaleCheckCounts[template] > 0 {
+			continue
+		}
+		agent, ok := agentsByName[template]
+		if !ok || agent.Suspended {
+			continue
+		}
+		if isNamedSessionTemplate(input.NamedSessions, template) {
+			continue
+		}
+		if active := collectActiveBeads(input.SessionBeads, template); len(active) > 0 {
+			desired[active[0].SessionName] = "routed"
+			continue
+		}
+		if creating := collectCreatingBeads(input.SessionBeads, template); len(creating) > 0 {
+			desired[creating[0].SessionName] = "routed"
 		}
 	}
 

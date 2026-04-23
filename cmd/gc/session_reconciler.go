@@ -1504,6 +1504,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if ctx != nil && ctx.Err() != nil {
 		return plannedWakes
 	}
+	nudgeRoutedWorkSessions(cityPath, cfg, sp, store, wakeTargets, awakeDecisions, workSet, stdout, stderr)
 
 	// Phase 2: Advance all in-flight drains.
 	sessionLookup := func(id string) *beads.Bead {

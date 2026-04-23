@@ -35,6 +35,9 @@ const (
 	WakePin WakeReason = "pin"
 	// WakeDependency means another awake session depends on this template.
 	WakeDependency WakeReason = "dependency"
+	// WakeRouted means unprocessed routed work (gc.routed_to) targets this
+	// template. Triggers nudge dispatch for alive sessions.
+	WakeRouted WakeReason = "routed"
 )
 
 // ExecSpec defines a validated command for process creation.
