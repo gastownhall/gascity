@@ -51,6 +51,28 @@ func TestReadinessRegistrySync(t *testing.T) {
 	}
 }
 
+func TestProbeCommandEnvForwardsClaudeCodeOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+
+	env := probeCommandEnv(homeDir)
+	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-test") {
+		t.Fatalf("probeCommandEnv missing CLAUDE_CODE_OAUTH_TOKEN forwarding: %v", env)
+	}
+}
+
+func TestProbeCommandEnvOmitsUnsetClaudeCodeOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+
+	env := probeCommandEnv(homeDir)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			t.Fatalf("probeCommandEnv forwarded unset CLAUDE_CODE_OAUTH_TOKEN: %q", entry)
+		}
+	}
+}
+
 func TestProbeCommandEnvPreservesXDGOverridesWhenGHConfigDirIsSet(t *testing.T) {
 	homeDir := t.TempDir()
 	xdgConfigHome := filepath.Join(homeDir, "xdg-config")

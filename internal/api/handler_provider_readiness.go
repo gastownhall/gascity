@@ -602,6 +602,14 @@ func probeCommandEnv(homeDir string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
+	// CLAUDE_CODE_OAUTH_TOKEN holds the long-lived first-party token from
+	// `claude setup-token`. In headless / containerised deployments it is
+	// the only authentication signal available, so it must be forwarded
+	// into the probe subprocess — otherwise `claude auth status --json`
+	// reports loggedIn: false and readiness falls through to needs_auth.
+	if value := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); value != "" {
+		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+value)
+	}
 	return env
 }
 
