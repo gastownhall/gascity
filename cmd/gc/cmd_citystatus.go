@@ -58,10 +58,24 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int `json:"total_agents"`
-	RunningAgents     int `json:"running_agents"`
-	ActiveSessions    int `json:"active_sessions,omitempty"`
-	SuspendedSessions int `json:"suspended_sessions,omitempty"`
+	TotalAgents       int          `json:"total_agents"`
+	RunningAgents     int          `json:"running_agents"`
+	ActiveSessions    int          `json:"active_sessions,omitempty"`
+	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
+	StoreHealth       *StoreHealth `json:"store_health,omitempty"`
+}
+
+// StoreHealth is the JSON shape of the Dolt bead store health block
+// surfaced by gc status. See ADR 0002 / bead ga-d5y design D9.
+type StoreHealth struct {
+	Path         string  `json:"path"`
+	SizeBytes    int64   `json:"size_bytes"`
+	LiveRows     int     `json:"live_rows"`
+	RatioMB      float64 `json:"ratio_mb_per_row"`
+	Warning      bool    `json:"warning"`
+	ThresholdMB  float64 `json:"threshold_mb_per_row"`
+	LastGCAt     string  `json:"last_gc_at,omitempty"`
+	LastGCStatus string  `json:"last_gc_status,omitempty"`
 }
 
 var (

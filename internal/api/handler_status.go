@@ -136,18 +136,19 @@ func (s *Server) buildStatusBody() StatusBody {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 
 	return StatusBody{
-		Name:       cityName,
-		Path:       s.state.CityPath(),
-		Version:    s.state.Version(),
-		UptimeSec:  uptime,
-		Suspended:  cfg.Workspace.Suspended,
-		AgentCount: ac.Total,
-		RigCount:   rc.Total,
-		Running:    rawRunning,
-		Agents:     ac,
-		Rigs:       rc,
-		Work:       wc,
-		Mail:       mc,
+		Name:        cityName,
+		Path:        s.state.CityPath(),
+		Version:     s.state.Version(),
+		UptimeSec:   uptime,
+		Suspended:   cfg.Workspace.Suspended,
+		AgentCount:  ac.Total,
+		RigCount:    rc.Total,
+		Running:     rawRunning,
+		Agents:      ac,
+		Rigs:        rc,
+		Work:        wc,
+		Mail:        mc,
+		StoreHealth: s.cachedStoreHealth(time.Now()),
 	}
 }
 
