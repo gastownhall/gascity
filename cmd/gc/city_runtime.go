@@ -93,6 +93,7 @@ type CityRuntime struct {
 	pokeCh              chan struct{}            // non-blocking signal to trigger immediate reconciler tick
 	controlDispatcherCh chan struct{}            // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}            // signal to dispatch queued nudges; fed by wake socket listener
+	reloadMu            sync.Mutex               // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
@@ -572,6 +573,31 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 
+	// Reload acceptance runs on its own goroutine so that a slow tick
+	// body (e.g., a session-start wave that waits for startup_timeout)
+	// does not block reload request acceptance. The accept path
+	// (handleReloadRequest) takes cr.reloadMu to stage activeReload and
+	// configDirty; the actual reload work still runs on the reconciler
+	// goroutine in the next tick. See bead ga-8nbr.
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case req := <-cr.reloadReqCh:
+				cr.safeTick(func() {
+					cr.handleReloadRequest(&req)
+				}, "reload-accept")
+			}
+		}
+	}()
+	defer func() {
+		<-acceptDone
+		cr.failActiveReload("Reload canceled because the controller is shutting down.")
+	}()
+
 	for {
 		select {
 		case <-ticker.C:
@@ -589,10 +615,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
 			}, "control-dispatcher")
-		case req := <-cr.reloadReqCh:
-			cr.safeTick(func() {
-				cr.handleReloadRequest(&req)
-			}, "reload-request")
 		case req := <-cr.convergenceReqCh:
 			// Low-latency path: process convergence commands between ticks.
 			// processConvergenceRequests() in tick() drains any that arrived
@@ -605,7 +627,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 				req.replyCh <- reply
 			}, "convergence-request")
 		case <-ctx.Done():
-			cr.failActiveReload("Reload canceled because the controller is shutting down.")
 			return
 		}
 	}
@@ -674,7 +695,10 @@ func (cr *CityRuntime) tick(
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
-	if cr.activeReload != nil {
+	cr.reloadMu.Lock()
+	hasActive := cr.activeReload != nil
+	cr.reloadMu.Unlock()
+	if hasActive {
 		traceDetail = "manual_reload"
 	}
 	trace := cr.beginTraceCycle(traceTrigger, traceDetail, sessionBeads)
@@ -740,17 +764,21 @@ func (cr *CityRuntime) tick(
 			reply = manualReply
 		}
 		cr.sendReloadReply(manualReload.doneCh, reply)
+		cr.reloadMu.Lock()
 		cr.activeReload = nil
+		cr.reloadMu.Unlock()
 	}()
 	configChanged := dirty.Swap(false)
 	if configChanged {
 		dirtyCleared = true
 		source := reloadSourceWatch
+		cr.reloadMu.Lock()
 		if cr.activeReload != nil {
 			source = reloadSourceManual
 			manualReload = cr.activeReload
 		}
-		manualReply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace, source)
+		cr.reloadMu.Unlock()
+		manualReply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace, source, manualReload != nil && manualReload.soft)
 		if manualReload != nil {
 			manualReloadCompleted = true
 		}
@@ -848,7 +876,9 @@ func (cr *CityRuntime) tick(
 	if manualReload != nil {
 		cr.sendReloadReply(manualReload.doneCh, manualReply)
 		manualReloadReplied = true
+		cr.reloadMu.Lock()
 		cr.activeReload = nil
+		cr.reloadMu.Unlock()
 	}
 	completion = TraceCompletionCompleted
 	tickCompleted = true
@@ -894,7 +924,9 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 	if req == nil {
 		return
 	}
+	cr.reloadMu.Lock()
 	if cr.activeReload != nil {
+		cr.reloadMu.Unlock()
 		req.acceptedCh <- reloadControlReply{
 			Outcome: reloadOutcomeBusy,
 			Message: "Reload request could not be accepted because another reload is already in progress.",
@@ -906,6 +938,7 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 		cr.configDirty = &atomic.Bool{}
 	}
 	cr.configDirty.Store(true)
+	cr.reloadMu.Unlock()
 	select {
 	case cr.pokeCh <- struct{}{}:
 	default:
@@ -917,14 +950,17 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 }
 
 func (cr *CityRuntime) failActiveReload(message string) {
-	if cr.activeReload == nil {
+	cr.reloadMu.Lock()
+	req := cr.activeReload
+	cr.activeReload = nil
+	cr.reloadMu.Unlock()
+	if req == nil {
 		return
 	}
-	cr.sendReloadReply(cr.activeReload.doneCh, reloadControlReply{
+	cr.sendReloadReply(req.doneCh, reloadControlReply{
 		Outcome: reloadOutcomeFailed,
 		Error:   message,
 	})
-	cr.activeReload = nil
 }
 
 func (cr *CityRuntime) sendReloadReply(ch chan<- reloadControlReply, reply reloadControlReply) {
@@ -947,7 +983,7 @@ func (cr *CityRuntime) reloadConfig(
 	lastProviderName *string,
 	cityRoot string,
 ) {
-	cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+	cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch, false)
 }
 
 func (cr *CityRuntime) applyStartupConfigReload(
@@ -962,7 +998,7 @@ func (cr *CityRuntime) applyStartupConfigReload(
 	if dirty != nil {
 		dirty.Swap(false)
 	}
-	reply := cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+	reply := cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch, false)
 	if reply.Outcome == reloadOutcomeFailed && dirty != nil {
 		dirty.Store(true)
 	}
@@ -974,6 +1010,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cityRoot string,
 	trace *sessionReconcilerTraceCycle,
 	source reloadSource,
+	softReload bool,
 ) reloadControlReply {
 	var warnings []string
 	appendWarning := func(message string) {
@@ -1229,7 +1266,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		trace.syncArms(time.Now().UTC(), nextCfg)
 	}
 
-	if cr.activeReload != nil && cr.activeReload.soft {
+	if softReload {
 		cityName := cr.cityName
 		if cityName == "" {
 			cityName = config.EffectiveCityName(nextCfg, "")

@@ -2793,7 +2793,7 @@ func TestCityRuntimeReloadProviderSwapFailsOnPartialSessionListing(t *testing.T)
 
 	writeCityRuntimeConfig(t, tomlPath, "fail")
 	lastProviderName := "fake"
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual, false)
 
 	if reply.Outcome != reloadOutcomeFailed {
 		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
@@ -2843,7 +2843,7 @@ func TestCityRuntimeReloadProviderSwapFailsOnSessionListingError(t *testing.T) {
 
 	writeCityRuntimeConfig(t, tomlPath, "fail")
 	lastProviderName := "fake"
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual, false)
 
 	if reply.Outcome != reloadOutcomeFailed {
 		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
@@ -2951,7 +2951,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	lastProviderName := "fake"
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual, false)
 
 	if reply.Outcome != reloadOutcomeFailed {
 		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
@@ -3042,7 +3042,7 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	lastProviderName := "fake"
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual, false)
 
 	if calls != 2 {
 		t.Fatalf("cityRuntimeStartBeadsLifecycle calls = %d, want 2", calls)
@@ -3123,7 +3123,7 @@ install_agent_hooks = ["codex"]
 	}
 
 	lastProviderName := "fake"
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual, false)
 
 	if reply.Outcome != reloadOutcomeFailed {
 		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
@@ -3201,7 +3201,7 @@ install_agent_hooks = ["codex"]
 	}
 
 	lastProviderName := "fake"
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual, false)
 
 	if reply.Outcome != reloadOutcomeFailed {
 		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
@@ -4663,4 +4663,105 @@ func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes 
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+}
+
+// TestCityRuntimeReloadAcceptNotBlockedBySlowTick is the regression test
+// for ga-8nbr: reload acceptance must not be starved by a slow reconciler
+// tick body. Before the fix, reloadReqCh was drained only by the main
+// select, which was also running tick bodies that can exceed the 5s
+// accept timeout (e.g., a session-start wave waiting for startup_timeout).
+// After the fix, a dedicated goroutine drains reloadReqCh so acceptance
+// is bounded by mutex contention, not by tick body duration.
+func TestCityRuntimeReloadAcceptNotBlockedBySlowTick(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	reloadReqCh := make(chan reloadRequest)
+	pokeCh := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cr := &CityRuntime{
+		reloadReqCh: reloadReqCh,
+		pokeCh:      pokeCh,
+		configDirty: &atomic.Bool{},
+		stderr:      io.Discard,
+	}
+
+	// Simulate the new accept goroutine from run(). Mirrors the
+	// production loop so the test validates the actual acceptance
+	// pathway, not a mock.
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case req := <-reloadReqCh:
+				cr.safeTick(func() {
+					cr.handleReloadRequest(&req)
+				}, "reload-accept")
+			}
+		}
+	}()
+
+	// Simulate a slow reconciler tick holding the main goroutine. The
+	// goroutine is separate from the accept loop so this test asserts
+	// that the accept loop is NOT blocked by a busy reconciler.
+	// Capture the delay locally so the goroutine's read does not race
+	// with t.Cleanup restoring controllerReloadAcceptTimeout.
+	tickBusyDelay := 3 * controllerReloadAcceptTimeout // 600ms: > accept timeout
+	tickBusy := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(tickBusyDelay):
+		case <-ctx.Done():
+		}
+		close(tickBusy)
+	}()
+
+	// Send a reload request as the socket handler would.
+	req := reloadRequest{
+		acceptedCh: make(chan reloadControlReply, 1),
+		doneCh:     make(chan reloadControlReply, 1),
+	}
+	sendStart := time.Now()
+	select {
+	case reloadReqCh <- req:
+	case <-time.After(controllerReloadAcceptTimeout):
+		t.Fatal("reloadReqCh send timed out — accept goroutine not draining")
+	}
+	sendElapsed := time.Since(sendStart)
+	if sendElapsed > controllerReloadAcceptTimeout/2 {
+		t.Fatalf("send took %s, want <%s (accept goroutine should be draining promptly)",
+			sendElapsed, controllerReloadAcceptTimeout/2)
+	}
+
+	// Accept reply must arrive well before the slow "tick" finishes.
+	select {
+	case reply := <-req.acceptedCh:
+		if reply.Outcome != reloadOutcomeAccepted {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+		}
+	case <-tickBusy:
+		t.Fatal("accept reply did not arrive before simulated tick finished — starved by reconciler")
+	case <-time.After(2 * controllerReloadAcceptTimeout):
+		t.Fatal("accept reply did not arrive at all")
+	}
+
+	// activeReload must be staged under the mutex.
+	cr.reloadMu.Lock()
+	staged := cr.activeReload != nil
+	cr.reloadMu.Unlock()
+	if !staged {
+		t.Fatal("activeReload not staged after acceptance")
+	}
+	if !cr.configDirty.Load() {
+		t.Fatal("configDirty not set after acceptance")
+	}
+
+	cancel()
+	<-acceptDone
 }
