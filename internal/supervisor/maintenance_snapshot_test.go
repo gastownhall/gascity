@@ -61,7 +61,7 @@ func (f *fakeDoltBackupRunner) Sync(_ context.Context, name string) error {
 
 // newSnapshotTestLoop builds a loop with a deterministic clock so the
 // timestamp-format assertions are stable. Caller injects the fake.
-func newSnapshotTestLoop(t *testing.T, runner *fakeDoltBackupRunner, clockNow time.Time) (*StoreMaintenanceLoop, *bytes.Buffer) {
+func newSnapshotTestLoop(t *testing.T, runner *fakeDoltBackupRunner, clockNow time.Time) *StoreMaintenanceLoop {
 	t.Helper()
 	var stderr bytes.Buffer
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
@@ -76,7 +76,7 @@ func newSnapshotTestLoop(t *testing.T, runner *fakeDoltBackupRunner, clockNow ti
 			return runner, nil
 		},
 	})
-	return loop, &stderr
+	return loop
 }
 
 func TestRunSnapshot_NilFactory_NoOp(t *testing.T) {
@@ -98,7 +98,7 @@ func TestRunSnapshot_HappyPath_RotatesToSuccessWithExpectedTimestamp(t *testing.
 	t.Parallel()
 	now := time.Date(2026, 4, 23, 12, 30, 45, 0, time.UTC)
 	runner := &fakeDoltBackupRunner{writeOnSync: true}
-	loop, _ := newSnapshotTestLoop(t, runner, now)
+	loop := newSnapshotTestLoop(t, runner, now)
 
 	path, err := loop.runSnapshot(context.Background())
 	if err != nil {
@@ -140,7 +140,7 @@ func TestRunSnapshot_AddFailure_ReturnsStageBackupAndLeavesNoSuccessDir(t *testi
 	t.Parallel()
 	now := time.Date(2026, 4, 23, 12, 30, 45, 0, time.UTC)
 	runner := &fakeDoltBackupRunner{addErr: errors.New("target URL duplicate with remote X")}
-	loop, _ := newSnapshotTestLoop(t, runner, now)
+	loop := newSnapshotTestLoop(t, runner, now)
 
 	path, err := loop.runSnapshot(context.Background())
 	var me *MaintenanceError
@@ -168,7 +168,7 @@ func TestRunSnapshot_SyncFailure_RotatesCurrentToFailedAndReturnsStageBackup(t *
 	t.Parallel()
 	now := time.Date(2026, 4, 23, 12, 30, 45, 0, time.UTC)
 	runner := &fakeDoltBackupRunner{syncErr: errors.New("network unreachable")}
-	loop, _ := newSnapshotTestLoop(t, runner, now)
+	loop := newSnapshotTestLoop(t, runner, now)
 
 	// Pre-populate current/ to simulate a partial sync write.
 	currentDir := filepath.Join(loop.cityPath, ".beads", "dolt-backups", "current")
@@ -206,7 +206,7 @@ func TestRunSnapshot_SuccessRetention_KeepsNewest3(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 4, 23, 12, 30, 45, 0, time.UTC)
 	runner := &fakeDoltBackupRunner{writeOnSync: true}
-	loop, _ := newSnapshotTestLoop(t, runner, now)
+	loop := newSnapshotTestLoop(t, runner, now)
 
 	// Seed 5 older successful snapshots. Names sort ascending by date.
 	successDir := filepath.Join(loop.cityPath, ".beads", "dolt-backups", "success")
@@ -259,7 +259,7 @@ func TestRunSnapshot_FailedRetention_KeepsNewest1(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 4, 23, 12, 30, 45, 0, time.UTC)
 	runner := &fakeDoltBackupRunner{syncErr: errors.New("network error")}
-	loop, _ := newSnapshotTestLoop(t, runner, now)
+	loop := newSnapshotTestLoop(t, runner, now)
 
 	// Pre-populate current/ so the failed rotation has content to move.
 	currentDir := filepath.Join(loop.cityPath, ".beads", "dolt-backups", "current")

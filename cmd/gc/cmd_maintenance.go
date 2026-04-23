@@ -168,7 +168,7 @@ func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool,
 func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonOut bool, stdout io.Writer) int {
 	if jsonOut {
 		envelope := map[string]any{
-			"status":        cr.Body,
+			"status":       cr.Body,
 			"_cache_age_s": cr.AgeSeconds,
 		}
 		_ = writeMaintenanceJSON(stdout, envelope)
@@ -250,10 +250,9 @@ func writeMaintenanceJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func truncateMaintenance(s string, max int) string {
-	if len(s) <= max {
+func truncateMaintenance(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	return s[:max-1] + "…"
+	return s[:limit-1] + "…"
 }
-

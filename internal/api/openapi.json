@@ -20036,6 +20036,17 @@
         "operationId": "trigger-maintenance-dolt-gc",
         "parameters": [
           {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "City name.",
             "in": "path",
             "name": "cityName",
@@ -20067,7 +20078,12 @@
                 }
               }
             },
-            "description": "Accepted"
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -20077,7 +20093,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Trigger a Dolt store maintenance run"
@@ -20116,6 +20137,9 @@
                   "format": "double",
                   "type": "number"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -20127,7 +20151,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name maintenance status"

@@ -140,13 +140,13 @@ type MaintenanceRunView struct {
 // only while a run is executing; callers use it to tell the user the run
 // already in progress and whether it looks stuck.
 type MaintenanceStatusView struct {
-	Enabled        bool                 `json:"enabled"`
-	IntervalSec    int64                `json:"interval_seconds"`
-	InFlight       bool                 `json:"in_flight"`
-	InFlightStart  string               `json:"in_flight_start,omitempty"`
-	LastRun        *MaintenanceRunView  `json:"last_run,omitempty"`
-	NextScheduled  string               `json:"next_scheduled,omitempty"`
-	History        []MaintenanceRunView `json:"history"`
+	Enabled       bool                 `json:"enabled"`
+	IntervalSec   int64                `json:"interval_seconds"`
+	InFlight      bool                 `json:"in_flight"`
+	InFlightStart string               `json:"in_flight_start,omitempty"`
+	LastRun       *MaintenanceRunView  `json:"last_run,omitempty"`
+	NextScheduled string               `json:"next_scheduled,omitempty"`
+	History       []MaintenanceRunView `json:"history"`
 }
 
 // MaintenanceTriggerView is the CLI-facing response body for POST

@@ -1636,6 +1636,87 @@ export type MailSendInputBody = {
     to: string;
 };
 
+export type MaintenanceRunBody = {
+    /**
+     * Store size in bytes after the run (0 when not measured).
+     */
+    after_bytes: number;
+    /**
+     * Store size in bytes before the run (0 when not measured).
+     */
+    before_bytes: number;
+    /**
+     * Elapsed wall-clock seconds between started_at and finished_at.
+     */
+    duration_s: number;
+    /**
+     * Error message when Stage names a failing phase; empty on success.
+     */
+    err?: string;
+    /**
+     * RFC3339 timestamp when the run completed.
+     */
+    finished_at: string;
+    /**
+     * Absolute path to the snapshot directory created for this run.
+     */
+    snapshot_path?: string;
+    /**
+     * Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.
+     */
+    stage: string;
+    /**
+     * RFC3339 timestamp when the run began.
+     */
+    started_at: string;
+};
+
+export type MaintenanceStatusBody = {
+    /**
+     * Whether [maintenance.dolt] enabled=true in city.toml.
+     */
+    enabled: boolean;
+    /**
+     * Bounded ring of recent run outcomes (oldest first).
+     */
+    history: Array<MaintenanceRunBody> | null;
+    /**
+     * True when a maintenance cycle is currently running.
+     */
+    in_flight: boolean;
+    /**
+     * RFC3339 start time of the in-flight run.
+     */
+    in_flight_start?: string;
+    /**
+     * Configured scheduling interval in seconds (0 when disabled).
+     */
+    interval_seconds: number;
+    /**
+     * Most recent completed run, or null when none.
+     */
+    last_run?: MaintenanceRunBody;
+    /**
+     * RFC3339 approximate next scheduled run time.
+     */
+    next_scheduled?: string;
+};
+
+export type MaintenanceTriggerBody = {
+    /**
+     * True when the supervisor accepted the trigger (202) or completed it (200).
+     */
+    accepted: boolean;
+    /**
+     * Full run summary, populated when the caller set ?wait=true.
+     */
+    run?: MaintenanceRunBody;
+    /**
+     * RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
+     */
+    started_at?: string;
+};
+
 export type Message = {
     body: string;
     cc?: Array<string> | null;
@@ -8387,6 +8468,77 @@ export type ReplyMailResponses = {
 };
 
 export type ReplyMailResponse = ReplyMailResponses[keyof ReplyMailResponses];
+
+export type TriggerMaintenanceDoltGcData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.
+         */
+        wait?: boolean;
+    };
+    url: '/v0/city/{cityName}/maintenance/dolt-gc';
+};
+
+export type TriggerMaintenanceDoltGcErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type TriggerMaintenanceDoltGcError = TriggerMaintenanceDoltGcErrors[keyof TriggerMaintenanceDoltGcErrors];
+
+export type TriggerMaintenanceDoltGcResponses = {
+    /**
+     * Accepted
+     */
+    202: MaintenanceTriggerBody;
+};
+
+export type TriggerMaintenanceDoltGcResponse = TriggerMaintenanceDoltGcResponses[keyof TriggerMaintenanceDoltGcResponses];
+
+export type GetV0CityByCityNameMaintenanceStatusData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/maintenance/status';
+};
+
+export type GetV0CityByCityNameMaintenanceStatusErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type GetV0CityByCityNameMaintenanceStatusError = GetV0CityByCityNameMaintenanceStatusErrors[keyof GetV0CityByCityNameMaintenanceStatusErrors];
+
+export type GetV0CityByCityNameMaintenanceStatusResponses = {
+    /**
+     * OK
+     */
+    200: MaintenanceStatusBody;
+};
+
+export type GetV0CityByCityNameMaintenanceStatusResponse = GetV0CityByCityNameMaintenanceStatusResponses[keyof GetV0CityByCityNameMaintenanceStatusResponses];
 
 export type GetV0CityByCityNameOrderHistoryByBeadIdData = {
     body?: never;

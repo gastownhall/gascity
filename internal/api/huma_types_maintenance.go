@@ -17,13 +17,13 @@ type MaintenanceRunBody struct {
 // MaintenanceStatusBody is the response body for GET
 // /v0/city/{city}/maintenance/status.
 type MaintenanceStatusBody struct {
-	Enabled        bool                 `json:"enabled" doc:"Whether [maintenance.dolt] enabled=true in city.toml."`
-	IntervalSec    int64                `json:"interval_seconds" doc:"Configured scheduling interval in seconds (0 when disabled)."`
-	InFlight       bool                 `json:"in_flight" doc:"True when a maintenance cycle is currently running."`
-	InFlightStart  string               `json:"in_flight_start,omitempty" doc:"RFC3339 start time of the in-flight run."`
-	LastRun        *MaintenanceRunBody  `json:"last_run,omitempty" doc:"Most recent completed run, or null when none."`
-	NextScheduled  string               `json:"next_scheduled,omitempty" doc:"RFC3339 approximate next scheduled run time."`
-	History        []MaintenanceRunBody `json:"history" doc:"Bounded ring of recent run outcomes (oldest first)."`
+	Enabled       bool                 `json:"enabled" doc:"Whether [maintenance.dolt] enabled=true in city.toml."`
+	IntervalSec   int64                `json:"interval_seconds" doc:"Configured scheduling interval in seconds (0 when disabled)."`
+	InFlight      bool                 `json:"in_flight" doc:"True when a maintenance cycle is currently running."`
+	InFlightStart string               `json:"in_flight_start,omitempty" doc:"RFC3339 start time of the in-flight run."`
+	LastRun       *MaintenanceRunBody  `json:"last_run,omitempty" doc:"Most recent completed run, or null when none."`
+	NextScheduled string               `json:"next_scheduled,omitempty" doc:"RFC3339 approximate next scheduled run time."`
+	History       []MaintenanceRunBody `json:"history" doc:"Bounded ring of recent run outcomes (oldest first)."`
 }
 
 // MaintenanceStatusInput is the Huma input for the status handler.

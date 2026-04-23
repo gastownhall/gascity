@@ -1037,6 +1037,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/maintenance/dolt-gc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger a Dolt store maintenance run
+         * @description Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.
+         */
+        post: operations["trigger-maintenance-dolt-gc"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v0/city/{cityName}/maintenance/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get v0 city by city name maintenance status */
+        get: operations["get-v0-city-by-city-name-maintenance-status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/order/history/{bead_id}": {
         parameters: {
             query?: never;
@@ -3164,6 +3201,60 @@ export interface components {
             subject: string;
             /** @description Recipient name. */
             to: string;
+        };
+        MaintenanceRunBody: {
+            /**
+             * Format: int64
+             * @description Store size in bytes after the run (0 when not measured).
+             */
+            after_bytes: number;
+            /**
+             * Format: int64
+             * @description Store size in bytes before the run (0 when not measured).
+             */
+            before_bytes: number;
+            /**
+             * Format: double
+             * @description Elapsed wall-clock seconds between started_at and finished_at.
+             */
+            duration_s: number;
+            /** @description Error message when Stage names a failing phase; empty on success. */
+            err?: string;
+            /** @description RFC3339 timestamp when the run completed. */
+            finished_at: string;
+            /** @description Absolute path to the snapshot directory created for this run. */
+            snapshot_path?: string;
+            /** @description Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure. */
+            stage: string;
+            /** @description RFC3339 timestamp when the run began. */
+            started_at: string;
+        };
+        MaintenanceStatusBody: {
+            /** @description Whether [maintenance.dolt] enabled=true in city.toml. */
+            enabled: boolean;
+            /** @description Bounded ring of recent run outcomes (oldest first). */
+            history: components["schemas"]["MaintenanceRunBody"][] | null;
+            /** @description True when a maintenance cycle is currently running. */
+            in_flight: boolean;
+            /** @description RFC3339 start time of the in-flight run. */
+            in_flight_start?: string;
+            /**
+             * Format: int64
+             * @description Configured scheduling interval in seconds (0 when disabled).
+             */
+            interval_seconds: number;
+            /** @description Most recent completed run, or null when none. */
+            last_run?: components["schemas"]["MaintenanceRunBody"];
+            /** @description RFC3339 approximate next scheduled run time. */
+            next_scheduled?: string;
+        };
+        MaintenanceTriggerBody: {
+            /** @description True when the supervisor accepted the trigger (202) or completed it (200). */
+            accepted: boolean;
+            /** @description Full run summary, populated when the caller set ?wait=true. */
+            run?: components["schemas"]["MaintenanceRunBody"];
+            /** @description RFC3339 start time of the triggered run; doubles as a run identifier for async callers. */
+            started_at?: string;
         };
         Message: {
             body: string;
@@ -9730,6 +9821,81 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Message"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "trigger-maintenance-dolt-gc": {
+        parameters: {
+            query?: {
+                /** @description When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately. */
+                wait?: boolean;
+            };
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceTriggerBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-v0-city-by-city-name-maintenance-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Cache-Age-S"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceStatusBody"];
                 };
             };
             /** @description Error */
