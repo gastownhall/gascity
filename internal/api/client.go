@@ -713,6 +713,31 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 	}, nil
 }
 
+// GetStatus fetches the city-wide status snapshot via
+// GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
+// the supervisor CachingStore age from the X-GC-Cache-Age-S response header
+// so callers can surface _cache_age_s on --json output and a staleness
+// banner on human output.
+func (c *Client) GetStatus() (CachedRead[StatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[StatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{})
+	if err != nil {
+		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[StatusView]{}, err
+	}
+	return CachedRead[StatusView]{
+		Body:       statusViewFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // ListMailInbox fetches unread messages for the given agent recipient via
 // GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
 // default caller identity (same resolution path the CLI would take locally).

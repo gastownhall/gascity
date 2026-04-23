@@ -83,6 +83,82 @@ type MaintenanceTriggerView struct {
 	Run       *MaintenanceRunView `json:"run,omitempty"`
 }
 
+// StatusView is the CLI-facing shape for `gc status` and `gc rig status`.
+// It mirrors the subset of StatusBody fields the CLI formatter reads so
+// cmd/gc/ never imports genclient directly. The detail slices (Agents,
+// Rigs, NamedSessions) are pre-filtered by the server to match what the
+// fallback snapshot would collect. Controller authority is resolved
+// locally by the CLI (controllerStatusForCity) because the server
+// handling the request IS the controller — no wire field is needed.
+type StatusView struct {
+	CityName      string
+	CityPath      string
+	Version       string
+	UptimeSec     int
+	Suspended     bool
+	Agents        []StatusAgentView
+	Rigs          []StatusRigView
+	NamedSessions []StatusNamedSessionView
+	SessionCounts StatusSessionCountsView
+	StoreHealth   *StatusStoreHealthView
+	Summary       StatusSummaryView
+}
+
+// StatusAgentView is the CLI-facing per-agent row.
+type StatusAgentView struct {
+	Name          string
+	QualifiedName string
+	Scope         string
+	Running       bool
+	Suspended     bool
+	SessionName   string
+	GroupName     string
+	ScaleLabel    string
+	Expanded      bool
+}
+
+// StatusRigView is the CLI-facing per-rig row.
+type StatusRigView struct {
+	Name      string
+	Path      string
+	Suspended bool
+}
+
+// StatusNamedSessionView is the CLI-facing named-session row.
+type StatusNamedSessionView struct {
+	Identity string
+	Status   string
+	Mode     string
+}
+
+// StatusSessionCountsView mirrors the "Sessions: N active, M suspended"
+// line appended to `gc status` text output.
+type StatusSessionCountsView struct {
+	Active    int
+	Suspended int
+}
+
+// StatusStoreHealthView mirrors the CLI's StoreHealth struct. Values
+// render into the store health block appended to text output; fallback
+// callers read the same shape from the local event log.
+type StatusStoreHealthView struct {
+	Path         string
+	SizeBytes    int64
+	LiveRows     int
+	RatioMB      float64
+	Warning      bool
+	ThresholdMB  float64
+	LastGCAt     string
+	LastGCStatus string
+}
+
+// StatusSummaryView captures the aggregate counts the renderer uses for the
+// "N/M agents running" and "Sessions: ..." lines.
+type StatusSummaryView struct {
+	TotalAgents   int
+	RunningAgents int
+}
+
 // cacheAgeFromResponse extracts the CachingStore age from the response's
 // X-GC-Cache-Age-S header. Returns 0 when the response is nil, the header
 // is absent, or the value fails to parse. The header value is a float64

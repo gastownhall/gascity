@@ -2401,26 +2401,69 @@ type StatusAgentCounts struct {
 	Total int64 `json:"total"`
 }
 
+// StatusAgentDetail defines model for StatusAgentDetail.
+type StatusAgentDetail struct {
+	// Draining True when the pool is draining this instance.
+	Draining *bool `json:"draining,omitempty"`
+
+	// Expanded True when this row is a pool-expanded instance (renderer indents differently).
+	Expanded *bool `json:"expanded,omitempty"`
+
+	// GroupName Pool group label for expanded rows; same as QualifiedName for singletons.
+	GroupName *string `json:"group_name,omitempty"`
+
+	// Name Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1').
+	Name string `json:"name"`
+
+	// QualifiedName Rig-qualified name when applicable, else the bare agent name.
+	QualifiedName string `json:"qualified_name"`
+
+	// Running Observed running state of the agent's session.
+	Running bool `json:"running"`
+
+	// ScaleLabel 'scaled (min=N, max=M)' header emitted once per pool group.
+	ScaleLabel *string `json:"scale_label,omitempty"`
+
+	// Scope city or rig.
+	Scope string `json:"scope"`
+
+	// SessionName tmux session name CLI drain-ops key on.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Suspended Whether the agent (or its rig) is suspended.
+	Suspended bool `json:"suspended"`
+}
+
 // StatusBody defines model for StatusBody.
 type StatusBody struct {
 	// AgentCount Total agent count (deprecated, use agents.total).
-	AgentCount int64             `json:"agent_count"`
-	Agents     StatusAgentCounts `json:"agents"`
-	Mail       StatusMailCounts  `json:"mail"`
+	AgentCount int64 `json:"agent_count"`
+
+	// AgentDetails Per-agent state (for CLI status views). Empty when none.
+	AgentDetails *[]StatusAgentDetail `json:"agent_details,omitempty"`
+	Agents       StatusAgentCounts    `json:"agents"`
+	Mail         StatusMailCounts     `json:"mail"`
 
 	// Name City name.
 	Name string `json:"name"`
+
+	// NamedSessionDetails Per-named-session detail. Empty when none configured.
+	NamedSessionDetails *[]StatusNamedSessionDetail `json:"named_session_details,omitempty"`
 
 	// Path City directory path.
 	Path string `json:"path"`
 
 	// RigCount Total rig count (deprecated, use rigs.total).
-	RigCount int64           `json:"rig_count"`
-	Rigs     StatusRigCounts `json:"rigs"`
+	RigCount int64 `json:"rig_count"`
+
+	// RigDetails Per-rig detail (for CLI status views). Empty when none.
+	RigDetails *[]StatusRigDetail `json:"rig_details,omitempty"`
+	Rigs       StatusRigCounts    `json:"rigs"`
 
 	// Running Number of running agent processes.
-	Running     int64              `json:"running"`
-	StoreHealth *StatusStoreHealth `json:"store_health,omitempty"`
+	Running             int64                      `json:"running"`
+	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty"`
+	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
@@ -2442,6 +2485,18 @@ type StatusMailCounts struct {
 	Unread int64 `json:"unread"`
 }
 
+// StatusNamedSessionDetail defines model for StatusNamedSessionDetail.
+type StatusNamedSessionDetail struct {
+	// Identity Qualified named-session identity.
+	Identity string `json:"identity"`
+
+	// Mode Named-session mode (on-demand, always, etc.).
+	Mode string `json:"mode"`
+
+	// Status Lifecycle status string (materialized, reserved-unmaterialized, etc.).
+	Status string `json:"status"`
+}
+
 // StatusRigCounts defines model for StatusRigCounts.
 type StatusRigCounts struct {
 	// Suspended Number of suspended rigs.
@@ -2449,6 +2504,27 @@ type StatusRigCounts struct {
 
 	// Total Total number of rigs.
 	Total int64 `json:"total"`
+}
+
+// StatusRigDetail defines model for StatusRigDetail.
+type StatusRigDetail struct {
+	// Name Rig name.
+	Name string `json:"name"`
+
+	// Path Rig directory path.
+	Path string `json:"path"`
+
+	// Suspended Whether the rig is suspended (either explicitly or because all its agents are suspended).
+	Suspended bool `json:"suspended"`
+}
+
+// StatusSessionCountsDetail defines model for StatusSessionCountsDetail.
+type StatusSessionCountsDetail struct {
+	// Active Number of active sessions.
+	Active int64 `json:"active"`
+
+	// Suspended Number of suspended sessions.
+	Suspended int64 `json:"suspended"`
 }
 
 // StatusStoreHealth defines model for StatusStoreHealth.
