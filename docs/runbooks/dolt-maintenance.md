@@ -1,9 +1,7 @@
 # Runbook: Dolt store maintenance
 
 Periodic compaction (`CALL DOLT_GC()`) and pre-gc snapshotting
-(`dolt backup sync`) for the city's `.beads/dolt/` store. Implements
-[ADR 0002](../adr/0002-dolt-store-maintenance-runbook.md); see also
-the rule [`docs/rules/dolt-store-maintenance.md`](../rules/dolt-store-maintenance.md).
+(`dolt backup sync`) for the city's `.beads/dolt/` store.
 
 The loop runs **inside the supervisor process** when opted in via
 `city.toml`. There is no separate daemon, cron, or systemd unit.
@@ -241,10 +239,6 @@ events remain visible via `gc events`.
 
 ## References
 
-- ADR: [`docs/adr/0002-dolt-store-maintenance-runbook.md`](../adr/0002-dolt-store-maintenance-runbook.md)
-- Rule: [`docs/rules/dolt-store-maintenance.md`](../rules/dolt-store-maintenance.md)
-- Architecture (cold-path context, UC-3):
-  [`docs/architecture/gc-read-path.md`](../architecture/gc-read-path.md)
 - Implementation:
   - `internal/supervisor/maintenance.go` (loop + lease)
   - `internal/supervisor/maintenance_snapshot.go` (backup + retention)
