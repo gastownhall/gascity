@@ -1,5 +1,10 @@
 package api
 
+import (
+	"net/http"
+	"strconv"
+)
+
 // This file hosts stable, CLI-facing read-path envelope types that are
 // shared across per-domain migrations.
 //
@@ -31,4 +36,28 @@ package api
 type CachedRead[T any] struct {
 	Body       T
 	AgeSeconds float64
+}
+
+// cacheAgeHeader is the wire name of the X-GC-Cache-Age-S response header,
+// set by read handlers via the cacheAgeSeconds helper and consumed by CLI
+// wrappers through cacheAgeFromResponse.
+const cacheAgeHeader = "X-GC-Cache-Age-S"
+
+// cacheAgeFromResponse extracts the CachingStore age from the response's
+// X-GC-Cache-Age-S header. Returns 0 when the response is nil, the header
+// is absent, or the value fails to parse. The header value is a float64
+// second count; fallback paths omit the header and naturally yield 0.
+func cacheAgeFromResponse(r *http.Response) float64 {
+	if r == nil {
+		return 0
+	}
+	v := r.Header.Get(cacheAgeHeader)
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 {
+		return 0
+	}
+	return f
 }

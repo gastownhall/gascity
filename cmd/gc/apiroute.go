@@ -63,6 +63,30 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 	return loadedCityName(cfg, cityPath)
 }
 
+// apiClientFallbackReason returns a reason code describing why apiClient
+// returned nil for cityPath. Read-path CLI commands call this when the
+// client is nil to emit a route=fallback reason=<code> log line.
+//
+// The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
+// (GC_NO_API truthy), "non-loopback-bind" (API bound to non-localhost with
+// mutations disallowed), "controller-down" (everything else — no controller,
+// config missing, API port unset).
+func apiClientFallbackReason(cityPath string) string {
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return "escape-hatch"
+	}
+	if controllerAlive(cityPath) != 0 {
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
+			bind := cfg.API.BindOrDefault()
+			if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+				return "non-loopback-bind"
+			}
+		}
+	}
+	return "controller-down"
+}
+
 // resolveAgentForAPI resolves a bare agent name (e.g., "worker") to its
 // qualified form (e.g., "myrig/worker") using the current rig context, so
 // the API server can find the agent. If already qualified or resolution
