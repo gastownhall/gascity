@@ -2,18 +2,22 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/deps"
+	"gopkg.in/yaml.v3"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1553,6 +1557,483 @@ func isWorktreeValid(wtPath string) bool {
 	_, err = os.Stat(target)
 	return err == nil
 }
+
+// --- Managed Dolt ops checks (PR 3) ---
+
+// Thresholds for the managed Dolt data directory footprint (bytes).
+const (
+	doltNomsWarnBytes  = int64(2) * 1024 * 1024 * 1024  // 2 GB
+	doltNomsErrorBytes = int64(20) * 1024 * 1024 * 1024 // 20 GB
+)
+
+// Minimum and recommended Dolt versions for managed operation.
+const (
+	doltMinVersion         = "1.50.0"
+	doltRecommendedVersion = "1.75.0"
+)
+
+// resolveManagedDoltDataDir returns the effective Dolt data directory for the
+// managed provider, honoring the GC_DOLT_DATA_DIR override used by
+// cmd/gc/dolt_runtime_layout.go.
+func resolveManagedDoltDataDir(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_DOLT_DATA_DIR")); v != "" {
+		return v
+	}
+	return filepath.Join(cityPath, ".beads", "dolt")
+}
+
+// resolveManagedDoltConfigPath returns the effective path to the managed
+// dolt-config.yaml, honoring the GC_DOLT_CONFIG_FILE override used by
+// cmd/gc/dolt_runtime_layout.go.
+func resolveManagedDoltConfigPath(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_DOLT_CONFIG_FILE")); v != "" {
+		return v
+	}
+	return filepath.Join(citylayout.PackStateDir(cityPath, "dolt"), "dolt-config.yaml")
+}
+
+// sumDirBytes walks root recursively and returns the total size of regular
+// files found. Missing roots return (0, false, nil); any other walk error is
+// returned.
+func sumDirBytes(root string) (int64, bool, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if !info.IsDir() {
+		return 0, false, fmt.Errorf("%s is not a directory", root)
+	}
+	var total int64
+	err = filepath.WalkDir(root, func(_ string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, statErr := d.Info()
+		if statErr != nil {
+			return statErr
+		}
+		if fi.Mode().IsRegular() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, true, err
+	}
+	return total, true, nil
+}
+
+func formatGB(bytes int64) string {
+	gb := float64(bytes) / (1024.0 * 1024.0 * 1024.0)
+	return fmt.Sprintf("%.2f GB", gb)
+}
+
+// DoltNomsSizeCheck warns when the managed Dolt database's on-disk footprint
+// is approaching or exceeds operator-set thresholds.
+type DoltNomsSizeCheck struct {
+	cityPath string
+	skip     bool
+}
+
+// NewDoltNomsSizeCheck creates a Dolt noms/on-disk size check.
+func NewDoltNomsSizeCheck(cityPath string, skip bool) *DoltNomsSizeCheck {
+	return &DoltNomsSizeCheck{cityPath: cityPath, skip: skip}
+}
+
+// Name returns the check identifier.
+func (c *DoltNomsSizeCheck) Name() string { return "dolt-noms-size" }
+
+// Run sums bytes under <dataDir>/<database>/.dolt/ and compares to thresholds.
+func (c *DoltNomsSizeCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.skip {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		return r
+	}
+
+	target, _, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
+	if err != nil {
+		// Let the beads-store / dolt-server checks report resolution errors.
+		r.Status = StatusOK
+		r.Message = "skipped (dolt target unresolved)"
+		return r
+	}
+	if !active {
+		r.Status = StatusOK
+		r.Message = "skipped (not a managed dolt backend)"
+		return r
+	}
+	if target.External {
+		// External endpoints (DoltHub, remote DB) aren't our disk to measure;
+		// any local `.dolt/` tree would be stale from a prior managed config.
+		r.Status = StatusOK
+		r.Message = "skipped (external dolt endpoint)"
+		return r
+	}
+
+	dataDir := resolveManagedDoltDataDir(c.cityPath)
+	db := strings.TrimSpace(target.Database)
+	var scanRoot string
+	switch {
+	case db != "":
+		scanRoot = filepath.Join(dataDir, db, ".dolt")
+	default:
+		// No database pinned — sum the entire data dir (still meaningful).
+		scanRoot = dataDir
+	}
+
+	total, exists, err := sumDirBytes(scanRoot)
+	if err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("scan dolt data dir: %v", err)
+		return r
+	}
+	if !exists {
+		r.Status = StatusOK
+		r.Message = "no dolt data yet"
+		return r
+	}
+
+	size := formatGB(total)
+	switch {
+	case total >= doltNomsErrorBytes:
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt noms directory is %s — excessive; recovery recommended", size)
+		r.FixHint = "see docs/troubleshooting/dolt-bloat-recovery.md"
+	case total >= doltNomsWarnBytes:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("dolt noms directory is %s — approaching threshold", size)
+		r.FixHint = "see docs/troubleshooting/dolt-bloat-recovery.md"
+	default:
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("dolt data footprint %s", size)
+	}
+	return r
+}
+
+// CanFix returns false — see PR 4 for bloat recovery runbook.
+func (c *DoltNomsSizeCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *DoltNomsSizeCheck) Fix(_ *CheckContext) error { return nil }
+
+// doltConfigExpectedValues captures the keys and expected values asserted by
+// DoltConfigCheck against the managed dolt-config.yaml. Keys are
+// dotted paths into the YAML document.
+//
+// Any key added here must match the value emitted by
+// writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go.
+func doltConfigExpectedValues() []struct {
+	Path  string
+	Value any
+} {
+	return []struct {
+		Path  string
+		Value any
+	}{
+		{"behavior.auto_gc_behavior.enable", true},
+		{"behavior.auto_gc_behavior.archive_level", 1},
+		{"listener.read_timeout_millis", 300000},
+		{"listener.write_timeout_millis", 300000},
+		{"listener.max_connections", 1000},
+		{"listener.back_log", 50},
+		{"listener.max_connections_timeout_millis", 5000},
+	}
+}
+
+// lookupYAMLPath walks a dotted key path through a decoded YAML map and
+// returns the leaf value, whether it was present, and whether the traversal
+// hit a non-map node before reaching the leaf.
+func lookupYAMLPath(doc map[string]any, dotted string) (any, bool) {
+	parts := strings.Split(dotted, ".")
+	var cur any = doc
+	for _, p := range parts {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		v, present := m[p]
+		if !present {
+			return nil, false
+		}
+		cur = v
+	}
+	return cur, true
+}
+
+// yamlIntEqual compares a decoded YAML scalar to an expected int value,
+// accepting int, int64, uint64, and float64 decodings (gopkg.in/yaml.v3
+// normally produces int, but be defensive).
+func yamlIntEqual(got any, want int) bool {
+	switch v := got.(type) {
+	case int:
+		return v == want
+	case int64:
+		return int64(want) == v
+	case uint64:
+		return uint64(want) == v //nolint:gosec // want is a fixed positive constant
+	case float64:
+		return v == float64(want)
+	}
+	return false
+}
+
+// DoltConfigCheck verifies the managed dolt-config.yaml exists and contains
+// the expected keys/values written by writeManagedDoltConfigFile.
+type DoltConfigCheck struct {
+	cityPath string
+	skip     bool
+}
+
+// NewDoltConfigCheck creates a managed Dolt config drift check.
+func NewDoltConfigCheck(cityPath string, skip bool) *DoltConfigCheck {
+	return &DoltConfigCheck{cityPath: cityPath, skip: skip}
+}
+
+// Name returns the check identifier.
+func (c *DoltConfigCheck) Name() string { return "dolt-config" }
+
+// Run parses the managed dolt-config.yaml and verifies required keys/values.
+func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.skip {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		return r
+	}
+
+	path := resolveManagedDoltConfigPath(c.cityPath)
+	data, err := os.ReadFile(path) //nolint:gosec // path is derived from city layout
+	if err != nil {
+		if os.IsNotExist(err) {
+			r.Status = StatusWarning
+			r.Message = "managed dolt-config.yaml not found"
+			r.FixHint = "run gc start (or gc dolt restart) to regenerate"
+			return r
+		}
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("read dolt-config.yaml: %v", err)
+		r.FixHint = "run gc start (or gc dolt restart) to regenerate"
+		return r
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("parse dolt-config.yaml: %v", err)
+		r.FixHint = "stop dolt (gc dolt stop) and restart to regenerate managed config"
+		return r
+	}
+
+	var drifted []string
+	for _, exp := range doltConfigExpectedValues() {
+		got, present := lookupYAMLPath(doc, exp.Path)
+		if !present {
+			drifted = append(drifted, exp.Path+" (missing)")
+			continue
+		}
+		switch want := exp.Value.(type) {
+		case bool:
+			if gotBool, ok := got.(bool); !ok || gotBool != want {
+				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %v)", exp.Path, got, want))
+			}
+		case int:
+			if !yamlIntEqual(got, want) {
+				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %d)", exp.Path, got, want))
+			}
+		default:
+			// Strings / other scalars — stringify for compare.
+			if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %v)", exp.Path, got, want))
+			}
+		}
+	}
+
+	if len(drifted) > 0 {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("managed dolt-config.yaml drift: %s", strings.Join(drifted, ", "))
+		r.FixHint = "stop dolt (gc dolt stop) and restart to regenerate managed config"
+		return r
+	}
+
+	r.Status = StatusOK
+	r.Message = "dolt config OK"
+	return r
+}
+
+// CanFix returns false. TODO: wire Fix() into the same code path as
+// `gc start` uses to rewrite the managed config once that helper is exposed
+// from the doctor package.
+func (c *DoltConfigCheck) CanFix() bool { return false }
+
+// Fix is a no-op. See TODO on CanFix.
+func (c *DoltConfigCheck) Fix(_ *CheckContext) error { return nil }
+
+// doltVersionInfo is the parsed semantic version of the installed `dolt`.
+type doltVersionInfo struct {
+	Major, Minor, Patch int
+	Raw                 string
+}
+
+// parseDoltVersion parses the first version-like token from `dolt version`
+// output. Accepted formats:
+//
+//	"dolt version 1.75.2\nWarning: ..."
+//	"dolt version 1.75.2"
+//	"1.75.2"
+//
+// Any suffix after patch (e.g. "-rc1") is ignored.
+func parseDoltVersion(out string) (doltVersionInfo, error) {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return doltVersionInfo{}, fmt.Errorf("empty version output")
+	}
+	// Only look at the first line — dolt sometimes emits a "Warning: ..."
+	// second line for deprecated flags.
+	if i := strings.IndexByte(out, '\n'); i >= 0 {
+		out = out[:i]
+	}
+	out = strings.TrimSpace(out)
+	// Strip the "dolt version " prefix if present.
+	const prefix = "dolt version "
+	if strings.HasPrefix(strings.ToLower(out), prefix) {
+		out = out[len(prefix):]
+	}
+	// Take the first whitespace-delimited token.
+	if i := strings.IndexAny(out, " \t"); i >= 0 {
+		out = out[:i]
+	}
+	out = strings.TrimPrefix(out, "v")
+	// Strip any pre-release / build suffix after MAJOR.MINOR.PATCH.
+	core := out
+	for _, sep := range []string{"-", "+"} {
+		if i := strings.Index(core, sep); i >= 0 {
+			core = core[:i]
+		}
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) < 3 {
+		return doltVersionInfo{}, fmt.Errorf("unrecognized version %q", out)
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return doltVersionInfo{}, fmt.Errorf("unrecognized major in %q: %w", out, err)
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return doltVersionInfo{}, fmt.Errorf("unrecognized minor in %q: %w", out, err)
+	}
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return doltVersionInfo{}, fmt.Errorf("unrecognized patch in %q: %w", out, err)
+	}
+	return doltVersionInfo{Major: major, Minor: minor, Patch: patch, Raw: fmt.Sprintf("%d.%d.%d", major, minor, patch)}, nil
+}
+
+// compareDoltVersion returns -1 if a<b, 0 if a==b, 1 if a>b.
+func compareDoltVersion(a, b doltVersionInfo) int {
+	switch {
+	case a.Major != b.Major:
+		if a.Major < b.Major {
+			return -1
+		}
+		return 1
+	case a.Minor != b.Minor:
+		if a.Minor < b.Minor {
+			return -1
+		}
+		return 1
+	case a.Patch != b.Patch:
+		if a.Patch < b.Patch {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// DoltVersionCheck shells out to `dolt version` and reports drift from the
+// minimum and recommended versions for managed operation.
+type DoltVersionCheck struct {
+	// versionOutput is injectable for tests. Nil means exec `dolt version`.
+	versionOutput func() (string, error)
+}
+
+// NewDoltVersionCheck creates a dolt binary version check.
+func NewDoltVersionCheck() *DoltVersionCheck {
+	return &DoltVersionCheck{}
+}
+
+// Name returns the check identifier.
+func (c *DoltVersionCheck) Name() string { return "dolt-version" }
+
+// Run invokes `dolt version` and compares against {min, recommended}.
+func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+
+	getOutput := c.versionOutput
+	if getOutput == nil {
+		getOutput = func() (string, error) {
+			path, lookErr := exec.LookPath("dolt")
+			if lookErr != nil {
+				return "", lookErr
+			}
+			cmd := exec.Command(path, "version")
+			out, err := cmd.CombinedOutput()
+			return string(out), err
+		}
+	}
+
+	out, err := getOutput()
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "executable file not found") {
+			r.Status = StatusWarning
+			r.Message = "dolt binary not in PATH"
+			return r
+		}
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("invoke dolt version: %v", err)
+		return r
+	}
+
+	info, err := parseDoltVersion(out)
+	if err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("parse dolt version: %v", err)
+		return r
+	}
+
+	minVer, _ := parseDoltVersion(doltMinVersion)
+	recVer, _ := parseDoltVersion(doltRecommendedVersion)
+
+	switch {
+	case compareDoltVersion(info, minVer) < 0:
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltMinVersion)
+		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
+	case compareDoltVersion(info, recVer) < 0:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("dolt version %s is below recommended %s; upgrade for default-on auto-GC + archive storage", info.Raw, doltRecommendedVersion)
+		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
+	default:
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("dolt %s", info.Raw)
+	}
+	return r
+}
+
+// CanFix returns false — upgrade instructions live in the FixHint.
+func (c *DoltVersionCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *DoltVersionCheck) Fix(_ *CheckContext) error { return nil }
 
 // IsControllerRunning probes the controller lock file to determine if a
 // controller is currently running. It tries to acquire the flock — if it

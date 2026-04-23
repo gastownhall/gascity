@@ -190,6 +190,14 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	}
 	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
+	// Managed Dolt ops checks (PR 3). Size + config drift are only
+	// meaningful when the city uses the managed bd/Dolt backend; the
+	// version check always runs so operators see drift even on external
+	// or file-backed setups.
+	skipManagedDoltCheck := os.Getenv("GC_DOLT") == "skip" || !scopeUsesManagedBdStoreContract(cityPath, cityPath)
+	d.Register(doctor.NewDoltNomsSizeCheck(cityPath, skipManagedDoltCheck))
+	d.Register(doctor.NewDoltConfigCheck(cityPath, skipManagedDoltCheck))
+	d.Register(doctor.NewDoltVersionCheck())
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 

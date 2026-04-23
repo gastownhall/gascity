@@ -34,6 +34,8 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		"host: 127.0.0.1",
 		`data_dir: "/tmp/city/.beads/dolt"`,
 		"archive_level: 1",
+		"back_log: 50",
+		"max_connections_timeout_millis: 5000",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -2209,5 +2211,440 @@ func TestWorktreeCheckFix(t *testing.T) {
 	r = c.Run(ctx)
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK after fix; msg = %s", r.Status, r.Message)
+	}
+}
+
+// --- DoltNomsSizeCheck ---
+
+// setupManagedDoltCity creates a minimal managed-bd/Dolt city in a temp dir
+// and returns its path. Runtime state is written for the pinned database.
+func setupManagedDoltCity(t *testing.T) string {
+	t.Helper()
+	const db = "hq"
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, dir, db)
+
+	// Provide a reachable runtime state so ResolveDoltConnectionTarget
+	// returns a valid target.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	writeDoctorRuntimeState(t, fs, dir, port)
+	return dir
+}
+
+// writeFakeFile creates a file at path of exactly size bytes (zero-filled).
+func writeFakeFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path) //nolint:gosec // test helper
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // test helper
+	if size > 0 {
+		if err := f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestDoltNomsSizeCheck_Skipped(t *testing.T) {
+	c := NewDoltNomsSizeCheck(t.TempDir(), true)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (skipped); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "skipped") {
+		t.Errorf("message = %q, want skipped", r.Message)
+	}
+}
+
+func TestDoltNomsSizeCheck_NoDataYet(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	// No .beads/dolt/hq/.dolt on disk.
+	c := NewDoltNomsSizeCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no dolt data yet") {
+		t.Errorf("message = %q, want no-data message", r.Message)
+	}
+}
+
+func TestDoltNomsSizeCheck_OKUnderThreshold(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	// 1 MB of data — well under 2 GB warn.
+	writeFakeFile(t, filepath.Join(dir, ".beads", "dolt", "hq", ".dolt", "noms", "file1"), 1024*1024)
+	c := NewDoltNomsSizeCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "footprint") {
+		t.Errorf("message = %q, want footprint description", r.Message)
+	}
+}
+
+func TestDoltNomsSizeCheck_WarnAtThreshold(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	// 3 GB — above warn (2 GB), below error (20 GB). Sparse file (Truncate)
+	// does not actually allocate disk, but reported size is 3 GB which
+	// is what our sum uses.
+	writeFakeFile(t, filepath.Join(dir, ".beads", "dolt", "hq", ".dolt", "noms", "big"), 3*1024*1024*1024)
+	c := NewDoltNomsSizeCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "approaching threshold") {
+		t.Errorf("message = %q, want approaching-threshold text", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "dolt-bloat-recovery") {
+		t.Errorf("fix hint = %q, want bloat-recovery doc reference", r.FixHint)
+	}
+}
+
+func TestDoltNomsSizeCheck_ErrorAtThreshold(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	// 21 GB — above error (20 GB).
+	writeFakeFile(t, filepath.Join(dir, ".beads", "dolt", "hq", ".dolt", "noms", "huge"), 21*1024*1024*1024)
+	c := NewDoltNomsSizeCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "excessive") {
+		t.Errorf("message = %q, want excessive text", r.Message)
+	}
+}
+
+func TestDoltNomsSizeCheck_CanFixFalse(t *testing.T) {
+	c := NewDoltNomsSizeCheck(t.TempDir(), false)
+	if c.CanFix() {
+		t.Error("CanFix() = true, want false")
+	}
+}
+
+// --- DoltConfigCheck ---
+
+// writeDoctorManagedDoltConfig writes a config.yaml at the canonical managed
+// path under city. values overrides individual key defaults; any value set to
+// the sentinel string "__missing__" is omitted entirely.
+func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[string]any) {
+	t.Helper()
+	defaults := map[string]any{
+		"log_level": "warning",
+		"listener": map[string]any{
+			"port":                           "3307",
+			"host":                           "127.0.0.1",
+			"max_connections":                1000,
+			"back_log":                       50,
+			"max_connections_timeout_millis": 5000,
+			"read_timeout_millis":            300000,
+			"write_timeout_millis":           300000,
+		},
+		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
+		"behavior": map[string]any{
+			"auto_gc_behavior": map[string]any{
+				"enable":        true,
+				"archive_level": 1,
+			},
+		},
+	}
+	for k, v := range overrides {
+		// Dotted override paths write into the nested map.
+		parts := strings.Split(k, ".")
+		cur := defaults
+		for i, p := range parts {
+			if i == len(parts)-1 {
+				if v == "__missing__" {
+					delete(cur, p)
+				} else {
+					cur[p] = v
+				}
+				break
+			}
+			next, ok := cur[p].(map[string]any)
+			if !ok {
+				next = map[string]any{}
+				cur[p] = next
+			}
+			cur = next
+		}
+	}
+
+	packStateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(packStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Using yaml.v3 via the doctor package's import is not re-exported;
+	// hand-render instead.
+	var b strings.Builder
+	renderDoctorTestYAML(&b, defaults, 0)
+	if err := os.WriteFile(filepath.Join(packStateDir, "dolt-config.yaml"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// renderDoctorTestYAML hand-renders a nested map[string]any as YAML. Kept
+// minimal; sufficient for dolt-config.yaml test fixtures.
+func renderDoctorTestYAML(b *strings.Builder, m map[string]any, indent int) {
+	// Sort keys for determinism.
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pad := strings.Repeat(" ", indent)
+	for _, k := range keys {
+		v := m[k]
+		switch vv := v.(type) {
+		case map[string]any:
+			fmt.Fprintf(b, "%s%s:\n", pad, k)
+			renderDoctorTestYAML(b, vv, indent+2)
+		case string:
+			fmt.Fprintf(b, "%s%s: %q\n", pad, k, vv)
+		case bool:
+			fmt.Fprintf(b, "%s%s: %t\n", pad, k, vv)
+		case int:
+			fmt.Fprintf(b, "%s%s: %d\n", pad, k, vv)
+		default:
+			fmt.Fprintf(b, "%s%s: %v\n", pad, k, vv)
+		}
+	}
+}
+
+func TestDoltConfigCheck_Skipped(t *testing.T) {
+	c := NewDoltConfigCheck(t.TempDir(), true)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "skipped") {
+		t.Errorf("message = %q, want skipped", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not found") {
+		t.Errorf("message = %q, want not-found", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "gc start") {
+		t.Errorf("fix hint = %q, want gc start reference", r.FixHint)
+	}
+}
+
+func TestDoltConfigCheck_OK(t *testing.T) {
+	dir := t.TempDir()
+	writeDoctorManagedDoltConfig(t, dir, nil)
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "OK") {
+		t.Errorf("message = %q, want OK text", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_MissingKey(t *testing.T) {
+	dir := t.TempDir()
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"listener.back_log": "__missing__",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "listener.back_log") {
+		t.Errorf("message = %q, want listener.back_log mention", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "gc dolt stop") {
+		t.Errorf("fix hint = %q, want stop/restart hint", r.FixHint)
+	}
+}
+
+func TestDoltConfigCheck_WrongValue(t *testing.T) {
+	dir := t.TempDir()
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"listener.max_connections": 500,
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "max_connections") {
+		t.Errorf("message = %q, want max_connections mention", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AutoGCDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"behavior.auto_gc_behavior.enable": false,
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "auto_gc_behavior.enable") {
+		t.Errorf("message = %q, want auto_gc_behavior.enable mention", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_CanFixFalse(t *testing.T) {
+	c := NewDoltConfigCheck(t.TempDir(), false)
+	if c.CanFix() {
+		t.Error("CanFix() = true, want false")
+	}
+}
+
+// --- DoltVersionCheck ---
+
+func TestParseDoltVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		wantMaj int
+		wantMin int
+		wantPat int
+		wantErr bool
+	}{
+		{"plain", "dolt version 1.75.2", 1, 75, 2, false},
+		{"with_warning", "dolt version 1.75.2\nWarning: some deprecation", 1, 75, 2, false},
+		{"no_prefix", "1.50.0", 1, 50, 0, false},
+		{"with_v_prefix", "v1.50.0", 1, 50, 0, false},
+		{"prerelease", "dolt version 1.76.0-rc1", 1, 76, 0, false},
+		{"build_suffix", "dolt version 1.76.0+build.5", 1, 76, 0, false},
+		{"empty", "", 0, 0, 0, true},
+		{"garbage", "hello world", 0, 0, 0, true},
+		{"too_few_parts", "dolt version 1.50", 0, 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDoltVersion(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseDoltVersion(%q) = %+v, want error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDoltVersion(%q) error: %v", tc.in, err)
+			}
+			if got.Major != tc.wantMaj || got.Minor != tc.wantMin || got.Patch != tc.wantPat {
+				t.Errorf("parseDoltVersion(%q) = %d.%d.%d, want %d.%d.%d",
+					tc.in, got.Major, got.Minor, got.Patch, tc.wantMaj, tc.wantMin, tc.wantPat)
+			}
+		})
+	}
+}
+
+func TestCompareDoltVersion(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.50.0", "1.50.0", 0},
+		{"1.50.0", "1.75.0", -1},
+		{"1.75.0", "1.50.0", 1},
+		{"2.0.0", "1.99.99", 1},
+		{"1.75.1", "1.75.0", 1},
+	}
+	for _, tc := range cases {
+		av, _ := parseDoltVersion(tc.a)
+		bv, _ := parseDoltVersion(tc.b)
+		if got := compareDoltVersion(av, bv); got != tc.want {
+			t.Errorf("compareDoltVersion(%s, %s) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestDoltVersionCheck_OK(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "dolt version 1.75.2\n", nil }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "1.75.2") {
+		t.Errorf("message = %q, want version in message", r.Message)
+	}
+}
+
+func TestDoltVersionCheck_Warn_BelowRecommended(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "dolt version 1.60.0\n", nil }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "below recommended") {
+		t.Errorf("message = %q, want below-recommended text", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "dolthub.com") {
+		t.Errorf("fix hint = %q, want upgrade URL", r.FixHint)
+	}
+}
+
+func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "dolt version 1.40.0\n", nil }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "below minimum") {
+		t.Errorf("message = %q, want below-minimum text", r.Message)
+	}
+}
+
+func TestDoltVersionCheck_NotInstalled(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "", exec.ErrNotFound }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not in PATH") {
+		t.Errorf("message = %q, want not-in-PATH text", r.Message)
+	}
+}
+
+func TestDoltVersionCheck_ParseError(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "not-a-version\n", nil }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning on parse error; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
+	c := NewDoltVersionCheck()
+	if c.CanFix() {
+		t.Error("CanFix() = true, want false")
 	}
 }

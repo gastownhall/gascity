@@ -127,6 +127,8 @@ listener:
   port: %s
   host: %s
   max_connections: 1000
+  back_log: 50
+  max_connections_timeout_millis: 5000
   read_timeout_millis: 300000
   write_timeout_millis: 300000
 
