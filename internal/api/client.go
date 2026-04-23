@@ -305,6 +305,42 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	return out, nil
 }
 
+// GetOrderHistory fetches order run history via
+// GET /v0/city/{cityName}/orders/history. scopedName is required (the
+// handler returns 400 when empty); limit=0 selects the server default;
+// before is an optional RFC3339 upper bound. The CachedRead.AgeSeconds
+// field carries the supervisor CachingStore age so callers can surface
+// _cache_age_s on --json output and a staleness banner on human output.
+func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (CachedRead[[]OrderHistoryView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]OrderHistoryView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameOrdersHistoryParams{
+		ScopedName: scopedName,
+	}
+	if limit > 0 {
+		l := int64(limit)
+		params.Limit = &l
+	}
+	if before != "" {
+		params.Before = &before
+	}
+	resp, err := c.cw.GetV0CityByCityNameOrdersHistoryWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]OrderHistoryView]{}, err
+	}
+	return CachedRead[[]OrderHistoryView]{
+		Body:       orderHistoryFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // ListRigs fetches the current set of configured rigs via
 // GET /v0/city/{cityName}/rigs. The CachedRead.AgeSeconds field carries the
 // supervisor CachingStore age from the X-GC-Cache-Age-S response header so
