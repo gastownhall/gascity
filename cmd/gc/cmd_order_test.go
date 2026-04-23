@@ -7,12 +7,15 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2337,5 +2340,282 @@ func TestOpenCityOrderStoreUsesProviderAwareStore(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].ID != created.ID {
 		t.Fatalf("order history results = %#v, want bead %q", results, created.ID)
+	}
+}
+
+// --- gc order history: API routing (ga-h6w / ga-6q1) ---
+
+// okOrderHistoryHandler serves a non-stale single-entry history matching
+// the test order.
+func okOrderHistoryHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/orders/history") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{
+				{
+					"bead_id":        "ca-1",
+					"name":           "digest",
+					"scoped_name":    "digest",
+					"created_at":     "2026-04-22T12:00:00Z",
+					"labels":         []string{"order-run:digest"},
+					"capture_output": false,
+					"has_output":     false,
+					"store_ref":      "city",
+				},
+			},
+		})
+	})
+}
+
+// writeOrderHistoryTestCity creates a minimal city directory with a
+// city.toml and a single city-level order so both the API-render path
+// and the fallback path have something to format.
+func writeOrderHistoryTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formulasDir := filepath.Join(cityPath, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ordersDir := filepath.Join(cityPath, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orderToml := `trigger = "manual"
+formula = "mol-digest"
+`
+	if err := os.WriteFile(filepath.Join(ordersDir, "digest.toml"), []byte(orderToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	return cityPath
+}
+
+func TestRouteOrderHistory_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      rigListMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okOrderHistoryHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "digest",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    problemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    problemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    problemHandler(http.StatusNotFound, "not_found: city not configured"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1") // force route=... lines into stderr buffer
+
+			cityPath := writeOrderHistoryTestCity(t)
+			cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			aa, code := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+			if code != 0 {
+				t.Fatalf("loadAllOrders = %d", code)
+			}
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, tc.nilReason, false, &stdout, &stderr)
+
+			if got != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", got, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+			// Fallback rows must produce the local iterator's rendered output
+			// (same "No order history." header/empty-state as the direct path).
+			if tc.wantRoute == "fallback" {
+				if !strings.Contains(stdout.String(), "No order history") && !strings.Contains(stdout.String(), "ORDER") {
+					t.Errorf("fallback stdout missing history header/empty-state:\n%s", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+// TestRouteOrderHistory_MultiOrderFallback verifies that `gc order history`
+// with no name falls back with reason=multi-order so the deliberate
+// no-API-routing branch is audit-logged.
+func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+
+	cityPath := writeOrderHistoryTestCity(t)
+	cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	aa, code := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders = %d", code)
+	}
+
+	srv := httptest.NewServer(okOrderHistoryHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	// Name empty → should not hit the API.
+	if got := routeOrderHistory(cityPath, cfg, "", "", aa, c, "", false, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit = %d, stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=fallback reason=multi-order") {
+		t.Errorf("stderr missing multi-order fallback:\n%s", stderr.String())
+	}
+}
+
+// TestRouteOrderHistory_StaleBannerOver30s verifies the > 30 s stale banner
+// on the API render path; matches the rig-list staleness test contract.
+func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+
+	cityPath := writeOrderHistoryTestCity(t)
+	cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	aa, _ := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{
+				{
+					"bead_id":        "ca-1",
+					"name":           "digest",
+					"scoped_name":    "digest",
+					"created_at":     "2026-04-22T12:00:00Z",
+					"labels":         []string{"order-run:digest"},
+					"capture_output": false,
+					"has_output":     false,
+					"store_ref":      "city",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age: 45s") {
+		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	}
+}
+
+// TestOrderScopedName verifies city-level vs rig-level scoping matches the
+// server's ScopedName() convention (name alone vs name:rig:<rig>).
+func TestOrderScopedName(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest"},
+		{Name: "cleanup", Rig: "frontend"},
+	}
+	cases := []struct {
+		name string
+		rig  string
+		want string
+	}{
+		{"digest", "", "digest"},
+		{"cleanup", "frontend", "cleanup:rig:frontend"},
+		{"unknown", "", "unknown"},
+		{"unknown", "backend", "unknown:rig:backend"},
+	}
+	for _, tc := range cases {
+		got := orderScopedName(tc.name, tc.rig, aa)
+		if got != tc.want {
+			t.Errorf("orderScopedName(%q, %q) = %q, want %q", tc.name, tc.rig, got, tc.want)
+		}
 	}
 }
