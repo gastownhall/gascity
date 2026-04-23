@@ -6122,6 +6122,59 @@
         ],
         "type": "object"
       },
+      "StatusAgentDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "draining": {
+            "description": "True when the pool is draining this instance.",
+            "type": "boolean"
+          },
+          "expanded": {
+            "description": "True when this row is a pool-expanded instance (renderer indents differently).",
+            "type": "boolean"
+          },
+          "group_name": {
+            "description": "Pool group label for expanded rows; same as QualifiedName for singletons.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1').",
+            "type": "string"
+          },
+          "qualified_name": {
+            "description": "Rig-qualified name when applicable, else the bare agent name.",
+            "type": "string"
+          },
+          "running": {
+            "description": "Observed running state of the agent's session.",
+            "type": "boolean"
+          },
+          "scale_label": {
+            "description": "'scaled (min=N, max=M)' header emitted once per pool group.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "city or rig.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "tmux session name CLI drain-ops key on.",
+            "type": "string"
+          },
+          "suspended": {
+            "description": "Whether the agent (or its rig) is suspended.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "qualified_name",
+          "scope",
+          "running",
+          "suspended"
+        ],
+        "type": "object"
+      },
       "StatusBody": {
         "additionalProperties": false,
         "properties": {
@@ -6129,6 +6182,16 @@
             "description": "Total agent count (deprecated, use agents.total).",
             "format": "int64",
             "type": "integer"
+          },
+          "agent_details": {
+            "description": "Per-agent state (for CLI status views). Empty when none.",
+            "items": {
+              "$ref": "#/components/schemas/StatusAgentDetail"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "agents": {
             "$ref": "#/components/schemas/StatusAgentCounts",
@@ -6142,6 +6205,16 @@
             "description": "City name.",
             "type": "string"
           },
+          "named_session_details": {
+            "description": "Per-named-session detail. Empty when none configured.",
+            "items": {
+              "$ref": "#/components/schemas/StatusNamedSessionDetail"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "path": {
             "description": "City directory path.",
             "type": "string"
@@ -6151,6 +6224,16 @@
             "format": "int64",
             "type": "integer"
           },
+          "rig_details": {
+            "description": "Per-rig detail (for CLI status views). Empty when none.",
+            "items": {
+              "$ref": "#/components/schemas/StatusRigDetail"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "rigs": {
             "$ref": "#/components/schemas/StatusRigCounts",
             "description": "Rig state counts."
@@ -6159,6 +6242,10 @@
             "description": "Number of running agent processes.",
             "format": "int64",
             "type": "integer"
+          },
+          "session_counts_detail": {
+            "$ref": "#/components/schemas/StatusSessionCountsDetail",
+            "description": "Active/suspended session counts. Omitted when unavailable."
           },
           "store_health": {
             "$ref": "#/components/schemas/StatusStoreHealth",
@@ -6217,6 +6304,29 @@
         ],
         "type": "object"
       },
+      "StatusNamedSessionDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "description": "Qualified named-session identity.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "Named-session mode (on-demand, always, etc.).",
+            "type": "string"
+          },
+          "status": {
+            "description": "Lifecycle status string (materialized, reserved-unmaterialized, etc.).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "status",
+          "mode"
+        ],
+        "type": "object"
+      },
       "StatusRigCounts": {
         "additionalProperties": false,
         "properties": {
@@ -6233,6 +6343,49 @@
         },
         "required": [
           "total",
+          "suspended"
+        ],
+        "type": "object"
+      },
+      "StatusRigDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Rig name.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Rig directory path.",
+            "type": "string"
+          },
+          "suspended": {
+            "description": "Whether the rig is suspended (either explicitly or because all its agents are suspended).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "suspended"
+        ],
+        "type": "object"
+      },
+      "StatusSessionCountsDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "description": "Number of active sessions.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "suspended": {
+            "description": "Number of suspended sessions.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active",
           "suspended"
         ],
         "type": "object"
