@@ -407,6 +407,27 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 	t.Fatal("stageHookFiles() did not stage hooks/claude.json")
 }
 
+func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	skillsDir := filepath.Join(workDir, ".claude", "skills", "plan")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", skillsDir, err)
+	}
+	skillPath := filepath.Join(skillsDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("---\nname: plan\n---\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", skillPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir)
+	wantRelDst := path.Join("worker", ".claude", "skills")
+	for _, entry := range got {
+		if entry.RelDst == wantRelDst {
+			t.Fatalf("stageHookFiles() staged %q at %q; want skills drift tracked via FingerprintExtra only", entry.Src, entry.RelDst)
+		}
+	}
+}
+
 func TestConfiguredRigNameMatchesRigByPathWithoutCreatingDirs(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(cityPath, "repos", "demo")
