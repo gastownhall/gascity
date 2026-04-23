@@ -343,6 +343,21 @@ make build
 See [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 for the full contributor setup.
 
+## Slung Beads Not Reaching Agents (managed-city mode)
+
+If `gc sling` accepts work but agents don't process it — especially if
+your supervisor log shows `rigStores=0` or `assignedWorkBeads=0`, or
+your `bd dolt set port` edits keep reverting at the next `gc start` —
+you're likely looking at a rig whose Dolt view has drifted from the
+managed city Dolt. Do **not** edit `.beads/dolt-server.port` or
+`bd dolt set port` directly; both self-revert.
+
+See the
+[Managed-city Dolt endpoints runbook](../runbooks/managed-city-endpoints.md)
+for the mental model, the forbidden edits, the sanctioned escape
+hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
+and an end-to-end recovery recipe.
+
 ## Still Stuck?
 
 Open an issue at
