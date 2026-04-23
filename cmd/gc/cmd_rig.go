@@ -637,8 +637,134 @@ func cmdRigList(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	c, reason := rigListAPIClient(cityPath)
+	return routeRigList(cityPath, c, reason, jsonOutput, stdout, stderr)
+}
+
+// rigListAPIClient returns (client, "") when the API path is available, or
+// (nil, reason) when the caller should fall back. Indirected through a var
+// so tests inject a client pointed at httptest.Server or force a specific
+// fallback reason without spinning up a real controller.
+var rigListAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeRigList dispatches the `rig list` read to the supervisor API when
+// available, falling back to doRigList when the controller is down, the
+// escape hatch is set, or the API returns a fallbackable error. Emits
+// exactly one route=... log line per exit path (gated on GC_DEBUG).
+func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+	const cmdName = "rig list"
+	if c != nil {
+		cr, err := c.ListRigs()
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, jsonOutput, stdout, stderr)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
 	return doRigList(fsys.OSFS{}, cityPath, jsonOutput, stdout, stderr)
 }
+
+// renderRigListFromAPI formats the API-sourced rig list to match doRigList
+// output. HQ info and per-rig beads status are derived locally (neither
+// lives on the API response); configured rigs come from the API with an
+// _cache_age_s envelope field (JSON) or staleness banner (human).
+func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	hqPrefix := config.EffectiveHQPrefix(cfg)
+	cityName := cfg.EffectiveCityName()
+
+	if jsonOutput {
+		result := rigListJSONWithCache{
+			CityPath: cityPath,
+			CityName: cityName,
+			Rigs: []RigListItem{{
+				Name:   cityName,
+				Path:   cityPath,
+				Prefix: hqPrefix,
+				HQ:     true,
+				Beads:  rigBeadsStatus(fs, cityPath),
+			}},
+			CacheAgeS: cr.AgeSeconds,
+		}
+		for _, rig := range cr.Body {
+			result.Rigs = append(result.Rigs, RigListItem{
+				Name:      rig.Name,
+				Path:      rig.Path,
+				Prefix:    rig.Prefix,
+				Suspended: rig.Suspended,
+				Beads:     rigBeadsStatus(fs, rig.Path),
+			})
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+
+	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
+	w("")
+	w(fmt.Sprintf("Rigs in %s:", cityPath))
+
+	hqBeads := rigBeadsStatus(fs, cityPath)
+	displayName := loadedCityName(cfg, cityPath)
+	w("")
+	w(fmt.Sprintf("  %s (HQ):", displayName))
+	w(fmt.Sprintf("    Prefix: %s", hqPrefix))
+	w(fmt.Sprintf("    Beads:  %s", hqBeads))
+
+	for _, rig := range cr.Body {
+		beads := rigBeadsStatus(fs, rig.Path)
+		header := rig.Name
+		if rig.Suspended {
+			header += " (suspended)"
+		}
+		w("")
+		w(fmt.Sprintf("  %s:", header))
+		w(fmt.Sprintf("    Path:   %s", rig.Path))
+		w(fmt.Sprintf("    Prefix: %s", rig.Prefix))
+		w(fmt.Sprintf("    Beads:  %s", beads))
+	}
+
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		w("")
+		w(fmt.Sprintf("(cache age: %.0fs — reconciler may be lagging)", cr.AgeSeconds))
+	}
+	return 0
+}
+
+// rigListJSONWithCache is the --json output for `gc rig list` on the API
+// path. Structurally identical to RigListJSON but adds the _cache_age_s
+// envelope field documented in docs/rules/gc-read-path-routes-through-api.md.
+type rigListJSONWithCache struct {
+	CityPath  string        `json:"city_path"`
+	CityName  string        `json:"city_name"`
+	Rigs      []RigListItem `json:"rigs"`
+	CacheAgeS float64       `json:"_cache_age_s"`
+}
+
+// cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
+// output appends the "reconciler may be lagging" banner. Matches the
+// enabler contract D5 documented in the ga-h6w plan.
+const cacheAgeBannerThresholdSeconds = 30.0
 
 // RigListJSON is the JSON output format for "gc rig list --json".
 type RigListJSON struct {
