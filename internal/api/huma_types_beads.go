@@ -22,6 +22,7 @@ type BeadListInput struct {
 	Label    string `query:"label" required:"false" doc:"Filter by label."`
 	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
 	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
+	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
 }
 
 // BeadReadyInput is the Huma input for GET /v0/city/{cityName}/beads/ready.
