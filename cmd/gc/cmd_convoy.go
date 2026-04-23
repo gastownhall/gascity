@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -252,9 +253,105 @@ child issues.`,
 	}
 }
 
-// cmdConvoyList is the CLI entry point for listing convoys.
+// cmdConvoyList is the CLI entry point for listing convoys. It routes
+// through the supervisor API when a controller is up and falls back to
+// direct bd reads otherwise.
 func cmdConvoyList(stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy list")
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	c, reason := convoyListAPIClient(cityPath)
+	return routeConvoyList(cityPath, c, reason, stdout, stderr)
+}
+
+// convoyListAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server or force a
+// specific fallback reason without spinning up a real controller.
+var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeConvoyList dispatches `convoy list` to the supervisor API when a
+// controller is up; otherwise falls back to the local multi-store iterator.
+// Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+//
+// The API path queries /convoys for the convoy list and /convoy/{id}/check
+// for each convoy's progress counts. If the per-convoy check returns a
+// fallbackable error, the whole operation falls back to local reads so
+// output is consistent (partial failure would produce surprising gaps).
+func routeConvoyList(cityPath string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "convoy list"
+	if c != nil {
+		cr, err := c.ListConvoys()
+		if err == nil {
+			progress, progErr := fetchConvoyProgress(c, cr.Body)
+			if progErr == nil {
+				logRoute(stderr, cmdName, "api", "")
+				return renderConvoyListFromAPI(cr, progress, stdout)
+			}
+			if !api.ShouldFallbackForRead(progErr) {
+				logRoute(stderr, cmdName, "api", "error")
+				fmt.Fprintf(stderr, "gc convoy list: %v\n", progErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
+		} else if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		} else {
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		}
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doConvoyListFallback(cityPath, stdout, stderr)
+}
+
+// fetchConvoyProgress calls /convoy/{id}/check for each convoy in list and
+// returns a parallel slice of progress views. Returns the first fallbackable
+// error encountered so the caller can surface it for the whole operation.
+func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheckView, error) {
+	out := make([]api.ConvoyCheckView, len(convoys))
+	for i, convoy := range convoys {
+		cr, err := c.CheckConvoy(convoy.ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = cr.Body
+	}
+	return out, nil
+}
+
+// renderConvoyListFromAPI formats the API-sourced convoy list to match
+// doConvoyListAcrossStores output. Stale banner appends when cache age > 30s.
+func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, stdout io.Writer) int {
+	if len(cr.Body) == 0 {
+		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
+	for i, convoy := range cr.Body {
+		p := progress[i]
+		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", convoy.ID, convoy.Title, p.Closed, p.Total) //nolint:errcheck // best-effort stdout
+	}
+	tw.Flush() //nolint:errcheck // best-effort stdout
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
+}
+
+// doConvoyListFallback is the direct-bd path for "gc convoy list".
+func doConvoyListFallback(cityPath string, stdout, stderr io.Writer) int {
+	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy list")
 	if stores == nil {
 		return code
 	}
@@ -375,6 +472,13 @@ func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, i
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
+	return openAllConvoyStoresAt(cityPath, stderr, cmdName)
+}
+
+// openAllConvoyStoresAt is openAllConvoyStores with a pre-resolved cityPath,
+// used by routed callers that already resolved the city before dispatching
+// to the fallback path.
+func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
@@ -423,6 +527,13 @@ func openConvoyStoreByID(convoyID string, stderr io.Writer, cmdName string) (bea
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
+	return openConvoyStoreByIDAt(convoyID, cityPath, stderr, cmdName)
+}
+
+// openConvoyStoreByIDAt is openConvoyStoreByID with a pre-resolved cityPath,
+// used by routed callers that already resolved the city before dispatching
+// to a fallback or mutation path.
+func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName string) (beads.Store, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
@@ -503,20 +614,116 @@ table of all child issues with their status and assignee.`,
 	}
 }
 
-// cmdConvoyStatus is the CLI entry point for convoy status.
+// cmdConvoyStatus is the CLI entry point for convoy status. It routes
+// through the supervisor API when a controller is up and falls back to
+// direct bd reads otherwise.
 func cmdConvoyStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		return doConvoyStatus(nil, args, stdout, stderr)
 	}
-	convoyID := ""
-	if len(args) > 0 {
-		convoyID = args[0]
+	convoyID := args[0]
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy status")
+	c, reason := convoyStatusAPIClient(cityPath)
+	return routeConvoyStatus(cityPath, convoyID, c, reason, stdout, stderr)
+}
+
+// convoyStatusAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back.
+var convoyStatusAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeConvoyStatus dispatches `convoy status` to the supervisor API when a
+// controller is up; otherwise falls back to the local store resolver.
+// Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "convoy status"
+	if c != nil {
+		cr, err := c.GetConvoy(convoyID)
+		if err == nil {
+			// Graph/workflow convoys return an empty Convoy.ID — treat as
+			// "not a simple convoy" and fall back so the workflow-aware
+			// local path can render it.
+			if cr.Body.Convoy.ID == "" {
+				logRoute(stderr, cmdName, "fallback", "workflow-convoy")
+				return doConvoyStatusFallback(cityPath, convoyID, stdout, stderr)
+			}
+			logRoute(stderr, cmdName, "api", "")
+			return renderConvoyStatusFromAPI(cr, stdout)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doConvoyStatusFallback(cityPath, convoyID, stdout, stderr)
+}
+
+// renderConvoyStatusFromAPI formats the API-sourced convoy detail to match
+// doConvoyStatus output. Stale banner appends when cache age > 30s.
+func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], stdout io.Writer) int {
+	convoy := cr.Body.Convoy
+	children := cr.Body.Children
+	progress := cr.Body.Progress
+
+	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
+	w(fmt.Sprintf("Convoy:   %s", convoy.ID))
+	w(fmt.Sprintf("Title:    %s", convoy.Title))
+	w(fmt.Sprintf("Status:   %s", convoy.Status))
+	w(fmt.Sprintf("Progress: %d/%d closed", progress.Closed, progress.Total))
+	fields := getConvoyFields(convoy)
+	if hasLabel(convoy.Labels, "owned") {
+		w("Lifecycle: owned")
+	}
+	if fields.Target != "" {
+		w(fmt.Sprintf("Target:   %s", fields.Target))
+	}
+	if fields.Owner != "" {
+		w(fmt.Sprintf("Owner:    %s", fields.Owner))
+	}
+	if fields.Notify != "" {
+		w(fmt.Sprintf("Notify:   %s", fields.Notify))
+	}
+	if fields.Merge != "" {
+		w(fmt.Sprintf("Merge:    %s", fields.Merge))
+	}
+	if len(children) > 0 {
+		w("")
+		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tASSIGNEE") //nolint:errcheck // best-effort stdout
+		for _, ch := range children {
+			assignee := ch.Assignee
+			if assignee == "" {
+				assignee = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ch.ID, ch.Title, ch.Status, assignee) //nolint:errcheck // best-effort stdout
+		}
+		tw.Flush() //nolint:errcheck // best-effort stdout
+	}
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
+}
+
+// doConvoyStatusFallback is the direct-bd path for "gc convoy status".
+func doConvoyStatusFallback(cityPath, convoyID string, stdout, stderr io.Writer) int {
+	store, code := openConvoyStoreByIDAt(convoyID, cityPath, stderr, "gc convoy status")
 	if store == nil {
 		return code
 	}
-	return doConvoyStatus(store, args, stdout, stderr)
+	return doConvoyStatus(store, []string{convoyID}, stdout, stderr)
 }
 
 // doConvoyStatus shows detailed status of a convoy and its children.
@@ -805,12 +1012,111 @@ Evaluates each open convoy's children. If all children have status
 }
 
 // cmdConvoyCheck is the CLI entry point for auto-closing completed convoys.
+// It routes through the supervisor API to discover convoys + completion
+// state, then performs the close mutations via local bd. Falls back to the
+// all-local multi-store iterator when the API is unavailable.
 func cmdConvoyCheck(stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy check")
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	c, reason := convoyCheckAPIClient(cityPath)
+	return routeConvoyCheck(cityPath, c, reason, stdout, stderr)
+}
+
+// convoyCheckAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back.
+var convoyCheckAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeConvoyCheck dispatches `convoy check` to the supervisor API when a
+// controller is up; otherwise falls back to the all-local iterator. Emits
+// exactly one route=... log line per exit path (gated on GC_DEBUG).
+//
+// The API path queries /convoys then /convoy/{id}/check for each non-owned
+// convoy. Completed convoys are closed via local bd — mutation routing is
+// intentionally outside this read-path migration. A fallbackable error on
+// any check call aborts the whole operation back to the local iterator so
+// the user sees consistent output.
+func routeConvoyCheck(cityPath string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "convoy check"
+	if c != nil {
+		cr, err := c.ListConvoys()
+		if err == nil {
+			progress, progErr := fetchConvoyProgress(c, cr.Body)
+			if progErr == nil {
+				logRoute(stderr, cmdName, "api", "")
+				return autoCloseConvoysFromAPI(cityPath, cr, progress, stdout, stderr)
+			}
+			if !api.ShouldFallbackForRead(progErr) {
+				logRoute(stderr, cmdName, "api", "error")
+				fmt.Fprintf(stderr, "gc convoy check: %v\n", progErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
+		} else if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		} else {
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		}
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doConvoyCheckFallback(cityPath, stdout, stderr)
+}
+
+// autoCloseConvoysFromAPI closes non-owned convoys whose API-reported
+// progress is complete. Closure uses local bd stores (resolved per-convoy
+// via openConvoyStoreByID) so mutation routing stays out of scope for the
+// read-path migration. Prints the stale banner when cache age > 30s.
+func autoCloseConvoysFromAPI(cityPath string, cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, stdout, stderr io.Writer) int {
+	rec := openCityRecorderAt(cityPath, stderr)
+	closed := 0
+	for i, convoy := range cr.Body {
+		if hasLabel(convoy.Labels, "owned") {
+			continue
+		}
+		p := progress[i]
+		if !p.Complete {
+			continue
+		}
+		store, code := openConvoyStoreByIDAt(convoy.ID, cityPath, stderr, "gc convoy check")
+		if store == nil {
+			return code
+		}
+		if err := store.Close(convoy.ID); err != nil {
+			fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", convoy.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		rec.Record(events.Event{
+			Type:    events.ConvoyClosed,
+			Actor:   eventActor(),
+			Subject: convoy.ID,
+		})
+		fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", convoy.ID, convoy.Title) //nolint:errcheck // best-effort stdout
+		closed++
+	}
+	fmt.Fprintf(stdout, "%d convoy(s) auto-closed\n", closed) //nolint:errcheck // best-effort stdout
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
+}
+
+// doConvoyCheckFallback is the direct-bd path for "gc convoy check".
+func doConvoyCheckFallback(cityPath string, stdout, stderr io.Writer) int {
+	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy check")
 	if stores == nil {
 		return code
 	}
-	rec := openCityRecorder(stderr)
+	rec := openCityRecorderAt(cityPath, stderr)
 	return doConvoyCheckAcrossStores(stores, rec, stdout, stderr)
 }
 
