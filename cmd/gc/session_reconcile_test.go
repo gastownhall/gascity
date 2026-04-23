@@ -2492,3 +2492,269 @@ func TestNudgeRoutedWorkSessions_LogsEnqueueFailure(t *testing.T) {
 		t.Errorf("stdout should not log a successful nudge when enqueue fails; got: %q", stdout.String())
 	}
 }
+func TestClaimRoutedWork_AssignsBeadToAliveSession(t *testing.T) {
+	store := beads.NewMemStore()
+	workBead, _ := store.Create(beads.Bead{
+		Title:    "routed task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, store, targets, decisions, workSet, &stdout, &stderr)
+
+	updated, err := store.Get(workBead.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if updated.Assignee != "ses-1" {
+		t.Errorf("expected assignee ses-1, got %q", updated.Assignee)
+	}
+	if !strings.Contains(stdout.String(), "Assigned routed bead") {
+		t.Errorf("expected assignment output, got: %q", stdout.String())
+	}
+}
+
+func TestClaimRoutedWork_SkipsAlreadyAssigned(t *testing.T) {
+	store := beads.NewMemStore()
+	store.Create(beads.Bead{
+		Title:    "already assigned",
+		Status:   "open",
+		Assignee: "other-session",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, store, targets, decisions, workSet, &stdout, &stderr)
+
+	if strings.Contains(stdout.String(), "Assigned") {
+		t.Errorf("should not assign already-assigned bead, got: %q", stdout.String())
+	}
+}
+
+func TestClaimRoutedWork_SkipsDeadSession(t *testing.T) {
+	store := beads.NewMemStore()
+	workBead, _ := store.Create(beads.Bead{
+		Title:    "routed task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: false}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, store, targets, decisions, workSet, &stdout, &stderr)
+
+	updated, _ := store.Get(workBead.ID)
+	if updated.Assignee != "" {
+		t.Errorf("should not assign to dead session, got assignee %q", updated.Assignee)
+	}
+}
+
+func TestClaimRoutedWork_ClaimsOncePerTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	store.Create(beads.Bead{
+		Title:    "routed task 1",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})
+	store.Create(beads.Bead{
+		Title:    "routed task 2",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	targets := []wakeTarget{
+		{
+			session: &beads.Bead{
+				ID: "ses-1", Status: "open",
+				Metadata: map[string]string{
+					"session_name": "polecat-1",
+					"template":     "gascity/polecat",
+					"state":        "active",
+				},
+			},
+			alive: true,
+		},
+		{
+			session: &beads.Bead{
+				ID: "ses-2", Status: "open",
+				Metadata: map[string]string{
+					"session_name": "polecat-2",
+					"template":     "gascity/polecat",
+					"state":        "active",
+				},
+			},
+			alive: true,
+		},
+	}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+		"polecat-2": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, store, targets, decisions, workSet, &stdout, &stderr)
+
+	assignCount := strings.Count(stdout.String(), "Assigned routed bead")
+	if assignCount != 1 {
+		t.Errorf("expected exactly 1 assignment per template per tick, got %d", assignCount)
+	}
+}
+
+func TestClaimRoutedWork_NoWorkSet(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "config"},
+	}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, store, targets, decisions, map[string]bool{}, &stdout, &stderr)
+
+	if stdout.Len() > 0 {
+		t.Errorf("should not assign when no work, got: %q", stdout.String())
+	}
+}
+
+func TestClaimRoutedWork_UsesPoolName(t *testing.T) {
+	store := beads.NewMemStore()
+	workBead, _ := store.Create(beads.Bead{
+		Title:    "routed to pool",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "gascity/worker"},
+	})
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker-1", Dir: "gascity"},
+		},
+	}
+	cfg.Agents[0].PoolName = "gascity/worker"
+
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"template":     "gascity/worker-1",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"worker-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/worker-1": true}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, store, targets, decisions, workSet, &stdout, &stderr)
+
+	updated, err := store.Get(workBead.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if updated.Assignee != "ses-1" {
+		t.Errorf("expected assignee ses-1, got %q", updated.Assignee)
+	}
+}
+
+func TestClaimRoutedWork_NilStore(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	var stdout, stderr strings.Builder
+	claimRoutedWorkForIdleSessions(cfg, nil, targets, decisions, workSet, &stdout, &stderr)
+
+	if stdout.Len() > 0 || stderr.Len() > 0 {
+		t.Errorf("nil store should no-op, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}

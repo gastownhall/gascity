@@ -496,6 +496,84 @@ func nudgeRoutedWorkSessions(
 	}
 }
 
+// claimRoutedWorkForIdleSessions assigns unassigned routed beads to alive
+// sessions whose templates have pending routed work. This complements
+// nudgeRoutedWorkSessions: the nudge tells the session to re-check its hook,
+// but named sessions can't see routed-unassigned beads via work_query Tier 3
+// (which gates on GC_SESSION_ORIGIN=ephemeral). By explicitly assigning the
+// bead, it becomes visible in Tier 1/2 (assigned work), which all session
+// types can see.
+func claimRoutedWorkForIdleSessions(
+	cfg *config.City,
+	store beads.Store,
+	targets []wakeTarget,
+	awakeDecisions map[string]AwakeDecision,
+	workSet map[string]bool,
+	stdout, stderr io.Writer,
+) {
+	if store == nil || cfg == nil || len(workSet) == 0 || len(targets) == 0 {
+		return
+	}
+	claimed := make(map[string]bool)
+	for _, target := range targets {
+		if !target.alive {
+			continue
+		}
+		template := normalizedSessionTemplate(*target.session, cfg)
+		if !workSet[template] {
+			continue
+		}
+		if claimed[template] {
+			continue
+		}
+		name := strings.TrimSpace(target.session.Metadata["session_name"])
+		if name == "" {
+			continue
+		}
+		decision, ok := awakeDecisions[name]
+		if !ok || !decision.ShouldWake {
+			continue
+		}
+
+		agent := findAgentByTemplate(cfg, template)
+		if agent == nil {
+			continue
+		}
+		routingTarget := agent.QualifiedName()
+		if agent.PoolName != "" {
+			routingTarget = agent.PoolName
+		}
+
+		candidates, err := store.List(beads.ListQuery{
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": routingTarget},
+			Limit:    1,
+		})
+		if err != nil || len(candidates) == 0 {
+			continue
+		}
+		// Skip beads that already have an assignee.
+		var unassigned *beads.Bead
+		for i := range candidates {
+			if candidates[i].Assignee == "" {
+				unassigned = &candidates[i]
+				break
+			}
+		}
+		if unassigned == nil {
+			continue
+		}
+
+		assignee := target.session.ID
+		if err := store.Update(unassigned.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			fmt.Fprintf(stderr, "claimRoutedWork: assign %s to %s: %v\n", unassigned.ID, name, err) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stdout, "Assigned routed bead %s to %s (%s)\n", unassigned.ID, name, template) //nolint:errcheck
+		claimed[template] = true
+	}
+}
+
 // findAgentByTemplate looks up a config agent by template name.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
