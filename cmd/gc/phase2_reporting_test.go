@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
@@ -178,11 +179,11 @@ func inputOverrideDefaultsResult(tc phase2ProviderCase, prepared *preparedStart)
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			"ResolvedProvider = nil, want provider defaults for override comparison").WithEvidence(evidence)
 	}
-	defaultArgs := prepared.candidate.tp.ResolvedProvider.ResolveDefaultArgs()
+	defaultArgs := defaultArgsExceptOption(prepared.candidate.tp.ResolvedProvider, "model")
 	switch {
 	case !containsOrderedArgs(prepared.cfg.Command, defaultArgs):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
-			fmt.Sprintf("Command = %q, want default args %v", prepared.cfg.Command, defaultArgs)).WithEvidence(evidence)
+			fmt.Sprintf("Command = %q, want non-model default args %v", prepared.cfg.Command, defaultArgs)).WithEvidence(evidence)
 	case !containsOrderedArgs(prepared.cfg.Command, tc.wantModelOverrideArgs):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			fmt.Sprintf("Command = %q, want model override args %v", prepared.cfg.Command, tc.wantModelOverrideArgs)).WithEvidence(evidence)
@@ -196,6 +197,49 @@ func inputOverrideDefaultsResult(tc phase2ProviderCase, prepared *preparedStart)
 		return workertest.Pass(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			"provider default launch flags survive schema overrides while first-input delivery stays exact-once").WithEvidence(evidence)
 	}
+}
+
+func defaultArgsExceptOption(provider *config.ResolvedProvider, optionKey string) []string {
+	if provider == nil {
+		return nil
+	}
+	defaultArgs := provider.ResolveDefaultArgs()
+	defaultValue := provider.EffectiveDefaults[optionKey]
+	for _, opt := range provider.OptionsSchema {
+		if opt.Key == optionKey && defaultValue == "" {
+			defaultValue = opt.Default
+		}
+		if opt.Key != optionKey || defaultValue == "" {
+			continue
+		}
+		for _, choice := range opt.Choices {
+			if choice.Value == defaultValue {
+				return removeContiguousArgs(defaultArgs, choice.FlagArgs)
+			}
+		}
+	}
+	return defaultArgs
+}
+
+func removeContiguousArgs(args, remove []string) []string {
+	if len(args) == 0 || len(remove) == 0 || len(remove) > len(args) {
+		return args
+	}
+	for i := 0; i <= len(args)-len(remove); i++ {
+		matched := true
+		for j := range remove {
+			if args[i+j] != remove[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			out := append([]string{}, args[:i]...)
+			out = append(out, args[i+len(remove):]...)
+			return out
+		}
+	}
+	return args
 }
 
 func phase2TemplateEvidence(tc phase2ProviderCase, tp TemplateParams) map[string]string {

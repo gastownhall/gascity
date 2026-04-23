@@ -149,6 +149,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Command:     "codex",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
+			"model":           "gpt-5.5",
 			"effort":          "xhigh",
 		},
 		PromptMode:        "arg",
@@ -184,6 +185,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
+					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}},
 				},

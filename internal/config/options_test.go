@@ -714,6 +714,13 @@ func TestBuiltinProviders_CodexHasNilArgsAndOptionDefaults(t *testing.T) {
 		t.Errorf("codex OptionDefaults[permission_mode] = %q, want unrestricted",
 			codex.OptionDefaults["permission_mode"])
 	}
+	if codex.OptionDefaults["model"] != "gpt-5.5" {
+		t.Errorf("codex OptionDefaults[model] = %q, want gpt-5.5",
+			codex.OptionDefaults["model"])
+	}
+	if !schemaHasChoice(codex.OptionsSchema, "model", "gpt-5.5") {
+		t.Error("codex OptionsSchema missing model choice gpt-5.5")
+	}
 }
 
 func TestBuiltinProviders_GeminiHasNilArgsAndOptionDefaults(t *testing.T) {
@@ -768,4 +775,18 @@ func TestValidateOptionDefaults_InvalidValue(t *testing.T) {
 	if !strings.Contains(err.Error(), "not a valid choice") {
 		t.Errorf("unexpected error: %v", err)
 	}
+}
+
+func schemaHasChoice(schema []ProviderOption, key, value string) bool {
+	for _, opt := range schema {
+		if opt.Key != key {
+			continue
+		}
+		for _, choice := range opt.Choices {
+			if choice.Value == value {
+				return true
+			}
+		}
+	}
+	return false
 }
