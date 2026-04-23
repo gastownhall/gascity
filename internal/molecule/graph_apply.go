@@ -150,7 +150,12 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
-			node.Type = nonRootStepBeadType(node.Type)
+			// graph.v2 workflows use step beads as independently routable
+			// actionable work, not scaffolding — skip the #1039 coercion
+			// so Ready() still surfaces them for worker claim.
+			if !graphWorkflow {
+				node.Type = nonRootStepBeadType(node.Type)
+			}
 			if node.Metadata == nil {
 				node.Metadata = make(map[string]string, 1)
 			}

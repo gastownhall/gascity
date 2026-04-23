@@ -2392,6 +2392,64 @@ func TestBuildRecipeApplyPlan_NonRootStepsGetStepType(t *testing.T) {
 	}
 }
 
+// TestInstantiate_GraphWorkflowSkipsStepCoercion verifies that non-root
+// steps of a graph.v2 workflow (recipe.Steps[0] marked with
+// gc.kind=workflow) retain their original type rather than being
+// coerced to "step". Graph workflows use step beads as independently
+// claimable actionable work; coercing them would hide real work from
+// `bd ready` and stall the workflow (#1039 regression guard).
+func TestInstantiate_GraphWorkflowSkipsStepCoercion(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.body", Title: "Body work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	body, err := store.Get(result.IDMapping["wf.body"])
+	if err != nil {
+		t.Fatalf("Get(body): %v", err)
+	}
+	if body.Type != "task" {
+		t.Errorf("graph-workflow step.Type = %q, want %q (must stay actionable)", body.Type, "task")
+	}
+}
+
+func TestBuildRecipeApplyPlan_GraphWorkflowSkipsStepCoercion(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.body", Title: "Body work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	for _, n := range plan.Nodes {
+		if n.Key == "wf.body" && n.Type != "task" {
+			t.Errorf("graph-workflow node.Type = %q, want %q (must stay actionable)", n.Type, "task")
+		}
+	}
+}
+
 func TestNonRootStepBeadType(t *testing.T) {
 	cases := []struct {
 		name        string

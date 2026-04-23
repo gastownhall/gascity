@@ -434,7 +434,12 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
-			b.Type = nonRootStepBeadType(b.Type)
+			// graph.v2 workflows use step beads as independently routable
+			// actionable work, not scaffolding — skip the #1039 coercion
+			// so Ready() still surfaces them for worker claim.
+			if !graphWorkflow {
+				b.Type = nonRootStepBeadType(b.Type)
+			}
 			// Non-root beads: resolve ParentID from the parent-child deps.
 			for _, dep := range recipe.Deps {
 				if dep.StepID == step.ID && dep.Type == "parent-child" {
