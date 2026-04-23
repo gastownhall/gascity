@@ -8946,6 +8946,16 @@
               "description": "Filter by rig.",
               "type": "string"
             }
+          },
+          {
+            "description": "Include closed beads.",
+            "explode": false,
+            "in": "query",
+            "name": "all",
+            "schema": {
+              "description": "Include closed beads.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
