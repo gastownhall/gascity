@@ -40,16 +40,16 @@ func routeLogEnabled() bool {
 // logRoute emits a single route audit line to the given writer when GC_DEBUG
 // is truthy. Each line carries cmd=<cmd> route=<route> reason=<reason>. A
 // route=api line typically omits reason; a route=fallback line always includes
-// it.
+// it, followed by any extras as key=value pairs.
 //
 // Callers pass their command-scoped stderr so CLI test harnesses observe
 // the audit trail through the buffer they already assert on, instead of
 // racing against the process-wide os.Stderr.
-func logRoute(w io.Writer, cmd, route, reason string) {
+func logRoute(w io.Writer, cmd, route, reason string, extra ...string) {
 	if !routeLogEnabled() {
 		return
 	}
-	logRouteTo(w, cmd, route, reason)
+	logRouteTo(w, cmd, route, reason, extra...)
 }
 
 // logRouteTo writes the route audit line to the given writer unconditionally.
