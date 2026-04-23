@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -72,7 +73,7 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 		return 1
 	}
 
-	// Collect agents belonging to this rig.
+	// Collect agents belonging to this rig for the fallback path.
 	var rigAgents []config.Agent
 	for _, a := range cfg.Agents {
 		if a.Dir == rigName {
@@ -90,7 +91,8 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
-	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, jsonOutput, stdout, stderr)
+	c, reason := rigStatusAPIClient(cityPath)
+	return routeRigStatus(cityPath, cityName, rig, rigAgents, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, sp, dops, c, reason, jsonOutput, stdout, stderr)
 }
 
 // RigStatusJSON is the JSON output format for "gc rig status --json".
@@ -122,6 +124,152 @@ type RigStatusAgent struct {
 	Suspended          bool   `json:"suspended"`
 	Draining           bool   `json:"draining"`
 	Status             string `json:"status"`
+}
+
+// rigStatusAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server or force a
+// specific fallback reason without spinning up a real controller.
+var rigStatusAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeRigStatus dispatches `gc rig status <name>` to the supervisor API
+// when a controller is up; otherwise falls back to the local observation
+// path. Emits exactly one route=... log line per exit path (GC_DEBUG).
+func routeRigStatus(
+	cityPath, cityName string,
+	rig config.Rig,
+	rigAgents []config.Agent,
+	sessionTemplate string,
+	cfg *config.City,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	sp runtime.Provider,
+	dops drainOps,
+	c *api.Client,
+	nilReason string,
+	jsonOutput bool,
+	stdout, stderr io.Writer,
+) int {
+	const cmdName = "rig status"
+	if c != nil {
+		cr, err := c.GetStatus()
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderRigStatusFromAPI(cr, rig, dops, jsonOutput, stdout, stderr)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, jsonOutput, stdout, stderr)
+}
+
+// renderRigStatusFromAPI filters the supervisor's StatusView by rig name
+// and renders the same text output the fallback path produces. Pool
+// expansion, scale labels, and drain-state rendering all live in
+// agentStatusLine, so this function only needs to emit header lines
+// ("<rig>:", "Path:", "Suspended:") and dispatch to agentStatusLine for
+// each agent row.
+func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], rig config.Rig, dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
+	suspStr := "no"
+	serverSuspended := rig.Suspended
+	for _, r := range cr.Body.Rigs {
+		if r.Name == rig.Name {
+			serverSuspended = r.Suspended
+			break
+		}
+	}
+	if serverSuspended {
+		suspStr = "yes"
+	}
+
+	if jsonOutput {
+		result := RigStatusJSON{
+			SchemaVersion: "1",
+			CityPath:      cr.Body.CityPath,
+			CityName:      cr.Body.CityName,
+			Rig: RigStatusRig{
+				Name:          rig.Name,
+				Path:          rig.Path,
+				Prefix:        rig.EffectivePrefix(),
+				DefaultBranch: rig.EffectiveDefaultBranch(),
+				Suspended:     serverSuspended,
+				Beads:         rigBeadsStatus(fsys.OSFS{}, rig.Path),
+			},
+		}
+		for _, a := range cr.Body.Agents {
+			if !rigStatusAgentBelongsToRig(a, rig.Name) {
+				continue
+			}
+			result.Agents = append(result.Agents, rigStatusAgentJSONFromAPI(a, dops))
+		}
+		if err := writeCLIJSONLine(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "%s:\n", rig.Name)              //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  Path:       %s\n", rig.Path) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  Suspended:  %s\n", suspStr)  //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  Agents:\n")                  //nolint:errcheck // best-effort stdout
+
+	for _, a := range cr.Body.Agents {
+		if !rigStatusAgentBelongsToRig(a, rig.Name) {
+			continue
+		}
+		status := agentStatusLine(a.Running, dops, a.SessionName, a.Suspended)
+		fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName, status) //nolint:errcheck // best-effort stdout
+	}
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+func rigStatusAgentBelongsToRig(a api.StatusAgentView, rigName string) bool {
+	if a.Scope != "rig" {
+		return false
+	}
+	prefix := rigName + "/"
+	return len(a.QualifiedName) > len(prefix) && a.QualifiedName[:len(prefix)] == prefix
+}
+
+func rigStatusAgentJSONFromAPI(a api.StatusAgentView, dops drainOps) RigStatusAgent {
+	draining := false
+	if a.Running {
+		draining, _ = dops.isDraining(a.SessionName)
+	}
+	status := "stopped"
+	if a.Running {
+		status = "running"
+		if draining {
+			status = "draining"
+		}
+	}
+	if a.Suspended && !a.Running {
+		status = "suspended"
+	}
+	return RigStatusAgent{
+		Name:               a.Name,
+		QualifiedName:      a.QualifiedName,
+		RuntimeSessionName: a.SessionName,
+		Running:            a.Running,
+		Suspended:          a.Suspended,
+		Draining:           draining,
+		Status:             status,
+	}
 }
 
 func doRigStatusWithStoreAndSnapshot(

@@ -4011,18 +4011,44 @@ export interface components {
              */
             total: number;
         };
+        StatusAgentDetail: {
+            /** @description True when the pool is draining this instance. */
+            draining?: boolean;
+            /** @description True when this row is a pool-expanded instance (renderer indents differently). */
+            expanded?: boolean;
+            /** @description Pool group label for expanded rows; same as QualifiedName for singletons. */
+            group_name?: string;
+            /** @description Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1'). */
+            name: string;
+            /** @description Rig-qualified name when applicable, else the bare agent name. */
+            qualified_name: string;
+            /** @description Observed running state of the agent's session. */
+            running: boolean;
+            /** @description 'scaled (min=N, max=M)' header emitted once per pool group. */
+            scale_label?: string;
+            /** @description city or rig. */
+            scope: string;
+            /** @description tmux session name CLI drain-ops key on. */
+            session_name?: string;
+            /** @description Whether the agent (or its rig) is suspended. */
+            suspended: boolean;
+        };
         StatusBody: {
             /**
              * Format: int64
              * @description Total agent count (deprecated, use agents.total).
              */
             agent_count: number;
+            /** @description Per-agent state (for CLI status views). Empty when none. */
+            agent_details?: components["schemas"]["StatusAgentDetail"][] | null;
             /** @description Agent state counts. */
             agents: components["schemas"]["StatusAgentCounts"];
             /** @description Mail counts. */
             mail: components["schemas"]["StatusMailCounts"];
             /** @description City name. */
             name: string;
+            /** @description Per-named-session detail. Empty when none configured. */
+            named_session_details?: components["schemas"]["StatusNamedSessionDetail"][] | null;
             /** @description True when one or more status backing reads returned incomplete data. */
             partial?: boolean;
             /** @description Human-readable errors from incomplete status backing reads. */
@@ -4034,6 +4060,8 @@ export interface components {
              * @description Total rig count (deprecated, use rigs.total).
              */
             rig_count: number;
+            /** @description Per-rig detail (for CLI status views). Empty when none. */
+            rig_details?: components["schemas"]["StatusRigDetail"][] | null;
             /** @description Rig state counts. */
             rigs: components["schemas"]["StatusRigCounts"];
             /**
@@ -4041,6 +4069,8 @@ export interface components {
              * @description Number of running agent processes.
              */
             running: number;
+            /** @description Active/suspended session counts. Omitted when unavailable. */
+            session_counts_detail?: components["schemas"]["StatusSessionCountsDetail"];
             /** @description Dolt bead store health summary. Omitted when unavailable. */
             store_health?: components["schemas"]["StatusStoreHealth"];
             /** @description Whether the city is suspended. */
@@ -4067,6 +4097,14 @@ export interface components {
              */
             unread: number;
         };
+        StatusNamedSessionDetail: {
+            /** @description Qualified named-session identity. */
+            identity: string;
+            /** @description Named-session mode (on-demand, always, etc.). */
+            mode: string;
+            /** @description Lifecycle status string (materialized, reserved-unmaterialized, etc.). */
+            status: string;
+        };
         StatusRigCounts: {
             /**
              * Format: int64
@@ -4078,6 +4116,26 @@ export interface components {
              * @description Total number of rigs.
              */
             total: number;
+        };
+        StatusRigDetail: {
+            /** @description Rig name. */
+            name: string;
+            /** @description Rig directory path. */
+            path: string;
+            /** @description Whether the rig is suspended (either explicitly or because all its agents are suspended). */
+            suspended: boolean;
+        };
+        StatusSessionCountsDetail: {
+            /**
+             * Format: int64
+             * @description Number of active sessions.
+             */
+            active: number;
+            /**
+             * Format: int64
+             * @description Number of suspended sessions.
+             */
+            suspended: number;
         };
         StatusStoreHealth: {
             /** @description RFC3339 timestamp of last maintenance run. */
@@ -7518,6 +7576,8 @@ export interface operations {
                 assignee?: string;
                 /** @description Filter by rig. */
                 rig?: string;
+                /** @description Include closed beads. */
+                all?: boolean;
             };
             header?: never;
             path: {

@@ -2767,11 +2767,58 @@ export type StatusAgentCounts = {
     total: number;
 };
 
+export type StatusAgentDetail = {
+    /**
+     * True when the pool is draining this instance.
+     */
+    draining?: boolean;
+    /**
+     * True when this row is a pool-expanded instance (renderer indents differently).
+     */
+    expanded?: boolean;
+    /**
+     * Pool group label for expanded rows; same as QualifiedName for singletons.
+     */
+    group_name?: string;
+    /**
+     * Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1').
+     */
+    name: string;
+    /**
+     * Rig-qualified name when applicable, else the bare agent name.
+     */
+    qualified_name: string;
+    /**
+     * Observed running state of the agent's session.
+     */
+    running: boolean;
+    /**
+     * 'scaled (min=N, max=M)' header emitted once per pool group.
+     */
+    scale_label?: string;
+    /**
+     * city or rig.
+     */
+    scope: string;
+    /**
+     * tmux session name CLI drain-ops key on.
+     */
+    session_name?: string;
+    /**
+     * Whether the agent (or its rig) is suspended.
+     */
+    suspended: boolean;
+};
+
 export type StatusBody = {
     /**
      * Total agent count (deprecated, use agents.total).
      */
     agent_count: number;
+    /**
+     * Per-agent state (for CLI status views). Empty when none.
+     */
+    agent_details?: Array<StatusAgentDetail> | null;
     /**
      * Agent state counts.
      */
@@ -2784,6 +2831,10 @@ export type StatusBody = {
      * City name.
      */
     name: string;
+    /**
+     * Per-named-session detail. Empty when none configured.
+     */
+    named_session_details?: Array<StatusNamedSessionDetail> | null;
     /**
      * True when one or more status backing reads returned incomplete data.
      */
@@ -2801,6 +2852,10 @@ export type StatusBody = {
      */
     rig_count: number;
     /**
+     * Per-rig detail (for CLI status views). Empty when none.
+     */
+    rig_details?: Array<StatusRigDetail> | null;
+    /**
      * Rig state counts.
      */
     rigs: StatusRigCounts;
@@ -2808,6 +2863,10 @@ export type StatusBody = {
      * Number of running agent processes.
      */
     running: number;
+    /**
+     * Active/suspended session counts. Omitted when unavailable.
+     */
+    session_counts_detail?: StatusSessionCountsDetail;
     /**
      * Dolt bead store health summary. Omitted when unavailable.
      */
@@ -2841,6 +2900,21 @@ export type StatusMailCounts = {
     unread: number;
 };
 
+export type StatusNamedSessionDetail = {
+    /**
+     * Qualified named-session identity.
+     */
+    identity: string;
+    /**
+     * Named-session mode (on-demand, always, etc.).
+     */
+    mode: string;
+    /**
+     * Lifecycle status string (materialized, reserved-unmaterialized, etc.).
+     */
+    status: string;
+};
+
 export type StatusRigCounts = {
     /**
      * Number of suspended rigs.
@@ -2850,6 +2924,32 @@ export type StatusRigCounts = {
      * Total number of rigs.
      */
     total: number;
+};
+
+export type StatusRigDetail = {
+    /**
+     * Rig name.
+     */
+    name: string;
+    /**
+     * Rig directory path.
+     */
+    path: string;
+    /**
+     * Whether the rig is suspended (either explicitly or because all its agents are suspended).
+     */
+    suspended: boolean;
+};
+
+export type StatusSessionCountsDetail = {
+    /**
+     * Number of active sessions.
+     */
+    active: number;
+    /**
+     * Number of suspended sessions.
+     */
+    suspended: number;
 };
 
 export type StatusStoreHealth = {
@@ -6199,6 +6299,10 @@ export type GetV0CityByCityNameBeadsData = {
          * Filter by rig.
          */
         rig?: string;
+        /**
+         * Include closed beads.
+         */
+        all?: boolean;
     };
     url: '/v0/city/{cityName}/beads';
 };
