@@ -56,6 +56,12 @@ const (
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
+
+	// Dolt store maintenance events. Emitted by the supervisor's
+	// StoreMaintenanceLoop (internal/supervisor/maintenance.go) after
+	// each scheduled maintenance cycle completes or fails.
+	StoreMaintenanceDone   = "gc.store.maintenance.done"
+	StoreMaintenanceFailed = "gc.store.maintenance.failed"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -77,6 +83,7 @@ var KnownEventTypes = []string{
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
+	StoreMaintenanceDone, StoreMaintenanceFailed,
 }
 
 // Event is a single recorded occurrence in the system.

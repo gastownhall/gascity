@@ -102,4 +102,8 @@ func init() {
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
+
+	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
+	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})
+	events.RegisterPayload(events.StoreMaintenanceFailed, events.StoreMaintenanceFailedPayload{})
 }
