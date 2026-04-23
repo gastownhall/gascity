@@ -150,7 +150,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
-			node.Type = nonRootStepBeadType(node.Type, step.Type)
+			node.Type = nonRootStepBeadType(node.Type)
 			if node.Metadata == nil {
 				node.Metadata = make(map[string]string, 1)
 			}

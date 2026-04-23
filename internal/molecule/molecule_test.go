@@ -2262,20 +2262,20 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 }
 
 // TestInstantiate_NonRootStepsGetStepType verifies that non-root step beads
-// created without an explicit type in the recipe default to "step" so Ready()
-// and `bd ready` skip them (#1039). The root keeps its coerced "molecule"
-// type; steps with an explicit type in TOML keep that type.
+// defaulting to "task" (empty or explicit) get coerced to "step" so Ready()
+// and `bd ready` skip them (#1039). Explicit non-"task" types ("bug",
+// "epic", ...) are preserved. The root still becomes "molecule".
 func TestInstantiate_NonRootStepsGetStepType(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
 		Name: "mol-demo",
 		Steps: []formula.RecipeStep{
 			{ID: "mol-demo", Title: "Root", IsRoot: true},
-			// step-a: no explicit type -> should become "step"
+			// step-a: no explicit type -> "step"
 			{ID: "mol-demo.step-a", Title: "Step A"},
-			// step-b: explicit type "task" -> should stay "task"
+			// step-b: explicit "task" (mirrors the compiler's default) -> "step"
 			{ID: "mol-demo.step-b", Title: "Step B", Type: "task"},
-			// step-c: explicit type "bug" -> should stay "bug"
+			// step-c: explicit non-"task" type is preserved
 			{ID: "mol-demo.step-c", Title: "Step C", Type: "bug"},
 		},
 		Deps: []formula.RecipeDep{
@@ -2293,7 +2293,7 @@ func TestInstantiate_NonRootStepsGetStepType(t *testing.T) {
 	cases := map[string]string{
 		"mol-demo":        "molecule",
 		"mol-demo.step-a": "step",
-		"mol-demo.step-b": "task",
+		"mol-demo.step-b": "step",
 		"mol-demo.step-c": "bug",
 	}
 	for stepID, wantType := range cases {
@@ -2382,7 +2382,7 @@ func TestBuildRecipeApplyPlan_NonRootStepsGetStepType(t *testing.T) {
 	cases := map[string]string{
 		"mol-demo":        "molecule",
 		"mol-demo.step-a": "step",
-		"mol-demo.step-b": "task",
+		"mol-demo.step-b": "step",
 		"mol-demo.step-c": "bug",
 	}
 	for key, wantType := range cases {
@@ -2392,73 +2392,22 @@ func TestBuildRecipeApplyPlan_NonRootStepsGetStepType(t *testing.T) {
 	}
 }
 
-// TestInstantiateFragment_StepsGetStepType verifies that fragment steps
-// (always non-root by construction) get Type "step" when no explicit TOML
-// type was declared (#1039).
-func TestInstantiateFragment_StepsGetStepType(t *testing.T) {
-	store := beads.NewMemStore()
-	root, err := store.Create(beads.Bead{
-		Title:    "Workflow root",
-		Type:     "task",
-		Metadata: map[string]string{"gc.kind": "workflow"},
-	})
-	if err != nil {
-		t.Fatalf("create root: %v", err)
-	}
-
-	recipe := &formula.FragmentRecipe{
-		Steps: []formula.RecipeStep{
-			// No explicit type -> should become "step"
-			{ID: "frag.a", Title: "Default"},
-			// Explicit "task" -> should stay "task"
-			{ID: "frag.b", Title: "Task", Type: "task"},
-			// Explicit "bug" -> should stay "bug"
-			{ID: "frag.c", Title: "Bug", Type: "bug"},
-		},
-		Deps: []formula.RecipeDep{
-			{StepID: "frag.b", DependsOnID: "frag.a", Type: "blocks"},
-			{StepID: "frag.c", DependsOnID: "frag.a", Type: "blocks"},
-		},
-	}
-
-	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
-	if err != nil {
-		t.Fatalf("InstantiateFragment: %v", err)
-	}
-
-	cases := map[string]string{
-		"frag.a": "step",
-		"frag.b": "task",
-		"frag.c": "bug",
-	}
-	for stepID, wantType := range cases {
-		b, err := store.Get(result.IDMapping[stepID])
-		if err != nil {
-			t.Fatalf("Get(%s): %v", stepID, err)
-		}
-		if b.Type != wantType {
-			t.Errorf("%s.Type = %q, want %q", stepID, b.Type, wantType)
-		}
-	}
-}
-
 func TestNonRootStepBeadType(t *testing.T) {
 	cases := []struct {
 		name        string
 		currentType string
-		tomlType    string
 		want        string
 	}{
-		{"defaulted task becomes step", "task", "", "step"},
-		{"explicit task stays task", "task", "task", "task"},
-		{"explicit bug stays bug", "bug", "bug", "bug"},
-		{"gate from deferBeadRouting stays gate", "gate", "", "gate"},
-		{"empty stays empty", "", "", ""},
+		{"task becomes step", "task", "step"},
+		{"explicit bug stays bug", "bug", "bug"},
+		{"epic stays epic", "epic", "epic"},
+		{"gate from deferBeadRouting stays gate", "gate", "gate"},
+		{"empty stays empty", "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := nonRootStepBeadType(tc.currentType, tc.tomlType); got != tc.want {
-				t.Errorf("nonRootStepBeadType(%q, %q) = %q, want %q", tc.currentType, tc.tomlType, got, tc.want)
+			if got := nonRootStepBeadType(tc.currentType); got != tc.want {
+				t.Errorf("nonRootStepBeadType(%q) = %q, want %q", tc.currentType, got, tc.want)
 			}
 		})
 	}
