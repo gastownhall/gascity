@@ -433,7 +433,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		return 1
 	}
 	if !reAdd || reAddNeedsConfigWrite {
-		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg); err != nil {
+		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg, io.Discard); err != nil {
 			writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
 			return 1
 		}
