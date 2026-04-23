@@ -405,6 +405,38 @@ func TestConfigRefsCheck_AbsolutePaths(t *testing.T) {
 	}
 }
 
+// City-root-relative paths (produced by adjustFragmentPath during
+// composition) resolve correctly against cityPath.
+func TestConfigRefsCheck_CityRootRelativePaths(t *testing.T) {
+	cityDir := t.TempDir()
+
+	// Create files at city-root-relative locations (as produced by pack composition).
+	promptDir := filepath.Join(cityDir, "packs", "mypack", "agents", "worker")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "prompt.template.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "mypack", "overlays", "custom")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:           "worker",
+			PromptTemplate: "packs/mypack/agents/worker/prompt.template.md",
+			OverlayDir:     "packs/mypack/overlays/custom",
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
 // session_setup_script is left as-authored (pack-relative) during
 // composition — resolving it against cityPath produces a false positive
 // when the script lives in the pack directory, not the city root.

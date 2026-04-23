@@ -714,10 +714,10 @@ func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 	}
 }
 
-// adjustRigOverridePaths resolves rig override session_setup_script values to
-// absolute paths rooted at the declaring config directory. Once overrides are
-// applied to pack-stamped agents, runtime only sees the target agent's
-// SourceDir, so relative override paths must be normalized during composition.
+// adjustRigOverridePaths resolves rig override path fields to stable forms
+// rooted at the declaring config directory. Once overrides are applied to
+// pack-stamped agents, runtime only sees the target agent's SourceDir, so
+// relative override paths must be normalized during composition.
 func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
 	for i := range rigs {
 		adjustAgentOverridePaths(rigs[i].Overrides, declDir, cityRoot)
@@ -728,11 +728,18 @@ func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
 func adjustAgentOverridePaths(overrides []AgentOverride, declDir, cityRoot string) {
 	for i := range overrides {
 		ov := &overrides[i]
-		if ov.SessionSetupScript == nil || *ov.SessionSetupScript == "" {
-			continue
+		if ov.SessionSetupScript != nil && *ov.SessionSetupScript != "" {
+			v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
+			ov.SessionSetupScript = &v
 		}
-		v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
-		ov.SessionSetupScript = &v
+		if ov.PromptTemplate != nil && *ov.PromptTemplate != "" {
+			v := adjustFragmentPath(*ov.PromptTemplate, declDir, cityRoot)
+			ov.PromptTemplate = &v
+		}
+		if ov.OverlayDir != nil && *ov.OverlayDir != "" {
+			v := adjustFragmentPath(*ov.OverlayDir, declDir, cityRoot)
+			ov.OverlayDir = &v
+		}
 	}
 }
 

@@ -1494,6 +1494,65 @@ func TestAdjustAgentPaths_OverlayDirAdjusted(t *testing.T) {
 	}
 }
 
+func TestAdjustAgentOverridePaths_AllFields(t *testing.T) {
+	promptRel := "prompts/custom.md"
+	overlayRel := "overlays/custom"
+	scriptRel := "scripts/setup.sh"
+	promptAbs := "/abs/prompt.md"
+	overlayAbs := "/abs/overlay"
+	scriptAbs := "/abs/setup.sh"
+	promptCity := "//prompts/global.md"
+	overlayCity := "//overlays/global"
+
+	overrides := []AgentOverride{
+		// Relative paths should be adjusted.
+		{Agent: "worker", PromptTemplate: &promptRel, OverlayDir: &overlayRel, SessionSetupScript: &scriptRel},
+		// Absolute paths pass through unchanged.
+		{Agent: "abs", PromptTemplate: &promptAbs, OverlayDir: &overlayAbs, SessionSetupScript: &scriptAbs},
+		// "//" paths resolve to city root.
+		{Agent: "city", PromptTemplate: &promptCity, OverlayDir: &overlayCity},
+		// Nil fields: unchanged.
+		{Agent: "empty"},
+	}
+	adjustAgentOverridePaths(overrides, "/city/packs/mypack", "/city")
+
+	// Relative paths: prompt_template/overlay_dir → city-root-relative via adjustFragmentPath.
+	if *overrides[0].PromptTemplate != "packs/mypack/prompts/custom.md" {
+		t.Errorf("worker prompt = %q, want packs/mypack/prompts/custom.md", *overrides[0].PromptTemplate)
+	}
+	if *overrides[0].OverlayDir != "packs/mypack/overlays/custom" {
+		t.Errorf("worker overlay = %q, want packs/mypack/overlays/custom", *overrides[0].OverlayDir)
+	}
+	// session_setup_script → absolute via resolveConfigPath.
+	if *overrides[0].SessionSetupScript != "/city/packs/mypack/scripts/setup.sh" {
+		t.Errorf("worker script = %q, want /city/packs/mypack/scripts/setup.sh", *overrides[0].SessionSetupScript)
+	}
+
+	// Absolute paths unchanged.
+	if *overrides[1].PromptTemplate != "/abs/prompt.md" {
+		t.Errorf("abs prompt = %q, want /abs/prompt.md", *overrides[1].PromptTemplate)
+	}
+	if *overrides[1].OverlayDir != "/abs/overlay" {
+		t.Errorf("abs overlay = %q, want /abs/overlay", *overrides[1].OverlayDir)
+	}
+
+	// "//" paths resolve to city root.
+	if *overrides[2].PromptTemplate != "prompts/global.md" {
+		t.Errorf("city prompt = %q, want prompts/global.md", *overrides[2].PromptTemplate)
+	}
+	if *overrides[2].OverlayDir != "overlays/global" {
+		t.Errorf("city overlay = %q, want overlays/global", *overrides[2].OverlayDir)
+	}
+
+	// Nil fields stay nil.
+	if overrides[3].PromptTemplate != nil {
+		t.Errorf("empty prompt = %v, want nil", overrides[3].PromptTemplate)
+	}
+	if overrides[3].OverlayDir != nil {
+		t.Errorf("empty overlay = %v, want nil", overrides[3].OverlayDir)
+	}
+}
+
 func TestLoadWithIncludes_MultipleCityPacks(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/packs/alpha/pack.toml"] = []byte(`
