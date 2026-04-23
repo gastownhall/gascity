@@ -2260,3 +2260,237 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 		t.Fatalf("plan root type = %q, want task", plan.Nodes[0].Type)
 	}
 }
+
+// TestInstantiate_NonRootStepsGetStepType verifies that non-root step beads
+// created without an explicit type in the recipe default to "step" so Ready()
+// and `bd ready` skip them (#1039). The root keeps its coerced "molecule"
+// type; steps with an explicit type in TOML keep that type.
+func TestInstantiate_NonRootStepsGetStepType(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			// step-a: no explicit type -> should become "step"
+			{ID: "mol-demo.step-a", Title: "Step A"},
+			// step-b: explicit type "task" -> should stay "task"
+			{ID: "mol-demo.step-b", Title: "Step B", Type: "task"},
+			// step-c: explicit type "bug" -> should stay "bug"
+			{ID: "mol-demo.step-c", Title: "Step C", Type: "bug"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step-a", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-b", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-c", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	cases := map[string]string{
+		"mol-demo":        "molecule",
+		"mol-demo.step-a": "step",
+		"mol-demo.step-b": "task",
+		"mol-demo.step-c": "bug",
+	}
+	for stepID, wantType := range cases {
+		beadID := result.IDMapping[stepID]
+		b, err := store.Get(beadID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", stepID, err)
+		}
+		if b.Type != wantType {
+			t.Errorf("%s.Type = %q, want %q", stepID, b.Type, wantType)
+		}
+	}
+}
+
+// TestInstantiate_StepBeadsExcludedFromReady verifies the end-to-end intent:
+// after instantiating a formula, Ready() skips every step bead whose type
+// defaulted (#1039). The root is already "molecule" and excluded.
+func TestInstantiate_StepBeadsExcludedFromReady(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			{ID: "mol-demo.step-a", Title: "Load context"},
+			{ID: "mol-demo.step-b", Title: "Run tests"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step-a", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-b", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	if _, err := Instantiate(context.Background(), store, recipe, Options{}); err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	// Add a real actionable task alongside the formula to confirm Ready() still
+	// returns genuine work.
+	if _, err := store.Create(beads.Bead{Title: "real work", Type: "task"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 {
+		titles := make([]string, 0, len(ready))
+		for _, b := range ready {
+			titles = append(titles, b.Title+"/"+b.Type)
+		}
+		t.Fatalf("Ready() returned %d beads, want 1 (only the real task); got %v", len(ready), titles)
+	}
+	if ready[0].Title != "real work" || ready[0].Type != "task" {
+		t.Errorf("Ready()[0] = %q/%q, want %q/%q", ready[0].Title, ready[0].Type, "real work", "task")
+	}
+}
+
+// TestBuildRecipeApplyPlan_NonRootStepsGetStepType mirrors
+// TestInstantiate_NonRootStepsGetStepType for the graph-apply plan path.
+func TestBuildRecipeApplyPlan_NonRootStepsGetStepType(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			{ID: "mol-demo.step-a", Title: "Step A"},
+			{ID: "mol-demo.step-b", Title: "Step B", Type: "task"},
+			{ID: "mol-demo.step-c", Title: "Step C", Type: "bug"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step-a", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-b", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-c", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+
+	typesByKey := make(map[string]string, len(plan.Nodes))
+	for _, n := range plan.Nodes {
+		typesByKey[n.Key] = n.Type
+	}
+	cases := map[string]string{
+		"mol-demo":        "molecule",
+		"mol-demo.step-a": "step",
+		"mol-demo.step-b": "task",
+		"mol-demo.step-c": "bug",
+	}
+	for key, wantType := range cases {
+		if got := typesByKey[key]; got != wantType {
+			t.Errorf("plan node %q Type = %q, want %q", key, got, wantType)
+		}
+	}
+}
+
+// TestInstantiateFragment_StepsGetStepType verifies that fragment steps
+// (always non-root by construction) get Type "step" when no explicit TOML
+// type was declared (#1039).
+func TestInstantiateFragment_StepsGetStepType(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow root",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			// No explicit type -> should become "step"
+			{ID: "frag.a", Title: "Default"},
+			// Explicit "task" -> should stay "task"
+			{ID: "frag.b", Title: "Task", Type: "task"},
+			// Explicit "bug" -> should stay "bug"
+			{ID: "frag.c", Title: "Bug", Type: "bug"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.b", DependsOnID: "frag.a", Type: "blocks"},
+			{StepID: "frag.c", DependsOnID: "frag.a", Type: "blocks"},
+		},
+	}
+
+	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	if err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+
+	cases := map[string]string{
+		"frag.a": "step",
+		"frag.b": "task",
+		"frag.c": "bug",
+	}
+	for stepID, wantType := range cases {
+		b, err := store.Get(result.IDMapping[stepID])
+		if err != nil {
+			t.Fatalf("Get(%s): %v", stepID, err)
+		}
+		if b.Type != wantType {
+			t.Errorf("%s.Type = %q, want %q", stepID, b.Type, wantType)
+		}
+	}
+}
+
+func TestNonRootStepBeadType(t *testing.T) {
+	cases := []struct {
+		name        string
+		currentType string
+		tomlType    string
+		want        string
+	}{
+		{"defaulted task becomes step", "task", "", "step"},
+		{"explicit task stays task", "task", "task", "task"},
+		{"explicit bug stays bug", "bug", "bug", "bug"},
+		{"gate from deferBeadRouting stays gate", "gate", "", "gate"},
+		{"empty stays empty", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nonRootStepBeadType(tc.currentType, tc.tomlType); got != tc.want {
+				t.Errorf("nonRootStepBeadType(%q, %q) = %q, want %q", tc.currentType, tc.tomlType, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstantiate_DeferredStepsStayGate verifies that graph-workflow steps
+// converted to "gate" by deferBeadRouting are NOT overridden to "step" by
+// the #1039 non-root type coercion. Gate-ness wins.
+func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			{ID: "mol-demo.step", Title: "Step", Assignee: "worker"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{DeferAssignees: true})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	stepID := result.IDMapping["mol-demo.step"]
+	b, err := store.Get(stepID)
+	if err != nil {
+		t.Fatalf("Get(step): %v", err)
+	}
+	if b.Type != "gate" {
+		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
+	}
+}

@@ -90,6 +90,7 @@ var readyExcludeTypes = map[string]bool{
 	"merge-request": true, // processed by automation
 	"gate":          true, // async wait conditions
 	"molecule":      true, // workflow containers
+	"step":          true, // non-root formula steps; parent molecule is the actionable unit (#1039)
 	"message":       true, // mail/communication items
 	"session":       true, // runtime/session continuity beads, never actionable work
 	"agent":         true, // identity/state tracking beads

@@ -2130,8 +2130,9 @@ op_init() {
     # Custom bead types for bd (extracted from beads core in v0.46.0).
     # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
     # "convergence" is required because gc's convergence handler creates
-    # beads with that type — must match doctor.RequiredCustomTypes.
-    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence}"
+    # beads with that type. "step" is required for non-root formula step
+    # beads (#1039). Must match doctor.RequiredCustomTypes.
+    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
 
     # If already initialized on disk and the server has a bd schema, ensure the
     # database is also registered with the running server. Local metadata can be

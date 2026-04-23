@@ -434,6 +434,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
+			b.Type = nonRootStepBeadType(b.Type, step.Type)
 			// Non-root beads: resolve ParentID from the parent-child deps.
 			for _, dep := range recipe.Deps {
 				if dep.StepID == step.ID && dep.Type == "parent-child" {
@@ -611,6 +612,9 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 
 	for _, step := range recipe.Steps {
 		b := stepToBead(step, vars, priorityOverride)
+		// Fragments are rootless by construction, so every step is non-root —
+		// apply the #1039 step-type coercion to each bead.
+		b.Type = nonRootStepBeadType(b.Type, step.Type)
 		hasFutureBlocker := false
 		for _, dep := range recipe.Deps {
 			if dep.StepID != step.ID || dep.Type == "parent-child" {
@@ -787,6 +791,18 @@ func groupExternalDeps(deps []ExternalDep) (map[string][]ExternalDep, error) {
 		byStep[dep.StepID] = append(byStep[dep.StepID], dep)
 	}
 	return byStep, nil
+}
+
+// nonRootStepBeadType returns the type to stamp on a non-root formula step
+// bead. Beads whose type defaulted to "task" (i.e. the TOML declared no
+// explicit type) become "step" so Ready() and `bd ready` skip formula
+// scaffolding (#1039). Explicit TOML types and the "gate" type produced by
+// deferBeadRouting are preserved.
+func nonRootStepBeadType(currentType, tomlType string) string {
+	if currentType == "task" && tomlType == "" {
+		return "step"
+	}
+	return currentType
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
