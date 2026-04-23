@@ -1056,18 +1056,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	if err != nil {
 		return TemplateParams{}, err
 	}
-	tp.Alias = identity
-	tp.TemplateName = namedSessionBackingTemplate(spec)
-	tp.InstanceName = identity
-	tp.ConfiguredNamedIdentity = identity
-	tp.ConfiguredNamedMode = spec.Mode
-	if tp.Env == nil {
-		tp.Env = make(map[string]string)
-	}
-	tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
-	tp.Env["GC_ALIAS"] = identity
-	tp.Env["GC_AGENT"] = identity
-	tp.Env["GC_SESSION_ORIGIN"] = "named"
+	applyNamedSessionTemplateParams(&tp, spec)
 	installAgentSideEffects(bp, spec.Agent, tp, stderr)
 	return tp, nil
 }

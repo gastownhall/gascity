@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -28,6 +30,29 @@ func findNamedSessionSpec(cfg *config.City, cityName, identity string) (namedSes
 
 func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
+}
+
+func applyNamedSessionTemplateParams(tp *TemplateParams, spec namedSessionSpec) {
+	if tp == nil {
+		return
+	}
+	identity := strings.TrimSpace(spec.Identity)
+	backingTemplate := strings.TrimSpace(namedSessionBackingTemplate(spec))
+	if identity == "" || backingTemplate == "" {
+		return
+	}
+	tp.Alias = identity
+	tp.TemplateName = backingTemplate
+	tp.InstanceName = identity
+	tp.ConfiguredNamedIdentity = identity
+	tp.ConfiguredNamedMode = spec.Mode
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_TEMPLATE"] = backingTemplate
+	tp.Env["GC_ALIAS"] = identity
+	tp.Env["GC_AGENT"] = identity
+	tp.Env["GC_SESSION_ORIGIN"] = "named"
 }
 
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {

@@ -1527,6 +1527,100 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 	}
 }
 
+func TestBuildDesiredState_BoundNamedSessionUsesTemplatePatchIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "witness",
+			BindingName:  "gastown",
+			Dir:          "demo",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "witness",
+			BindingName: "gastown",
+			Dir:         "demo",
+			Mode:        "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	sessionName := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "demo/gastown.witness")
+	tp, ok := dsResult.State[sessionName]
+	if !ok {
+		t.Fatalf("desired state missing named session: keys=%v", mapKeys(dsResult.State))
+	}
+	if tp.TemplateName != "witness" {
+		t.Fatalf("TemplateName = %q, want template patch key %q", tp.TemplateName, "witness")
+	}
+	if got := tp.Env["GC_TEMPLATE"]; got != "witness" {
+		t.Fatalf("GC_TEMPLATE = %q, want template patch key %q", got, "witness")
+	}
+	if got := tp.Alias; got != "demo/gastown.witness" {
+		t.Fatalf("Alias = %q, want named identity %q", got, "demo/gastown.witness")
+	}
+}
+
+func TestBuildDesiredState_StoreBackedNamedSessionReappliesTemplatePatchIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "witness",
+			BindingName:  "gastown",
+			Dir:          "demo",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "witness",
+			BindingName: "gastown",
+			Dir:         "demo",
+			Mode:        "always",
+		}},
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok := findNamedSessionSpec(cfg, cityName, "demo/gastown.witness")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(demo/gastown.witness) = false")
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "demo/gastown.witness",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               spec.SessionName,
+			"template":                   "demo/gastown.witness",
+			"agent_name":                 "demo/gastown.witness",
+			"state":                      "ready",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "demo/gastown.witness",
+			namedSessionModeMetadata:     spec.Mode,
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	tp, ok := dsResult.State[spec.SessionName]
+	if !ok {
+		t.Fatalf("desired state missing named session: keys=%v", mapKeys(dsResult.State))
+	}
+	if tp.TemplateName != "witness" {
+		t.Fatalf("TemplateName = %q, want template patch key %q", tp.TemplateName, "witness")
+	}
+	if got := tp.Env["GC_TEMPLATE"]; got != "witness" {
+		t.Fatalf("GC_TEMPLATE = %q, want template patch key %q", got, "witness")
+	}
+	if got := tp.ConfiguredNamedIdentity; got != "demo/gastown.witness" {
+		t.Fatalf("ConfiguredNamedIdentity = %q, want %q", got, "demo/gastown.witness")
+	}
+	if got := tp.Env["GC_SESSION_ORIGIN"]; got != "named" {
+		t.Fatalf("GC_SESSION_ORIGIN = %q, want named", got)
+	}
+}
+
 func TestBuildDesiredState_PendingCreatePoolSessionUsesConcreteBeadIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

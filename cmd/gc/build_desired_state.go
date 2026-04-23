@@ -377,18 +377,7 @@ func buildDesiredStateWithSessionBeads(
 			fmt.Fprintf(stderr, "buildDesiredState: named session %q: %v (skipping)\n", identity, err) //nolint:errcheck
 			continue
 		}
-		tp.Alias = identity
-		tp.TemplateName = namedSessionBackingTemplate(spec)
-		tp.InstanceName = identity
-		tp.ConfiguredNamedIdentity = identity
-		tp.ConfiguredNamedMode = spec.Mode
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
-		tp.Env["GC_ALIAS"] = identity
-		tp.Env["GC_AGENT"] = identity
-		tp.Env["GC_SESSION_ORIGIN"] = "named"
+		applyNamedSessionTemplateParams(&tp, spec)
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName
@@ -713,6 +702,12 @@ func discoverSessionBeadsWithRoots(
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: bead %s template %q: %v (skipping)\n", b.ID, template, err) //nolint:errcheck
 			continue
+		}
+		if isNamedSessionBead(b) {
+			identity := namedSessionIdentity(b)
+			if spec, ok := findNamedSessionSpec(cfg, bp.cityName, identity); ok {
+				applyNamedSessionTemplateParams(&tp, spec)
+			}
 		}
 		tp.ManualSession = isManualSessionBeadForAgent(b, cfgAgent)
 		if tp.ManualSession {
