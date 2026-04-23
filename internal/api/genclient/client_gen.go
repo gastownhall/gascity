@@ -2403,6 +2403,22 @@ type StatusWorkCounts struct {
 	Ready int64 `json:"ready"`
 }
 
+// StoreMaintenanceDonePayload defines model for StoreMaintenanceDonePayload.
+type StoreMaintenanceDonePayload struct {
+	AfterBytes   int64   `json:"after_bytes"`
+	BeforeBytes  int64   `json:"before_bytes"`
+	DurationS    float64 `json:"duration_s"`
+	SnapshotPath string  `json:"snapshot_path"`
+}
+
+// StoreMaintenanceFailedPayload defines model for StoreMaintenanceFailedPayload.
+type StoreMaintenanceFailedPayload struct {
+	DurationS    float64 `json:"duration_s"`
+	ErrorMsg     string  `json:"error_msg"`
+	SnapshotPath *string `json:"snapshot_path,omitempty"`
+	Stage        string  `json:"stage"`
+}
+
 // SubmissionCapabilities defines model for SubmissionCapabilities.
 type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
@@ -3448,6 +3464,58 @@ func (t *EventPayload) FromOutboundEventPayload(v OutboundEventPayload) error {
 
 // MergeOutboundEventPayload performs a merge with any union data inside the EventPayload, using the provided OutboundEventPayload
 func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStoreMaintenanceDonePayload returns the union data inside the EventPayload as a StoreMaintenanceDonePayload
+func (t EventPayload) AsStoreMaintenanceDonePayload() (StoreMaintenanceDonePayload, error) {
+	var body StoreMaintenanceDonePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreMaintenanceDonePayload overwrites any union data inside the EventPayload as the provided StoreMaintenanceDonePayload
+func (t *EventPayload) FromStoreMaintenanceDonePayload(v StoreMaintenanceDonePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreMaintenanceDonePayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceDonePayload
+func (t *EventPayload) MergeStoreMaintenanceDonePayload(v StoreMaintenanceDonePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStoreMaintenanceFailedPayload returns the union data inside the EventPayload as a StoreMaintenanceFailedPayload
+func (t EventPayload) AsStoreMaintenanceFailedPayload() (StoreMaintenanceFailedPayload, error) {
+	var body StoreMaintenanceFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreMaintenanceFailedPayload overwrites any union data inside the EventPayload as the provided StoreMaintenanceFailedPayload
+func (t *EventPayload) FromStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreMaintenanceFailedPayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceFailedPayload
+func (t *EventPayload) MergeStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

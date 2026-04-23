@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -14,10 +15,18 @@ import (
 
 // apiClient returns an API client if a controller with a mutable API server
 // is running for the city at cityPath. Returns nil if no controller is running,
-// the API is not configured, or the API is bound to a non-localhost address
-// (which runs in read-only mode). CLI commands use this to route writes through
-// the API when available, falling back to direct file mutation.
+// the API is not configured, GC_NO_API is set truthy (operator escape hatch),
+// or the API is bound to a non-localhost address without allow_mutations.
+// CLI commands use this to route reads/writes through the API when available,
+// falling back to direct bd or file mutation.
 func apiClient(cityPath string) *api.Client {
+	// Operator escape hatch: GC_NO_API=1|true|yes → always fall back.
+	// Unknown values warn to stderr and fail open (fall through to normal path).
+	if disabled, warn := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return nil
+	} else if warn != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+warn) //nolint:errcheck // best-effort stderr
+	}
 	// Check if controller is alive.
 	if controllerAlive(cityPath) != 0 {
 		// Load config to find API port.

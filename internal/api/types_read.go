@@ -1,0 +1,34 @@
+package api
+
+// This file hosts stable, CLI-facing read-path envelope types that are
+// shared across per-domain migrations.
+//
+// Domain-specific CLI types (SessionSummary, MailHeader, RigView, ...)
+// live alongside their decode_<domain>.go translator in this package so
+// cmd/gc/ never imports internal/api/genclient directly. A new per-file
+// migration typically adds:
+//
+//   - internal/api/decode_<domain>.go  — translators from genclient response
+//                                        types to CLI-facing types, plus
+//                                        small, focused unit tests.
+//   - internal/api/client.go           — one typed read wrapper per endpoint
+//                                        returning (<CLIType>, float64 age, error).
+//   - cmd/gc/cmd_<domain>.go           — routes via apiClient(cityPath);
+//                                        logs route=... on every exit path.
+//
+// The CacheAge float64 returned from each wrapper is the supervisor's
+// CachingStore age in seconds at the time of the read, sourced from the
+// X-GC-Cache-Age-S response header (populated by handlers via the
+// cacheAgeSeconds helper). CLI callers surface this as _cache_age_s on
+// the --json envelope and as a stale-read banner on human output when
+// the age crosses 30 s.
+
+// CachedRead is a convenience wrapper returned by read wrappers so the
+// two cache-age-bearing return values stay co-located with the payload.
+// Per-domain wrappers may return CachedRead[[]SessionSummary],
+// CachedRead[MailHeader], and so on. A zero AgeSeconds means the server
+// did not surface a cache age (non-caching store or fallback path).
+type CachedRead[T any] struct {
+	Body       T
+	AgeSeconds float64
+}
