@@ -167,6 +167,7 @@ func (s *Server) buildStatusBody() StatusBody {
 		Mail:          mc,
 		Partial:       len(partialErrors) > 0,
 		PartialErrors: partialErrors,
+		StoreHealth:   s.cachedStoreHealth(time.Now()),
 	}
 }
 

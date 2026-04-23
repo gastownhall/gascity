@@ -4041,6 +4041,8 @@ export interface components {
              * @description Number of running agent processes.
              */
             running: number;
+            /** @description Dolt bead store health summary. Omitted when unavailable. */
+            store_health?: components["schemas"]["StatusStoreHealth"];
             /** @description Whether the city is suspended. */
             suspended: boolean;
             /**
@@ -4076,6 +4078,36 @@ export interface components {
              * @description Total number of rigs.
              */
             total: number;
+        };
+        StatusStoreHealth: {
+            /** @description RFC3339 timestamp of last maintenance run. */
+            last_gc_at?: string;
+            /** @description Status of last maintenance run ('success' or 'failed'). */
+            last_gc_status?: string;
+            /**
+             * Format: int64
+             * @description Live bead row count.
+             */
+            live_rows: number;
+            /** @description On-disk path of the Dolt store. */
+            path: string;
+            /**
+             * Format: double
+             * @description Derived megabytes per row.
+             */
+            ratio_mb_per_row: number;
+            /**
+             * Format: int64
+             * @description Total bytes of the store directory.
+             */
+            size_bytes: number;
+            /**
+             * Format: double
+             * @description Ratio threshold; a ratio above this trips warning.
+             */
+            threshold_mb_per_row: number;
+            /** @description True when maintenance is overdue. */
+            warning: boolean;
         };
         StatusWorkCounts: {
             /**
