@@ -522,12 +522,18 @@ func executePreparedStartWave(
 			}
 			var outcome string
 			switch {
-			case err == nil:
-				outcome = "success"
 			case startCtx.Err() == context.DeadlineExceeded:
 				outcome = "deadline_exceeded"
+				if err == nil {
+					err = fmt.Errorf("resuming session: %w", context.DeadlineExceeded)
+				}
 			case startCtx.Err() == context.Canceled:
 				outcome = "canceled"
+				if err == nil {
+					err = fmt.Errorf("resuming session: %w", context.Canceled)
+				}
+			case err == nil:
+				outcome = "success"
 			case errors.Is(err, runtime.ErrSessionInitializing):
 				outcome = "session_initializing"
 				err = nil
