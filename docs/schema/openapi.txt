@@ -3634,6 +3634,123 @@
         ],
         "type": "object"
       },
+      "MaintenanceRunBody": {
+        "additionalProperties": false,
+        "properties": {
+          "after_bytes": {
+            "description": "Store size in bytes after the run (0 when not measured).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "before_bytes": {
+            "description": "Store size in bytes before the run (0 when not measured).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "duration_s": {
+            "description": "Elapsed wall-clock seconds between started_at and finished_at.",
+            "format": "double",
+            "type": "number"
+          },
+          "err": {
+            "description": "Error message when Stage names a failing phase; empty on success.",
+            "type": "string"
+          },
+          "finished_at": {
+            "description": "RFC3339 timestamp when the run completed.",
+            "type": "string"
+          },
+          "snapshot_path": {
+            "description": "Absolute path to the snapshot directory created for this run.",
+            "type": "string"
+          },
+          "stage": {
+            "description": "Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "RFC3339 timestamp when the run began.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at",
+          "stage",
+          "before_bytes",
+          "after_bytes",
+          "duration_s"
+        ],
+        "type": "object"
+      },
+      "MaintenanceStatusBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "description": "Whether [maintenance.dolt] enabled=true in city.toml.",
+            "type": "boolean"
+          },
+          "history": {
+            "description": "Bounded ring of recent run outcomes (oldest first).",
+            "items": {
+              "$ref": "#/components/schemas/MaintenanceRunBody"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "in_flight": {
+            "description": "True when a maintenance cycle is currently running.",
+            "type": "boolean"
+          },
+          "in_flight_start": {
+            "description": "RFC3339 start time of the in-flight run.",
+            "type": "string"
+          },
+          "interval_seconds": {
+            "description": "Configured scheduling interval in seconds (0 when disabled).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_run": {
+            "$ref": "#/components/schemas/MaintenanceRunBody",
+            "description": "Most recent completed run, or null when none."
+          },
+          "next_scheduled": {
+            "description": "RFC3339 approximate next scheduled run time.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "interval_seconds",
+          "in_flight",
+          "history"
+        ],
+        "type": "object"
+      },
+      "MaintenanceTriggerBody": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "description": "True when the supervisor accepted the trigger (202) or completed it (200).",
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/MaintenanceRunBody",
+            "description": "Full run summary, populated when the caller set ?wait=true."
+          },
+          "started_at": {
+            "description": "RFC3339 start time of the triggered run; doubles as a run identifier for async callers.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
       "Message": {
         "additionalProperties": false,
         "properties": {
@@ -12202,6 +12319,109 @@
           }
         },
         "summary": "Reply to a mail message"
+      }
+    },
+    "/v0/city/{cityName}/maintenance/dolt-gc": {
+      "post": {
+        "description": "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+        "operationId": "trigger-maintenance-dolt-gc",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceTriggerBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Trigger a Dolt store maintenance run"
+      }
+    },
+    "/v0/city/{cityName}/maintenance/status": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-maintenance-status",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceStatusBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "format": "double",
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name maintenance status"
       }
     },
     "/v0/city/{cityName}/order/history/{bead_id}": {
