@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -702,7 +703,113 @@ func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
+	c, reason := orderHistoryAPIClient(cityPath)
+	return routeOrderHistory(cityPath, cfg, name, rig, aa, c, reason, stdout, stderr)
+}
+
+// orderHistoryAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server or force a
+// specific fallback reason without spinning up a real controller.
+var orderHistoryAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeOrderHistory dispatches `order history` to the supervisor API when
+// a single order is being queried and the controller is up; otherwise falls
+// back to the local iterator. Emits exactly one route=... log line per exit
+// path (gated on GC_DEBUG).
+func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa []orders.Order, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "order history"
+	// Multi-order mode (no name provided) has no single scoped_name to
+	// request against /orders/history; stay on the local iterator so we
+	// produce the same aggregated output. The log line documents the
+	// deliberate fallback reason so operators aren't surprised by a
+	// missing route=api.
+	if name == "" {
+		logRoute(stderr, cmdName, "fallback", "multi-order")
+		return doOrderHistoryWithStoresResolver(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), stdout, stderr)
+	}
+
+	if c != nil {
+		scopedName := orderScopedName(name, rig, aa)
+		cr, err := c.GetOrderHistory(scopedName, 0, "")
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderOrderHistoryFromAPI(cr, name, stdout)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
 	return doOrderHistoryWithStoresResolver(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), stdout, stderr)
+}
+
+// orderScopedName returns the rig-qualified key for the server's
+// /orders/history lookup. When a matching order is loaded locally, its
+// ScopedName() is authoritative (handles the city-level vs rig-level
+// distinction the API requires). Otherwise we compose from the raw inputs.
+func orderScopedName(name, rig string, aa []orders.Order) string {
+	if a, ok := findOrder(aa, name, rig); ok {
+		return a.ScopedName()
+	}
+	if rig == "" {
+		return name
+	}
+	return name + ":rig:" + rig
+}
+
+// renderOrderHistoryFromAPI prints the API-sourced order history to match
+// doOrderHistoryWithStoresResolver's human output. Empty results and
+// rig-column presence are preserved; a staleness banner appends when the
+// supervisor cache age exceeds the shared threshold.
+func renderOrderHistoryFromAPI(cr api.CachedRead[[]api.OrderHistoryView], name string, stdout io.Writer) int {
+	entries := cr.Body
+	if len(entries) == 0 {
+		if name != "" {
+			fmt.Fprintf(stdout, "No order history for %q.\n", name) //nolint:errcheck // best-effort stdout
+		} else {
+			fmt.Fprintln(stdout, "No order history.") //nolint:errcheck // best-effort stdout
+		}
+		return 0
+	}
+
+	hasRig := false
+	for _, e := range entries {
+		if e.Rig != "" {
+			hasRig = true
+			break
+		}
+	}
+
+	if hasRig {
+		fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", "ORDER", "RIG", "BEAD", "EXECUTED") //nolint:errcheck
+		for _, e := range entries {
+			rig := e.Rig
+			if rig == "" {
+				rig = "-"
+			}
+			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.Name, rig, e.BeadID, e.CreatedAt) //nolint:errcheck
+		}
+	} else {
+		fmt.Fprintf(stdout, "%-20s %-15s %s\n", "ORDER", "BEAD", "EXECUTED") //nolint:errcheck
+		for _, e := range entries {
+			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.Name, e.BeadID, e.CreatedAt) //nolint:errcheck
+		}
+	}
+
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
 }
 
 // doOrderHistory queries bead history for order runs and prints a table.
