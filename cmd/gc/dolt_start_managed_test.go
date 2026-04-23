@@ -152,3 +152,32 @@ func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
 		t.Fatal("gc-beads-bd.sh still logs the broader fallback as phantom-only")
 	}
 }
+
+func TestResolveDoltArchiveLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit int
+		envVal   string
+		want     int
+	}{
+		{name: "explicit zero", explicit: 0, want: 0},
+		{name: "explicit positive", explicit: 1, want: 1},
+		{name: "explicit large", explicit: 42, want: 42},
+		{name: "negative defaults to zero", explicit: -1, want: 0},
+		{name: "negative with valid env", explicit: -1, envVal: "1", want: 1},
+		{name: "negative with env zero", explicit: -1, envVal: "0", want: 0},
+		{name: "negative with non-numeric env falls back", explicit: -1, envVal: "abc", want: 0},
+		{name: "negative with empty env", explicit: -1, envVal: "", want: 0},
+		{name: "explicit overrides env", explicit: 2, envVal: "5", want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envVal != "" {
+				t.Setenv("GC_DOLT_ARCHIVE_LEVEL", tt.envVal)
+			}
+			if got := resolveDoltArchiveLevel(tt.explicit); got != tt.want {
+				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
+			}
+		})
+	}
+}

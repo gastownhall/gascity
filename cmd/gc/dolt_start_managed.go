@@ -44,15 +44,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	// Resolve archive level: explicit argument > env var > default (0).
-	if archiveLevel < 0 {
-		archiveLevel = 0
-		if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
-			if parsed, parseErr := strconv.Atoi(v); parseErr == nil {
-				archiveLevel = parsed
-			}
-		}
-	}
+	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
 
 	report := managedDoltStartReport{}
 	currentPort := portNum
@@ -196,6 +188,21 @@ func managedDoltLogSuffix(path string, offset int64) (string, error) {
 		offset = 0
 	}
 	return string(data[offset:]), nil
+}
+
+// resolveDoltArchiveLevel resolves the archive level for dolt auto_gc.
+// Explicit non-negative values are returned as-is. Negative values trigger
+// env-var fallback (GC_DOLT_ARCHIVE_LEVEL), defaulting to 0.
+func resolveDoltArchiveLevel(explicit int) int {
+	if explicit >= 0 {
+		return explicit
+	}
+	if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func terminateManagedDoltPID(pid int) error {
