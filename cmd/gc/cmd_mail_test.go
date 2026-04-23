@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -2086,5 +2090,453 @@ func TestMailCheckInjectFiltersCorrectly(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 unread message(s)") {
 		t.Errorf("stdout missing correct count:\n%s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Six-row read-path routing matrix for `gc mail check/peek/count`
+// (ADR 0001, ga-h6w, per-file migration ga-6s5). Each command gets the
+// six mandatory rows:
+//
+//   api-happy-path       API returns 200 with body            route=api, exit per cmd
+//   api-cache-not-live   API returns 503 cache_not_live       fallback, exit per cmd
+//   api-500-fallback     API returns generic 500              fallback (conn-refused), exit per cmd
+//   api-404-error        API returns 404                      no fallback, exit 1
+//   controller-down      apiClient returns nil (no env)       fallback (controller-down), exit per cmd
+//   escape-hatch         GC_NO_API truthy                     fallback (escape-hatch), exit per cmd
+//
+// Tests invoke route*Mail* directly with an injected api.Client or nil +
+// reason so no tmux / controller process is needed.
+// ---------------------------------------------------------------------------
+
+type mailMatrixHandler func(t *testing.T) http.Handler
+
+func okMailCheckHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total": 1,
+		})
+	})
+}
+
+func okMailPeekHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"id":         "msg-1",
+			"from":       "alice",
+			"to":         "mayor",
+			"subject":    "hello",
+			"body":       "world",
+			"created_at": "2026-04-23T10:00:00Z",
+			"read":       false,
+		})
+	})
+}
+
+func okMailCountHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"total": 3, "unread": 1}) //nolint:errcheck
+	})
+}
+
+func mailProblemHandler(status int, detail string) mailMatrixHandler {
+	return func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"status": status,
+				"title":  http.StatusText(status),
+				"detail": detail,
+			})
+		})
+	}
+}
+
+// writeMailTestCity creates a minimal city directory with GC_MAIL=fake so
+// the fallback path succeeds without a real bd store. The fake provider
+// responds to Inbox/Check/Get/Count with empty/ErrNotFound (expected for
+// the fallback rows). GC_CITY_PATH pins resolveCity() to the temp city so
+// the fallback helpers don't walk up to the builder's own city directory.
+func writeMailTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_MAIL", "fake")
+	t.Setenv("GC_CITY_PATH", cityPath)
+	return cityPath
+}
+
+// assertMailRouteLog verifies exactly one route=... line with the expected
+// route and reason is present in stderr.
+func assertMailRouteLog(t *testing.T, stderrStr, wantRoute, wantReason string) {
+	t.Helper()
+	if wantRoute == "" {
+		return
+	}
+	want := "route=" + wantRoute
+	if wantReason != "" {
+		want += " reason=" + wantReason
+	}
+	if !strings.Contains(stderrStr, want) {
+		t.Errorf("stderr missing %q:\n%s", want, stderrStr)
+	}
+	if n := strings.Count(stderrStr, "route="); n != 1 {
+		t.Errorf("route=... lines = %d, want 1:\n%s", n, stderrStr)
+	}
+}
+
+func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      mailMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okMailCheckHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "1 unread message(s)",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    mailProblemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   1, // fallback hits empty fake provider
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    mailProblemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   1,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    mailProblemHandler(http.StatusNotFound, "not_found: no such recipient"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeMailTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, tc.nilReason, &stdout, &stderr)
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			assertMailRouteLog(t, stderr.String(), tc.wantRoute, tc.wantReason)
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+func TestRouteMailPeek_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      mailMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okMailPeekHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "From:     alice",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    mailProblemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   1, // fallback Get returns ErrNotFound on empty fake
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    mailProblemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   1,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    mailProblemHandler(http.StatusNotFound, "not_found: no such message"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeMailTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeMailPeek(cityPath, []string{"msg-1"}, c, tc.nilReason, &stdout, &stderr)
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			assertMailRouteLog(t, stderr.String(), tc.wantRoute, tc.wantReason)
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+func TestRouteMailCount_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      mailMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okMailCountHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "3 total, 1 unread",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    mailProblemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   0, // fallback with empty fake still returns 0 for count
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+			wantStdout: "0 total, 0 unread",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    mailProblemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+			wantStdout: "0 total, 0 unread",
+		},
+		{
+			name:       "api-404-error",
+			handler:    mailProblemHandler(http.StatusNotFound, "not_found: no such recipient"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+			wantStdout:   "0 total, 0 unread",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+			wantStdout:   "0 total, 0 unread",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeMailTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeMailCount(cityPath, []string{"mayor"}, c, tc.nilReason, &stdout, &stderr)
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			assertMailRouteLog(t, stderr.String(), tc.wantRoute, tc.wantReason)
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeMailTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total": 1,
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age:") {
+		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
+	}
+}
+
+func TestRouteMailPeek_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeMailTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"id":         "msg-1",
+			"from":       "alice",
+			"to":         "mayor",
+			"subject":    "hi",
+			"body":       "hello",
+			"created_at": "2026-04-23T10:00:00Z",
+			"read":       false,
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeMailPeek(cityPath, []string{"msg-1"}, c, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age:") {
+		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
+	}
+}
+
+func TestRouteMailCount_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeMailTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"total": 1, "unread": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeMailCount(cityPath, []string{"mayor"}, c, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age:") {
+		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
 	}
 }

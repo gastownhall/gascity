@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -157,19 +158,89 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
-	// Check city-level suspension before opening the store.
-	if cityPath, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cityPath, stderr); err == nil {
-			if citySuspended(cfg) {
-				if inject {
-					return 0
-				}
-				fmt.Fprintln(stderr, "gc mail check: city is suspended") //nolint:errcheck // best-effort stderr
-				return 1
+	cityPath, cityPathErr := resolveCity()
+	if cityPathErr == nil {
+		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
+			if inject {
+				return 0
 			}
+			fmt.Fprintln(stderr, "gc mail check: city is suspended") //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	}
+	if cityPathErr != nil {
+		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+	}
+	c, reason := mailCheckAPIClient(cityPath)
+	return routeMailCheck(cityPath, args, inject, hookFormat, c, reason, stdout, stderr)
+}
 
+// mailCheckAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server or force a
+// specific fallback reason without spinning up a real controller.
+var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeMailCheck dispatches `mail check` to the supervisor API when a
+// controller is up; otherwise falls back to the local mail-provider path.
+// Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+func routeMailCheck(cityPath string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "mail check"
+	recipient := defaultMailIdentity()
+	if len(args) > 0 {
+		recipient = strings.TrimSpace(args[0])
+	}
+	if c != nil {
+		cr, err := c.ListMailInbox(recipient, "")
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			if inject {
+				return 0
+			}
+			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+}
+
+// renderMailCheckFromAPI formats the API-sourced inbox for `gc mail check`.
+// With --inject, writes the <system-reminder> block and always returns 0.
+// Without --inject, returns 0 if mail exists and 1 if empty, matching the
+// local fallback contract; human output appends a stale-read banner when the
+// supervisor cache is > 30 s old.
+func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
+	messages := cr.Body
+	if inject {
+		if len(messages) > 0 {
+			_ = writeProviderHookContext(stdout, hookFormat, formatInjectOutput(messages))
+		}
+		return 0
+	}
+	if len(messages) == 0 {
+		return 1
+	}
+	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), recipient) //nolint:errcheck // best-effort stdout
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+// doMailCheckFallback is the direct-bd path for `gc mail check`.
+func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail check")
 	if mp == nil {
 		if inject {
@@ -1165,8 +1236,62 @@ func doMailRead(mp mail.Provider, rec events.Recorder, args []string, stdout, st
 	return 0
 }
 
-// cmdMailPeek shows a message without marking it as read.
+// cmdMailPeek shows a message without marking it as read. It routes through
+// the supervisor API when a controller is up and falls back to direct bd
+// reads otherwise.
 func cmdMailPeek(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "gc mail peek: missing message ID") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		return doMailPeekFallback(args, stdout, stderr)
+	}
+	c, reason := mailPeekAPIClient(cityPath)
+	return routeMailPeek(cityPath, args, c, reason, stdout, stderr)
+}
+
+// mailPeekAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server.
+var mailPeekAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeMailPeek dispatches `mail peek` to the supervisor API when a
+// controller is up; otherwise falls back to the local mail-provider path.
+// Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+func routeMailPeek(cityPath string, args []string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "mail peek"
+	id := args[0]
+	if c != nil {
+		cr, err := c.GetMail(id, "")
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			printMessage(cr.Body, stdout)
+			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+			}
+			return 0
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc mail peek: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doMailPeekFallback(args, stdout, stderr)
+}
+
+// doMailPeekFallback is the direct-bd path for `gc mail peek`.
+func doMailPeekFallback(args []string, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail peek")
 	if mp == nil {
 		return code
@@ -1412,8 +1537,60 @@ func doMailThread(mp mail.Provider, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 
-// cmdMailCount shows total/unread count.
+// cmdMailCount shows total/unread count. It routes through the supervisor
+// API when a controller is up and falls back to direct bd reads otherwise.
 func cmdMailCount(args []string, stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return doMailCountFallback(args, stdout, stderr)
+	}
+	c, reason := mailCountAPIClient(cityPath)
+	return routeMailCount(cityPath, args, c, reason, stdout, stderr)
+}
+
+// mailCountAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server.
+var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeMailCount dispatches `mail count` to the supervisor API when a
+// controller is up; otherwise falls back to the local mail-provider path.
+// Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+func routeMailCount(cityPath string, args []string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	const cmdName = "mail count"
+	recipient := defaultMailIdentity()
+	if len(args) > 0 {
+		recipient = strings.TrimSpace(args[0])
+	}
+	if c != nil {
+		cr, err := c.CountMail(recipient, "")
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			fmt.Fprintf(stdout, "%d total, %d unread for %s\n", cr.Body.Total, cr.Body.Unread, recipient) //nolint:errcheck // best-effort stdout
+			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+			}
+			return 0
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doMailCountFallback(args, stdout, stderr)
+}
+
+// doMailCountFallback is the direct-bd path for `gc mail count`.
+func doMailCountFallback(args []string, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail count")
 	if mp == nil {
 		return code
