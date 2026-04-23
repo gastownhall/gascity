@@ -14576,6 +14576,19 @@
               "description": "Include last output preview.",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5.",
+            "explode": false,
+            "in": "query",
+            "name": "peek_lines",
+            "schema": {
+              "description": "Number of lines to include in the last output preview when peek=true. Defaults to 5.",
+              "format": "int64",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
