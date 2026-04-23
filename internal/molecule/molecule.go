@@ -612,6 +612,10 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 
 	for _, step := range recipe.Steps {
 		b := stepToBead(step, vars, priorityOverride)
+		// Fragment entries stay "task" — unlike formula scaffolding steps,
+		// fanout-expanded fragment beads are actionable work that pool
+		// workers claim from `bd ready`. Do not apply nonRootStepBeadType
+		// here (#1039).
 		hasFutureBlocker := false
 		for _, dep := range recipe.Deps {
 			if dep.StepID != step.ID || dep.Type == "parent-child" {

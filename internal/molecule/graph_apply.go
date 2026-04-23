@@ -297,6 +297,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 		if err != nil {
 			return nil, err
 		}
+		// Fragment entries stay "task" — unlike formula scaffolding steps,
+		// fanout-expanded fragment nodes are actionable work that pool
+		// workers claim from `bd ready`. Do not apply nonRootStepBeadType
+		// here (#1039).
 		if node.Metadata == nil {
 			node.Metadata = make(map[string]string, 2)
 		}
