@@ -155,11 +155,16 @@ append_fragments = ["footer"]
 		t.Fatalf("config.Parse: %v", err)
 	}
 	var mayor config.Agent
+	found := false
 	for _, a := range cfg.Agents {
 		if a.Name == "mayor" {
 			mayor = a
+			found = true
 			break
 		}
+	}
+	if !found {
+		t.Fatalf(`expected [[agent]] with name "mayor" in parsed config`)
 	}
 	if got := mayor.AppendFragments; len(got) != 1 || got[0] != "footer" {
 		t.Fatalf("[[agent]] AppendFragments = %v, want [footer]", got)
