@@ -131,6 +131,11 @@ type StoreMaintenanceLoopDeps struct {
 	// working unchanged. Production wires this to NewSQLDoltOps.
 	OpenDoltOps DoltOpsFactory
 
+	// OpenDoltBackup opens a DoltBackupRunner for one snapshot cycle.
+	// Nil leaves runSnapshot a no-op. Production wires this to
+	// NewExecDoltBackupRunner rooted at the managed Dolt DB dir.
+	OpenDoltBackup DoltBackupRunnerFactory
+
 	// Mail sends operator alert mail on failed runs when Cfg.AlertTo is
 	// set. Nil disables alerts; tests that do not exercise the alert
 	// path can leave it unset.
@@ -144,15 +149,16 @@ type StoreMaintenanceLoopDeps struct {
 //
 // The zero value is not usable — construct with NewStoreMaintenanceLoop.
 type StoreMaintenanceLoop struct {
-	cfg         config.DoltMaintenance
-	store       beads.Store
-	cityPath    string
-	recorder    events.Recorder
-	stderr      io.Writer
-	clock       func() time.Time
-	rand        func() float64
-	openDoltOps DoltOpsFactory
-	mail        mail.Provider
+	cfg            config.DoltMaintenance
+	store          beads.Store
+	cityPath       string
+	recorder       events.Recorder
+	stderr         io.Writer
+	clock          func() time.Time
+	rand           func() float64
+	openDoltOps    DoltOpsFactory
+	openDoltBackup DoltBackupRunnerFactory
+	mail           mail.Provider
 
 	// mu is the in-process maintenance lease. runOnce holds it for the
 	// duration of a single maintenance cycle; the future manual-override
@@ -180,17 +186,18 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		deps.Stderr = io.Discard
 	}
 	return &StoreMaintenanceLoop{
-		cfg:         deps.Cfg,
-		store:       deps.Store,
-		cityPath:    deps.CityPath,
-		recorder:    deps.Recorder,
-		stderr:      deps.Stderr,
-		clock:       deps.Clock,
-		rand:        deps.Rand,
-		openDoltOps: deps.OpenDoltOps,
-		mail:        deps.Mail,
-		lastRunAt:   deps.LastRunAt,
-		history:     make([]MaintenanceRun, 0, maintenanceHistorySize),
+		cfg:            deps.Cfg,
+		store:          deps.Store,
+		cityPath:       deps.CityPath,
+		recorder:       deps.Recorder,
+		stderr:         deps.Stderr,
+		clock:          deps.Clock,
+		rand:           deps.Rand,
+		openDoltOps:    deps.OpenDoltOps,
+		openDoltBackup: deps.OpenDoltBackup,
+		mail:           deps.Mail,
+		lastRunAt:      deps.LastRunAt,
+		history:        make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
 }
 
