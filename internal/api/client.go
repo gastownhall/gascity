@@ -69,10 +69,28 @@ func (e *clientInitError) Error() string {
 }
 func (e *clientInitError) Unwrap() error { return e.err }
 
+// cacheNotLiveError indicates the supervisor returned 503 because its
+// read-path CachingStore has not yet reached the live state. Read handlers
+// return this shape during startup/reconcile rather than serve stale or
+// empty data; the CLI classifies it as fallbackable so reads land on raw
+// bd instead.
+type cacheNotLiveError struct {
+	msg string
+}
+
+func (e *cacheNotLiveError) Error() string {
+	if e.msg == "" {
+		return "cache not yet live"
+	}
+	return e.msg
+}
+
 // ShouldFallback reports whether err indicates the CLI should fall back to
-// direct file mutation. This is true for transport-level failures (connection
-// refused, timeout), read-only API rejections (server bound to non-localhost,
-// mutations disabled), and client-init failures (malformed base URL).
+// direct file mutation (or, for reads, to raw bd). True for transport-level
+// failures (connection refused, timeout), read-only API rejections (server
+// bound to non-localhost, mutations disabled), client-init failures
+// (malformed base URL), and cache-not-live 503 responses during supervisor
+// priming.
 func ShouldFallback(err error) bool {
 	if IsConnError(err) {
 		return true
@@ -82,7 +100,11 @@ func ShouldFallback(err error) bool {
 		return true
 	}
 	var ci *clientInitError
-	return errors.As(err, &ci)
+	if errors.As(err, &ci) {
+		return true
+	}
+	var cnl *cacheNotLiveError
+	return errors.As(err, &cnl)
 }
 
 // Client is an HTTP client for the Gas City API server. It wraps the
@@ -626,6 +648,13 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 			msg = "mutations disabled (read-only server)"
 		}
 		return &readOnlyError{msg: msg}
+	}
+	if status == http.StatusServiceUnavailable && strings.HasPrefix(detail, "cache_not_live") {
+		msg := detail
+		if msg == "" {
+			msg = "cache not yet live"
+		}
+		return &cacheNotLiveError{msg: msg}
 	}
 	if detail != "" {
 		return fmt.Errorf("API error: %s", detail)

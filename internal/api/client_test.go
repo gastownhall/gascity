@@ -483,6 +483,61 @@ func TestClientConnErrorShouldFallback(t *testing.T) {
 	}
 }
 
+func TestClientCacheNotLiveFallback(t *testing.T) {
+	// Server returns 503 Problem Details with a `cache_not_live:` prefix.
+	// Read-path routing must classify this as fallbackable so the CLI lands
+	// on raw bd while the supervisor cache is priming or reconciling.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "cache_not_live: supervisor cache is priming or reconciling; retry via fallback",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListServices()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for cache-not-live rejection: %v", err)
+	}
+	if IsConnError(err) {
+		t.Errorf("IsConnError = true for cache-not-live (should be false): %v", err)
+	}
+}
+
+func TestClientGenericFiveHundredNoFallbackByDefault(t *testing.T) {
+	// A 500 without a known detail prefix is NOT fallbackable by the
+	// client classifier on its own — the CLI per-command layer handles
+	// transport/5xx-style fallback via IsConnError semantics. This test
+	// documents the boundary: apiErrorFromResponse only classifies
+	// specific prefixes; other 5xx surface as generic errors.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Internal Server Error",
+			"status": http.StatusInternalServerError,
+			"detail": "internal: something exploded",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	err := c.SuspendCity()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if ShouldFallback(err) {
+		t.Errorf("ShouldFallback = true for generic 500: %v", err)
+	}
+}
+
 func TestClientBusinessErrorNoFallback(t *testing.T) {
 	// A 404 not_found is a business error — should NOT trigger fallback.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
