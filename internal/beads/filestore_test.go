@@ -68,6 +68,14 @@ func (f *oneShotStatErrorFS) Stat(name string) (os.FileInfo, error) {
 	return f.FS.Stat(name)
 }
 
+type errLocker struct {
+	lockErr   error
+	unlockErr error
+}
+
+func (l errLocker) Lock() error   { return l.lockErr }
+func (l errLocker) Unlock() error { return l.unlockErr }
+
 func TestFileStore(t *testing.T) {
 	factory := func() beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")
@@ -556,6 +564,40 @@ func TestFileStoreRefreshFallbackReloadsWhenStatFails(t *testing.T) {
 	}
 }
 
+func TestFileStoreRefreshPropagatesReloadErrorAfterExternalRewrite(t *testing.T) {
+	base := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	writer, err := beads.OpenFileStore(base, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := writer.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readerFS := &toggledErrorFS{FS: base, path: path}
+	reader, err := beads.OpenFileStore(readerFS, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	if err := writer.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
+		t.Fatalf("Update(%q): %v", created.ID, err)
+	}
+	readerFS.readErr = fmt.Errorf("read boom")
+
+	if _, err := reader.Get(created.ID); err == nil {
+		t.Fatalf("Get(%q) after external rewrite err = nil, want read boom", created.ID)
+	} else if !strings.Contains(err.Error(), "read boom") {
+		t.Fatalf("Get(%q) after external rewrite err = %v, want read boom", created.ID, err)
+	}
+}
+
 func TestFileStoreCreateRewarmsAfterFreshnessStatFailure(t *testing.T) {
 	base := fsys.NewFake()
 	path := "/city/.gc/beads.json"
@@ -896,6 +938,71 @@ func TestFileStoreDeletePersistsAcrossOpenInstances(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("ListOpen() after persisted delete = %+v, want empty", got)
+	}
+}
+
+func TestFileStoreDeletePropagatesLockError(t *testing.T) {
+	f := fsys.NewFake()
+	s, err := beads.OpenFileStore(f, "/city/.gc/beads.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetLocker(errLocker{lockErr: fmt.Errorf("lock boom")})
+
+	if err := s.Delete("gc-1"); err == nil {
+		t.Fatal("Delete(gc-1) err = nil, want lock boom")
+	} else if !strings.Contains(err.Error(), "lock boom") {
+		t.Fatalf("Delete(gc-1) err = %v, want lock boom", err)
+	}
+}
+
+func TestFileStoreDeletePropagatesMemStoreError(t *testing.T) {
+	f := fsys.NewFake()
+	s, err := beads.OpenFileStore(f, "/city/.gc/beads.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Delete("gc-404"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Delete(gc-404) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestFileStoreDeleteRollsBackWhenSaveFails(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s1.Create(beads.Bead{Title: "keep me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Errors[path+".tmp"] = fmt.Errorf("disk full")
+
+	err = s1.Delete(created.ID)
+	if err == nil {
+		t.Fatalf("Delete(%q) err = nil, want disk full", created.ID)
+	}
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("Delete(%q) err = %v, want disk full", created.ID, err)
+	}
+
+	delete(f.Errors, path+".tmp")
+
+	if _, err := s1.Get(created.ID); err != nil {
+		t.Fatalf("Get(%q) after rollback: %v", created.ID, err)
+	}
+
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("Get(%q) after reopen: %v", created.ID, err)
 	}
 }
 
