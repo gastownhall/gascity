@@ -2360,7 +2360,8 @@ type StatusBody struct {
 	Rigs     StatusRigCounts `json:"rigs"`
 
 	// Running Number of running agent processes.
-	Running int64 `json:"running"`
+	Running     int64              `json:"running"`
+	StoreHealth *StatusStoreHealth `json:"store_health,omitempty"`
 
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
@@ -2389,6 +2390,33 @@ type StatusRigCounts struct {
 
 	// Total Total number of rigs.
 	Total int64 `json:"total"`
+}
+
+// StatusStoreHealth defines model for StatusStoreHealth.
+type StatusStoreHealth struct {
+	// LastGcAt RFC3339 timestamp of last maintenance run.
+	LastGcAt *string `json:"last_gc_at,omitempty"`
+
+	// LastGcStatus Status of last maintenance run ('success' or 'failed').
+	LastGcStatus *string `json:"last_gc_status,omitempty"`
+
+	// LiveRows Live bead row count.
+	LiveRows int64 `json:"live_rows"`
+
+	// Path On-disk path of the Dolt store.
+	Path string `json:"path"`
+
+	// RatioMbPerRow Derived megabytes per row.
+	RatioMbPerRow float64 `json:"ratio_mb_per_row"`
+
+	// SizeBytes Total bytes of the store directory.
+	SizeBytes int64 `json:"size_bytes"`
+
+	// ThresholdMbPerRow Ratio threshold; a ratio above this trips warning.
+	ThresholdMbPerRow float64 `json:"threshold_mb_per_row"`
+
+	// Warning True when maintenance is overdue.
+	Warning bool `json:"warning"`
 }
 
 // StatusWorkCounts defines model for StatusWorkCounts.

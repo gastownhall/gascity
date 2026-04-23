@@ -6043,6 +6043,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "store_health": {
+            "$ref": "#/components/schemas/StatusStoreHealth",
+            "description": "Dolt bead store health summary. Omitted when unavailable."
+          },
           "suspended": {
             "description": "Whether the city is suspended.",
             "type": "boolean"
@@ -6113,6 +6117,56 @@
         "required": [
           "total",
           "suspended"
+        ],
+        "type": "object"
+      },
+      "StatusStoreHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "last_gc_at": {
+            "description": "RFC3339 timestamp of last maintenance run.",
+            "type": "string"
+          },
+          "last_gc_status": {
+            "description": "Status of last maintenance run ('success' or 'failed').",
+            "type": "string"
+          },
+          "live_rows": {
+            "description": "Live bead row count.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "path": {
+            "description": "On-disk path of the Dolt store.",
+            "type": "string"
+          },
+          "ratio_mb_per_row": {
+            "description": "Derived megabytes per row.",
+            "format": "double",
+            "type": "number"
+          },
+          "size_bytes": {
+            "description": "Total bytes of the store directory.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "threshold_mb_per_row": {
+            "description": "Ratio threshold; a ratio above this trips warning.",
+            "format": "double",
+            "type": "number"
+          },
+          "warning": {
+            "description": "True when maintenance is overdue.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "size_bytes",
+          "live_rows",
+          "ratio_mb_per_row",
+          "warning",
+          "threshold_mb_per_row"
         ],
         "type": "object"
       },
