@@ -2650,3 +2650,55 @@ func TestNudgeRoutedWorkSessions_SkipsMissingDecision(t *testing.T) {
 		t.Errorf("should not nudge when session is missing from decisions map, got: %q", stdout.String())
 	}
 }
+
+// createErrStore wraps a beads.Store and forces Create to fail. Used to
+// exercise the error branch inside nudgeRoutedWorkSessions where the
+// underlying nudge enqueue fails to persist its bead.
+type createErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s *createErrStore) Create(_ beads.Bead) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
+
+func TestNudgeRoutedWorkSessions_LogsEnqueueFailure(t *testing.T) {
+	// When the nudge enqueue fails (e.g., underlying bead Create errors
+	// from a broken store view), the loop must log to stderr and move on
+	// rather than panic or mark the template as nudged.
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity"},
+		},
+	}
+	session := &beads.Bead{
+		ID: "ses-1", Status: "open",
+		Metadata: map[string]string{
+			"session_name": "polecat-1",
+			"template":     "gascity/polecat",
+			"state":        "active",
+		},
+	}
+	targets := []wakeTarget{{session: session, alive: true}}
+	decisions := map[string]AwakeDecision{
+		"polecat-1": {ShouldWake: true, Reason: "scaled:demand"},
+	}
+	workSet := map[string]bool{"gascity/polecat": true}
+
+	store := &createErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("simulated store failure")}
+
+	var stdout, stderr strings.Builder
+	nudgeRoutedWorkSessions(cityPath, cfg, nil, store, targets, decisions, workSet, &stdout, &stderr)
+
+	if !strings.Contains(stderr.String(), "nudgeRoutedWork") {
+		t.Errorf("expected stderr to log enqueue failure under nudgeRoutedWork prefix; got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "simulated store failure") {
+		t.Errorf("expected stderr to include underlying error text; got: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Queued routed-work nudge") {
+		t.Errorf("stdout should not log a successful nudge when enqueue fails; got: %q", stdout.String())
+	}
+}
