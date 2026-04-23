@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 )
 
 const (
@@ -128,6 +130,11 @@ type StoreMaintenanceLoopDeps struct {
 	// placeholder runOnce path and tests that don't exercise SQL keep
 	// working unchanged. Production wires this to NewSQLDoltOps.
 	OpenDoltOps DoltOpsFactory
+
+	// Mail sends operator alert mail on failed runs when Cfg.AlertTo is
+	// set. Nil disables alerts; tests that do not exercise the alert
+	// path can leave it unset.
+	Mail mail.Provider
 }
 
 // StoreMaintenanceLoop runs periodic Dolt store maintenance inside the
@@ -145,6 +152,7 @@ type StoreMaintenanceLoop struct {
 	clock       func() time.Time
 	rand        func() float64
 	openDoltOps DoltOpsFactory
+	mail        mail.Provider
 
 	// mu is the in-process maintenance lease. runOnce holds it for the
 	// duration of a single maintenance cycle; the future manual-override
@@ -180,6 +188,7 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		clock:       deps.Clock,
 		rand:        deps.Rand,
 		openDoltOps: deps.OpenDoltOps,
+		mail:        deps.Mail,
 		lastRunAt:   deps.LastRunAt,
 		history:     make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
@@ -342,6 +351,41 @@ func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
 		Ts:      run.FinishedAt,
 		Payload: raw,
 	})
+	if run.Err != "" {
+		m.sendFailureAlert(run)
+	}
+}
+
+// sendFailureAlert posts one best-effort operator alert mail for a
+// failed maintenance run. It is a no-op when Mail is unset or AlertTo
+// is empty; Send errors are logged to stderr but never propagate. The
+// subject and body shape is stable and documented in the runbook
+// (ga-d5y / ga-sec).
+func (m *StoreMaintenanceLoop) sendFailureAlert(run MaintenanceRun) {
+	if m.mail == nil || m.cfg.AlertTo == "" {
+		return
+	}
+	duration := run.FinishedAt.Sub(run.StartedAt).Seconds()
+	if duration < 0 {
+		duration = 0
+	}
+	nextRetry := run.StartedAt.Add(m.cfg.IntervalOrDefault()).UTC().Format(time.RFC3339)
+
+	subject := fmt.Sprintf("[ALERT] Dolt store maintenance failed: %s", run.Stage)
+	var body strings.Builder
+	fmt.Fprintf(&body, "Dolt store maintenance run failed.\n\n")
+	fmt.Fprintf(&body, "Stage:         %s\n", run.Stage)
+	fmt.Fprintf(&body, "Error:         %s\n", run.Err)
+	fmt.Fprintf(&body, "Duration:      %.3fs\n", duration)
+	if run.SnapshotPath != "" {
+		fmt.Fprintf(&body, "Snapshot path: %s\n", run.SnapshotPath)
+	}
+	fmt.Fprintf(&body, "City:          %s\n", m.cityPath)
+	fmt.Fprintf(&body, "Next retry:    %s (approximate; actual time subject to jitter)\n", nextRetry)
+
+	if _, err := m.mail.Send(maintenanceActor, m.cfg.AlertTo, subject, body.String()); err != nil {
+		fmt.Fprintf(m.stderr, "store-maintenance: alert mail send failed: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // appendHistoryLocked appends r to the history ring buffer, dropping
