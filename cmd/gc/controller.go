@@ -1137,6 +1137,7 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.services = cr.svc
 	cs.startBeadEventWatcher(ctx)
+	cs.startMaintenanceLoop(ctx)
 	cr.setControllerState(cs)
 
 	// Start API server if configured. Standalone city mode wraps the

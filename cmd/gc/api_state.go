@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -230,6 +231,30 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// startMaintenanceLoop launches the periodic Dolt store maintenance
+// loop when [maintenance.dolt] enabled=true in city.toml. When the
+// section is omitted or enabled=false, this is a no-op — the caller
+// invokes it unconditionally so startup stays flat.
+func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	store := cs.cityBeadStore
+	cityPath := cs.cityPath
+	cs.mu.RUnlock()
+	if cfg == nil || !cfg.Maintenance.Dolt.Enabled {
+		return
+	}
+	loop := supervisor.NewStoreMaintenanceLoop(supervisor.StoreMaintenanceLoopDeps{
+		Cfg:       cfg.Maintenance.Dolt,
+		Store:     store,
+		CityPath:  cityPath,
+		Recorder:  cs.eventProv,
+		Stderr:    os.Stderr,
+		LastRunAt: supervisor.SeedLastRunAt(cs.eventProv),
+	})
+	go loop.Run(ctx)
 }
 
 func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
