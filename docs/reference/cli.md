@@ -19,16 +19,19 @@ gc [flags]
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc actual-factory](#gc-actual-factory) | Commands from the actual-factory import |
 | [gc agent](#gc-agent) | Manage agent configuration |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
 | [gc cities](#gc-cities) | List registered cities |
+| [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
+| [gc dolt](#gc-dolt) | Commands from the dolt import |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
@@ -39,6 +42,7 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
@@ -52,6 +56,7 @@ gc [flags]
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
+| [gc shell](#gc-shell) | Manage the Gas City shell integration hook |
 | [gc skill](#gc-skill) | List visible skills |
 | [gc sling](#gc-sling) | Route work to a session config or agent |
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
@@ -63,6 +68,98 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+
+## gc actual-factory
+
+Commands from the actual-factory import
+
+```
+gc actual-factory
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc actual-factory build](#gc-actual-factory-build) | Manually trigger the build formula against a bead |
+| [gc actual-factory designs](#gc-actual-factory-designs) | List design artifacts under docs/designs/ |
+| [gc actual-factory harvest](#gc-actual-factory-harvest) | Manually trigger a feedback-harvest cycle |
+| [gc actual-factory plan](#gc-actual-factory-plan) | Print the current work-breakdown graph for a goal bead |
+| [gc actual-factory rules](#gc-actual-factory-rules) | List architectural rules discovered under docs/rules/ |
+| [gc actual-factory status](#gc-actual-factory-status) | Show planner work status for the current rig |
+| [gc actual-factory tests](#gc-actual-factory-tests) | List test files that came from actual-validator |
+| [gc actual-factory tracker-sync](#gc-actual-factory-tracker-sync) | Manually run the tracker → beads import |
+| [gc actual-factory verdicts](#gc-actual-factory-verdicts) | List recent review verdicts |
+
+## gc actual-factory build
+
+Manually trigger the build formula against a bead
+
+```
+gc actual-factory build
+```
+
+## gc actual-factory designs
+
+List design artifacts under docs/designs/
+
+```
+gc actual-factory designs
+```
+
+## gc actual-factory harvest
+
+Manually trigger a feedback-harvest cycle
+
+```
+gc actual-factory harvest
+```
+
+## gc actual-factory plan
+
+Print the current work-breakdown graph for a goal bead
+
+```
+gc actual-factory plan
+```
+
+## gc actual-factory rules
+
+List architectural rules discovered under docs/rules/
+
+```
+gc actual-factory rules
+```
+
+## gc actual-factory status
+
+Show planner work status for the current rig
+
+```
+gc actual-factory status
+```
+
+## gc actual-factory tests
+
+List test files that came from actual-validator
+
+```
+gc actual-factory tests
+```
+
+## gc actual-factory tracker-sync
+
+Manually run the tracker → beads import
+
+```
+gc actual-factory tracker-sync
+```
+
+## gc actual-factory verdicts
+
+List recent review verdicts
+
+```
+gc actual-factory verdicts
+```
 
 ## gc agent
 
@@ -164,7 +261,9 @@ gc bd --rig my-project list
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, and diagnostics.
+Subcommands for topology operations, health checking, diagnostics, and
+read-only list/show routed through the supervisor API with transparent
+fallback to direct bd reads.
 
 ```
 gc beads
@@ -174,6 +273,8 @@ gc beads
 |------------|-------------|
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
+| [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
 
@@ -244,6 +345,49 @@ gc beads health
 |------|------|---------|-------------|
 | `--quiet` | bool |  | silent on success, stderr on failure |
 
+## gc beads list
+
+List beads across all rigs, routed through the supervisor API when
+the controller is alive and falling back to a direct multi-store read
+otherwise.
+
+Supports --label, --status, --all, and --format flags. --json is an
+alias for --format=json. API-path JSON output includes _cache_age_s;
+fallback-path JSON omits it.
+
+```
+gc beads list
+```
+
+**Example:**
+
+```
+gc beads list
+  gc beads list --label ready-to-build
+  gc beads list --status open --json
+  gc beads list --format=toon
+```
+
+## gc beads show
+
+Show one bead by ID, routed through the supervisor API when the
+controller is alive and falling back to a direct multi-store lookup
+otherwise.
+
+Supports --format and --json. API-path JSON output includes
+_cache_age_s; fallback-path JSON omits it.
+
+```
+gc beads show <bead-id>
+```
+
+**Example:**
+
+```
+gc beads show ga-abc
+  gc beads show ga-abc --json
+```
+
 ## gc build-image
 
 Assemble a Docker build context from city config, prompts, formulas,
@@ -303,6 +447,127 @@ List registered cities
 ```
 gc cities list
 ```
+
+## gc completion
+
+Generate the autocompletion script for gc for the specified shell.
+See each sub-command's help for details on how to use the generated script.
+
+```
+gc completion
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc completion bash](#gc-completion-bash) | Generate the autocompletion script for bash |
+| [gc completion fish](#gc-completion-fish) | Generate the autocompletion script for fish |
+| [gc completion powershell](#gc-completion-powershell) | Generate the autocompletion script for powershell |
+| [gc completion zsh](#gc-completion-zsh) | Generate the autocompletion script for zsh |
+
+## gc completion bash
+
+Generate the autocompletion script for the bash shell.
+
+This script depends on the 'bash-completion' package.
+If it is not installed already, you can install it via your OS's package manager.
+
+To load completions in your current shell session:
+
+	source &lt;(gc completion bash)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	gc completion bash &gt; /etc/bash_completion.d/gc
+
+#### macOS:
+
+	gc completion bash &gt; $(brew --prefix)/etc/bash_completion.d/gc
+
+You will need to start a new shell for this setup to take effect.
+
+```
+gc completion bash
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
+
+## gc completion fish
+
+Generate the autocompletion script for the fish shell.
+
+To load completions in your current shell session:
+
+	gc completion fish | source
+
+To load completions for every new session, execute once:
+
+	gc completion fish &gt; ~/.config/fish/completions/gc.fish
+
+You will need to start a new shell for this setup to take effect.
+
+```
+gc completion fish [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
+
+## gc completion powershell
+
+Generate the autocompletion script for powershell.
+
+To load completions in your current shell session:
+
+	gc completion powershell | Out-String | Invoke-Expression
+
+To load completions for every new session, add the output of the above command
+to your powershell profile.
+
+```
+gc completion powershell [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
+
+## gc completion zsh
+
+Generate the autocompletion script for the zsh shell.
+
+If shell completion is not already enabled in your environment you will need
+to enable it.  You can execute the following once:
+
+	echo "autoload -U compinit; compinit" &gt;&gt; ~/.zshrc
+
+To load completions in your current shell session:
+
+	source &lt;(gc completion zsh)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	gc completion zsh &gt; "$&#123;fpath[1]&#125;/_gc"
+
+#### macOS:
+
+	gc completion zsh &gt; $(brew --prefix)/share/zsh/site-functions/_gc
+
+You will need to start a new shell for this setup to take effect.
+
+```
+gc completion zsh [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
 
 ## gc config
 
@@ -786,6 +1051,107 @@ gc doctor
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
+
+## gc dolt
+
+Commands from the dolt import
+
+```
+gc dolt
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc dolt cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases |
+| [gc dolt health](#gc-dolt-health) | Check Dolt data-plane health |
+| [gc dolt list](#gc-dolt-list) | List Dolt databases |
+| [gc dolt logs](#gc-dolt-logs) | Tail the Dolt server log file |
+| [gc dolt recover](#gc-dolt-recover) | Recover Dolt from read-only state |
+| [gc dolt rollback](#gc-dolt-rollback) | List or restore from migration backups |
+| [gc dolt sql](#gc-dolt-sql) | Open an interactive Dolt SQL shell |
+| [gc dolt start](#gc-dolt-start) | Start the Dolt server if not already running |
+| [gc dolt status](#gc-dolt-status) | Check if the Dolt server is running |
+| [gc dolt sync](#gc-dolt-sync) | Push databases to configured remotes |
+
+## gc dolt cleanup
+
+Find and remove orphaned Dolt databases
+
+```
+gc dolt cleanup
+```
+
+## gc dolt health
+
+Check Dolt data-plane health
+
+```
+gc dolt health
+```
+
+## gc dolt list
+
+List Dolt databases
+
+```
+gc dolt list
+```
+
+## gc dolt logs
+
+Tail the Dolt server log file
+
+```
+gc dolt logs
+```
+
+## gc dolt recover
+
+Recover Dolt from read-only state
+
+```
+gc dolt recover
+```
+
+## gc dolt rollback
+
+List or restore from migration backups
+
+```
+gc dolt rollback
+```
+
+## gc dolt sql
+
+Open an interactive Dolt SQL shell
+
+```
+gc dolt sql
+```
+
+## gc dolt start
+
+Start the Dolt server if not already running
+
+```
+gc dolt start
+```
+
+## gc dolt status
+
+Check if the Dolt server is running
+
+```
+gc dolt status
+```
+
+## gc dolt sync
+
+Push databases to configured remotes
+
+```
+gc dolt sync
+```
 
 ## gc event
 
@@ -1342,6 +1708,47 @@ Show all messages sharing a thread ID, ordered by time.
 ```
 gc mail thread <thread-id>
 ```
+
+## gc maintenance
+
+Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+
+The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
+in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+```
+gc maintenance
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc maintenance dolt-gc](#gc-maintenance-dolt-gc) | Trigger a Dolt store maintenance run |
+| [gc maintenance status](#gc-maintenance-status) | Show Dolt store maintenance status |
+
+## gc maintenance dolt-gc
+
+Trigger a Dolt store maintenance run
+
+```
+gc maintenance dolt-gc [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
+| `--wait` | bool |  | block until the run completes (exit 1 on failure) |
+
+## gc maintenance status
+
+Show Dolt store maintenance status
+
+```
+gc maintenance status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
 
 ## gc mcp
 
@@ -2247,6 +2654,51 @@ gc session wake <session-id-or-alias>
 ```
 gc session wake gc-42
   gc session wake mayor
+```
+
+## gc shell
+
+The shell integration adds a completion hook to your shell RC file that
+provides tab-completion for gc commands and flags.
+
+Subcommands: install, remove, status.
+
+```
+gc shell
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc shell install](#gc-shell-install) | Install or update shell integration |
+| [gc shell remove](#gc-shell-remove) | Remove shell integration |
+| [gc shell status](#gc-shell-status) | Show shell integration status |
+
+## gc shell install
+
+Install or update the gc shell completion hook.
+
+If no shell is specified, the shell is detected from $SHELL.
+The completion script is written to ~/.gc/completions/ and a source line
+is added to your shell RC file.
+
+```
+gc shell install [bash|zsh|fish]
+```
+
+## gc shell remove
+
+Remove the gc shell completion hook from your shell RC file and delete the completion script.
+
+```
+gc shell remove
+```
+
+## gc shell status
+
+Show shell integration status
+
+```
+gc shell status
 ```
 
 ## gc skill

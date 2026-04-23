@@ -31,6 +31,7 @@ City is the top-level configuration for a Gas City instance.
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
+| `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 
@@ -278,6 +279,17 @@ DoltConfig holds optional dolt server overrides.
 | `port` | integer |  | `0` | Port is the dolt server port. 0 means use ephemeral port allocation (hashed from city path). Set explicitly to override. |
 | `host` | string |  | `localhost` | Host is the dolt server hostname. Defaults to localhost. |
 
+## DoltMaintenance
+
+DoltMaintenance configures the periodic Dolt store maintenance loop.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  | Enabled toggles the maintenance loop. Defaults to false (opt-in). |
+| `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
+| `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
+| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
+
 ## EventsConfig
 
 EventsConfig holds events provider settings.
@@ -328,6 +340,14 @@ MailConfig holds mail provider settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
+
+## MaintenanceConfig
+
+MaintenanceConfig groups periodic store-maintenance subsections.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop (CALL DOLT_GC + backup snapshot). |
 
 ## NamedSession
 
