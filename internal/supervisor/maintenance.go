@@ -2,7 +2,9 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -32,7 +34,17 @@ const (
 	// maintenanceActor identifies the supervisor subsystem as the
 	// originator of maintenance events.
 	maintenanceActor = "supervisor"
+
+	// maintenanceSmokeTable names the bd-managed table the post-gc smoke
+	// test reads from. bd's Dolt schema names it "issues"; see
+	// internal/api/convoy_sql.go for the same literal on the read path.
+	maintenanceSmokeTable = "issues"
 )
+
+// maintenanceSmokeTimeout caps the post-gc SELECT COUNT(*) probe. It is
+// a var (not const) so tests can shorten it; production keeps the 5 s
+// value mandated by design D5.
+var maintenanceSmokeTimeout = 5 * time.Second
 
 // MaintenanceRun summarizes one completed (or failed) maintenance run.
 // Stage is "done" for successful runs and names the failing phase
@@ -50,6 +62,55 @@ type MaintenanceRun struct {
 	SnapshotPath string
 }
 
+// DoltOps is the minimal SQL surface the maintenance loop needs to run
+// CALL DOLT_GC() and the post-gc smoke test. Production wraps *sql.DB
+// via NewSQLDoltOps; tests supply fakes. Close must release the
+// underlying connection exactly once per cycle.
+type DoltOps interface {
+	// ExecGC runs CALL DOLT_GC() with the supplied context's deadline.
+	ExecGC(ctx context.Context) error
+	// SmokeCount runs SELECT COUNT(*) FROM issues against the current
+	// database and returns the scalar result.
+	SmokeCount(ctx context.Context) (int, error)
+	// Close releases the underlying connection.
+	Close() error
+}
+
+// DoltOpsFactory opens a DoltOps for one maintenance cycle. Returning a
+// non-nil error surfaces as a stage="gc" MaintenanceError from
+// runDoltGC — the scheduler classifies "cannot reach Dolt" alongside
+// "CALL DOLT_GC() failed" because the operator remediation is the
+// same.
+type DoltOpsFactory func(ctx context.Context) (DoltOps, error)
+
+// MaintenanceError classifies a failed maintenance stage. Stage names
+// the phase ("backup" | "gc" | "smoke-test" | "prune"); Err carries the
+// underlying cause and is unwrappable via errors.Is / errors.As so
+// context.DeadlineExceeded propagates across stage boundaries.
+type MaintenanceError struct {
+	Stage string
+	Err   error
+}
+
+// Error renders the classified failure as "<stage>: <cause>".
+func (e *MaintenanceError) Error() string {
+	if e == nil {
+		return "<nil maintenance error>"
+	}
+	if e.Err == nil {
+		return e.Stage + ": <nil cause>"
+	}
+	return e.Stage + ": " + e.Err.Error()
+}
+
+// Unwrap exposes the underlying error for errors.Is / errors.As.
+func (e *MaintenanceError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // StoreMaintenanceLoopDeps bundles the runtime dependencies for the
 // loop. Unset optional fields are replaced with sensible defaults.
 type StoreMaintenanceLoopDeps struct {
@@ -61,6 +122,12 @@ type StoreMaintenanceLoopDeps struct {
 	Clock     func() time.Time
 	Rand      func() float64 // returns [0,1); defaults to math/rand
 	LastRunAt time.Time      // seeded from the event log by the caller
+
+	// OpenDoltOps opens a SQL connection to the managed Dolt store for
+	// one maintenance cycle. Nil leaves runDoltGC a no-op — the existing
+	// placeholder runOnce path and tests that don't exercise SQL keep
+	// working unchanged. Production wires this to NewSQLDoltOps.
+	OpenDoltOps DoltOpsFactory
 }
 
 // StoreMaintenanceLoop runs periodic Dolt store maintenance inside the
@@ -70,13 +137,14 @@ type StoreMaintenanceLoopDeps struct {
 //
 // The zero value is not usable — construct with NewStoreMaintenanceLoop.
 type StoreMaintenanceLoop struct {
-	cfg      config.DoltMaintenance
-	store    beads.Store
-	cityPath string
-	recorder events.Recorder
-	stderr   io.Writer
-	clock    func() time.Time
-	rand     func() float64
+	cfg         config.DoltMaintenance
+	store       beads.Store
+	cityPath    string
+	recorder    events.Recorder
+	stderr      io.Writer
+	clock       func() time.Time
+	rand        func() float64
+	openDoltOps DoltOpsFactory
 
 	// mu is the in-process maintenance lease. runOnce holds it for the
 	// duration of a single maintenance cycle; the future manual-override
@@ -104,15 +172,16 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		deps.Stderr = io.Discard
 	}
 	return &StoreMaintenanceLoop{
-		cfg:       deps.Cfg,
-		store:     deps.Store,
-		cityPath:  deps.CityPath,
-		recorder:  deps.Recorder,
-		stderr:    deps.Stderr,
-		clock:     deps.Clock,
-		rand:      deps.Rand,
-		lastRunAt: deps.LastRunAt,
-		history:   make([]MaintenanceRun, 0, maintenanceHistorySize),
+		cfg:         deps.Cfg,
+		store:       deps.Store,
+		cityPath:    deps.CityPath,
+		recorder:    deps.Recorder,
+		stderr:      deps.Stderr,
+		clock:       deps.Clock,
+		rand:        deps.Rand,
+		openDoltOps: deps.OpenDoltOps,
+		lastRunAt:   deps.LastRunAt,
+		history:     make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
 }
 
@@ -282,6 +351,93 @@ func (m *StoreMaintenanceLoop) appendHistoryLocked(r MaintenanceRun) {
 	if len(m.history) > maintenanceHistorySize {
 		m.history = m.history[len(m.history)-maintenanceHistorySize:]
 	}
+}
+
+// runDoltGC runs CALL DOLT_GC() followed by the SELECT COUNT(*) smoke
+// test against the managed Dolt store. Design D4 + D5 from ga-d5y.
+//
+// Returns nil on success. A non-nil return is a *MaintenanceError
+// whose Stage classifies the failing phase:
+//
+//   - "gc": factory error, SQL error from CALL DOLT_GC(), or the
+//     configured GCTimeout elapsed.
+//   - "smoke-test": SQL error on SELECT COUNT(*), the 5 s smoke
+//     deadline elapsed, or the query returned 0 rows (which indicates
+//     either a corrupted schema or a wiped table and is never a
+//     healthy post-gc state for a running city).
+//
+// When openDoltOps is nil, runDoltGC returns nil. This keeps the
+// existing placeholder runOnce path working while upstream wiring
+// (bead ga-zn8 / cmd/gc) lands in a follow-up.
+func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
+	if m.openDoltOps == nil {
+		return nil
+	}
+	ops, err := m.openDoltOps(ctx)
+	if err != nil {
+		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("open dolt conn: %w", err)}
+	}
+	defer ops.Close() //nolint:errcheck // best-effort cleanup; underlying pool manages lifecycle
+
+	gcCtx, cancelGC := context.WithTimeout(ctx, m.cfg.GCTimeoutOrDefault())
+	defer cancelGC()
+	if err := ops.ExecGC(gcCtx); err != nil {
+		return &MaintenanceError{Stage: "gc", Err: err}
+	}
+
+	smokeCtx, cancelSmoke := context.WithTimeout(ctx, maintenanceSmokeTimeout)
+	defer cancelSmoke()
+	count, err := ops.SmokeCount(smokeCtx)
+	if err != nil {
+		return &MaintenanceError{Stage: "smoke-test", Err: err}
+	}
+	if count == 0 {
+		return &MaintenanceError{Stage: "smoke-test", Err: errors.New("SELECT COUNT(*) returned 0 rows")}
+	}
+	return nil
+}
+
+// NewSQLDoltOps adapts a *sql.DB opener to the DoltOps interface. The
+// returned factory is safe to assign to StoreMaintenanceLoopDeps.OpenDoltOps.
+//
+// open is called once per maintenance cycle and receives the per-cycle
+// context; the returned *sql.DB is closed by the DoltOps' Close method
+// when the cycle ends.
+func NewSQLDoltOps(open func(ctx context.Context) (*sql.DB, error)) DoltOpsFactory {
+	return func(ctx context.Context) (DoltOps, error) {
+		db, err := open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &sqlDoltOps{db: db}, nil
+	}
+}
+
+// sqlDoltOps implements DoltOps against a *sql.DB pool. ExecGC and
+// SmokeCount each take one connection from the pool and return it;
+// Close closes the pool.
+type sqlDoltOps struct {
+	db *sql.DB
+}
+
+func (s *sqlDoltOps) ExecGC(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "CALL DOLT_GC()")
+	return err
+}
+
+func (s *sqlDoltOps) SmokeCount(ctx context.Context) (int, error) {
+	var n int
+	// LIMIT 1 is redundant on a COUNT(*) aggregate but matches the
+	// design-doc literal so the runbook and the code stay in lockstep.
+	row := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+maintenanceSmokeTable+"` LIMIT 1")
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *sqlDoltOps) Close() error {
+	return s.db.Close()
 }
 
 // SeedLastRunAt returns the timestamp of the most recent
