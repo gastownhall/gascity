@@ -134,6 +134,21 @@ func TestDoltConfigWriteManagedCmd_ExplicitArchiveLevel(t *testing.T) {
 	}
 }
 
+func TestWriteManagedDoltConfigFile_DefaultLogLevel(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "", 0); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "log_level: warning") {
+		t.Fatalf("empty logLevel should default to warning, got:\n%s", text)
+	}
+}
+
 func TestDoltConfigNormalizeScopeCmd(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")

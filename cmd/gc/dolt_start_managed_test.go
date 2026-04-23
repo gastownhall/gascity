@@ -153,6 +153,107 @@ func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
 	}
 }
 
+func TestManagedDoltStartFields(t *testing.T) {
+	report := managedDoltStartReport{
+		Ready:        true,
+		PID:          4321,
+		Port:         3312,
+		AddressInUse: false,
+		Attempts:     2,
+	}
+	fields := managedDoltStartFields(report)
+	want := []string{
+		"ready\ttrue",
+		"pid\t4321",
+		"port\t3312",
+		"address_in_use\tfalse",
+		"attempts\t2",
+	}
+	if len(fields) != len(want) {
+		t.Fatalf("got %d fields, want %d", len(fields), len(want))
+	}
+	for i, w := range want {
+		if fields[i] != w {
+			t.Errorf("fields[%d] = %q, want %q", i, fields[i], w)
+		}
+	}
+}
+
+func TestManagedDoltLogSize(t *testing.T) {
+	t.Run("existing file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "dolt.log")
+		if err := os.WriteFile(path, []byte("hello world\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		got, err := managedDoltLogSize(path)
+		if err != nil {
+			t.Fatalf("managedDoltLogSize: %v", err)
+		}
+		if got != 12 {
+			t.Errorf("managedDoltLogSize = %d, want 12", got)
+		}
+	})
+
+	t.Run("missing file returns zero", func(t *testing.T) {
+		got, err := managedDoltLogSize(filepath.Join(t.TempDir(), "no-such.log"))
+		if err != nil {
+			t.Fatalf("managedDoltLogSize: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("managedDoltLogSize = %d, want 0", got)
+		}
+	})
+}
+
+func TestManagedDoltLogSuffix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dolt.log")
+	content := "line one\nline two\nline three\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Run("from offset", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(path, 9)
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != "line two\nline three\n" {
+			t.Errorf("got %q, want %q", got, "line two\nline three\n")
+		}
+	})
+
+	t.Run("offset past end returns empty", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(path, int64(len(content)+10))
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("negative offset treated as zero", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(path, -5)
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != content {
+			t.Errorf("got %q, want %q", got, content)
+		}
+	})
+
+	t.Run("missing file returns empty", func(t *testing.T) {
+		got, err := managedDoltLogSuffix(filepath.Join(dir, "no-such.log"), 0)
+		if err != nil {
+			t.Fatalf("managedDoltLogSuffix: %v", err)
+		}
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
 func TestResolveDoltArchiveLevel(t *testing.T) {
 	tests := []struct {
 		name     string
