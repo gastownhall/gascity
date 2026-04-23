@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -250,5 +253,461 @@ func TestRebaseSessionConfigHashes_ReconciledAfterRebaseShowsNoDrift(t *testing.
 	env.reconcile([]beads.Bead{updated})
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Errorf("expected no drain after rebase, got reason=%q", ds.reason)
+	}
+}
+
+func TestRebaseSessionConfigHashes_SkipsEmptySessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	desiredState := map[string]TemplateParams{
+		"worker": {Command: "new-cmd", SessionName: "worker", TemplateName: "worker"},
+	}
+
+	// Session with blank session_name but non-empty hash — should be skipped.
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": "some-hash",
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 0 {
+		t.Errorf("updated = %d, want 0 for empty session_name", n)
+	}
+}
+
+func TestRebaseSessionConfigHashes_TemplateFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// TemplateName is empty in desired state — function falls back to
+	// normalizedSessionTemplate which reads the bead's "template" metadata.
+	desiredState := map[string]TemplateParams{
+		"worker": {Command: "new-cmd", SessionName: "worker", TemplateName: ""},
+	}
+
+	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": oldHash,
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 1 {
+		t.Fatalf("updated = %d, want 1 (stderr=%s)", n, stderr.String())
+	}
+}
+
+func TestRebaseSessionConfigHashes_SkipsWhenBothTemplatesEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// TemplateName is empty AND bead has no "template" metadata —
+	// normalizedSessionTemplate returns "" so the session is skipped.
+	desiredState := map[string]TemplateParams{
+		"worker": {Command: "new-cmd", SessionName: "worker", TemplateName: ""},
+	}
+
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"state":               "active",
+			"started_config_hash": "old-hash",
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 0 {
+		t.Errorf("updated = %d, want 0 when both template paths are empty", n)
+	}
+}
+
+func TestRebaseSessionConfigHashes_SkipsUnknownTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	// Config has "worker" but bead's template is "unknown" — findAgentByTemplate returns nil.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	desiredState := map[string]TemplateParams{
+		"rogue": {Command: "new-cmd", SessionName: "rogue", TemplateName: "unknown"},
+	}
+
+	b, _ := store.Create(beads.Bead{
+		Title:  "rogue",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "rogue",
+			"template":            "unknown",
+			"state":               "active",
+			"started_config_hash": "old-hash",
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 0 {
+		t.Errorf("updated = %d, want 0 for template not in agent config", n)
+	}
+}
+
+func TestRebaseSessionConfigHashes_TemplateOverridesModifyHash(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	schema := []config.ProviderOption{{
+		Key:   "model",
+		Label: "Model",
+		Type:  "select",
+		Choices: []config.OptionChoice{
+			{Value: "fast", Label: "Fast", FlagArgs: []string{"--model", "fast"}},
+			{Value: "smart", Label: "Smart", FlagArgs: []string{"--model", "smart"}},
+		},
+	}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:      "claude --model fast",
+			SessionName:  "worker",
+			TemplateName: "worker",
+			ResolvedProvider: &config.ResolvedProvider{
+				OptionsSchema:     schema,
+				EffectiveDefaults: map[string]string{"model": "fast"},
+			},
+		},
+	}
+
+	// Session was started with "fast" model. template_overrides selects "smart".
+	// The rebase must apply the override to compute the correct hash.
+	overrides := map[string]string{"model": "smart"}
+	overridesJSON, _ := json.Marshal(overrides)
+
+	baseCfg := templateParamsToConfig(desiredState["worker"])
+	oldHash := runtime.CoreFingerprint(baseCfg)
+
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": oldHash,
+			"template_overrides":  string(overridesJSON),
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 1 {
+		t.Fatalf("updated = %d, want 1 (stderr=%s)", n, stderr.String())
+	}
+
+	got, _ := store.Get(b.ID)
+	// The hash should differ from the base (non-overridden) hash because the
+	// override changed the command via replaceSchemaFlags.
+	if got.Metadata["started_config_hash"] == oldHash {
+		t.Error("hash should change when template_overrides modify the command")
+	}
+}
+
+func TestRebaseSessionConfigHashes_TemplateOverridesSkipsInitialMessage(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	schema := []config.ProviderOption{{
+		Key:   "model",
+		Label: "Model",
+		Type:  "select",
+		Choices: []config.OptionChoice{
+			{Value: "fast", Label: "Fast", FlagArgs: []string{"--model", "fast"}},
+		},
+	}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:      "claude --model fast",
+			SessionName:  "worker",
+			TemplateName: "worker",
+			ResolvedProvider: &config.ResolvedProvider{
+				OptionsSchema:     schema,
+				EffectiveDefaults: map[string]string{"model": "fast"},
+			},
+		},
+	}
+
+	// Override contains only initial_message which is filtered out.
+	// No effective schema change → hash should match the base config.
+	overrides := map[string]string{"initial_message": "hello", "model": "fast"}
+	overridesJSON, _ := json.Marshal(overrides)
+
+	baseCfg := templateParamsToConfig(desiredState["worker"])
+	// Compute the hash the rebase function would produce (with overrides applied
+	// but initial_message filtered): effective options are model=fast (same as default).
+	extra, _ := config.ResolveExplicitOptions(schema, map[string]string{"model": "fast"})
+	expectedCfg := baseCfg
+	if len(extra) > 0 {
+		expectedCfg.Command = config.ReplaceSchemaFlags(baseCfg.Command, schema, extra)
+	}
+	expectedHash := runtime.CoreFingerprint(expectedCfg)
+
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": "different-old-hash",
+			"template_overrides":  string(overridesJSON),
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 1 {
+		t.Fatalf("updated = %d, want 1 (stderr=%s)", n, stderr.String())
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["started_config_hash"] != expectedHash {
+		t.Errorf("hash = %q, want %q", got.Metadata["started_config_hash"], expectedHash)
+	}
+}
+
+func TestRebaseSessionConfigHashes_TemplateOverridesIgnoredWithoutProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	// No ResolvedProvider — template_overrides should be ignored entirely.
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:      "new-cmd",
+			SessionName:  "worker",
+			TemplateName: "worker",
+		},
+	}
+
+	overrides := map[string]string{"model": "smart"}
+	overridesJSON, _ := json.Marshal(overrides)
+
+	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": oldHash,
+			"template_overrides":  string(overridesJSON),
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 1 {
+		t.Fatalf("updated = %d, want 1 (stderr=%s)", n, stderr.String())
+	}
+
+	// Hash should match the base config (no override processing).
+	got, _ := store.Get(b.ID)
+	wantHash := runtime.CoreFingerprint(runtime.Config{Command: "new-cmd"})
+	if got.Metadata["started_config_hash"] != wantHash {
+		t.Errorf("hash = %q, want %q (base config, no overrides)", got.Metadata["started_config_hash"], wantHash)
+	}
+}
+
+func TestRebaseSessionConfigHashes_TemplateOverridesInvalidJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:      "new-cmd",
+			SessionName:  "worker",
+			TemplateName: "worker",
+			ResolvedProvider: &config.ResolvedProvider{
+				OptionsSchema: []config.ProviderOption{{Key: "model"}},
+			},
+		},
+	}
+
+	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": oldHash,
+			"template_overrides":  "{invalid json",
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 1 {
+		t.Fatalf("updated = %d, want 1 (invalid JSON ignored, base hash used)", n)
+	}
+
+	// Hash should match the base config since invalid JSON is silently ignored.
+	got, _ := store.Get(b.ID)
+	wantHash := runtime.CoreFingerprint(runtime.Config{Command: "new-cmd"})
+	if got.Metadata["started_config_hash"] != wantHash {
+		t.Errorf("hash = %q, want %q", got.Metadata["started_config_hash"], wantHash)
+	}
+}
+
+func TestRebaseSessionConfigHashes_LiveHashOnlyDiffers(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {Command: "test-cmd", SessionName: "worker", TemplateName: "worker"},
+	}
+
+	// Core hash already matches, but live hash differs.
+	currentCoreHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	currentLiveHash := runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"})
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": currentCoreHash,
+			"started_live_hash":   "stale-live-hash",
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 1 {
+		t.Fatalf("updated = %d, want 1 for live-only hash drift (stderr=%s)", n, stderr.String())
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["started_live_hash"] != currentLiveHash {
+		t.Errorf("started_live_hash = %q, want %q", got.Metadata["started_live_hash"], currentLiveHash)
+	}
+	// Core hash should NOT have been updated (it already matched).
+	if got.Metadata["started_config_hash"] != currentCoreHash {
+		t.Errorf("started_config_hash changed unexpectedly: %q → %q", currentCoreHash, got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["core_hash_breakdown"] != "" {
+		t.Error("core_hash_breakdown should not be set when core hash matches")
+	}
+}
+
+func TestRebaseSessionConfigHashes_LiveHashEmptySkipped(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {Command: "test-cmd", SessionName: "worker", TemplateName: "worker"},
+	}
+
+	// Core hash matches and live hash is empty — no update needed.
+	currentCoreHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	b, _ := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": currentCoreHash,
+		},
+	})
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(store, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 0 {
+		t.Errorf("updated = %d, want 0 when core matches and live hash is empty", n)
+	}
+}
+
+func TestRebaseSessionConfigHashes_SetMetadataBatchError(t *testing.T) {
+	// Use unavailableStore to simulate a store write failure.
+	// We need a store that can hold data but fails on SetMetadataBatch.
+	// Build a real store for setup, then wrap with a failing store.
+	realStore := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {Command: "new-cmd", SessionName: "worker", TemplateName: "worker"},
+	}
+
+	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
+	b, _ := realStore.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"started_config_hash": oldHash,
+		},
+	})
+	// Use the snapshot from the real store but pass the failing store for writes.
+	snapshot := newSessionBeadSnapshot([]beads.Bead{b})
+	failStore := unavailableStore{err: errors.New("disk full")}
+	var stdout, stderr bytes.Buffer
+
+	n := rebaseSessionConfigHashes(failStore, cfg, desiredState, snapshot, &stdout, &stderr)
+	if n != 0 {
+		t.Errorf("updated = %d, want 0 when store write fails", n)
+	}
+	if !strings.Contains(stderr.String(), "disk full") {
+		t.Errorf("stderr = %q, want error message mentioning 'disk full'", stderr.String())
+	}
+	if stdout.Len() > 0 {
+		t.Errorf("stdout should be empty on failure, got %q", stdout.String())
+	}
+}
+
+func TestRebaseSessionConfigHashes_NilSessionBeadsReturnsZero(t *testing.T) {
+	store := beads.NewMemStore()
+	n := rebaseSessionConfigHashes(store, nil, nil, nil, nil, nil)
+	if n != 0 {
+		t.Errorf("updated = %d, want 0 for nil sessionBeads", n)
 	}
 }
