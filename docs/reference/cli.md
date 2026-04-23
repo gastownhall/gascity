@@ -45,6 +45,7 @@ gc [flags]
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
@@ -1881,6 +1882,47 @@ gc mail thread <id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON result |
+
+## gc maintenance
+
+Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+
+The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
+in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+```
+gc maintenance
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc maintenance dolt-gc](#gc-maintenance-dolt-gc) | Trigger a Dolt store maintenance run |
+| [gc maintenance status](#gc-maintenance-status) | Show Dolt store maintenance status |
+
+## gc maintenance dolt-gc
+
+Trigger a Dolt store maintenance run
+
+```
+gc maintenance dolt-gc [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
+| `--wait` | bool |  | block until the run completes (exit 1 on failure) |
+
+## gc maintenance status
+
+Show Dolt store maintenance status
+
+```
+gc maintenance status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
 
 ## gc mcp
 

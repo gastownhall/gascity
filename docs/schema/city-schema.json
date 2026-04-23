@@ -1065,6 +1065,10 @@
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
         },
+        "maintenance": {
+          "$ref": "#/$defs/MaintenanceConfig",
+          "description": "Maintenance configures periodic store-maintenance loops."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1275,6 +1279,31 @@
       "type": "object",
       "description": "DoltConfig holds optional dolt server overrides."
     },
+    "DoltMaintenance": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the maintenance loop. Defaults to false (opt-in)."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the cadence between maintenance runs as a duration\nstring (e.g., \"168h\"). Defaults to 168h (weekly).",
+          "default": "168h"
+        },
+        "alert_to": {
+          "type": "string",
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+        },
+        "gc_timeout": {
+          "type": "string",
+          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
+    },
     "EventsConfig": {
       "properties": {
         "provider": {
@@ -1442,6 +1471,17 @@
       "additionalProperties": false,
       "type": "object",
       "description": "MailConfig holds mail provider settings."
+    },
+    "MaintenanceConfig": {
+      "properties": {
+        "dolt": {
+          "$ref": "#/$defs/DoltMaintenance",
+          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "MaintenanceConfig groups periodic store-maintenance subsections."
     },
     "ModelPricing": {
       "properties": {
