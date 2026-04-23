@@ -2403,8 +2403,10 @@ func TestInstantiate_GraphWorkflowSkipsStepCoercion(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
-			{ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
-				Metadata: map[string]string{"gc.kind": "workflow"}},
+			{
+				ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			},
 			{ID: "wf.body", Title: "Body work", Type: "task"},
 		},
 		Deps: []formula.RecipeDep{
@@ -2430,8 +2432,10 @@ func TestBuildRecipeApplyPlan_GraphWorkflowSkipsStepCoercion(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
-			{ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
-				Metadata: map[string]string{"gc.kind": "workflow"}},
+			{
+				ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			},
 			{ID: "wf.body", Title: "Body work", Type: "task"},
 		},
 		Deps: []formula.RecipeDep{
