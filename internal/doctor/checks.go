@@ -178,7 +178,7 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := resolveConfigRefPath(c.cityPath, a.SessionSetupScript)
+			path := resolveSessionSetupScriptPath(c.cityPath, a.SourceDir, a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, path))
 			}
@@ -223,6 +223,22 @@ func (c *ConfigRefsCheck) Fix(_ *CheckContext) error { return nil }
 func resolveConfigRefPath(cityPath, p string) string {
 	if filepath.IsAbs(p) {
 		return p
+	}
+	return filepath.Join(cityPath, p)
+}
+
+// resolveSessionSetupScriptPath resolves a session_setup_script path.
+// Unlike prompt_template and overlay_dir, session_setup_script is left
+// as-authored during composition and resolved at runtime against the
+// agent's SourceDir. The doctor check mirrors that resolution: relative
+// paths resolve against SourceDir when available, falling back to cityPath
+// for inline agents that have no SourceDir.
+func resolveSessionSetupScriptPath(cityPath, sourceDir, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	if sourceDir != "" {
+		return filepath.Join(sourceDir, p)
 	}
 	return filepath.Join(cityPath, p)
 }

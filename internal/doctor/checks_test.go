@@ -405,6 +405,37 @@ func TestConfigRefsCheck_AbsolutePaths(t *testing.T) {
 	}
 }
 
+// session_setup_script is left as-authored (pack-relative) during
+// composition — resolving it against cityPath produces a false positive
+// when the script lives in the pack directory, not the city root.
+func TestConfigRefsCheck_SessionSetupScriptSourceDir(t *testing.T) {
+	cityDir := t.TempDir()
+	packDir := t.TempDir()
+
+	// Create a setup script inside the pack directory.
+	scriptPath := filepath.Join(packDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+			// As-authored: pack-relative, not city-root-relative.
+			SessionSetupScript: "scripts/setup.sh",
+			SourceDir:          packDir,
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
 // --- BuiltinPackFamilyCheck ---
 
 func TestBuiltinPackFamilyCheck_Unmodified(t *testing.T) {
