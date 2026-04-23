@@ -1333,11 +1333,11 @@ func TestCapWakeConfigByDemand_ActiveCountsAgainstBudget(t *testing.T) {
 	}
 	poolDesired := map[string]int{"worker": 3}
 
-	// 1 active (creating), 4 asleep. Desired is 3.
+	// 1 active, 4 asleep. Desired is 3.
 	// Active counts against budget: 3 - 1 = 2 asleep should wake.
 	sessions := []beads.Bead{
 		makeBead("s0", map[string]string{
-			"template": "worker", "session_name": "worker-0", "state": "creating",
+			"template": "worker", "session_name": "worker-0", "state": "active",
 		}),
 		makeBead("s1", map[string]string{
 			"template": "worker", "session_name": "worker-1", "state": "asleep",
@@ -1363,6 +1363,45 @@ func TestCapWakeConfigByDemand_ActiveCountsAgainstBudget(t *testing.T) {
 	}
 	if asleepWakes != 2 {
 		t.Errorf("asleep sessions with WakeConfig = %d, want 2 (desired 3 minus 1 active)", asleepWakes)
+	}
+}
+
+func TestCapWakeConfigByDemand_CreatingDoesNotConsumeSlot(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+		},
+	}
+	poolDesired := map[string]int{"worker": 2}
+
+	// 1 creating (failed spawn), 3 asleep. Desired is 2.
+	// Creating does NOT count against budget, so all 4 non-active sessions
+	// compete for 2 slots. 2 should get WakeConfig.
+	sessions := []beads.Bead{
+		makeBead("s0", map[string]string{
+			"template": "worker", "session_name": "worker-0", "state": "creating",
+		}),
+		makeBead("s1", map[string]string{
+			"template": "worker", "session_name": "worker-1", "state": "asleep",
+		}),
+		makeBead("s2", map[string]string{
+			"template": "worker", "session_name": "worker-2", "state": "asleep",
+		}),
+		makeBead("s3", map[string]string{
+			"template": "worker", "session_name": "worker-3", "state": "asleep",
+		}),
+	}
+
+	evals := computeWakeEvaluations(sessions, cfg, nil, poolDesired, nil, nil, &clock.Fake{Time: time.Now()})
+
+	wakeCount := 0
+	for _, eval := range evals {
+		if containsWakeReason(eval.Reasons, WakeConfig) {
+			wakeCount++
+		}
+	}
+	if wakeCount != 2 {
+		t.Errorf("sessions with WakeConfig = %d, want 2 (creating should not consume slot)", wakeCount)
 	}
 }
 

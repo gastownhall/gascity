@@ -5465,3 +5465,46 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
 	}
 }
+
+func TestCommitStartResult_FailedSpawnClearsLastWokeAndRecordsFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := startCandidate{
+		session: &session,
+		tp:      TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: candidate},
+		err:      fmt.Errorf("tmux spawn failed"),
+		outcome:  "provider_error",
+		started:  time.Unix(100, 0),
+		finished: time.Unix(101, 0),
+	}
+	rec := events.NewFake()
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
+	if ok {
+		t.Fatal("commitStartResult returned true for failed start")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Errorf("last_woke_at = %q, want cleared after failed spawn", got.Metadata["last_woke_at"])
+	}
+	if got.Metadata["wake_attempts"] != "1" {
+		t.Errorf("wake_attempts = %q, want %q after failed spawn", got.Metadata["wake_attempts"], "1")
+	}
+}

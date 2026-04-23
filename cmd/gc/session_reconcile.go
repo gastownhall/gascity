@@ -222,7 +222,7 @@ func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[st
 	// Group sessions by template and count how many already need to be awake.
 	type templateBudget struct {
 		desired int
-		active  int      // creating/awake — already consuming a slot
+		active  int      // running (active/awake) — consuming a slot
 		wakeIDs []string // sessions with WakeConfig that are asleep
 	}
 	budgets := make(map[string]*templateBudget)
@@ -257,11 +257,14 @@ func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[st
 
 		state := sessionMetadataState(session)
 		switch state {
-		case "active", "creating":
-			// Already running or starting — counts against desired.
+		case "active":
+			// Running — counts against desired.
 			b.active++
 		default:
-			// Asleep — candidate for wake, subject to budget.
+			// Asleep or creating — candidate for wake, subject to budget.
+			// Creating sessions are NOT counted as active because a failed
+			// tmux spawn leaves the row in creating state indefinitely,
+			// blocking the pool from reaching its desired count.
 			b.wakeIDs = append(b.wakeIDs, session.ID)
 		}
 	}
