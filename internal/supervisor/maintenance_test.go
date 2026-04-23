@@ -226,8 +226,8 @@ func TestSeedLastRunAt_ReturnsLatestDoneTimestamp(t *testing.T) {
 	earlier := time.Date(2026, 4, 20, 3, 0, 0, 0, time.UTC)
 	later := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
 	// Unordered on purpose: function must pick the latest, not the last appended.
-	fake.Record(events.Event{Type: maintenanceDoneEventType, Ts: later})
-	fake.Record(events.Event{Type: maintenanceDoneEventType, Ts: earlier})
+	fake.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: later})
+	fake.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: earlier})
 
 	got := SeedLastRunAt(fake)
 	if !got.Equal(later) {
@@ -238,7 +238,7 @@ func TestSeedLastRunAt_ReturnsLatestDoneTimestamp(t *testing.T) {
 func TestSeedLastRunAt_IgnoresUnrelatedEventTypes(t *testing.T) {
 	t.Parallel()
 	fake := events.NewFake()
-	fake.Record(events.Event{Type: "gc.store.maintenance.failed", Ts: time.Now()})
+	fake.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: time.Now()})
 	fake.Record(events.Event{Type: "controller.started", Ts: time.Now()})
 
 	got := SeedLastRunAt(fake)
