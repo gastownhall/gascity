@@ -651,6 +651,96 @@ func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
 	}, nil
 }
 
+// ListBeadsOpts is the optional filter set for ListBeads. All fields are
+// zero-valued by default; the server falls back to its own defaults when a
+// field is empty. All mirrors the CLI --all flag and maps to the server's
+// IncludeClosed query semantic.
+type ListBeadsOpts struct {
+	Status   string
+	Type     string
+	Label    string
+	Assignee string
+	Rig      string
+	Limit    int
+	All      bool
+}
+
+// ListBeads fetches beads across all rigs via
+// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
+// query parameters. The CachedRead.AgeSeconds field carries the supervisor
+// CachingStore age from the X-GC-Cache-Age-S response header so callers can
+// surface _cache_age_s on --json output and a staleness banner on human
+// output.
+func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameBeadsParams{}
+	if opts.Status != "" {
+		params.Status = &opts.Status
+	}
+	if opts.Type != "" {
+		params.Type = &opts.Type
+	}
+	if opts.Label != "" {
+		params.Label = &opts.Label
+	}
+	if opts.Assignee != "" {
+		params.Assignee = &opts.Assignee
+	}
+	if opts.Rig != "" {
+		params.Rig = &opts.Rig
+	}
+	if opts.Limit > 0 {
+		lim := int64(opts.Limit)
+		params.Limit = &lim
+	}
+	if opts.All {
+		t := true
+		params.All = &t
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetBead fetches one bead by ID via
+// GET /v0/city/{cityName}/bead/{id}. Returns the bead detail with cache age
+// so callers can attach _cache_age_s (JSON) or a staleness banner (human).
+func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[beads.Bead]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[beads.Bead]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[beads.Bead]{
+		Body:       beadFromGenPtr(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // ListMailInbox fetches unread messages for the given agent recipient via
 // GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
 // default caller identity (same resolution path the CLI would take locally).
