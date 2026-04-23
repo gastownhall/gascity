@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -160,13 +161,42 @@ type StoreMaintenanceLoop struct {
 	openDoltBackup DoltBackupRunnerFactory
 	mail           mail.Provider
 
-	// mu is the in-process maintenance lease. runOnce holds it for the
-	// duration of a single maintenance cycle; the future manual-override
-	// API (bead ga-zn8) contends on the same mutex and returns 409 when
-	// it cannot acquire it.
-	mu        sync.Mutex
+	// mu is the in-process maintenance lease. runOnce and TriggerNow hold
+	// it for the duration of a single maintenance cycle; each contends on
+	// the same mutex so the manual-override API returns 409 when the
+	// scheduler (or a prior manual trigger) is mid-cycle.
+	mu sync.Mutex
+
+	// runStartedAt reports the start time of the currently in-flight run
+	// so callers contending for the lease can surface started_at in a 409
+	// Conflict body without having to acquire mu (which would block for
+	// the remainder of the cycle). Set before a cycle begins and cleared
+	// in the cycle's defer; nil means "no run in flight."
+	runStartedAt atomic.Pointer[time.Time]
+
 	lastRunAt time.Time
 	history   []MaintenanceRun
+}
+
+// MaintenanceInProgressError is returned by TriggerNow when the maintenance
+// lease is already held (either by the scheduled loop or a prior manual
+// trigger). The StartedAt field is the timestamp of the in-flight run and
+// is surfaced in the HTTP 409 Conflict body so operators can tell whether
+// the existing run is fresh or stuck.
+type MaintenanceInProgressError struct {
+	StartedAt time.Time
+}
+
+// Error implements the error interface. The message shape is stable so the
+// CLI's --wait stderr message remains grep-able from tests.
+func (e *MaintenanceInProgressError) Error() string {
+	if e == nil {
+		return "<nil maintenance-in-progress>"
+	}
+	if e.StartedAt.IsZero() {
+		return "maintenance already in progress"
+	}
+	return fmt.Sprintf("maintenance already in progress (started %s)", e.StartedAt.UTC().Format(time.RFC3339))
 }
 
 // NewStoreMaintenanceLoop constructs a loop from the given dependencies,
@@ -301,7 +331,53 @@ func (m *StoreMaintenanceLoop) runOnce(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	m.executeCycleLocked(ctx)
+}
+
+// TriggerNow runs one maintenance cycle synchronously, returning the
+// MaintenanceRun summary on success. When the lease is held by another
+// goroutine (the scheduler or a prior manual trigger), TriggerNow returns
+// a *MaintenanceInProgressError whose StartedAt is the in-flight run's
+// start time — this is what the POST
+// /v0/city/{city}/maintenance/dolt-gc handler turns into a 409 Conflict.
+//
+// The returned run is a copy of the entry appended to history; callers may
+// mutate it freely.
+func (m *StoreMaintenanceLoop) TriggerNow(ctx context.Context) (MaintenanceRun, error) {
+	if !m.mu.TryLock() {
+		started := time.Time{}
+		if p := m.runStartedAt.Load(); p != nil {
+			started = *p
+		}
+		return MaintenanceRun{}, &MaintenanceInProgressError{StartedAt: started}
+	}
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return MaintenanceRun{}, err
+	}
+	return m.executeCycleLocked(ctx), nil
+}
+
+// InFlightStart reports the start time of the currently-in-flight
+// maintenance cycle and whether one is running. Non-blocking: it never
+// acquires m.mu, so it is safe to call from HTTP handlers while a real
+// cycle holds the lease for minutes.
+func (m *StoreMaintenanceLoop) InFlightStart() (time.Time, bool) {
+	p := m.runStartedAt.Load()
+	if p == nil {
+		return time.Time{}, false
+	}
+	return *p, true
+}
+
+// executeCycleLocked performs one maintenance cycle with m.mu already
+// held. Callers are responsible for acquiring/releasing the lease and for
+// the context-cancellation pre-check; this method focuses on the cycle
+// body so runOnce and TriggerNow share exactly one code path.
+func (m *StoreMaintenanceLoop) executeCycleLocked(_ context.Context) MaintenanceRun {
 	started := m.clock()
+	m.runStartedAt.Store(&started)
+	defer m.runStartedAt.Store(nil)
 	fmt.Fprintf(m.stderr, "store-maintenance: would run maintenance for %q\n", m.cityPath) //nolint:errcheck // best-effort stderr
 	finished := m.clock()
 	run := MaintenanceRun{
@@ -312,6 +388,7 @@ func (m *StoreMaintenanceLoop) runOnce(ctx context.Context) {
 	m.lastRunAt = started
 	m.appendHistoryLocked(run)
 	m.emitRunEvent(run)
+	return run
 }
 
 // emitRunEvent records the typed gc.store.maintenance.done or

@@ -112,6 +112,56 @@ func IsStoreSlowError(err error) bool {
 	return errors.As(err, &sse)
 }
 
+// MaintenanceInProgressError indicates the supervisor returned 409 because
+// a Dolt store maintenance cycle is already executing. StartedAt carries
+// the in-flight run's start time from the server's typed body so CLI
+// callers can display it verbatim. Callers classify it via IsMaintenanceInProgress.
+type MaintenanceInProgressError struct {
+	StartedAt string // RFC3339 UTC; empty when server did not include it
+	msg       string
+}
+
+// Error implements the error interface. The rendered message always leads
+// with "already in progress" so callers can grep for it reliably; the raw
+// server detail (in e.msg) is retained for debugging but not shown in the
+// user-facing text.
+func (e *MaintenanceInProgressError) Error() string {
+	if e == nil {
+		return "<nil maintenance-in-progress>"
+	}
+	if e.StartedAt == "" {
+		return "maintenance already in progress"
+	}
+	return fmt.Sprintf("maintenance already in progress (started %s)", e.StartedAt)
+}
+
+// IsMaintenanceInProgress reports whether err originates from a 409 with a
+// maintenance-in-progress typed body, so the CLI can emit exit code 3 and
+// a targeted message instead of a generic error.
+func IsMaintenanceInProgress(err error) bool {
+	var e *MaintenanceInProgressError
+	return errors.As(err, &e)
+}
+
+// MaintenanceDisabledError indicates the server returned 503 because
+// [maintenance.dolt] enabled=false in city.toml. The CLI surfaces this as
+// a short message pointing at the runbook rather than rolling the 503 into
+// the generic cache-not-live fallback bucket (no local fallback path
+// exists for maintenance operations).
+type MaintenanceDisabledError struct{}
+
+// Error implements the error interface.
+func (e *MaintenanceDisabledError) Error() string {
+	return "maintenance disabled: set [maintenance.dolt] enabled = true in city.toml and restart the controller"
+}
+
+// IsMaintenanceDisabled reports whether err indicates the server rejected
+// a maintenance request because the loop is not enabled.
+func IsMaintenanceDisabled(err error) bool {
+	var e *MaintenanceDisabledError
+	return errors.As(err, &e)
+}
+
 // serverError indicates a generic 5xx API response without a recognized
 // 503 detail prefix such as cache_not_live or store_slow. Read-path callers
 // classify it as fallbackable via ShouldFallbackForRead so the CLI lands on
@@ -499,6 +549,59 @@ func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (C
 		Body:       orderHistoryFromGenList(resp.JSON200),
 		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
 	}, nil
+}
+
+// GetMaintenanceStatus fetches the Dolt store maintenance loop state via
+// GET /v0/city/{cityName}/maintenance/status. The CachedRead.AgeSeconds
+// field carries the supervisor CachingStore age from the X-GC-Cache-Age-S
+// response header so callers can surface _cache_age_s on --json output
+// and a staleness banner on human output. Returns
+// *MaintenanceDisabledError when the loop is disabled in city.toml.
+func (c *Client) GetMaintenanceStatus() (CachedRead[MaintenanceStatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MaintenanceStatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameMaintenanceStatusWithResponse(context.Background(), c.cityName)
+	if err != nil {
+		return CachedRead[MaintenanceStatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MaintenanceStatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[MaintenanceStatusView]{}, err
+	}
+	return CachedRead[MaintenanceStatusView]{
+		Body:       maintenanceStatusViewFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// TriggerMaintenanceDoltGC posts POST /v0/city/{cityName}/maintenance/dolt-gc.
+// With wait=true the call blocks until the run completes and returns the
+// full MaintenanceTriggerView; with wait=false it returns 202 Accepted with
+// the synthesized started_at token. Returns *MaintenanceInProgressError on
+// 409 Conflict and *MaintenanceDisabledError on 503 maintenance_disabled.
+func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, error) {
+	if err := c.requireCityScope(); err != nil {
+		return MaintenanceTriggerView{}, err
+	}
+	params := &genclient.TriggerMaintenanceDoltGcParams{}
+	if wait {
+		w := true
+		params.Wait = &w
+	}
+	resp, err := c.cw.TriggerMaintenanceDoltGcWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return MaintenanceTriggerView{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return MaintenanceTriggerView{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return MaintenanceTriggerView{}, err
+	}
+	return maintenanceTriggerViewFromGen(resp.JSON202), nil
 }
 
 // ListSessions fetches the current set of sessions via
@@ -1182,11 +1285,19 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 			}
 			return &storeSlowError{msg: msg}
 		}
+		if strings.HasPrefix(detail, "maintenance_disabled") {
+			return &MaintenanceDisabledError{}
+		}
 	}
-	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live or
-	// store_slow prefix) wraps into a serverError so read-path callers can
-	// classify it as fallbackable via ShouldFallbackForRead. Mutation callers
-	// continue to see it as non-fallbackable (ShouldFallback excludes it).
+	if status == http.StatusConflict && strings.HasPrefix(detail, "maintenance-in-progress") {
+		startedAt := extractMaintenanceStartedAt(detail)
+		return &MaintenanceInProgressError{StartedAt: startedAt, msg: detail}
+	}
+	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live,
+	// store_slow, or maintenance_disabled prefix) wraps into a serverError so
+	// read-path callers can classify it as fallbackable via
+	// ShouldFallbackForRead. Mutation callers continue to see it as
+	// non-fallbackable (ShouldFallback excludes it).
 	if status >= 500 {
 		msg := detail
 		if msg == "" {
@@ -1204,6 +1315,29 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 		return fmt.Errorf("API error: %s", title)
 	}
 	return fmt.Errorf("API returned %d", status)
+}
+
+// extractMaintenanceStartedAt parses the JSON body that the
+// maintenance 409 handler appends after the "maintenance-in-progress: "
+// prefix and returns the started_at field, or empty when absent or
+// malformed. The server always emits this prefix via maintenanceConflictFromError,
+// so a missing started_at means the in-flight run had a zero-value
+// StartedAt (a race during supervisor startup) rather than a protocol
+// violation.
+func extractMaintenanceStartedAt(detail string) string {
+	const prefix = "maintenance-in-progress: "
+	idx := strings.Index(detail, prefix)
+	if idx < 0 {
+		return ""
+	}
+	payload := detail[idx+len(prefix):]
+	var body struct {
+		StartedAt string `json:"started_at"`
+	}
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		return ""
+	}
+	return body.StartedAt
 }
 
 // cityInfoFromGen copies the generated CityInfo (which uses pointer

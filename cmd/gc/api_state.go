@@ -56,7 +56,8 @@ type controllerState struct {
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
-	updateMu               sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 
 	// True after an API config mutation refreshes controller state ahead of the
@@ -320,6 +321,12 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		Mail:      mailProv,
 		LastRunAt: supervisor.SeedLastRunAt(cs.eventProv),
 	})
+	// Retain the handle so the API layer can expose
+	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
+	// without a separate wiring path.
+	cs.mu.Lock()
+	cs.maintenanceLoop = loop
+	cs.mu.Unlock()
 	go loop.Run(ctx)
 }
 
@@ -674,6 +681,19 @@ func configDropsBoundRigs(current, next *config.City) bool {
 }
 
 // --- api.State implementation ---
+
+// MaintenanceLoop exposes the Dolt store maintenance loop to the API
+// layer, returning nil when [maintenance.dolt] is disabled. The
+// concrete *supervisor.StoreMaintenanceLoop satisfies
+// api.MaintenanceProvider directly.
+func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.maintenanceLoop == nil {
+		return nil
+	}
+	return cs.maintenanceLoop
+}
 
 // Config returns the current city config snapshot.
 func (cs *controllerState) Config() *config.City {
