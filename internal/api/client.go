@@ -85,6 +85,46 @@ func (e *cacheNotLiveError) Error() string {
 	return e.msg
 }
 
+// serverError indicates a generic 5xx API response without a recognized
+// detail prefix (cache_not_live / read_only / not_found). Read-path callers
+// classify it as fallbackable via ShouldFallbackForRead so the CLI lands on
+// direct bd when the supervisor is unhealthy. Mutation callers continue to
+// surface it as a hard error (ShouldFallback returns false) because writes
+// with unknown server-side state are unsafe to silently retry locally.
+type serverError struct {
+	status int
+	msg    string
+}
+
+func (e *serverError) Error() string {
+	if e.msg == "" {
+		return fmt.Sprintf("API returned %d", e.status)
+	}
+	return e.msg
+}
+
+// Status reports the HTTP status carried by the server error (always 5xx).
+func (e *serverError) Status() int { return e.status }
+
+// IsServerError reports whether err originates from a 5xx API response the
+// read-path CLI should treat as fallbackable. Independent of ShouldFallback
+// so mutation paths retain their strict no-fallback-on-5xx semantics.
+func IsServerError(err error) bool {
+	var se *serverError
+	return errors.As(err, &se)
+}
+
+// ShouldFallbackForRead reports whether err indicates a read-path command
+// should fall back to direct bd. Read-path commands tolerate generic 5xx
+// server errors (IsServerError) in addition to the cases ShouldFallback
+// already covers.
+func ShouldFallbackForRead(err error) bool {
+	if ShouldFallback(err) {
+		return true
+	}
+	return IsServerError(err)
+}
+
 // ShouldFallback reports whether err indicates the CLI should fall back to
 // direct file mutation (or, for reads, to raw bd). True for transport-level
 // failures (connection refused, timeout), read-only API rejections (server
@@ -105,6 +145,33 @@ func ShouldFallback(err error) bool {
 	}
 	var cnl *cacheNotLiveError
 	return errors.As(err, &cnl)
+}
+
+// FallbackReason returns a stable reason code for err when
+// ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
+// "read-only", "client-init", "conn-refused". Generic 5xx server errors
+// collapse to "conn-refused" since from the CLI's read-path perspective an
+// unhealthy server is equivalent to an unreachable one. Returns "unknown"
+// for non-fallbackable errors so callers that invoke FallbackReason
+// unconditionally produce a token instead of panicking; gate on
+// ShouldFallbackForRead first to avoid that sentinel.
+func FallbackReason(err error) string {
+	var cnl *cacheNotLiveError
+	if errors.As(err, &cnl) {
+		return "cache-not-live"
+	}
+	var ro *readOnlyError
+	if errors.As(err, &ro) {
+		return "read-only"
+	}
+	var ci *clientInitError
+	if errors.As(err, &ci) {
+		return "client-init"
+	}
+	if IsConnError(err) || IsServerError(err) {
+		return "conn-refused"
+	}
+	return "unknown"
 }
 
 // Client is an HTTP client for the Gas City API server. It wraps the
@@ -368,6 +435,31 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 		out = append(out, workspaceStatusFromGen(item))
 	}
 	return out, nil
+}
+
+// ListRigs fetches the current set of configured rigs via
+// GET /v0/city/{cityName}/rigs. The CachedRead.AgeSeconds field carries the
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]RigView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameRigsWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameRigsParams{})
+	if err != nil {
+		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]RigView]{}, err
+	}
+	return CachedRead[[]RigView]{
+		Body:       rigsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
 }
 
 // GetService fetches one current workspace service status.
@@ -655,6 +747,20 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 			msg = "cache not yet live"
 		}
 		return &cacheNotLiveError{msg: msg}
+	}
+	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live
+	// prefix) wraps into a serverError so read-path callers can classify it
+	// as fallbackable via ShouldFallbackForRead. Mutation callers continue
+	// to see it as non-fallbackable (ShouldFallback excludes it).
+	if status >= 500 {
+		msg := detail
+		if msg == "" {
+			msg = title
+		}
+		if msg == "" {
+			return &serverError{status: status}
+		}
+		return &serverError{status: status, msg: fmt.Sprintf("API error: %s", msg)}
 	}
 	if detail != "" {
 		return fmt.Errorf("API error: %s", detail)

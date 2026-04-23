@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -2783,5 +2786,251 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "already has bead prefix") {
 		t.Errorf("error should mention prefix mismatch: %s", stderr.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Six-row read-path routing matrix for `gc rig list` (ADR 0001, ga-h6w).
+// ---------------------------------------------------------------------------
+//
+// Each row exercises one branch of routeRigList:
+//
+//   api-happy-path       API returns 200 with items         route=api, exit 0
+//   api-cache-not-live   API returns 503 cache_not_live     fallback, exit 0
+//   api-500-fallback     API returns generic 500            fallback (conn-refused), exit 0
+//   api-404-error        API returns 404                    no fallback, exit 1
+//   controller-down      apiClient returns nil (no env)     fallback (controller-down), exit 0
+//   escape-hatch         GC_NO_API truthy                   fallback (escape-hatch), exit 0
+//
+// Tests invoke routeRigList directly with an injected api.Client or nil +
+// reason so no tmux / controller process is needed.
+
+// rigListMatrixHandler returns the http.Handler to install for one matrix
+// row, or nil when the row exercises the apiClient-nil branch.
+type rigListMatrixHandler func(t *testing.T) http.Handler
+
+// okRigsHandler serves a non-stale rig list matching the test city config.
+func okRigsHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/rigs") {
+			http.NotFound(w, r)
+			return
+		}
+		prefix := "fe"
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{"name": "frontend", "path": "/abs/frontend", "prefix": prefix, "suspended": false, "agent_count": 0, "running_count": 0},
+			},
+			"total": 1,
+		})
+	})
+}
+
+func problemHandler(status int, detail string) rigListMatrixHandler {
+	return func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": status,
+				"title":  http.StatusText(status),
+				"detail": detail,
+			})
+		})
+	}
+}
+
+func TestRouteRigList_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      rigListMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		// Extra stderr assertions — e.g. "not found" for the 404 row.
+		wantStderr string
+		// When non-empty, assert stdout contains the substring.
+		wantStdout string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okRigsHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "frontend",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    problemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    problemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    problemHandler(http.StatusNotFound, "not_found: city not configured"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1") // force route=... lines into stderr buffer
+
+			cityPath := writeRigListTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeRigList(cityPath, c, tc.nilReason, false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				// Exactly one route=... line per exit path.
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+			// Fallback rows must produce the same rendered output as the
+			// direct path (doRigList). Happy-path API rows render via
+			// renderRigListFromAPI.
+			if tc.wantRoute == "fallback" {
+				if !strings.Contains(stdout.String(), "test-city (HQ)") {
+					t.Errorf("fallback stdout missing HQ header:\n%s", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+// writeRigListTestCity creates a minimal city directory with a city.toml
+// that declares one rig so both the API-render path (renderRigListFromAPI)
+// and the fallback path (doRigList) have something to format.
+func writeRigListTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+
+[[rigs]]
+name = "frontend"
+path = "/abs/frontend"
+prefix = "fe"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
+
+func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
+	// API-path --json output must carry _cache_age_s; fallback must not.
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeRigListTestCity(t)
+
+	srv := httptest.NewServer(okRigsHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeRigList(cityPath, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v\n%s", err, stdout.String())
+	}
+	if _, ok := out["_cache_age_s"]; !ok {
+		t.Errorf("_cache_age_s missing from API --json:\n%s", stdout.String())
+	}
+	// Fallback path must omit the field.
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeRigList(cityPath, nil, "controller-down", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
+	}
+	var fb map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &fb); err != nil {
+		t.Fatalf("unmarshal fallback stdout: %v\n%s", err, stdout.String())
+	}
+	if _, ok := fb["_cache_age_s"]; ok {
+		t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+	}
+}
+
+func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
+	// Human output must append a staleness banner when the server reports
+	// a cache age > 30 s.
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeRigListTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeRigList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age: 45s") {
+		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
 }

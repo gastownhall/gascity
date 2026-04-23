@@ -120,7 +120,11 @@ var openStoreHealthEvents = defaultOpenStoreHealthEvents
 
 func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	p, err := newEventsProvider(eventsPath, stderr)
+	providerName := os.Getenv("GC_EVENTS")
+	if providerName == "" {
+		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
+	}
+	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
 	if err != nil {
 		return nil
 	}

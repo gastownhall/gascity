@@ -80,6 +80,22 @@ func TestLogRouteToFormat(t *testing.T) {
 	})
 }
 
+func TestAPIClientFallbackReason_EscapeHatch(t *testing.T) {
+	// GC_NO_API truthy → escape-hatch reason regardless of controller state.
+	t.Setenv("GC_NO_API", "1")
+	if got := apiClientFallbackReason(t.TempDir()); got != "escape-hatch" {
+		t.Errorf("got %q, want escape-hatch", got)
+	}
+}
+
+func TestAPIClientFallbackReason_ControllerDown(t *testing.T) {
+	// No controller → controller-down reason.
+	t.Setenv("GC_NO_API", "")
+	if got := apiClientFallbackReason(t.TempDir()); got != "controller-down" {
+		t.Errorf("got %q, want controller-down", got)
+	}
+}
+
 func TestRouteLogEnabled(t *testing.T) {
 	cases := []struct {
 		value string

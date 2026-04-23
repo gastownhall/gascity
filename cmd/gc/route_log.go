@@ -37,17 +37,19 @@ func routeLogEnabled() bool {
 	return false
 }
 
-// logRoute emits a single route audit line to stderr when GC_DEBUG is truthy.
-// Each line carries cmd=<cmd> route=<route> reason=<reason>, followed by any
-// extras as key=value pairs. A route=api line typically omits reason; a
-// route=fallback line always includes it.
+// logRoute emits a single route audit line to the given writer when GC_DEBUG
+// is truthy. Each line carries cmd=<cmd> route=<route> reason=<reason>,
+// followed by any extras as key=value pairs. A route=api line typically
+// omits reason; a route=fallback line always includes it.
 //
-//nolint:unused // Stacked read-route PRs call this helper; this enabler PR pins its contract first.
-func logRoute(cmd, route, reason string, extra ...string) {
+// Callers pass their command-scoped stderr so CLI test harnesses observe
+// the audit trail through the buffer they already assert on, instead of
+// racing against the process-wide os.Stderr.
+func logRoute(w io.Writer, cmd, route, reason string, extra ...string) {
 	if !routeLogEnabled() {
 		return
 	}
-	logRouteTo(os.Stderr, cmd, route, reason, extra...)
+	logRouteTo(w, cmd, route, reason, extra...)
 }
 
 // logRouteTo writes the route audit line to the given writer unconditionally.

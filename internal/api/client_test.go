@@ -754,6 +754,43 @@ func TestClientSendSessionMessageWaitsForResultEvent(t *testing.T) {
 	}
 }
 
+func TestClientListRigs(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/rigs" {
+			t.Fatalf("path = %q, want /v0/city/alpha/rigs", r.URL.Path)
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "1.5")
+		w.Header().Set("Content-Type", "application/json")
+		prefix := "fe"
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"name": "frontend", "path": "/abs/frontend", "prefix": prefix, "suspended": false, "agent_count": 0, "running_count": 0},
+				{"name": "backend", "path": "/abs/backend", "suspended": true, "agent_count": 0, "running_count": 0},
+			},
+			"total": 2,
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.ListRigs()
+	if err != nil {
+		t.Fatalf("ListRigs: %v", err)
+	}
+	if len(got.Body) != 2 {
+		t.Fatalf("items = %d, want 2", len(got.Body))
+	}
+	if got.Body[0].Name != "frontend" || got.Body[0].Prefix != "fe" {
+		t.Errorf("got[0] = %+v, want frontend/fe", got.Body[0])
+	}
+	if got.Body[1].Name != "backend" || !got.Body[1].Suspended {
+		t.Errorf("got[1] = %+v, want backend/suspended", got.Body[1])
+	}
+	if got.AgeSeconds != 1.5 {
+		t.Errorf("AgeSeconds = %v, want 1.5", got.AgeSeconds)
+	}
+}
+
 func TestClientSendSessionMessageReportsAsyncFailure(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -862,6 +899,73 @@ func TestClientSubmitSessionReportsAsyncFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "submit failed: not_ready: session is starting") {
 		t.Fatalf("error = %q, want async failure detail", err.Error())
+	}
+}
+
+func TestClientListRigs_CacheNotLiveFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "cache_not_live: supervisor cache is priming",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListRigs()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientListRigs_ConnErrorFallback(t *testing.T) {
+	// Pointing at a closed listener produces a transport-level error
+	// classified as fallbackable by ShouldFallback.
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListRigs()
+	if err == nil {
+		t.Fatal("expected connection error, got nil")
+	}
+	if !ShouldFallback(err) {
+		t.Errorf("ShouldFallback = false for conn error: %v", err)
+	}
+}
+
+func TestCacheAgeFromResponse(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   float64
+	}{
+		{"absent", "", 0},
+		{"zero", "0", 0},
+		{"positive", "42.5", 42.5},
+		{"negative clamped to zero", "-1", 0},
+		{"invalid", "not-a-number", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &http.Response{Header: http.Header{}}
+			if tc.header != "" {
+				r.Header.Set("X-GC-Cache-Age-S", tc.header)
+			}
+			if got := cacheAgeFromResponse(r); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	if got := cacheAgeFromResponse(nil); got != 0 {
+		t.Errorf("nil response: got %v, want 0", got)
 	}
 }
 
