@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -28,22 +29,25 @@ const (
 	// immediately to catch up.
 	maintenanceStaleMultiplier = 1.5
 
-	// maintenanceDoneEventType is the event type emitted on a successful
-	// maintenance run. The constant is defined for real by bead ga-8cq;
-	// here we use the string literal so the seeding path can ship ahead
-	// of event registration. When ga-8cq lands, swap the literal for the
-	// constant.
-	maintenanceDoneEventType = "gc.store.maintenance.done"
+	// maintenanceActor identifies the supervisor subsystem as the
+	// originator of maintenance events.
+	maintenanceActor = "supervisor"
 )
 
 // MaintenanceRun summarizes one completed (or failed) maintenance run.
-// Real failure classification lands with bead ga-8cq; this skeleton uses
-// Stage == "done" for placeholder runs.
+// Stage is "done" for successful runs and names the failing phase
+// ("backup" | "gc" | "smoke-test" | "prune") for failed runs. Err is
+// empty on success. BeforeBytes / AfterBytes / SnapshotPath are
+// populated by the work stages (beads ga-74d, ga-zoj); they are zero
+// when the placeholder path runs without real maintenance.
 type MaintenanceRun struct {
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Stage      string // "done" | "backup" | "gc" | "smoke-test" | "prune"
-	Err        string // empty on success
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	Stage        string
+	Err          string
+	BeforeBytes  int64
+	AfterBytes   int64
+	SnapshotPath string
 }
 
 // StoreMaintenanceLoopDeps bundles the runtime dependencies for the
@@ -200,9 +204,10 @@ func (m *StoreMaintenanceLoop) applyJitter(interval time.Duration) time.Duration
 // a previous tick has not finished), it returns without doing work —
 // lease contention is a normal, silent condition.
 //
-// The current body is a placeholder: it logs and updates lastRunAt.
-// Real work (dolt backup, CALL DOLT_GC(), smoke test, event emission)
-// lands with beads ga-74d, ga-zoj, and ga-8cq.
+// The current body is a placeholder: it logs, records a success run,
+// and emits a gc.store.maintenance.done event so SeedLastRunAt recovers
+// the schedule across restarts. Real work (dolt backup, CALL DOLT_GC(),
+// smoke test) lands with beads ga-74d, ga-zoj.
 func (m *StoreMaintenanceLoop) runOnce(ctx context.Context) {
 	if !m.mu.TryLock() {
 		return
@@ -214,11 +219,59 @@ func (m *StoreMaintenanceLoop) runOnce(ctx context.Context) {
 	started := m.clock()
 	fmt.Fprintf(m.stderr, "store-maintenance: would run maintenance for %q\n", m.cityPath) //nolint:errcheck // best-effort stderr
 	finished := m.clock()
-	m.lastRunAt = started
-	m.appendHistoryLocked(MaintenanceRun{
+	run := MaintenanceRun{
 		StartedAt:  started,
 		FinishedAt: finished,
 		Stage:      "done",
+	}
+	m.lastRunAt = started
+	m.appendHistoryLocked(run)
+	m.emitRunEvent(run)
+}
+
+// emitRunEvent records the typed gc.store.maintenance.done or
+// gc.store.maintenance.failed event for a completed run. The failed
+// variant fires when run.Err is non-empty; the done variant otherwise.
+// Emission failures are swallowed (the recorder itself is best-effort).
+func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
+	if m.recorder == nil {
+		return
+	}
+	duration := run.FinishedAt.Sub(run.StartedAt).Seconds()
+	if duration < 0 {
+		duration = 0
+	}
+	var (
+		eventType string
+		payload   events.Payload
+	)
+	if run.Err == "" {
+		eventType = events.StoreMaintenanceDone
+		payload = events.StoreMaintenanceDonePayload{
+			DurationSeconds: duration,
+			BeforeBytes:     run.BeforeBytes,
+			AfterBytes:      run.AfterBytes,
+			SnapshotPath:    run.SnapshotPath,
+		}
+	} else {
+		eventType = events.StoreMaintenanceFailed
+		payload = events.StoreMaintenanceFailedPayload{
+			Stage:           run.Stage,
+			ErrorMsg:        run.Err,
+			SnapshotPath:    run.SnapshotPath,
+			DurationSeconds: duration,
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	m.recorder.Record(events.Event{
+		Type:    eventType,
+		Actor:   maintenanceActor,
+		Subject: m.cityPath,
+		Ts:      run.FinishedAt,
+		Payload: raw,
 	})
 }
 
@@ -244,7 +297,7 @@ func SeedLastRunAt(provider events.Provider) time.Time {
 	if provider == nil {
 		return time.Time{}
 	}
-	evts, err := provider.List(events.Filter{Type: maintenanceDoneEventType})
+	evts, err := provider.List(events.Filter{Type: events.StoreMaintenanceDone})
 	if err != nil {
 		return time.Time{}
 	}

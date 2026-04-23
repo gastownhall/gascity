@@ -1875,6 +1875,12 @@
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/StoreMaintenanceDonePayload"
+          },
+          {
+            "$ref": "#/components/schemas/StoreMaintenanceFailedPayload"
+          },
+          {
             "$ref": "#/components/schemas/UnboundEventPayload"
           },
           {
@@ -6133,6 +6139,57 @@
           "in_progress",
           "ready",
           "open"
+        ],
+        "type": "object"
+      },
+      "StoreMaintenanceDonePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "after_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "before_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "duration_s": {
+            "format": "double",
+            "type": "number"
+          },
+          "snapshot_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "duration_s",
+          "before_bytes",
+          "after_bytes",
+          "snapshot_path"
+        ],
+        "type": "object"
+      },
+      "StoreMaintenanceFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_s": {
+            "format": "double",
+            "type": "number"
+          },
+          "error_msg": {
+            "type": "string"
+          },
+          "snapshot_path": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "error_msg",
+          "duration_s"
         ],
         "type": "object"
       },
