@@ -334,7 +334,8 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut b
 	const cmdName = "convoy list"
 	if c != nil {
 		cr, err := c.ListConvoys()
-		if err == nil {
+		switch {
+		case err == nil:
 			progress, progErr := fetchConvoyProgress(c, cr.Body)
 			if progErr == nil {
 				logRoute(stderr, cmdName, "api", "")
@@ -346,11 +347,11 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut b
 				return 1
 			}
 			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
-		} else if !api.ShouldFallbackForRead(err) {
+		case !api.ShouldFallbackForRead(err):
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
-		} else {
+		default:
 			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
 		}
 	} else {
@@ -1365,7 +1366,8 @@ func routeConvoyCheck(cityPath string, c *api.Client, nilReason string, jsonOut 
 	const cmdName = "convoy check"
 	if c != nil {
 		cr, err := c.ListConvoys()
-		if err == nil {
+		switch {
+		case err == nil:
 			progress, progErr := fetchConvoyProgress(c, cr.Body)
 			if progErr == nil {
 				logRoute(stderr, cmdName, "api", "")
@@ -1377,11 +1379,11 @@ func routeConvoyCheck(cityPath string, c *api.Client, nilReason string, jsonOut 
 				return 1
 			}
 			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
-		} else if !api.ShouldFallbackForRead(err) {
+		case !api.ShouldFallbackForRead(err):
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
-		} else {
+		default:
 			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
 		}
 	} else {

@@ -19,11 +19,11 @@ import (
 // stubSupervisorAlive installs test hooks that make controllerStatusForCity
 // report a running supervisor-managed city. Caller must register the city
 // in the supervisor registry first.
-func stubSupervisorAlive(t *testing.T, pid int) {
+func stubSupervisorAlive(t *testing.T) {
 	t.Helper()
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
-	supervisorAliveHook = func() int { return pid }
+	supervisorAliveHook = func() int { return 4321 }
 	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
@@ -60,7 +60,7 @@ func registerCityForSnapshot(t *testing.T) string {
 
 func TestCityStatusSnapshotIncludesStoreHealthWhenControllerRunning(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
-	stubSupervisorAlive(t, 4321)
+	stubSupervisorAlive(t)
 
 	ep := events.NewFake()
 	ts := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
@@ -104,7 +104,7 @@ func TestCityStatusSnapshotIncludesStoreHealthWhenControllerRunning(t *testing.T
 
 func TestCityStatusJSONIncludesStoreHealthWhenSupervisorAlive(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
-	stubSupervisorAlive(t, 4321)
+	stubSupervisorAlive(t)
 	stubStoreHealthEvents(t, events.NewFake())
 
 	store := beads.NewMemStore()
@@ -145,7 +145,7 @@ func TestCityStatusJSONOmitsStoreHealthWhenSupervisorDown(t *testing.T) {
 
 func TestCityStatusTextIncludesStoreHealthBlockWhenSupervisorAlive(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
-	stubSupervisorAlive(t, 4321)
+	stubSupervisorAlive(t)
 	stubStoreHealthEvents(t, events.NewFake())
 
 	store := beads.NewMemStore()
@@ -168,7 +168,7 @@ func TestCityStatusTextIncludesStoreHealthBlockWhenSupervisorAlive(t *testing.T)
 
 func TestCityStatusSnapshotWarnsOnHighRatio(t *testing.T) {
 	cityPath := registerCityForSnapshot(t)
-	stubSupervisorAlive(t, 4321)
+	stubSupervisorAlive(t)
 	stubStoreHealthEvents(t, events.NewFake())
 
 	// 221 rows is enough to exceed the 1 MB/row threshold against a

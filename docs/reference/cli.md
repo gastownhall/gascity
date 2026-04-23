@@ -273,7 +273,9 @@ gc bd --rig my-project list
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, and diagnostics.
+Subcommands for topology operations, health checking, diagnostics, and
+read-only list/show routed through the supervisor API with transparent
+fallback to direct bd reads.
 
 ```
 gc beads
@@ -283,6 +285,8 @@ gc beads
 |------------|-------------|
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
+| [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
 
@@ -354,6 +358,49 @@ gc beads health
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON result |
 | `--quiet` | bool |  | silent on success, stderr on failure |
+
+## gc beads list
+
+List beads across all rigs, routed through the supervisor API when
+the controller is alive and falling back to a direct multi-store read
+otherwise.
+
+Supports --label, --status, --all, and --format flags. --json is an
+alias for --format=json. API-path JSON output includes _cache_age_s;
+fallback-path JSON omits it.
+
+```
+gc beads list
+```
+
+**Example:**
+
+```
+gc beads list
+  gc beads list --label ready-to-build
+  gc beads list --status open --json
+  gc beads list --format=toon
+```
+
+## gc beads show
+
+Show one bead by ID, routed through the supervisor API when the
+controller is alive and falling back to a direct multi-store lookup
+otherwise.
+
+Supports --format and --json. API-path JSON output includes
+_cache_age_s; fallback-path JSON omits it.
+
+```
+gc beads show <bead-id>
+```
+
+**Example:**
+
+```
+gc beads show ga-abc
+  gc beads show ga-abc --json
+```
 
 ## gc build-image
 

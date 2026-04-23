@@ -706,7 +706,7 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 // routeSessionList dispatches `session list` to the supervisor API when a
 // controller is up; otherwise falls back to the local iterator. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
-func routeSessionList(cityPath, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	const cmdName = "session list"
 	if c != nil {
 		cr, err := c.ListSessions(stateFilter, templateFilter, false)

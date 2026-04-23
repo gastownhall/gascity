@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -311,12 +312,94 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 }
 
 func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, cityPath, code := openCityStoreWithPath(stderr, "gc wait list")
-	if store == nil {
-		return code
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	c, reason := waitListAPIClient(cityPath)
+	return routeWaitList(cityPath, c, reason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+// waitListAPIClient is indirected so tests inject a client pointed at
+// httptest.Server (or force a specific fallback reason) without spinning
+// up a real controller.
+var waitListAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeWaitList dispatches `gc wait list` through the supervisor API when a
+// controller is up; otherwise falls back to the local store iterator.
+// Exactly one route=... line per exit path (gated on GC_DEBUG).
+//
+// Wait beads are located via the generic beads endpoint using the
+// sessionpkg.WaitBeadLabel contract: GET /v0/city/{name}/beads?label=gc:wait.
+// The label constant is the shared invariant between CLI and server, so
+// callers reference it rather than inlining the string.
+func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	const cmdName = "wait list"
+	if c != nil {
+		cr, err := c.ListBeads(api.ListBeadsOpts{
+			Label: sessionpkg.WaitBeadLabel,
+			Limit: 1000,
+		})
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderWaitListFromAPI(cityPath, cr, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+// renderWaitListFromAPI applies the same IsWaitBead + closed-excluded filter
+// as the fallback path. The beads endpoint filters by label, not by type, so
+// a stray non-wait bead tagged gc:wait would otherwise leak through. IsWaitBead
+// also covers the legacy "wait" type for back-compat with older stores.
+func renderWaitListFromAPI(cityPath string, cr api.CachedRead[[]beads.Bead], stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	items := make([]beads.Bead, 0, len(cr.Body))
+	for _, item := range cr.Body {
+		if item.Status == "closed" {
+			continue
+		}
+		if !sessionpkg.IsWaitBead(item) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	filtered := filterWaitListItems(items, stateFilter, sessionFilter)
+	if jsonOutput {
+		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
+	}
+	writeWaitListTable(filtered, stdout)
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
+}
+
+func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", fmt.Sprintf("gc wait list: %v", err), 1)
+		}
+		fmt.Fprintf(stderr, "gc wait list: %v\n", err)                  //nolint:errcheck
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+		return 1
 	}
 	var items []beads.Bead
-	var err error
 	if sessionFilter != "" {
 		items, err = loadSessionWaitBeads(store, sessionFilter)
 	} else {
@@ -330,19 +413,32 @@ func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, std
 		fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	filtered := filterWaitListItems(items, stateFilter, "")
+	if jsonOutput {
+		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
+	}
+	writeWaitListTable(filtered, stdout)
+	return 0
+}
+
+func filterWaitListItems(items []beads.Bead, stateFilter, sessionFilter string) []beads.Bead {
 	filtered := make([]beads.Bead, 0, len(items))
 	for _, item := range items {
 		if stateFilter != "" && item.Metadata["state"] != stateFilter {
 			continue
 		}
+		if sessionFilter != "" && item.Metadata["session_id"] != sessionFilter {
+			continue
+		}
 		filtered = append(filtered, item)
 	}
-	if jsonOutput {
-		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
-	}
+	return filtered
+}
+
+func writeWaitListTable(items []beads.Bead, stdout io.Writer) {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "WAIT\tSESSION\tSTATE\tKIND\tNOTE") //nolint:errcheck
-	for _, item := range filtered {
+	for _, item := range items {
 		note := item.Description
 		if note == "" {
 			note = "-"
@@ -350,13 +446,73 @@ func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, std
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.ID, item.Metadata["session_id"], item.Metadata["state"], item.Metadata["kind"], note) //nolint:errcheck
 	}
 	_ = tw.Flush()
-	return 0
 }
 
 func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, cityPath, code := openCityStoreWithPath(stderr, "gc wait inspect")
-	if store == nil {
-		return code
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	c, reason := waitInspectAPIClient(cityPath)
+	return routeWaitInspect(cityPath, c, reason, waitID, jsonOutput, stdout, stderr)
+}
+
+var waitInspectAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeWaitInspect dispatches `gc wait inspect <id>` through the supervisor
+// API and falls back to a direct store lookup otherwise. Keeps the
+// sessionpkg.IsWaitBead type guard on both paths so a non-wait bead ID does
+// not render as a wait.
+func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	const cmdName = "wait inspect"
+	if c != nil {
+		cr, err := c.GetBead(waitID)
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderWaitInspectFromAPI(cityPath, cr, waitID, jsonOutput, stdout, stderr)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doWaitInspectFallback(cityPath, waitID, jsonOutput, stdout, stderr)
+}
+
+func renderWaitInspectFromAPI(cityPath string, cr api.CachedRead[beads.Bead], waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if !sessionpkg.IsWaitBead(cr.Body) {
+		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+		return 1
+	}
+	if jsonOutput {
+		return writeWaitInspectJSON(stdout, stderr, cityPath, cr.Body)
+	}
+	writeWaitDetail(cr.Body, stdout)
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
+}
+
+func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", fmt.Sprintf("gc wait inspect: %v", err), 1)
+		}
+		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err)               //nolint:errcheck
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+		return 1
 	}
 	b, err := store.Get(waitID)
 	if err != nil {
@@ -370,6 +526,11 @@ func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) in
 	if jsonOutput {
 		return writeWaitInspectJSON(stdout, stderr, cityPath, b)
 	}
+	writeWaitDetail(b, stdout)
+	return 0
+}
+
+func writeWaitDetail(b beads.Bead, stdout io.Writer) {
 	fmt.Fprintf(stdout, "Wait:       %s\n", b.ID)                                               //nolint:errcheck
 	fmt.Fprintf(stdout, "Session:    %s\n", b.Metadata["session_id"])                           //nolint:errcheck
 	fmt.Fprintf(stdout, "State:      %s\n", b.Metadata["state"])                                //nolint:errcheck
@@ -379,7 +540,6 @@ func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) in
 	fmt.Fprintf(stdout, "Attempt:    %s\n", b.Metadata["delivery_attempt"])                     //nolint:errcheck
 	fmt.Fprintf(stdout, "Nudge:      %s\n", b.Metadata["nudge_id"])                             //nolint:errcheck
 	fmt.Fprintf(stdout, "Note:       %s\n", b.Description)                                      //nolint:errcheck
-	return 0
 }
 
 type waitJSON struct {

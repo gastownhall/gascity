@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -92,6 +93,7 @@ func (s *Server) buildStatusBody() StatusBody {
 			scope = "rig"
 		}
 		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
 		scaleLabelEmitted := false
@@ -270,21 +272,21 @@ func (s *Server) buildStatusBody() StatusBody {
 // client-side so human output is identical whether served via API or
 // fallback.
 func poolScaleLabel(a config.Agent) string {
-	min := 0
+	minSessions := 0
 	if a.MinActiveSessions != nil {
-		min = *a.MinActiveSessions
+		minSessions = *a.MinActiveSessions
 	}
-	max := 1
-	maxLabel := fmt.Sprintf("max=%d", max)
+	maxSessions := 1
+	maxLabel := fmt.Sprintf("max=%d", maxSessions)
 	if a.MaxActiveSessions != nil {
-		max = *a.MaxActiveSessions
-		if max < 0 {
+		maxSessions = *a.MaxActiveSessions
+		if maxSessions < 0 {
 			maxLabel = "max=unlimited"
 		} else {
-			maxLabel = fmt.Sprintf("max=%d", max)
+			maxLabel = fmt.Sprintf("max=%d", maxSessions)
 		}
 	}
-	return fmt.Sprintf("scaled (min=%d, %s)", min, maxLabel)
+	return fmt.Sprintf("scaled (min=%d, %s)", minSessions, maxLabel)
 }
 
 // namedSessionStatus classifies a named session for the StatusBody detail
@@ -384,6 +386,7 @@ type statusSessionSnapshot struct {
 
 type statusSessionInfo struct {
 	sessionName string
+	agentName   string
 	template    string
 	state       session.State
 }
@@ -414,6 +417,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		}
 		info := statusSessionInfo{
 			sessionName: strings.TrimSpace(b.Metadata["session_name"]),
+			agentName:   strings.TrimSpace(b.Metadata["agent_name"]),
 			template:    strings.TrimSpace(b.Metadata["template"]),
 			state:       statusSessionState(b),
 		}
@@ -433,6 +437,51 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		}
 	}
 	return snapshot
+}
+
+func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+	maxSess := a.EffectiveMaxActiveSessions()
+	if !a.SupportsInstanceExpansion() || (maxSess != nil && *maxSess >= 0) {
+		return expanded
+	}
+
+	seenSessionNames := make(map[string]bool, len(expanded))
+	for _, ea := range expanded {
+		seenSessionNames[agentSessionName(cityName, ea.qualifiedName, sessTmpl)] = true
+	}
+
+	poolName := a.QualifiedName()
+	for _, info := range snapshot.byTemplate[poolName] {
+		if seenSessionNames[info.sessionName] {
+			continue
+		}
+		qn := statusSessionQualifiedName(cityName, sessTmpl, info)
+		if qn == "" {
+			continue
+		}
+		expanded = append(expanded, expandedAgent{
+			qualifiedName: qn,
+			rig:           a.Dir,
+			pool:          poolName,
+			suspended:     a.Suspended,
+			provider:      a.Provider,
+			description:   a.Description,
+		})
+		seenSessionNames[info.sessionName] = true
+	}
+	return expanded
+}
+
+func statusSessionQualifiedName(cityName, sessTmpl string, info statusSessionInfo) string {
+	if info.agentName != "" && info.agentName != info.template {
+		return info.agentName
+	}
+	qnSanitized := info.sessionName
+	templatePrefix := agent.SessionNameFor(cityName, "", sessTmpl)
+	if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
+		qnSanitized = qnSanitized[len(templatePrefix):]
+	}
+	return agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 }
 
 func statusSessionState(b beads.Bead) session.State {

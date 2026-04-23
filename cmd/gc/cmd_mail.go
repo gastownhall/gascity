@@ -345,7 +345,7 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 // routeMailCheck dispatches `mail check` to the supervisor API when a
 // controller is up; otherwise falls back to the local mail-provider path.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
-func routeMailCheck(cityPath string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
 	recipient := defaultMailIdentity()
 	if len(args) > 0 {

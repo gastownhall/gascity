@@ -11,9 +11,6 @@ func TestStatusViewFromGen_NilReturnsZero(t *testing.T) {
 	if got.CityName != "" || got.CityPath != "" {
 		t.Fatalf("statusViewFromGen(nil) = %+v, want zero value", got)
 	}
-	if got.Agents == nil || got.Rigs == nil {
-		// Zero value is fine; renderer treats empty and nil identically.
-	}
 }
 
 func TestStatusViewFromGen_ValidResponse(t *testing.T) {
