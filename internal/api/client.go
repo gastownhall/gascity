@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -434,6 +435,85 @@ func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 	}
 	return CachedRead[[]RigView]{
 		Body:       rigsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListConvoys fetches the open convoys across all rigs via
+// GET /v0/city/{cityName}/convoys. The CachedRead.AgeSeconds field carries the
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoysWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameConvoysParams{})
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       convoysFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetConvoy fetches one convoy by ID via
+// GET /v0/city/{cityName}/convoy/{id}. Returns the convoy bead, its direct
+// children, and progress counts. Workflow/graph convoys produce an empty
+// Convoy (ID == "") — callers should treat that as "not a simple convoy" and
+// fall back to the local path.
+func (c *Client) GetConvoy(id string) (CachedRead[ConvoyStatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[ConvoyStatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoyByIdWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[ConvoyStatusView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[ConvoyStatusView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[ConvoyStatusView]{
+		Body:       convoyStatusFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CheckConvoy fetches one convoy's completion status via
+// GET /v0/city/{cityName}/convoy/{id}/check. Returns child totals and a
+// Complete flag that is true when total > 0 and all children are closed.
+func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[ConvoyCheckView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoyByIdCheckWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[ConvoyCheckView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[ConvoyCheckView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[ConvoyCheckView]{
+		Body:       convoyCheckFromGen(resp.JSON200),
 		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
 	}, nil
 }
