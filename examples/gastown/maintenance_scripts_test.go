@@ -604,6 +604,100 @@ func TestMaintenanceDoltScriptsRejectInvalidManagedPort(t *testing.T) {
 	}
 }
 
+func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		env    map[string]string
+	}{
+		{
+			name:   "reaper",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			env: map[string]string{
+				"GC_REAPER_DRY_RUN": "1",
+			},
+		},
+		{
+			name:   "jsonl export",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			env: map[string]string{
+				"GC_JSONL_ARCHIVE_REPO":      "archive",
+				"GC_JSONL_MAX_PUSH_FAILURES": "99",
+			},
+		},
+	}
+
+	excludedDBs := []string{
+		"benchdb",
+		"testdb_foo",
+		"beads_tbar",
+		"beads_ptbaz",
+		"beads_vrqux",
+		"doctest_xyz",
+		"doctortest_abc",
+	}
+	includedDBs := []string{"beads", "customdb"}
+
+	allDBs := append([]string{}, includedDBs...)
+	allDBs = append(allDBs, excludedDBs...)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"DOLT_ARGS_LOG":       doltLog,
+				"DOLT_DBS":            strings.Join(allDBs, " "),
+				"GC_CALL_LOG":         gcLog,
+				"GC_CITY":             cityDir,
+				"GC_CITY_PATH":        cityDir,
+				"GC_PACK_STATE_DIR":   stateDir,
+				"GC_DOLT_HOST":        "127.0.0.1",
+				"GC_DOLT_PORT":        "3307",
+				"GC_DOLT_USER":        "root",
+				"GC_DOLT_PASSWORD":    "",
+				"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+				"GIT_CONFIG_NOSYSTEM": "1",
+				"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for key, value := range tt.env {
+				if key == "GC_JSONL_ARCHIVE_REPO" {
+					value = filepath.Join(cityDir, value)
+				}
+				env[key] = value
+			}
+
+			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+
+			logData, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatalf("ReadFile(dolt log): %v", err)
+			}
+			log := string(logData)
+			for _, excluded := range excludedDBs {
+				if strings.Contains(log, "`"+excluded+"`") {
+					t.Errorf("dolt log references excluded test-pattern database %q:\n%s", excluded, log)
+				}
+			}
+			for _, included := range includedDBs {
+				if !strings.Contains(log, "`"+included+"`") {
+					t.Errorf("dolt log missing included database %q:\n%s", included, log)
+				}
+			}
+		})
+	}
+}
+
 func listenManagedDoltPort(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -972,7 +1066,14 @@ func writeMaintenanceDoltStub(t *testing.T, path string) {
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
   *"SHOW DATABASES"*)
-    printf 'Database\nbeads\n'
+    printf 'Database\n'
+    if [ -n "${DOLT_DBS:-}" ]; then
+      for db in $DOLT_DBS; do
+        printf '%s\n' "$db"
+      done
+    else
+      printf 'beads\n'
+    fi
     ;;
   *"SELECT *"*)
     printf '{"id":"ga-1","title":"sample"}\n'
