@@ -36,7 +36,10 @@ func (countOnlyMailProvider) Read(string) (mail.Message, error)    { panic("unex
 func (countOnlyMailProvider) MarkRead(string) error                { panic("unexpected MarkRead") }
 func (countOnlyMailProvider) MarkUnread(string) error              { panic("unexpected MarkUnread") }
 func (countOnlyMailProvider) Archive(string) error                 { panic("unexpected Archive") }
-func (countOnlyMailProvider) Delete(string) error                  { panic("unexpected Delete") }
+func (countOnlyMailProvider) ArchiveMany([]string) ([]mail.ArchiveResult, error) {
+	panic("unexpected ArchiveMany")
+}
+func (countOnlyMailProvider) Delete(string) error { panic("unexpected Delete") }
 func (countOnlyMailProvider) Check(string) ([]mail.Message, error) { panic("unexpected Check") }
 func (countOnlyMailProvider) Reply(string, string, string, string) (mail.Message, error) {
 	panic("unexpected Reply")
@@ -1782,6 +1785,66 @@ func TestMailDeleteSuccess(t *testing.T) {
 	}
 }
 
+func TestMailDeleteMultiSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("human", "mayor", "", "batch me"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	rec := &memRecorder{}
+	code := doMailDelete(mp, rec, []string{"gc-1", "gc-2", "gc-3"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Deleted message gc-1", "Deleted message gc-2", "Deleted message gc-3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if n := len(rec.events); n != 3 {
+		t.Errorf("recorded events = %d, want 3", n)
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("bead %s Status = %q, want closed", id, b.Status)
+		}
+	}
+}
+
+func TestMailDeleteMultiPartialFailure(t *testing.T) {
+	mp := mail.NewFake()
+	m1, _ := mp.Send("human", "mayor", "", "one")
+	m2, _ := mp.Send("human", "mayor", "", "two")
+	if err := mp.Archive(m2.ID); err != nil {
+		t.Fatalf("pre-archive m2: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{m1.ID, m2.ID, "ghost"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailDelete = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Deleted message "+m1.ID) {
+		t.Errorf("stdout missing Deleted for m1:\n%s", out)
+	}
+	if !strings.Contains(out, "Already deleted "+m2.ID) {
+		t.Errorf("stdout missing Already deleted for m2:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "gc mail delete ghost") {
+		t.Errorf("stderr missing per-id error for ghost:\n%s", stderr.String())
+	}
+}
+
 // --- gc mail thread ---
 
 func TestMailThreadSuccess(t *testing.T) {
@@ -1982,6 +2045,57 @@ func TestMailArchiveAlreadyClosed(t *testing.T) {
 	// Already-closed messages report as already archived.
 	if !strings.Contains(stdout.String(), "Already archived gc-1") {
 		t.Errorf("stdout = %q, want 'Already archived'", stdout.String())
+	}
+}
+
+func TestMailArchiveMultiSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("human", "mayor", "", "batch"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	rec := &memRecorder{}
+	code := doMailArchive(mp, rec, []string{"gc-1", "gc-2", "gc-3"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchive = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Archived message gc-1", "Archived message gc-2", "Archived message gc-3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if n := len(rec.events); n != 3 {
+		t.Errorf("recorded events = %d, want 3", n)
+	}
+}
+
+func TestMailArchiveMultiPartialFailure(t *testing.T) {
+	mp := mail.NewFake()
+	m1, _ := mp.Send("human", "mayor", "", "one")
+	m2, _ := mp.Send("human", "mayor", "", "two")
+	if err := mp.Archive(m2.ID); err != nil {
+		t.Fatalf("pre-archive: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchive(mp, events.Discard, []string{m1.ID, m2.ID, "ghost"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailArchive = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Archived message "+m1.ID) {
+		t.Errorf("stdout missing Archived for m1:\n%s", out)
+	}
+	if !strings.Contains(out, "Already archived "+m2.ID) {
+		t.Errorf("stdout missing Already archived for m2:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "gc mail archive ghost") {
+		t.Errorf("stderr missing per-id error for ghost:\n%s", stderr.String())
 	}
 }
 

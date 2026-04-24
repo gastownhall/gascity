@@ -195,6 +195,28 @@ func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
+// ArchiveMany archives a batch of messages in one bd close round-trip.
+// Callers must pass message-type bead ids; unlike [Provider.Archive] this
+// skips the per-id type check to preserve the single-round-trip path. On
+// batch failure it falls back to per-id [Provider.Archive] so partial
+// successes and [mail.ErrAlreadyArchived] are reported accurately.
+func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]mail.ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i].ID = id
+	}
+	if _, err := p.store.CloseAll(ids, nil); err != nil {
+		for i, id := range ids {
+			results[i].Err = p.Archive(id)
+		}
+		return results, nil
+	}
+	return results, nil
+}
+
 // All returns all open messages (read and unread) for the recipient.
 func (p *Provider) All(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, true)

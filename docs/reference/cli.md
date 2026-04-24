@@ -1294,10 +1294,10 @@ gc mail
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc mail archive](#gc-mail-archive) | Archive a message without reading it |
+| [gc mail archive](#gc-mail-archive) | Archive one or more messages without reading them |
 | [gc mail check](#gc-mail-check) | Check for unread mail (use --inject for hook output) |
 | [gc mail count](#gc-mail-count) | Show total/unread message count |
-| [gc mail delete](#gc-mail-delete) | Delete a message (closes the bead) |
+| [gc mail delete](#gc-mail-delete) | Delete one or more messages (closes the beads) |
 | [gc mail inbox](#gc-mail-inbox) | List unread messages (defaults to your inbox) |
 | [gc mail mark-read](#gc-mail-mark-read) | Mark a message as read |
 | [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread |
@@ -1309,13 +1309,14 @@ gc mail
 
 ## gc mail archive
 
-Close a message bead without displaying its contents.
+Close one or more message beads without displaying their contents.
 
-Use this to dismiss a message without reading it. The message is marked
-as closed and will no longer appear in mail check or inbox results.
+Use this to dismiss messages without reading them. Each message is marked
+as closed and will no longer appear in mail check or inbox results. When
+multiple IDs are passed, they are archived in a single batch round-trip.
 
 ```
-gc mail archive <id>
+gc mail archive <id>...
 ```
 
 ## gc mail check
@@ -1355,10 +1356,12 @@ gc mail count [session]
 
 ## gc mail delete
 
-Delete a message by closing the bead. Same effect as archive but with different user intent.
+Delete one or more messages by closing the beads. Same effect as archive
+but with different user intent. When multiple IDs are passed, they are
+deleted in a single batch round-trip.
 
 ```
-gc mail delete <id>
+gc mail delete <id>...
 ```
 
 ## gc mail inbox

@@ -73,12 +73,13 @@ hooks to deliver mail notifications into agent prompts.`,
 
 func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "archive <id>",
-		Short: "Archive a message without reading it",
-		Long: `Close a message bead without displaying its contents.
+		Use:   "archive <id>...",
+		Short: "Archive one or more messages without reading them",
+		Long: `Close one or more message beads without displaying their contents.
 
-Use this to dismiss a message without reading it. The message is marked
-as closed and will no longer appear in mail check or inbox results.`,
+Use this to dismiss messages without reading them. Each message is marked
+as closed and will no longer appear in mail check or inbox results. When
+multiple IDs are passed, they are archived in a single batch round-trip.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailArchive(args, stdout, stderr) != 0 {
@@ -99,15 +100,22 @@ func cmdMailArchive(args []string, stdout, stderr io.Writer) int {
 	return doMailArchive(mp, rec, args, stdout, stderr)
 }
 
-// doMailArchive closes a message without displaying it. Accepts an
-// injected provider and recorder for testability.
+// doMailArchive closes one or more message beads. For a single ID the
+// behavior matches the pre-batch CLI byte-for-byte; for two or more IDs it
+// delegates to mp.ArchiveMany for a single-round-trip close and prints one
+// result line per id.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail archive: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
+	if len(args) == 1 {
+		return doMailArchiveSingle(mp, rec, args[0], stdout, stderr)
+	}
+	return doMailArchiveMany(mp, rec, args, stdout, stderr)
+}
 
+func doMailArchiveSingle(mp mail.Provider, rec events.Recorder, id string, stdout, stderr io.Writer) int {
 	if err := mp.Archive(id); err != nil {
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			fmt.Fprintf(stdout, "Already archived %s\n", id) //nolint:errcheck // best-effort stdout
@@ -126,6 +134,36 @@ func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout,
 	})
 	fmt.Fprintf(stdout, "Archived message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func doMailArchiveMany(mp mail.Provider, rec events.Recorder, ids []string, stdout, stderr io.Writer) int {
+	results, err := mp.ArchiveMany(ids)
+	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "archive", err)
+		fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	exit := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			telemetry.RecordMailOp(context.Background(), "archive", nil)
+			rec.Record(events.Event{
+				Type:    events.MailArchived,
+				Actor:   eventActor(),
+				Subject: r.ID,
+				Payload: mailEventPayload(nil),
+			})
+			fmt.Fprintf(stdout, "Archived message %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			fmt.Fprintf(stdout, "Already archived %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		default:
+			telemetry.RecordMailOp(context.Background(), "archive", r.Err)
+			fmt.Fprintf(stderr, "gc mail archive %s: %v\n", r.ID, r.Err) //nolint:errcheck // best-effort stderr
+			exit = 1
+		}
+	}
+	return exit
 }
 
 func newMailCheckCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -901,10 +939,12 @@ func newMailMarkUnreadCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newMailDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <id>",
-		Short: "Delete a message (closes the bead)",
-		Long:  `Delete a message by closing the bead. Same effect as archive but with different user intent.`,
-		Args:  cobra.ArbitraryArgs,
+		Use:   "delete <id>...",
+		Short: "Delete one or more messages (closes the beads)",
+		Long: `Delete one or more messages by closing the beads. Same effect as archive
+but with different user intent. When multiple IDs are passed, they are
+deleted in a single batch round-trip.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailDelete(args, stdout, stderr) != 0 {
 				return errExit
@@ -1424,13 +1464,21 @@ func cmdMailDelete(args []string, stdout, stderr io.Writer) int {
 	return doMailDelete(mp, rec, args, stdout, stderr)
 }
 
-// doMailDelete closes a message bead (same as archive but different intent).
+// doMailDelete closes one or more message beads (same as archive but
+// different intent). Single-id behavior matches the pre-batch CLI
+// byte-for-byte; multi-id uses mp.ArchiveMany for a single-round-trip close.
 func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail delete: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
+	if len(args) == 1 {
+		return doMailDeleteSingle(mp, rec, args[0], stdout, stderr)
+	}
+	return doMailDeleteMany(mp, rec, args, stdout, stderr)
+}
+
+func doMailDeleteSingle(mp mail.Provider, rec events.Recorder, id string, stdout, stderr io.Writer) int {
 	if err := mp.Delete(id); err != nil {
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			fmt.Fprintf(stdout, "Already deleted %s\n", id) //nolint:errcheck // best-effort stdout
@@ -1449,6 +1497,36 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 	})
 	fmt.Fprintf(stdout, "Deleted message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func doMailDeleteMany(mp mail.Provider, rec events.Recorder, ids []string, stdout, stderr io.Writer) int {
+	results, err := mp.ArchiveMany(ids)
+	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "delete", err)
+		fmt.Fprintf(stderr, "gc mail delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	exit := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			telemetry.RecordMailOp(context.Background(), "delete", nil)
+			rec.Record(events.Event{
+				Type:    events.MailDeleted,
+				Actor:   eventActor(),
+				Subject: r.ID,
+				Payload: mailEventPayload(nil),
+			})
+			fmt.Fprintf(stdout, "Deleted message %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			fmt.Fprintf(stdout, "Already deleted %s\n", r.ID) //nolint:errcheck // best-effort stdout
+		default:
+			telemetry.RecordMailOp(context.Background(), "delete", r.Err)
+			fmt.Fprintf(stderr, "gc mail delete %s: %v\n", r.ID, r.Err) //nolint:errcheck // best-effort stderr
+			exit = 1
+		}
+	}
+	return exit
 }
 
 // cmdMailThread lists messages in a thread.
