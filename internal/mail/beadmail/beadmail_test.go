@@ -561,6 +561,144 @@ func TestReply(t *testing.T) {
 	}
 }
 
+// TestReplyDerivesSubjectFromOriginal ensures an empty subject is replaced
+// with "Re: <original-subject>", so underlying stores that require a
+// non-empty title (e.g. BdStore → `bd create`) don't reject the reply.
+func TestReplyDerivesSubjectFromOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply with empty subject: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: Hello")
+	}
+}
+
+// TestReplyPreservesExplicitSubject ensures an explicit subject is passed
+// through unchanged — no automatic "Re:" prefixing.
+func TestReplyPreservesExplicitSubject(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "Custom subject", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject != "Custom subject" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Custom subject")
+	}
+}
+
+// TestReplyAvoidsDoubleRePrefix ensures that replying to a message whose
+// subject already starts with "Re:" does not produce "Re: Re: ..." when
+// the caller omits the subject.
+func TestReplyAvoidsDoubleRePrefix(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Re: Hello", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q (no double prefix)", reply.Subject, "Re: Hello")
+	}
+}
+
+// TestReplyFallsBackToBodyWhenOriginalTitleEmpty covers the degenerate case
+// where an original message somehow has no title (possible in stores that
+// don't enforce title). The reply still gets a non-empty title.
+func TestReplyFallsBackToBodyWhenOriginalTitleEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Create a message bead directly without a title.
+	orig, err := store.Create(beads.Bead{
+		Type:     "message",
+		Assignee: "bob",
+		From:     "alice",
+		Labels:   []string{"thread:t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(orig.ID, "bob", "", "a terse reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject == "" {
+		t.Error("Reply Subject is empty; must be non-empty so bd create won't reject")
+	}
+	if reply.Subject != "a terse reply body" {
+		t.Errorf("Reply Subject = %q, want %q (first line of body)", reply.Subject, "a terse reply body")
+	}
+}
+
+// TestReplyAgainstBdStoreValidatesTitle is a regression test that exercises
+// the real BdStore code path: the fake runner emulates `bd create`'s
+// title-required validation. Without a derived title, Reply would fail here.
+func TestReplyAgainstBdStoreValidatesTitle(t *testing.T) {
+	// Fake runner that rejects `bd create` with empty positional title,
+	// the same way the real bd binary does.
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, errors.New("unexpected command: " + name)
+		}
+		switch args[0] {
+		case "create":
+			// args: create --json <title> -t <type> [flags...]
+			if len(args) < 3 {
+				return nil, errors.New("bd create: too few args")
+			}
+			title := args[2]
+			if title == "" {
+				return nil, errors.New(`exit status 1: {"error":"validation failed for issue : title is required"}`)
+			}
+			// Return a minimal issue JSON.
+			id := "bd-" + title
+			return []byte(`{"id":"` + id + `","title":"` + title + `","status":"open","issue_type":"message","created_at":"2026-04-24T00:00:00Z"}`), nil
+		case "show":
+			// bd show --json returns a JSON array.
+			return []byte(`[{"id":"bd-Hello","title":"Hello","status":"open","issue_type":"message","assignee":"bob","from":"alice","created_at":"2026-04-24T00:00:00Z","labels":["thread:t1"]}]`), nil
+		case "update":
+			return []byte(`{}`), nil
+		case "list":
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected bd subcommand: " + args[0])
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	// Reply with empty subject — must succeed because the provider derives
+	// "Re: Hello" from the original message.
+	reply, err := p.Reply("bd-Hello", "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply should derive a non-empty title to pass bd validation: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: Hello")
+	}
+}
+
 // --- Thread ---
 
 func TestThread(t *testing.T) {
