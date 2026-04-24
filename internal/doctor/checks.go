@@ -166,6 +166,7 @@ func (c *ConfigRefsCheck) Name() string { return "config-refs" }
 func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	var issues []string
+	builtins := config.BuiltinProviders()
 
 	for _, a := range c.cfg.Agents {
 		qn := a.QualifiedName()
@@ -190,7 +191,9 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 			}
 		}
 		if a.Provider != "" && len(c.cfg.Providers) > 0 {
-			if _, ok := c.cfg.Providers[a.Provider]; !ok {
+			_, inCustom := c.cfg.Providers[a.Provider]
+			_, inBuiltin := builtins[a.Provider]
+			if !inCustom && !inBuiltin {
 				issues = append(issues, fmt.Sprintf("agent %q: provider %q not defined in [providers]", qn, a.Provider))
 			}
 		}

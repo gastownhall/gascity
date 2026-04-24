@@ -262,6 +262,34 @@ func TestConfigRefsCheck_UndefinedProvider(t *testing.T) {
 	}
 }
 
+func TestConfigRefsCheck_BuiltinProviderNotFlagged(t *testing.T) {
+	// When custom providers exist but an agent references a built-in provider
+	// (e.g. "claude"), the check must not flag it as undefined.
+	dir := t.TempDir()
+	builtins := config.BuiltinProviders()
+	if len(builtins) == 0 {
+		t.Skip("no built-in providers registered")
+	}
+	// Pick the first built-in name.
+	var builtinName string
+	for name := range builtins {
+		builtinName = name
+		break
+	}
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{"custom-only": {}},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: builtinName},
+		},
+	}
+	c := NewConfigRefsCheck(cfg, dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; built-in provider %q should not be flagged; details = %v",
+			r.Status, builtinName, r.Details)
+	}
+}
+
 func TestConfigRefsCheck_NoProvidersDefined(t *testing.T) {
 	// When no providers section exists, agent provider refs are not checked.
 	dir := t.TempDir()
