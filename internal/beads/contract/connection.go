@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,28 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
+
+// ManagedCityHostEnv lets deployments override the host used to reach a
+// managed-city Dolt server. Default is loopback; containerised callers
+// (MCP servers, proxies on Docker Desktop) set this to e.g.
+// "host.docker.internal" because 127.0.0.1 inside the container is the
+// container's own loopback, not the Dolt-hosting machine.
+//
+// Name matches gc's existing GC_DOLT_HOST convention; the bd-side env
+// (BEADS_DOLT_SERVER_HOST) is already derived from GC_DOLT_HOST by
+// cmd/gc/bd_env.go#mirrorBeadsDoltEnv, so a single env var serves both
+// the gc-internal direct connection (this helper) and bd subprocesses.
+const ManagedCityHostEnv = "GC_DOLT_HOST"
+
+// managedCityHost returns the host to use for managed-city Dolt
+// connections. Honors GC_DOLT_HOST as an override so containerised
+// callers can redirect away from loopback.
+func managedCityHost() string {
+	if host := strings.TrimSpace(os.Getenv(ManagedCityHostEnv)); host != "" {
+		return host
+	}
+	return "127.0.0.1"
+}
 
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
@@ -103,7 +126,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 		if err != nil {
 			return DoltConnectionTarget{}, err
 		}
-		target.Host = "127.0.0.1"
+		target.Host = managedCityHost()
 		target.Port = port
 		return target, nil
 	case EndpointOriginCityCanonical, EndpointOriginExplicit:
@@ -487,7 +510,7 @@ func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot string, target Do
 		if err != nil {
 			return DoltConnectionTarget{}, err
 		}
-		target.Host = "127.0.0.1"
+		target.Host = managedCityHost()
 		target.Port = port
 		return target, nil
 	}
@@ -673,7 +696,7 @@ func contractPortReachable(port string) bool {
 	if strings.TrimSpace(port) == "" {
 		return false
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(managedCityHost(), port), 250*time.Millisecond)
 	if err != nil {
 		return false
 	}

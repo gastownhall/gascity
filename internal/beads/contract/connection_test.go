@@ -979,3 +979,81 @@ func writeRuntimeState(t *testing.T, fs fsys.FS, city, raw string) {
 		t.Fatal(err)
 	}
 }
+
+// TestManagedCityHost_Default asserts the default remains 127.0.0.1 when the
+// env override is unset or empty.
+func TestManagedCityHost_Default(t *testing.T) {
+	t.Setenv(ManagedCityHostEnv, "")
+	if got := managedCityHost(); got != "127.0.0.1" {
+		t.Fatalf("managedCityHost() = %q, want 127.0.0.1", got)
+	}
+}
+
+// TestManagedCityHost_EnvOverride asserts BEADS_DOLT_SERVER_HOST overrides the
+// default loopback — this is how containerised callers (MCP servers, proxies
+// on Docker Desktop) redirect away from the container's own 127.0.0.1.
+func TestManagedCityHost_EnvOverride(t *testing.T) {
+	t.Setenv(ManagedCityHostEnv, "host.docker.internal")
+	if got := managedCityHost(); got != "host.docker.internal" {
+		t.Fatalf("managedCityHost() = %q, want host.docker.internal", got)
+	}
+}
+
+// TestManagedCityHost_EnvTrimmed asserts surrounding whitespace is trimmed so
+// "  host  " → "host". Mirrors how other config values are normalised in this
+// package.
+func TestManagedCityHost_EnvTrimmed(t *testing.T) {
+	t.Setenv(ManagedCityHostEnv, "  example.internal  ")
+	if got := managedCityHost(); got != "example.internal" {
+		t.Fatalf("managedCityHost() = %q, want example.internal", got)
+	}
+}
+
+// TestResolveDoltConnectionTargetManagedCity_EnvOverride asserts that a
+// managed-city resolve honors BEADS_DOLT_SERVER_HOST. Uses 127.0.0.1 as the
+// override value so the liveness check (contractPortReachable) passes — the
+// override is the same host the listener is bound to.
+func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
+	t.Setenv(ManagedCityHostEnv, "127.0.0.1")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+	port := writeReachableRuntimeState(t, fs, city)
+
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.Host != "127.0.0.1" || target.Port != port {
+		t.Fatalf("target = %+v, want host 127.0.0.1 port %q", target, port)
+	}
+}
+
+// TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToTarget sets
+// the env to an invalid host and asserts the liveness check fails — proving
+// the override reaches the reachability probe, not just the returned target.
+// If the probe were still hardcoded to 127.0.0.1, it would succeed (the
+// listener is on loopback) and this test would fail.
+func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability(t *testing.T) {
+	// Use a non-routable TEST-NET-1 address so DialTimeout fails fast.
+	t.Setenv(ManagedCityHostEnv, "192.0.2.1")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+	writeReachableRuntimeState(t, fs, city)
+
+	_, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want unavailable (override routed liveness probe elsewhere)", err)
+	}
+}
