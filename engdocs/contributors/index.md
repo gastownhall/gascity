@@ -9,6 +9,8 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Architecture Overview](../architecture/index.md)
 - [Primitive Test](primitive-test.md)
 - [Reconciler Debugging](reconciler-debugging.md)
+- [Safe Upmerge Formula](safe-upmerge-formula.md)
+- [T3 Session Bridge Merge Checklist](t3-session-bridge-merge-checklist.md)
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
