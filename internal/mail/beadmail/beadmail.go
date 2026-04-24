@@ -195,24 +195,47 @@ func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
-// ArchiveMany archives a batch of messages in one bd close round-trip.
-// Callers must pass message-type bead ids; unlike [Provider.Archive] this
-// skips the per-id type check to preserve the single-round-trip path. On
-// batch failure it falls back to per-id [Provider.Archive] so partial
-// successes and [mail.ErrAlreadyArchived] are reported accurately.
+// ArchiveMany archives a batch of messages, preserving per-id error
+// reporting that matches [Provider.Archive]: [mail.ErrAlreadyArchived] for
+// beads that were already closed, a wrapped store error for unknown ids,
+// and a non-message error for beads of the wrong type. Ids that need an
+// actual state transition are closed in a single [beads.Store.CloseAll]
+// round-trip; on batch failure the open subset falls back to per-id
+// [beads.Store.Close].
 func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	results := make([]mail.ArchiveResult, len(ids))
+	openIdx := make([]int, 0, len(ids))
+	openIDs := make([]string, 0, len(ids))
 	for i, id := range ids {
 		results[i].ID = id
-	}
-	if _, err := p.store.CloseAll(ids, nil); err != nil {
-		for i, id := range ids {
-			results[i].Err = p.Archive(id)
+		b, err := p.store.Get(id)
+		if err != nil {
+			results[i].Err = fmt.Errorf("beadmail archive: %w", err)
+			continue
 		}
+		if b.Type != "message" {
+			results[i].Err = fmt.Errorf("beadmail archive: bead %s is not a message", id)
+			continue
+		}
+		if b.Status == "closed" {
+			results[i].Err = mail.ErrAlreadyArchived
+			continue
+		}
+		openIdx = append(openIdx, i)
+		openIDs = append(openIDs, id)
+	}
+	if len(openIDs) == 0 {
 		return results, nil
+	}
+	if _, err := p.store.CloseAll(openIDs, nil); err != nil {
+		for k, id := range openIDs {
+			if closeErr := p.store.Close(id); closeErr != nil {
+				results[openIdx[k]].Err = fmt.Errorf("beadmail archive: %w", closeErr)
+			}
+		}
 	}
 	return results, nil
 }

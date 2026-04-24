@@ -583,6 +583,44 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
+	t.Run("ArchiveMany_MixedOpenClosed", func(t *testing.T) {
+		p := newProvider(t)
+		var ids []string
+		for i := 0; i < 3; i++ {
+			m, err := p.Send("alice", "bob", "", "mixed")
+			if err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+			ids = append(ids, m.ID)
+		}
+		if err := p.Archive(ids[1]); err != nil {
+			t.Fatalf("pre-Archive middle: %v", err)
+		}
+		results, err := p.ArchiveMany(ids)
+		if err != nil {
+			t.Fatalf("ArchiveMany: %v", err)
+		}
+		if len(results) != len(ids) {
+			t.Fatalf("results = %d, want %d", len(results), len(ids))
+		}
+		if results[0].Err != nil {
+			t.Errorf("results[0].Err = %v, want nil", results[0].Err)
+		}
+		if !errors.Is(results[1].Err, mail.ErrAlreadyArchived) {
+			t.Errorf("results[1].Err = %v, want ErrAlreadyArchived", results[1].Err)
+		}
+		if results[2].Err != nil {
+			t.Errorf("results[2].Err = %v, want nil", results[2].Err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after ArchiveMany = %d, want 0", len(msgs))
+		}
+	})
+
 	// --- Group 12: Lifecycle ---
 
 	t.Run("Lifecycle_SendInboxReadInboxEmpty", func(t *testing.T) {
