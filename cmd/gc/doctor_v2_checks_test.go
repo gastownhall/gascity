@@ -72,6 +72,36 @@ scope = "city"
 	}
 }
 
+func TestV2AgentFormatPassesForPackTomlSchema2(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "v2-city"
+provider = "claude"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "v2-city"
+schema = 2
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`)
+
+	res := v2AgentFormatCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("schema=2 pack.toml with canonical [[agent]] mayor should pass v2-agent-format; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+}
+
 func TestV2ScriptsLayoutWarnsForSymlinkOnlyDir(t *testing.T) {
 	t.Parallel()
 

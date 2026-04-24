@@ -459,13 +459,19 @@ func legacyAgentFiles(cityPath string) []string {
 	if cfg, ok := parseCityConfig(filepath.Join(cityPath, "city.toml")); ok && len(cfg.Agents) > 0 {
 		files = append(files, "city.toml")
 	}
+	// pack.toml [[agent]] is the canonical v2 scaffold emitted by `gc init`
+	// and documented in Tutorial 01, so only flag it when the pack is still
+	// declaring schema=1 (or an unspecified schema).
 	type rawPack struct {
+		Pack struct {
+			Schema int `toml:"schema"`
+		} `toml:"pack"`
 		Agents []config.Agent `toml:"agent"`
 	}
 	packPath := filepath.Join(cityPath, "pack.toml")
 	if data, err := os.ReadFile(packPath); err == nil {
 		var pack rawPack
-		if _, err := toml.Decode(string(data), &pack); err == nil && len(pack.Agents) > 0 {
+		if _, err := toml.Decode(string(data), &pack); err == nil && len(pack.Agents) > 0 && pack.Pack.Schema < 2 {
 			files = append(files, "pack.toml")
 		}
 	}
