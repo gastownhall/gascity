@@ -617,6 +617,53 @@ func TestReplyFallsBackToBodyWhenOriginalUntitled(t *testing.T) {
 	}
 }
 
+func TestReplyTruncatesLongBodyTitle(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Original has empty subject AND empty body so the title-fallback
+	// path falls through to the body of the reply.
+	sent, err := p.Send("alice", "bob", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reply body is a single line longer than 80 chars. With no original
+	// title to "Re:"-prefix and no newline to split on, the derived title
+	// must come from this line and must be truncated.
+	body := strings.Repeat("a", 120)
+	reply, err := p.Reply(sent.ID, "bob", "", body)
+	if err != nil {
+		t.Fatalf("Reply with long body: %v", err)
+	}
+	if len(reply.Subject) > 80 {
+		t.Errorf("Reply Subject length = %d, want <= 80 (got %q)", len(reply.Subject), reply.Subject)
+	}
+	if !strings.HasSuffix(reply.Subject, "...") {
+		t.Errorf("Reply Subject = %q, want suffix %q", reply.Subject, "...")
+	}
+}
+
+func TestReplyFallsBackToPlaceholderWhenOriginalAndBodyEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Both the original and the reply have empty subject AND empty body,
+	// so every derivation branch above the final placeholder is empty.
+	sent, err := p.Send("alice", "bob", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "")
+	if err != nil {
+		t.Fatalf("Reply with empty original and empty body: %v", err)
+	}
+	if reply.Subject != "Re: (no subject)" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: (no subject)")
+	}
+}
+
 // --- Thread ---
 
 func TestThread(t *testing.T) {
