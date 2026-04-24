@@ -1,13 +1,17 @@
-# Gas Town — city pack definition.
+# Gas Town root pack — wires the gastown pack at both city and rig scope.
 #
-# Owns the portable configuration: imports and pack identity.
-# city.toml carries deployment-local settings (rigs, daemon, beads).
+# City-level: [imports.gastown] in city.toml expands city-scoped agents
+# (mayor, deacon, boot).
+#
+# Rig-level: [defaults.rig.imports.gastown] ensures every new rig
+# automatically imports rig-scoped agents (witness, refinery, polecat)
+# without hand-editing city.toml.
 
 [pack]
-name = "gastown"
+name = "gastown-city"
 schema = 2
 
-[imports.gastown]
+[defaults.rig.imports.gastown]
 source = "packs/gastown"
 
 [defaults.rig.imports.gastown]

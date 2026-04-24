@@ -163,6 +163,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		d.Register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath))
 		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
+		d.Register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
