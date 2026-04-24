@@ -801,7 +801,7 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 		return true
 	}
 	if strings.HasPrefix(sessionProvider, "exec:") {
-		return strings.HasSuffix(strings.TrimPrefix(sessionProvider, "exec:"), "gc-session-t3")
+		return isLegacyT3BridgeExecScript(strings.TrimPrefix(sessionProvider, "exec:"))
 	}
 	return false
 }

@@ -234,6 +234,26 @@ func TestResolveNamedSessionSpecForConfigTarget_BareNameResolvesV2BoundSession(t
 	}
 }
 
+func TestNamedSessionBackingTemplate_UsesTemplatePatchIdentity(t *testing.T) {
+	spec := NamedSessionSpec{
+		Named: &config.NamedSession{
+			Template:    "witness",
+			BindingName: "gastown",
+			Dir:         "demo",
+		},
+		Agent: &config.Agent{
+			Name:        "witness",
+			BindingName: "gastown",
+			Dir:         "demo",
+		},
+		Identity: "demo/gastown.witness",
+	}
+
+	if got := NamedSessionBackingTemplate(spec); got != "witness" {
+		t.Fatalf("NamedSessionBackingTemplate() = %q, want template patch key %q", got, "witness")
+	}
+}
+
 func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousAcrossBindings(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

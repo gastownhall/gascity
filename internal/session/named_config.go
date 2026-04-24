@@ -67,11 +67,11 @@ func FindNamedSessionSpec(cfg *config.City, cityName, identity string) (NamedSes
 
 // NamedSessionBackingTemplate returns the resolved backing agent template for a named session spec.
 func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
-	if spec.Agent != nil {
-		return spec.Agent.QualifiedName()
-	}
 	if spec.Named != nil {
-		return spec.Named.TemplateQualifiedName()
+		return strings.TrimSpace(spec.Named.Template)
+	}
+	if spec.Agent != nil {
+		return strings.TrimSpace(spec.Agent.Name)
 	}
 	return ""
 }

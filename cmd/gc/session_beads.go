@@ -919,11 +919,11 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["continuation_epoch"] == "" {
 			queueMeta("continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch))
 		}
-		if b.Metadata["command"] == "" && tp.Command != "" {
+		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
 		if tp.ResolvedProvider != nil {
-			if b.Metadata["provider"] == "" && tp.ResolvedProvider.Name != "" {
+			if tp.ResolvedProvider.Name != "" && b.Metadata["provider"] != tp.ResolvedProvider.Name {
 				queueMeta("provider", tp.ResolvedProvider.Name)
 			}
 			if b.Metadata["resume_flag"] == "" && tp.ResolvedProvider.ResumeFlag != "" {
@@ -934,6 +934,9 @@ func syncSessionBeadsWithSnapshot(
 			}
 			if b.Metadata["resume_command"] == "" && tp.ResolvedProvider.ResumeCommand != "" {
 				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
+			}
+			if tp.ResolvedProvider.Kind != "" && tp.ResolvedProvider.Kind != tp.ResolvedProvider.Name && b.Metadata["provider_kind"] != tp.ResolvedProvider.Kind {
+				queueMeta("provider_kind", tp.ResolvedProvider.Kind)
 			}
 		}
 

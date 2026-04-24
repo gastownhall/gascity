@@ -416,10 +416,12 @@ func buildPreparedStart(
 		delete(runtimeEnv, "GC_ALIAS")
 	}
 	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
-	if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
-		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-	} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
-		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	if strings.TrimSpace(agentCfg.Env["GC_PROVIDER"]) == "" {
+		if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
+			agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+		} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
+			agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+		}
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{

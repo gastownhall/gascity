@@ -41,3 +41,36 @@ func TestBuildStartupEnvelope_UsesTemplateForGroupingAgent(t *testing.T) {
 		t.Fatalf("gc.sessionName = %#v, want t3code--polecat-1", got)
 	}
 }
+
+func TestBuildStartupEnvelope_NamedSessionPublishesTemplatePatchIdentity(t *testing.T) {
+	tp := TemplateParams{
+		TemplateName: "crew",
+		InstanceName: "t3code/gastown.crew",
+		Alias:        "t3code/gastown.crew",
+		SessionName:  "t3code--gastown__crew",
+		EffectiveSessionProvider: "t3bridge",
+		WorkDir:      "/data/projects/gc/.gc/worktrees/t3code/crew/gastown.crew",
+		Command:      "codex",
+		Env: map[string]string{
+			"GC_CITY_PATH":    "/data/projects/gc",
+			"GC_PROVIDER":     "codex",
+			"GC_AGENT":        "t3code/gastown.crew",
+			"GC_TEMPLATE":     "crew",
+			"GC_SESSION_NAME": "t3code--gastown__crew",
+		},
+	}
+
+	raw := buildStartupEnvelope(tp, "prime")
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+
+	gc, ok := envelope["gc"].(map[string]any)
+	if !ok {
+		t.Fatalf("gc section missing: %#v", envelope["gc"])
+	}
+	if got := gc["template"]; got != "crew" {
+		t.Fatalf("gc.template = %#v, want crew", got)
+	}
+}
