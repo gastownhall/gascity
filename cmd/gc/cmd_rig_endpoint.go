@@ -538,7 +538,7 @@ func readCanonicalProjectID(metadataPath string) (string, error) {
 func readDatabaseProjectID(ctx context.Context, db *sql.DB) (string, bool, error) {
 	var projectID string
 	if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&projectID); err != nil {
-		if err == sql.ErrNoRows {
+		if err == sql.ErrNoRows || isMissingDoltMetadataTableError(err) {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("read database _project_id: %w", err)
@@ -548,6 +548,17 @@ func readDatabaseProjectID(ctx context.Context, db *sql.DB) (string, bool, error
 		return "", false, nil
 	}
 	return projectID, true, nil
+}
+
+func isMissingDoltMetadataTableError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1146 {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found: metadata") ||
+		strings.Contains(msg, "table 'metadata' doesn't exist") ||
+		strings.Contains(msg, "no such table: metadata")
 }
 
 type fileSnapshot struct {

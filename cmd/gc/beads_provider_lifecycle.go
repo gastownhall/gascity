@@ -363,6 +363,11 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
+	if cityUsesBdStoreContract(cityPath) && currentManagedDoltPort(cityPath) != "" {
+		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
+			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
+		}
+	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
 	if err := installBeadHooks(dir); err != nil {
 		return fmt.Errorf("install hooks at %s: %w", dir, err)

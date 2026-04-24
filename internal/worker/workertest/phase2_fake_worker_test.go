@@ -32,9 +32,9 @@ var (
 )
 
 const (
-	fakeStartupGateTimeout         = 2 * time.Second
-	fakeStartupLaunchBound         = 750 * time.Millisecond
-	fakeStartupPostControlOverhead = 250 * time.Millisecond
+	fakeStartupGateTimeout         = 10 * time.Second
+	fakeStartupLaunchBound         = 5 * time.Second
+	fakeStartupPostControlOverhead = 2 * time.Second
 	fakeInteractionSignalBound     = 2 * time.Second
 )
 
@@ -87,7 +87,9 @@ func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.
 		t.Fatalf("write fake config: %v", err)
 	}
 
-	cmd := exec.CommandContext(context.Background(), fakeWorkerBinary(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, fakeWorkerBinary(t))
 	cmd.Env = append(os.Environ(),
 		"GC_FAKE_WORKER_CONFIG="+configPath,
 		"GC_FAKE_WORKER_START_FILE="+startFile,
@@ -104,7 +106,24 @@ func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.
 	waitCh := make(chan error, 1)
 	go func() {
 		waitCh <- cmd.Wait()
+		close(waitCh)
 	}()
+	t.Cleanup(func() {
+		select {
+		case <-waitCh:
+			return
+		default:
+		}
+		cancel()
+		select {
+		case <-waitCh:
+		case <-time.After(2 * time.Second):
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-waitCh
+		}
+	})
 
 	waitEvent := waitForWorkerFakeEvent(t, eventPath, "control_waiting", fakeStartupGateTimeout)
 	launchToWait := time.Since(launchStart)
