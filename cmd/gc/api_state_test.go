@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +132,106 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 	if cs.Config() != cfg2 {
 		t.Error("Config() not updated")
+	}
+}
+
+func TestControllerStateMutateAndPokeReloadsControllerAndRefreshesConfig(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test-city", "mayor")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+	cs.pokeCh = make(chan struct{}, 1)
+
+	sockPath := controllerSocketPath(dir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatalf("mkdir controller socket dir: %v", err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen(%q): %v", sockPath, err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	reloadCmd := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		line, err := bufio.NewReader(conn).ReadString('\n')
+		if err == nil {
+			reloadCmd <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("ok\n"))
+	}()
+
+	writeCityTOML(t, dir, "test-city", "mayor", "worker")
+
+	if err := cs.mutateAndPoke(func() error { return nil }); err != nil {
+		t.Fatalf("mutateAndPoke: %v", err)
+	}
+
+	select {
+	case got := <-reloadCmd:
+		if got != "reload" {
+			t.Fatalf("reload command = %q, want reload", got)
+		}
+	default:
+		t.Fatal("expected reload command")
+	}
+
+	select {
+	case <-done:
+	default:
+		t.Fatal("reload listener did not finish")
+	}
+
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("unexpected poke when reload succeeded")
+	default:
+	}
+
+	if got := len(cs.Config().Agents); got != 2 {
+		t.Fatalf("agent count = %d, want 2", got)
+	}
+	if got := cs.Config().Agents[1].Name; got != "worker" {
+		t.Fatalf("second agent = %q, want worker", got)
+	}
+}
+
+func TestControllerStateMutateAndPokeFallsBackToPokeWhenReloadUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := writeCityTOML(t, dir, "test-city", "mayor")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", dir)
+	cs.pokeCh = make(chan struct{}, 1)
+
+	if err := cs.mutateAndPoke(func() error { return nil }); err != nil {
+		t.Fatalf("mutateAndPoke: %v", err)
+	}
+
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("expected poke when reload command failed")
 	}
 }
 

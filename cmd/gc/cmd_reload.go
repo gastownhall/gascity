@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	controllerReloadAcceptTimeout = 5 * time.Second
+	controllerReloadAcceptTimeout = 30 * time.Second
 	sendReloadControlRequestHook  = sendReloadControlRequest
 	reloadUnavailableMessageHook  = reloadUnavailableMessage
 	supervisorAPIBaseURLHook      = supervisorAPIBaseURL

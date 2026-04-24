@@ -603,6 +603,12 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if err := mutate(); err != nil {
 		return err
 	}
+	if cfg, err := loadCityConfig(cs.cityPath); err == nil && cfg != nil {
+		cs.update(cfg, cs.SessionProvider())
+	}
+	if _, err := sendControllerCommandWithReadTimeout(cs.cityPath, "reload", 2*time.Second); err == nil {
+		return nil
+	}
 	cs.Poke()
 	return nil
 }

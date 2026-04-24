@@ -75,8 +75,9 @@ Checks that each active session has:
 - a projected thread session row
 - a provider runtime row
 - the persisted GC_* env keys needed for recovery and reuse
+- the live provider process env keys needed for runtime correctness when a PID is available
 
-This audits T3-persisted GC metadata, not /proc process environments.`,
+This audits both T3-persisted GC metadata and live /proc process environments when the provider runtime reports a PID.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionAuditEnv(dbPath, stdout, stderr) != 0 {
@@ -473,6 +474,7 @@ func auditRequiredEnv(metadata map[string]string, env map[string]string) []strin
 		"GC_CITY",
 		"GC_CITY_PATH",
 		"GC_TEMPLATE",
+		"GC_PROVIDER",
 	}
 	rig := strings.TrimSpace(metadata["gc.rig"])
 	if rig == "" {

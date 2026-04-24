@@ -118,6 +118,9 @@ func providerStateDir(providerName, cityPath string) string {
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
 		script := strings.TrimPrefix(name, "exec:")
+		if isLegacyT3BridgeExecScript(script) {
+			return sessiont3bridge.NewProvider(), nil
+		}
 		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
@@ -149,6 +152,10 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 	default:
 		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
+}
+
+func isLegacyT3BridgeExecScript(script string) bool {
+	return strings.HasSuffix(strings.TrimSpace(script), "gc-session-t3")
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider

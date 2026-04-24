@@ -104,7 +104,105 @@ func TestDecodeIssuedBearerSessionToken_EmptyToken(t *testing.T) {
 	}
 }
 
+func TestResolveWsURLCandidates_PrefersRuntimeStateOverStaleWSURL(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("T3_HOME", filepath.Join(tempHome, ".t3"))
+	t.Setenv("T3_WS_URL", "")
+	if err := os.MkdirAll(filepath.Join(tempHome, ".t3", "dev"), 0o755); err != nil {
+		t.Fatalf("mkdir dev dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempHome, ".t3", "ws-url"), []byte("ws://127.0.0.1:3773/ws"), 0o644); err != nil {
+		t.Fatalf("write ws-url: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(tempHome, ".t3", "dev", "server-runtime.json"),
+		[]byte(`{"origin":"http://127.0.0.1:3774"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write server-runtime.json: %v", err)
+	}
+
+	candidates := resolveWsURLCandidates()
+	if len(candidates) == 0 {
+		t.Fatal("resolveWsURLCandidates returned no candidates")
+	}
+	if candidates[0] != "ws://127.0.0.1:3774/ws" {
+		t.Fatalf("first candidate = %q, want ws://127.0.0.1:3774/ws", candidates[0])
+	}
+}
+
 func TestProcessAlive_ReadyCountsAsAlive(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":        "thread-1",
+				"projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent":       "mayor",
+					"gc.sessionName": "mayor",
+				},
+				"session": map[string]interface{}{
+					"status": "ready",
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	if !p.ProcessAlive("mayor", nil) {
+		t.Fatal("ProcessAlive(ready) = false, want true")
+	}
+}
+
+func TestProcessAlive_ReadyCountsAsAlive_WithResultWrappedSnapshot(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"result": map[string]interface{}{
+			"threads": []interface{}{
+				map[string]interface{}{
+					"id":        "thread-1",
+					"projectId": "project-1",
+					"customMetadata": map[string]interface{}{
+						"gc.agent":       "gascity/gastown.polecat",
+						"gc.sessionName": "gastown__polecat-gc-qghp",
+					},
+					"session": map[string]interface{}{
+						"status": "ready",
+					},
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	if !p.ProcessAlive("gastown__polecat-gc-qghp", nil) {
+		t.Fatal("ProcessAlive(result-wrapped ready) = false, want true")
+	}
+}
+
+func TestIsRunning_UsesCachedSnapshotWithinTTL(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"threads": []interface{}{
 			map[string]interface{}{
@@ -129,8 +227,30 @@ func TestProcessAlive_ReadyCountsAsAlive(t *testing.T) {
 		recentStarts: make(map[string]time.Time),
 	}
 
-	if !p.ProcessAlive("mayor", nil) {
-		t.Fatal("ProcessAlive(ready) = false, want true")
+	if !p.IsRunning("mayor") {
+		t.Fatal("IsRunning(first) = false, want true")
+	}
+	if !p.IsRunning("mayor") {
+		t.Fatal("IsRunning(second) = false, want true")
+	}
+	if calls := server.wsCalls(); calls != 1 {
+		t.Fatalf("ws calls = %d, want 1", calls)
+	}
+}
+
+func TestAuthenticatedWsURL_UsesBearerTokenForNonLoopback(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+	wsURL, headers, err := authenticatedWsURL("wss://remote.example/ws")
+	if err != nil {
+		t.Fatalf("authenticatedWsURL: %v", err)
+	}
+	if wsURL != "wss://remote.example/ws" {
+		t.Fatalf("wsURL = %q, want wss://remote.example/ws", wsURL)
+	}
+	if got := headers.Get("Authorization"); got != "Bearer test-bearer" {
+		t.Fatalf("authorization = %q, want Bearer test-bearer", got)
 	}
 }
 
@@ -288,6 +408,23 @@ func TestDeriveProjectTitle_UsesWorkspaceRootInsteadOfAgentCwd(t *testing.T) {
 	}
 }
 
+func TestResolveActiveProjectID_UsesResultWrappedSnapshot(t *testing.T) {
+	snapshot := map[string]interface{}{
+		"result": map[string]interface{}{
+			"projects": []interface{}{
+				map[string]interface{}{
+					"id":            "project-1",
+					"workspaceRoot": "/data/projects/gascity",
+				},
+			},
+		},
+	}
+
+	if got := resolveActiveProjectID(snapshot, "/data/projects/gascity"); got != "project-1" {
+		t.Fatalf("resolveActiveProjectID(result-wrapped) = %q, want project-1", got)
+	}
+}
+
 func TestWaitForThreadGCMetadata_RecognizesProjectedSessionEnv(t *testing.T) {
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"threads": []interface{}{
@@ -427,6 +564,8 @@ type t3BridgeTestServer struct {
 	authFailureStatus int
 	authFailureBody   string
 	authRequestCount  int
+	wsAuthorization   []string
+	wsRequestCount    int
 }
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
@@ -458,6 +597,10 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 			_ = json.NewEncoder(w).Encode(map[string]string{"token": "test-ws-token"})
 			return
 		}
+		ts.mu.Lock()
+		ts.wsRequestCount++
+		ts.wsAuthorization = append(ts.wsAuthorization, r.Header.Get("Authorization"))
+		ts.mu.Unlock()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("upgrade websocket: %v", err)
@@ -537,6 +680,37 @@ func (ts *t3BridgeTestServer) authCalls() int {
 	return ts.authRequestCount
 }
 
+func (ts *t3BridgeTestServer) lastWSAuthorization() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.wsAuthorization) == 0 {
+		return ""
+	}
+	return ts.wsAuthorization[len(ts.wsAuthorization)-1]
+}
+
+func (ts *t3BridgeTestServer) wsCalls() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.wsRequestCount
+}
+
+func resetBridgeAuthCacheForTest(t *testing.T) {
+	t.Helper()
+	authMu.Lock()
+	cachedBridgeWSToken = ""
+	cachedBridgeWSTokenBaseURL = ""
+	cachedBridgeWSTokenExpiresAt = time.Time{}
+	authMu.Unlock()
+	t.Cleanup(func() {
+		authMu.Lock()
+		cachedBridgeWSToken = ""
+		cachedBridgeWSTokenBaseURL = ""
+		cachedBridgeWSTokenExpiresAt = time.Time{}
+		authMu.Unlock()
+	})
+}
+
 func commandType(payload map[string]interface{}) string {
 	if typ, _ := payload["type"].(string); typ != "" {
 		return typ
@@ -577,7 +751,8 @@ func TestResolveBindingProviderModel_InfersCodexFromStoredGptModel(t *testing.T)
 	}
 }
 
-func TestRPCSnapshot_RetriesTransientBridgeAuthFailure(t *testing.T) {
+func TestRPCSnapshot_UsesUnauthenticatedLoopbackWebSocketUpgrade(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
 	oldDefaults := defaultWSURLCandidates
 	defaultWSURLCandidates = nil
 	t.Cleanup(func() {
@@ -590,8 +765,10 @@ func TestRPCSnapshot_RetriesTransientBridgeAuthFailure(t *testing.T) {
 	server.setAuthFailures(2, http.StatusServiceUnavailable, "warming")
 	defer server.Close()
 
+	t.Setenv("T3_BEARER_TOKEN", "")
 	t.Setenv("T3_HOME", t.TempDir())
 	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
 
 	p := &Provider{
 		watchers:     make(map[string]context.CancelFunc),
@@ -599,10 +776,10 @@ func TestRPCSnapshot_RetriesTransientBridgeAuthFailure(t *testing.T) {
 	}
 
 	if _, err := p.rpcSnapshot(); err != nil {
-		t.Fatalf("rpcSnapshot retry: %v", err)
+		t.Fatalf("rpcSnapshot unauth loopback: %v", err)
 	}
-	if calls := server.authCalls(); calls < 3 {
-		t.Fatalf("auth calls = %d, want at least 3", calls)
+	if calls := server.authCalls(); calls != 0 {
+		t.Fatalf("auth calls = %d, want 0", calls)
 	}
 }
 
