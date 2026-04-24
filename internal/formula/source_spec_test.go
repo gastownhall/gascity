@@ -168,14 +168,13 @@ func TestNamespaceSourceSpecStepPreservesNestedRef(t *testing.T) {
 }
 
 func TestCompileControlSpecBeadsAreNotWorkflowSinks(t *testing.T) {
-	oldFormulaV2 := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(oldFormulaV2) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 	formulaContent := `
 formula = "control-spec-demo"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "review"

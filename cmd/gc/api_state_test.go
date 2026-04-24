@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -643,7 +644,7 @@ func TestControllerStateOrdersIncludeVisibleCityRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(autoDir, "order.toml"), []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -802,6 +803,44 @@ func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 	}
 }
 
+func TestControllerStateApplyBeadEventPokesController(t *testing.T) {
+	cs := &controllerState{
+		pokeCh: make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "agent-runtime",
+		Subject: "bd-123",
+		Payload: json.RawMessage(`{"id":"bd-123"}`),
+	})
+
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("expected bead event to poke controller")
+	}
+}
+
+func TestControllerStateApplyCacheReconcileEventDoesNotPokeController(t *testing.T) {
+	cs := &controllerState{
+		pokeCh: make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "cache-reconcile",
+		Subject: "bd-123",
+		Payload: json.RawMessage(`{"id":"bd-123"}`),
+	})
+
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("cache-reconcile event should not poke controller")
+	default:
+	}
+}
+
 func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) {
 	t.Helper()
 
@@ -833,6 +872,135 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 		editor: configedit.NewEditor(fsys.OSFS{}, tomlPath),
 		pokeCh: make(chan struct{}, 1),
 	}, tomlPath
+}
+
+// TestBuildStores_ExecProviderSetsPerRigEnv is a regression test for #391:
+// when GC_BEADS=exec:<script>, each rig's store must receive distinct
+// GC_BEADS_PREFIX, BEADS_DIR, GC_RIG_ROOT, and GC_RIG env vars.
+// Before the fix (PR #421), all exec stores shared identical env — the
+// last rig's prefix won, causing a create→orphan loop in K8s multi-prefix
+// deployments.
+func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	envDir := t.TempDir()
+
+	// Script that captures identity env vars to a per-rig file on list calls.
+	scriptContent := "#!/bin/sh\n" +
+		"op=\"$1\"; shift\n" +
+		"case \"$op\" in\n" +
+		"  list)\n" +
+		"    env | grep -E '^(GC_BEADS_PREFIX|BEADS_DIR|GC_RIG_ROOT|GC_RIG)=' " +
+		"> \"" + envDir + "/${GC_RIG}.env\"\n" +
+		"    echo '[]'\n" +
+		"    ;;\n" +
+		"  *) exit 2 ;;\n" +
+		"esac\n"
+	scriptPath := filepath.Join(t.TempDir(), "beads-provider.sh")
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o755); err != nil {
+		t.Fatalf("writing provider script: %v", err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+scriptPath)
+
+	rig1Path := filepath.Join(t.TempDir(), "rig-alpha")
+	rig2Path := filepath.Join(t.TempDir(), "rig-bravo")
+	if err := os.MkdirAll(rig1Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rig2Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: rig1Path, Prefix: "al"},
+			{Name: "bravo", Path: rig2Path, Prefix: "br"},
+		},
+	}
+
+	cs := &controllerState{cityPath: cityDir}
+	stores := cs.buildStores(cfg)
+
+	if len(stores) != 2 {
+		t.Fatalf("buildStores returned %d stores, want 2", len(stores))
+	}
+
+	// Trigger each store's script to dump its env.
+	for name, store := range stores {
+		if _, err := store.ListOpen(); err != nil {
+			t.Fatalf("ListOpen(%s): %v", name, err)
+		}
+	}
+
+	// Verify each rig received distinct, correct env vars.
+	type rigExpect struct {
+		rig     string
+		prefix  string
+		rigPath string
+	}
+	for _, tc := range []rigExpect{
+		{"alpha", "al", rig1Path},
+		{"bravo", "br", rig2Path},
+	} {
+		envFile := filepath.Join(envDir, tc.rig+".env")
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("env file for rig %q not created — script was not called with GC_RIG=%s: %v",
+				tc.rig, tc.rig, err)
+		}
+		env := string(data)
+
+		wantPrefix := "GC_BEADS_PREFIX=" + tc.prefix
+		if !strings.Contains(env, wantPrefix) {
+			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantPrefix, env)
+		}
+
+		wantRigRoot := "GC_RIG_ROOT=" + tc.rigPath
+		if !strings.Contains(env, wantRigRoot) {
+			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantRigRoot, env)
+		}
+
+		wantRig := "GC_RIG=" + tc.rig
+		if !strings.Contains(env, wantRig) {
+			t.Errorf("rig %q: want %s in env, got:\n%s", tc.rig, wantRig, env)
+		}
+
+		// Post-#790 contract: BEADS_DIR is intentionally empty for exec
+		// stores (store_target_exec.go). Scope is communicated via
+		// GC_RIG_ROOT / GC_STORE_ROOT instead. Assert we did NOT regress
+		// back to a per-rig BEADS_DIR projection.
+		if strings.Contains(env, "BEADS_DIR="+filepath.Join(tc.rigPath, ".beads")) {
+			t.Errorf("rig %q: BEADS_DIR is projecting a rig-specific path; "+
+				"exec contract (PR #790) requires BEADS_DIR to stay empty so scope "+
+				"is routed via GC_RIG_ROOT/GC_STORE_ROOT. env:\n%s", tc.rig, env)
+		}
+	}
+
+	// Cross-rig assertion: the two rigs must have received different prefixes.
+	// This is the exact regression from #391 — before PR #421, both stores
+	// got identical env, so the last rig's prefix silently won.
+	// Compare extracted GC_BEADS_PREFIX values (not raw env output, whose
+	// line order is non-deterministic due to Go map iteration in exec.Store).
+	extractPrefix := func(envFile string) string {
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "GC_BEADS_PREFIX=") {
+				return strings.TrimPrefix(line, "GC_BEADS_PREFIX=")
+			}
+		}
+		return ""
+	}
+	alphaPrefix := extractPrefix(filepath.Join(envDir, "alpha.env"))
+	bravoPrefix := extractPrefix(filepath.Join(envDir, "bravo.env"))
+	if alphaPrefix == bravoPrefix {
+		t.Errorf("regression: alpha and bravo exec stores received the same "+
+			"GC_BEADS_PREFIX=%q — store identity is not being propagated per rig",
+			alphaPrefix)
+	}
 }
 
 // Verify controllerState satisfies the api.State interface at compile time.

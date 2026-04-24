@@ -146,6 +146,18 @@ type waitFailStore struct {
 	*beads.MemStore
 }
 
+type failMetadataKeyStore struct {
+	*beads.MemStore
+	key string
+}
+
+func (s failMetadataKeyStore) SetMetadata(id, key, value string) error {
+	if key == s.key {
+		return errors.New("set metadata failed")
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
 func (s waitFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Label == WaitBeadLabel || strings.HasPrefix(query.Label, "session:") {
 		return nil, errors.New("wait list failed")
@@ -710,6 +722,78 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
 		}
+	}
+}
+
+func TestCreateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
+		context.Background(),
+		"mayor",
+		"test-city--mayor",
+		"reviewer",
+		"Mayor",
+		"claude",
+		"/tmp",
+		"claude-max",
+		"",
+		nil,
+		ProviderResume{},
+		runtime.Config{},
+		map[string]string{
+			"builtin_ancestor": "claude",
+			"provider_kind":    "claude-max",
+			"session_origin":   "named",
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+	}
+
+	cfg := sp.LastStartConfig("test-city--mayor")
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	if got := cfg.Env["GC_PROVIDER"]; got != "claude" {
+		t.Fatalf("GC_PROVIDER = %q, want claude for %s", got, info.ID)
+	}
+}
+
+func TestAttachUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":     "test-city--worker",
+			"state":            string(StateSuspended),
+			"template":         "worker",
+			"work_dir":         "/tmp",
+			"provider":         "claude-max",
+			"provider_kind":    "claude-max",
+			"builtin_ancestor": "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating session bead: %v", err)
+	}
+
+	if err := mgr.Attach(context.Background(), b.ID, "claude --resume abc", runtime.Config{}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	cfg := sp.LastStartConfig("test-city--worker")
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	if got := cfg.Env["GC_PROVIDER"]; got != "claude" {
+		t.Fatalf("GC_PROVIDER = %q, want claude", got)
 	}
 }
 
@@ -2772,5 +2856,51 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *test
 	}
 	if b.Metadata["state"] != string(StateSuspended) {
 		t.Errorf("state should remain suspended after failed unstrippable fallback, got %q", b.Metadata["state"])
+	}
+}
+
+func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) {
+	store := failMetadataKeyStore{MemStore: beads.NewMemStore(), key: "session_key"}
+	base := runtime.NewFake()
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+	resumeCmd := "claude --dangerously --resume " + sessionKey
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	if err == nil {
+		t.Fatal("Send should fail when stale resume metadata cannot be cleared")
+	}
+	if !strings.Contains(err.Error(), "clearing stale resume metadata session_key") {
+		t.Fatalf("Send error = %v, want stale metadata clear failure", err)
+	}
+
+	b, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead after failure: %v", err)
+	}
+	if b.Metadata["session_key"] == "" {
+		t.Fatal("session_key should remain set after failed metadata clear")
 	}
 }

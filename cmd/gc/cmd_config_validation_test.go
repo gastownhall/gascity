@@ -98,3 +98,30 @@ assignee = "reviewer"
 		t.Fatalf("errs = %v, want none", errs)
 	}
 }
+
+func TestConfigForDisplayUsesResolvedWorkspaceIdentityWhenRawFieldsBlank(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Provider: "claude",
+		},
+		ResolvedWorkspaceName:   "bright-lights",
+		ResolvedWorkspacePrefix: "bl",
+	}
+
+	display := configForDisplay(cfg)
+	if display == nil {
+		t.Fatal("configForDisplay returned nil")
+	}
+	if display.Workspace.Name != "bright-lights" {
+		t.Fatalf("display.Workspace.Name = %q, want %q", display.Workspace.Name, "bright-lights")
+	}
+	if display.Workspace.Prefix != "bl" {
+		t.Fatalf("display.Workspace.Prefix = %q, want %q", display.Workspace.Prefix, "bl")
+	}
+	if cfg.Workspace.Name != "" {
+		t.Fatalf("cfg.Workspace.Name = %q, want original config unchanged", cfg.Workspace.Name)
+	}
+	if cfg.Workspace.Prefix != "" {
+		t.Fatalf("cfg.Workspace.Prefix = %q, want original config unchanged", cfg.Workspace.Prefix)
+	}
+}

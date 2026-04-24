@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -216,62 +215,6 @@ template = "mayor"
 	}
 }
 
-// TestSkillListIncludesBootstrapCatalog is the Phase 3C regression:
-// `gc skill list` must surface bootstrap implicit-import pack skills
-// (e.g., the `core` catalog) so the listing reflects what the
-// materializer delivers. Without this the user sees only city-pack
-// skills and would think core's gc-<topic> skills have gone missing
-// after upgrading from v0.15.0's stub materializer.
-func TestSkillListIncludesBootstrapCatalog(t *testing.T) {
-	clearGCEnv(t)
-	cityDir := t.TempDir()
-	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir)
-	writeCatalogFile(t, cityDir, "skills/city-one/SKILL.md", "city-one")
-
-	// Build a fake GC_HOME with a bootstrap-named implicit import that
-	// resolves to a cache dir with one skill.
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
-
-	// Pick the first real bootstrap pack name so the materializer's
-	// name-filter lets this entry through.
-	bootstrapName := bootstrapPackNameForTest(t)
-	source := "github.com/example/" + bootstrapName
-	commit := bootstrapName + "-commit"
-	cacheDir := globalRepoCachePathForTest(gcHome, source, commit)
-	// Config loading follows implicit imports and requires each pack
-	// have a pack.toml; write a minimal one so the test fixture
-	// doesn't crash the city-config loader.
-	writeCatalogFile(t, cacheDir, "pack.toml", "[pack]\nname = \""+bootstrapName+"\"\nversion = \"0.1.0\"\nschema = 2\n")
-	writeCatalogFile(t, cacheDir, "skills/"+bootstrapName+"-sample/SKILL.md", "bootstrap skill")
-
-	implicitPath := filepath.Join(gcHome, "implicit-import.toml")
-	implicit := "schema = 1\n\n[imports.\"" + bootstrapName + "\"]\nsource = \"" + source + "\"\nversion = \"0.1.0\"\ncommit = \"" + commit + "\"\n"
-	if err := os.MkdirAll(filepath.Dir(implicitPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(implicitPath, []byte(implicit), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"skill", "list"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("gc skill list exited %d: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "city-one") {
-		t.Errorf("city skill missing from output:\n%s", out)
-	}
-	if !strings.Contains(out, bootstrapName+"-sample") {
-		t.Errorf("bootstrap skill missing from output:\n%s", out)
-	}
-	if !strings.Contains(out, bootstrapName) {
-		t.Errorf("bootstrap pack name %q missing from Source column:\n%s", bootstrapName, out)
-	}
-}
-
 func writeCatalogFile(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	path := filepath.Join(dir, rel)
@@ -281,22 +224,4 @@ func writeCatalogFile(t *testing.T, dir, rel, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
-}
-
-// bootstrapPackNameForTest returns a real bootstrap pack name so tests
-// that need to fabricate an implicit-import entry pass the
-// materializer's bootstrap-name filter.
-func bootstrapPackNameForTest(t *testing.T) string {
-	t.Helper()
-	names := bootstrap.PackNames()
-	if len(names) == 0 {
-		t.Fatal("bootstrap.PackNames() returned no names")
-	}
-	return names[0]
-}
-
-// globalRepoCachePathForTest mirrors config.GlobalRepoCachePath without
-// making the test file import config just for this one call.
-func globalRepoCachePathForTest(gcHome, source, commit string) string {
-	return config.GlobalRepoCachePath(gcHome, source, commit)
 }

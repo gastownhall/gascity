@@ -53,7 +53,7 @@ func TestEnrichSessionResponseAcceptsStateAndPeekCapability(t *testing.T) {
 	}, nil, sessionResponseCapabilityHandle{
 		state:  worker.State{Phase: worker.PhaseReady},
 		output: "peek output",
-	}, true)
+	}, true, false)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")

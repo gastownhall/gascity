@@ -4,10 +4,46 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestManagedDoltReadOnlyProbeDoesNotDropProbeDatabase(t *testing.T) {
+	for _, query := range append(append([]string{}, managedDoltReadOnlyProbeStatements[:]...), managedDoltReadOnlyProbeSQL) {
+		assertNoManagedDoltProbeDrop(t, "read-only probe", query)
+	}
+	assertManagedDoltProbeWrites(t, "joined read-only probe", managedDoltReadOnlyProbeSQL)
+	foundWriteStatement := false
+	for _, query := range managedDoltReadOnlyProbeStatements {
+		if strings.Contains(query, "REPLACE INTO __gc_probe.__probe VALUES (1)") {
+			foundWriteStatement = true
+		}
+	}
+	if !foundWriteStatement {
+		t.Fatal("read-only probe statements must include a write to __gc_probe.__probe")
+	}
+}
+
+func assertNoManagedDoltProbeDrop(t *testing.T, label, text string) {
+	t.Helper()
+	dropProbeDatabase := regexp.MustCompile("(?i)\\bDROP\\s+DATABASE\\s+(IF\\s+EXISTS\\s+)?`?__gc_probe`?")
+	dropProbeTable := regexp.MustCompile("(?i)\\bDROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?(`?__gc_probe`?\\.)?`?__probe`?")
+	if dropProbeDatabase.MatchString(text) {
+		t.Fatalf("%s must not drop __gc_probe: %s", label, text)
+	}
+	if dropProbeTable.MatchString(text) {
+		t.Fatalf("%s must keep __gc_probe.__probe stable: %s", label, text)
+	}
+}
+
+func assertManagedDoltProbeWrites(t *testing.T, label, text string) {
+	t.Helper()
+	if !strings.Contains(text, "REPLACE INTO __gc_probe.__probe VALUES (1)") {
+		t.Fatalf("%s must write to __gc_probe.__probe: %s", label, text)
+	}
+}
 
 func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 	binDir := t.TempDir()

@@ -8,6 +8,6 @@
 # Becomes unnecessary when beads supports cross-rig computeBlockedIDs.
 [order]
 description = "Convert satisfied cross-rig blocks deps to related"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 exec = "$PACK_DIR/assets/scripts/cross-rig-deps.sh"

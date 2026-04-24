@@ -64,7 +64,7 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	if p.ReadyDelayMs != 10000 {
 		t.Errorf("ReadyDelayMs = %d, want 10000", p.ReadyDelayMs)
 	}
-	if !p.EmitsPermissionWarning {
+	if !derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = false, want true")
 	}
 }
@@ -108,17 +108,8 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.ReadyDelayMs != 3000 {
 		t.Errorf("ReadyDelayMs = %d, want 3000", p.ReadyDelayMs)
 	}
-	if p.ReadyPromptPrefix != "› " {
-		t.Errorf("ReadyPromptPrefix = %q, want %q", p.ReadyPromptPrefix, "› ")
-	}
-	if p.EmitsPermissionWarning {
+	if derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = true, want false")
-	}
-	if p.ResumeFlag != "resume" {
-		t.Errorf("ResumeFlag = %q, want resume", p.ResumeFlag)
-	}
-	if p.ResumeStyle != "subcommand" {
-		t.Errorf("ResumeStyle = %q, want subcommand", p.ResumeStyle)
 	}
 }
 
@@ -146,12 +137,6 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	if len(p.ProcessNames) != 2 || p.ProcessNames[0] != "gemini" || p.ProcessNames[1] != "node" {
 		t.Errorf("ProcessNames = %v, want [gemini node]", p.ProcessNames)
 	}
-	if p.ResumeFlag != "--resume" {
-		t.Errorf("ResumeFlag = %q, want --resume", p.ResumeFlag)
-	}
-	if p.ResumeStyle != "flag" {
-		t.Errorf("ResumeStyle = %q, want flag", p.ResumeStyle)
-	}
 }
 
 func TestBuiltinProvidersReturnsNewMap(t *testing.T) {
@@ -178,10 +163,10 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	if p.PromptFlag != "" {
 		t.Errorf("PromptFlag = %q, want empty", p.PromptFlag)
 	}
-	if !p.SupportsHooks {
+	if !derefBool(p.SupportsHooks) {
 		t.Error("SupportsHooks = false, want true")
 	}
-	if !p.SupportsACP {
+	if !derefBool(p.SupportsACP) {
 		t.Error("SupportsACP = false, want true")
 	}
 	if p.InstructionsFile != "AGENTS.md" {

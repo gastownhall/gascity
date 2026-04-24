@@ -128,6 +128,64 @@ func TestEdit_ValidationFailure(t *testing.T) {
 	}
 }
 
+func TestEdit_ValidatesRigsAgainstEffectiveHQPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+
+[[rigs]]
+name = "big-lane"
+path = "/tmp/my-rig"
+`)
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, dir, "bright-lights", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.Edit(func(_ *config.City) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), `rig "big-lane": prefix "bl" collides with HQ`) {
+		t.Fatalf("Edit error = %v, want HQ prefix collision", err)
+	}
+}
+
+func TestEditExpanded_ValidatesRigsAgainstEffectiveHQPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+
+[[rigs]]
+name = "big-lane"
+path = "/tmp/my-rig"
+`)
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, dir, "bright-lights", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.EditExpanded(func(_, _ *config.City) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), `rig "big-lane": prefix "bl" collides with HQ`) {
+		t.Fatalf("EditExpanded error = %v, want HQ prefix collision", err)
+	}
+}
+
 func TestSetAgentSuspended_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())
@@ -1069,6 +1127,69 @@ func TestCreateProvider(t *testing.T) {
 	}
 }
 
+// TestCreateProvider_BaseOnlyNoCommand verifies the relaxed validation:
+// a provider with only `base` set is valid — the chain walk inherits
+// the command from the ancestor.
+func TestCreateProvider_BaseOnlyNoCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	base := "builtin:codex"
+	spec := config.ProviderSpec{Base: &base}
+	if err := ed.CreateProvider("codex-max", spec); err != nil {
+		t.Fatalf("CreateProvider with base and no command: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	got, ok := cfg.Providers["codex-max"]
+	if !ok {
+		t.Fatal("provider 'codex-max' not found after create")
+	}
+	if got.Base == nil {
+		t.Fatal("Base pointer is nil after round-trip")
+	}
+	if *got.Base != "builtin:codex" {
+		t.Errorf("*Base = %q, want builtin:codex", *got.Base)
+	}
+	if got.Command != "" {
+		t.Errorf("Command = %q, want empty (inherited)", got.Command)
+	}
+}
+
+// TestCreateProvider_NoBaseNoCommandRejected ensures that a provider
+// that declares neither command nor base is still rejected by
+// validateProviders.
+func TestCreateProvider_NoBaseNoCommandRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateProvider("nothing", config.ProviderSpec{})
+	if err == nil {
+		t.Fatal("expected error for provider without command or base")
+	}
+}
+
+func TestCreateProvider_RejectsInvalidLegacyBuiltinOptionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateProvider("codex-fast", config.ProviderSpec{
+		Command: "codex",
+		OptionDefaults: map[string]string{
+			"permission_mode": "typo",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid option_defaults to be rejected")
+	}
+	if !strings.Contains(err.Error(), `option_defaults key "permission_mode"`) {
+		t.Fatalf("error = %v, want option_defaults validation detail", err)
+	}
+}
+
 func TestCreateProvider_Duplicate(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithProvider())
@@ -1314,12 +1435,25 @@ func TestSetOrderOverride(t *testing.T) {
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	enabled := false
+	trigger := "cooldown"
 	err := ed.SetOrderOverride(config.OrderOverride{
 		Name:    "health-check",
 		Enabled: &enabled,
+		Trigger: &trigger,
 	})
 	if err != nil {
 		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got := string(raw); got != "" && strings.Contains(got, "gate =") {
+		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	}
+	if !strings.Contains(string(raw), `trigger = "cooldown"`) {
+		t.Fatalf("city.toml missing canonical trigger key:\n%s", string(raw))
 	}
 
 	cfg := readTOML(t, path)
@@ -1333,6 +1467,9 @@ func TestSetOrderOverride(t *testing.T) {
 	if ov.Enabled == nil || *ov.Enabled {
 		t.Error("expected enabled=false")
 	}
+	if ov.Trigger == nil || *ov.Trigger != "cooldown" {
+		t.Fatalf("override trigger = %#v, want cooldown", ov.Trigger)
+	}
 }
 
 func TestSetOrderOverride_UpdateExisting(t *testing.T) {
@@ -1341,9 +1478,11 @@ func TestSetOrderOverride_UpdateExisting(t *testing.T) {
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	disabled := false
+	trigger := "cooldown"
 	_ = ed.SetOrderOverride(config.OrderOverride{
 		Name:    "health-check",
 		Enabled: &disabled,
+		Trigger: &trigger,
 	})
 
 	enabled := true
@@ -1359,8 +1498,47 @@ func TestSetOrderOverride_UpdateExisting(t *testing.T) {
 	if len(cfg.Orders.Overrides) != 1 {
 		t.Fatalf("expected 1 override, got %d", len(cfg.Orders.Overrides))
 	}
-	if cfg.Orders.Overrides[0].Enabled == nil || !*cfg.Orders.Overrides[0].Enabled {
+	ov := cfg.Orders.Overrides[0]
+	if ov.Enabled == nil || !*ov.Enabled {
 		t.Error("expected enabled=true after update")
+	}
+	if ov.Trigger != nil {
+		t.Fatalf("expected trigger to be replaced away, got %#v", ov.Trigger)
+	}
+}
+
+func TestMergeOrderOverridePreservesExistingTriggerOnPartialUpdate(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	disabled := false
+	trigger := "cooldown"
+	_ = ed.SetOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &disabled,
+		Trigger: &trigger,
+	})
+
+	enabled := true
+	err := ed.MergeOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("MergeOrderOverride (partial update): %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(cfg.Orders.Overrides))
+	}
+	ov := cfg.Orders.Overrides[0]
+	if ov.Enabled == nil || !*ov.Enabled {
+		t.Fatal("expected enabled=true after partial update")
+	}
+	if ov.Trigger == nil || *ov.Trigger != "cooldown" {
+		t.Fatalf("trigger = %#v, want cooldown", ov.Trigger)
 	}
 }
 
@@ -1393,5 +1571,38 @@ func TestDeleteOrderOverride_NotFound(t *testing.T) {
 	err := ed.DeleteOrderOverride("nonexistent", "")
 	if err == nil {
 		t.Fatal("expected error for deleting nonexistent override")
+	}
+}
+
+func TestMergeOrderOverrideNormalizesLegacyGateToTriggerOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity()+`
+[orders]
+
+[[orders.overrides]]
+name = "health-check"
+gate = "cooldown"
+`)
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	enabled := true
+	err := ed.MergeOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(raw)
+	if strings.Contains(got, "gate =") {
+		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	}
+	if !strings.Contains(got, `trigger = "cooldown"`) {
+		t.Fatalf("city.toml missing canonical trigger after enabled-only update:\n%s", got)
 	}
 }

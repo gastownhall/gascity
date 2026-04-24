@@ -259,7 +259,7 @@ Bead lifecycle events are recorded on the event bus. The event types
 - `bead.updated` -- emitted on updates
 - `convoy.closed` -- emitted when a convoy auto-closes
 
-These events feed into order gates. An `event` gate type triggers
+These events feed into order triggers. An `event` trigger type fires
 when a specific event type occurs, enabling reactive order chains.
 
 ### Convoy auto-close
@@ -384,7 +384,7 @@ maps to closed, in_progress maps to in_progress, everything else to open.
   and pools, including container expansion
 - [Formulas architecture](formulas.md) -- formula parsing, molecule
   instantiation, and step dependency resolution
-- [Orders architecture](orders.md) -- gate conditions, cooldown
+- [Orders architecture](orders.md) -- trigger conditions, cooldown
   tracking via order-run labels, and wisp dispatch
 - [Messaging architecture](messaging.md) -- how mail composes on top of
   beads (messages are beads with type "message")

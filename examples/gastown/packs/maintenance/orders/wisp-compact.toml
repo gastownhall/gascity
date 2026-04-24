@@ -1,5 +1,5 @@
 [order]
 description = "TTL-based cleanup of expired ephemeral beads (wisps)"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1h"
 exec = "$PACK_DIR/assets/scripts/wisp-compact.sh"

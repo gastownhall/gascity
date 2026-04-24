@@ -66,6 +66,591 @@ func TestStart(t *testing.T) {
 	}
 }
 
+func TestStart_ReturnsDialogDismissalError(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start) cat > /dev/null ;;
+  stop) echo "$*" >> "`+stopFile+`" ;;
+  peek) echo "Bypass Permissions mode" ;;
+  send-keys) echo "failed to dismiss dialog" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err == nil {
+		t.Fatal("Start succeeded, want dialog dismissal error")
+	}
+	if !strings.Contains(err.Error(), "failed to dismiss dialog") {
+		t.Fatalf("Start error = %v, want dialog dismissal context", err)
+	}
+	data, readErr := os.ReadFile(stopFile)
+	if readErr != nil {
+		t.Fatalf("read stop log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "stop test-sess") {
+		t.Fatalf("stop log = %q, want cleanup stop call", string(data))
+	}
+}
+
+func TestStartPrefersWatchStartupOverPeekPolling(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"user@host $"}'
+    ;;
+  peek)
+    echo "peek" >> "`+peekFile+`"
+    echo "user@host $"
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if data, err := os.ReadFile(peekFile); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("peek should not be called when watch-startup is supported, got %q", string(data))
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read peek log: %v", err)
+	}
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal", string(data))
+	}
+}
+
+func TestStartHandlesDelayedBypassDialogAfterInitialWatchPrompt(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"user@host $"}'
+    sleep 0.02
+    printf '%s\n' '{"content":"Bypass Permissions mode"}'
+    ;;
+  peek)
+    echo "peek" >> "`+peekFile+`"
+    echo "user@host $"
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+	`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if _, err := os.ReadFile(peekFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read peek log: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want delayed bypass dismissal", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenStartupWatchClosesBeforeReadinessAfterDialog(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    ;;
+  peek)
+    echo "$*" >> "`+peekFile+`"
+    if [ "$(wc -l < "`+sendKeysFile+`" 2>/dev/null || echo 0)" -ge 2 ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+	`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	peekData, err := os.ReadFile(peekFile)
+	if err != nil {
+		t.Fatalf("read peek log: %v", err)
+	}
+	if strings.TrimSpace(string(peekData)) == "" {
+		t.Fatalf("peek log = %q, want fallback peek calls after watch closes early", string(peekData))
+	}
+
+	sendData, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	for _, want := range []string{
+		"send-keys test-sess Enter",
+		"send-keys test-sess Down",
+	} {
+		if !strings.Contains(string(sendData), want) {
+			t.Fatalf("send-keys log = %q, want %q", string(sendData), want)
+		}
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    exit 2
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want separate Down and Enter dismissal calls", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupDoesNotEmitInitialEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    sleep 5
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Do you trust the contents of this directory?"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	oldTimeout := startupWatchFirstEventTimeout
+	startupWatchFirstEventTimeout = func() time.Duration { return 50 * time.Millisecond }
+	t.Cleanup(func() {
+		startupWatchFirstEventTimeout = oldTimeout
+	})
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal after peek fallback", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupLeavesStdoutOpenWithoutInitialEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    sh -c 'sleep 5' &
+    exit 0
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Do you trust the contents of this directory?"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	oldTimeout := startupWatchFirstEventTimeout
+	startupWatchFirstEventTimeout = func() time.Duration { return 50 * time.Millisecond }
+	t.Cleanup(func() {
+		startupWatchFirstEventTimeout = oldTimeout
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung while cleaning up a no-event watch-startup child")
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal after peek fallback", string(data))
+	}
+}
+
+func TestStartReturnsPromptlyWhenWatchStartupFirstEventIsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' 'not-json'
+    sleep 5
+    ;;
+  stop)
+    echo "$*" >> "`+stopFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start succeeded, want startup watcher decode error")
+		}
+		if !strings.Contains(err.Error(), "startup watcher decode") {
+			t.Fatalf("Start error = %v, want startup watcher decode context", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung after malformed first watch-startup event")
+	}
+
+	data, err := os.ReadFile(stopFile)
+	if err != nil {
+		t.Fatalf("read stop log: %v", err)
+	}
+	if !strings.Contains(string(data), "stop test-sess") {
+		t.Fatalf("stop log = %q, want cleanup stop call", string(data))
+	}
+}
+
+func TestStartStartupWatchReturnsMalformedFirstEventError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  watch-startup)
+    printf '%s\n' 'not-json'
+    sleep 5
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	snapshots, closeWatch, ok, err := p.startStartupWatch(context.Background(), "test-sess", time.Second)
+	if err == nil {
+		t.Fatal("startStartupWatch succeeded, want malformed first event error")
+	}
+	if !strings.Contains(err.Error(), "startup watcher decode") {
+		t.Fatalf("startStartupWatch error = %v, want startup watcher decode context", err)
+	}
+	if ok {
+		t.Fatal("startStartupWatch ok = true, want false on malformed first event")
+	}
+	if snapshots != nil {
+		t.Fatal("startStartupWatch returned snapshots, want nil on malformed first event")
+	}
+	if closeWatch != nil {
+		t.Fatal("startStartupWatch returned closeWatch, want nil on malformed first event")
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupFailsAfterFirstEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"starting up"}'
+    printf '%s\n' 'not-json'
+    exit 1
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want peek fallback dismissal", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupOnlyEmitsIrrelevantSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"starting up"}'
+    sleep 5
+    ;;
+  peek)
+    echo "$*" >> "`+peekFile+`"
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung while falling back from an irrelevant watch-startup snapshot")
+	}
+
+	peekData, err := os.ReadFile(peekFile)
+	if err != nil {
+		t.Fatalf("read peek log: %v", err)
+	}
+	if strings.TrimSpace(string(peekData)) == "" {
+		t.Fatalf("peek log = %q, want fallback peek call", string(peekData))
+	}
+
+	sendData, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(sendData), "send-keys test-sess Down") ||
+		!strings.Contains(string(sendData), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want fallback dismissal", string(sendData))
+	}
+}
+
+func TestStartDoesNotHangWhenWatchStartupKeepsStreamingPromptSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    i=0
+    while [ "$i" -lt 2000 ]; do
+      printf '%s\n' '{"content":"user@host $"}'
+      i=$((i+1))
+    done
+    sleep 5
+    ;;
+  send-keys)
+    ;;
+  peek)
+    echo "peek should not be used"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(context.Background(), "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() hung while cleaning up watch-startup stream")
+	}
+}
+
 func TestStartWrapsDuplicateSessionError(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

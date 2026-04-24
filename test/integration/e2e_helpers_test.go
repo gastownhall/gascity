@@ -4,17 +4,22 @@ package integration
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"text/template"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -120,33 +125,27 @@ func (r *e2eReport) hasKey(key string) bool {
 // renderE2EToml generates a full single-file template for gc init --file.
 func renderE2EToml(city e2eCity) string {
 	var b strings.Builder
-
 	writeE2EWorkspaceSection(&b, city.Workspace)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
 	writeE2EProviderSections(&b, city.Providers)
 	writeE2EAgentSections(&b, city.Agents)
 	writeE2ENamedSessionSections(&b, city.Agents)
-
 	return b.String()
 }
 
 func renderE2ECityRuntimeToml(city e2eCity) string {
 	var b strings.Builder
-
 	writeE2EWorkspaceSection(&b, city.Workspace)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
-
 	return b.String()
 }
 
 func renderE2EPackToml(city e2eCity) string {
 	var b strings.Builder
-
 	fmt.Fprintf(&b, "[pack]\nname = %s\nschema = 2\n", quote(city.Workspace.Name))
 	writeE2EProviderSections(&b, city.Providers)
 	writeE2EAgentSections(&b, city.Agents)
 	writeE2ENamedSessionSections(&b, city.Agents)
-
 	return b.String()
 }
 
@@ -264,11 +263,13 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 	t.Helper()
 
 	packPath := filepath.Join(cityDir, "pack.toml")
-	if err := os.WriteFile(packPath, []byte(renderE2EPackToml(city)), 0o644); err != nil {
-		t.Fatalf("writing pack.toml: %v", err)
-	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	writeFileAtomic(t, tomlPath, []byte(renderE2ECityRuntimeToml(city)))
+	if _, err := os.Stat(packPath); err == nil {
+		writeFileAtomic(t, packPath, []byte(renderE2EPackToml(city)))
+		writeFileAtomic(t, tomlPath, []byte(renderE2ECityRuntimeToml(city)))
+		return
+	}
+	writeFileAtomic(t, tomlPath, []byte(renderE2EToml(city)))
 }
 
 func writeE2ETomlFile(t *testing.T, tomlPath string, city e2eCity) {
@@ -390,7 +391,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	copyE2EScripts(t, cityDir)
 
 	// gc init — seed the city directly from the intended E2E config rather than
-	// the default tutorial scaffold, which brings along unrelated hooks/packs.
+	// the default minimal scaffold, which brings along unrelated hooks/packs.
 	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
@@ -407,6 +408,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 		}
 		waitForAgentRunning(t, cityDir, qualifiedName, 15*time.Second)
 	}
+	waitForControllerReady(t, cityDir, 15*time.Second)
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
@@ -569,6 +571,75 @@ func waitForAgentRunning(t *testing.T, cityDir, agentName string, timeout time.D
 	}
 	out, _ := gc(cityDir, "session", "list", "--state", "all")
 	t.Fatalf("agent %q not active within %s\nsessions:\n%s", agentName, timeout, out)
+}
+
+// waitForControllerReady waits until the standalone controller both holds the
+// controller lock and responds on its control socket. gc start rejects a
+// running standalone controller by probing the socket first, so the helper
+// must wait for the same readiness condition to avoid CI races.
+func waitForControllerReady(t *testing.T, cityDir string, timeout time.Duration) {
+	t.Helper()
+	lockPath := filepath.Join(cityDir, ".gc", "controller.lock")
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		lockHeld, err := controllerLockHeld(lockPath)
+		if err == nil && lockHeld && controllerAlive(cityDir) != 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("controller was not ready within %s: lock=%s socket=%s", timeout, lockPath, controllerSocketPath(cityDir))
+}
+
+func controllerLockHeld(lockPath string) (bool, error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // best-effort probe cleanup
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+			return true, nil
+		}
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort probe cleanup
+	return false, nil
+}
+
+const controllerSocketPathLimit = 100
+
+func controllerSocketPath(cityPath string) string {
+	canonicalCityPath := pathutil.NormalizePathForCompare(cityPath)
+	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
+	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
+	if len(canonicalLegacy) <= controllerSocketPathLimit {
+		return legacy
+	}
+	sum := sha256.Sum256([]byte(canonicalCityPath))
+	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
+}
+
+func controllerAlive(cityPath string) int {
+	sockPath := controllerSocketPath(cityPath)
+	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	if err != nil {
+		return 0
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	conn.Write([]byte("ping\n"))
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck // best-effort deadline
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != nil || n == 0 {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if err != nil {
+		return 0
+	}
+	return pid
 }
 
 func qualifiedE2EAgentName(a e2eAgent) string {

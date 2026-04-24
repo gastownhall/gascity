@@ -187,10 +187,9 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 	}
 }
 
-// TestE2E_StartRejectsRunningCity verifies that gc start
-// returns an explicit error when the city already has a running standalone
-// controller.
-func TestE2E_StartRejectsRunningCity(t *testing.T) {
+// TestE2E_StartIsIdempotentForSupervisorManagedCity verifies that gc start
+// succeeds when the city is already running under the supervisor.
+func TestE2E_StartIsIdempotentForSupervisorManagedCity(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{Name: "idem", StartCommand: e2eReportScript()},
@@ -201,14 +200,14 @@ func TestE2E_StartRejectsRunningCity(t *testing.T) {
 	// Wait for initial report so the city is fully up.
 	waitForReport(t, cityDir, "idem", e2eDefaultTimeout())
 
-	// Start again — the current contract is an explicit error because the
-	// standalone controller is already running.
+	// Start again. setupE2ECity creates a supervisor-managed city, and
+	// re-registering an already managed city is intentionally idempotent.
 	out, err := gc("", "start", cityDir)
-	if err == nil {
-		t.Fatal("gc start (second) unexpectedly succeeded")
+	if err != nil {
+		t.Fatalf("gc start (second) failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "standalone controller already running") {
-		t.Fatalf("gc start (second) output = %q, want standalone controller error", out)
+	if !strings.Contains(out, "City started under supervisor.") {
+		t.Fatalf("gc start (second) output = %q, want supervisor start success", out)
 	}
 }
 

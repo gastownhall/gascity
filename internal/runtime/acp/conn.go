@@ -43,21 +43,28 @@ type sessionConn struct {
 
 	// pending tracks response waiters by request ID.
 	pending map[int64]chan JSONRPCMessage
+	idleCh  chan struct{}
 }
 
 // newSessionConn creates a sessionConn with the given buffer size.
-func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSize int) *sessionConn {
+func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSize int, done chan struct{}) *sessionConn {
 	if bufSize <= 0 {
 		bufSize = defaultOutputBufferLines
 	}
-	return &sessionConn{
+	if done == nil {
+		done = make(chan struct{})
+	}
+	sc := &sessionConn{
 		cmd:          cmd,
 		stdin:        stdin,
-		done:         make(chan struct{}),
+		done:         done,
 		listener:     lis,
 		outputBufMax: bufSize,
 		pending:      make(map[int64]chan JSONRPCMessage),
+		idleCh:       make(chan struct{}),
 	}
+	close(sc.idleCh)
+	return sc
 }
 
 // readLoop reads JSON-RPC messages from the agent's stdout and dispatches them.
@@ -107,7 +114,7 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		}
 		// Clear busy state if this is the active prompt response.
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
-			sc.activePromptID = 0
+			sc.markIdleLocked()
 		}
 		sc.mu.Unlock()
 		if ok {
@@ -199,7 +206,7 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 // setActivePrompt marks the given request ID as the active prompt.
 func (sc *sessionConn) setActivePrompt(id int64) {
 	sc.mu.Lock()
-	sc.activePromptID = id
+	sc.markBusyLocked(id)
 	sc.mu.Unlock()
 }
 
@@ -207,10 +214,18 @@ func (sc *sessionConn) setActivePrompt(id int64) {
 // Safe to call multiple times — closed channels are deleted from the map.
 func (sc *sessionConn) drainPending() {
 	sc.mu.Lock()
-	sc.activePromptID = 0
+	sc.markIdleLocked()
 	for id, ch := range sc.pending {
 		close(ch)
 		delete(sc.pending, id)
+	}
+	sc.mu.Unlock()
+}
+
+func (sc *sessionConn) clearActivePrompt(id int64) {
+	sc.mu.Lock()
+	if id == 0 || sc.activePromptID == id {
+		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
 }
@@ -222,19 +237,53 @@ func (sc *sessionConn) isBusy() bool {
 	return sc.activePromptID != 0
 }
 
-// waitIdle polls until the agent is not busy or the timeout expires.
+func (sc *sessionConn) ensureIdleChannelLocked() {
+	if sc.idleCh == nil {
+		sc.idleCh = make(chan struct{})
+		if sc.activePromptID == 0 {
+			close(sc.idleCh)
+		}
+	}
+}
+
+func (sc *sessionConn) markBusyLocked(id int64) {
+	sc.ensureIdleChannelLocked()
+	if sc.activePromptID == 0 {
+		sc.idleCh = make(chan struct{})
+	}
+	sc.activePromptID = id
+}
+
+func (sc *sessionConn) markIdleLocked() {
+	sc.ensureIdleChannelLocked()
+	sc.activePromptID = 0
+	select {
+	case <-sc.idleCh:
+	default:
+		close(sc.idleCh)
+	}
+}
+
+// waitIdle blocks until the agent is not busy or the timeout expires.
 // Returns true if the agent became idle, false on timeout.
 func (sc *sessionConn) waitIdle(timeout time.Duration) bool {
-	deadline := time.After(timeout)
-	for {
-		if !sc.isBusy() {
-			return true
-		}
-		select {
-		case <-deadline:
-			return false
-		case <-time.After(100 * time.Millisecond):
-		}
+	sc.mu.Lock()
+	sc.ensureIdleChannelLocked()
+	if sc.activePromptID == 0 {
+		sc.mu.Unlock()
+		return true
+	}
+	idleCh := sc.idleCh
+	sc.mu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-idleCh:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 

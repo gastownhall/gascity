@@ -382,18 +382,18 @@ version = "1.0.0"
 	}
 }
 
-func TestExpandPacks_RejectsUnknownPackTomlFields(t *testing.T) { //nolint:misspell // intentional typo in test data
+func TestExpandPacks_RejectsUnknownPackTomlFields(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/bad/pack.toml", `
 [pack]
 name = "bad"
-schema = 2
-schemla = 2
+schema = 1
+scheam = 1
 `)
 
 	cfg := &City{
 		Rigs: []Rig{
-			{Name: "hello-world", Path: "/home/user/hello-world", Includes: []string{"packs/bad"}},
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/bad"}},
 		},
 	}
 
@@ -401,33 +401,68 @@ schemla = 2
 	if err == nil {
 		t.Fatal("expected error for unknown pack.toml field")
 	}
-	if !strings.Contains(err.Error(), `unknown field "pack.schemla"`) {
-		t.Fatalf("error = %v, want unknown field detail for pack.schemla", err)
+	if !strings.Contains(err.Error(), `unknown field "pack.scheam"`) {
+		t.Fatalf("error should mention unknown pack field, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), `did you mean "schema"`) {
-		t.Fatalf("error = %v, want schema suggestion", err)
+		t.Fatalf("error should suggest schema, got: %v", err)
 	}
 }
 
-func TestLoadWithIncludes_RejectsUnknownRootPackTomlFields(t *testing.T) {
+func TestExpandPacks_AcceptsPackDescription(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "city.toml", `
-[workspace]
-name = "test"
-`)
-	writeFile(t, dir, "pack.toml", `
+	writeFile(t, dir, "packs/described/pack.toml", `
 [pack]
-name = "test"
+name = "described"
 schema = 2
-description = "silently accepted before issue 783"
+description = "Human-readable pack summary"
+
+[[agent]]
+name = "worker"
 `)
 
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
-	if err == nil {
-		t.Fatal("expected error for unknown root pack.toml field")
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/described"}},
+		},
 	}
-	if !strings.Contains(err.Error(), `unknown field "pack.description"`) {
-		t.Fatalf("error = %v, want unknown field detail for pack.description", err)
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks rejected [pack].description: %v", err)
+	}
+}
+
+func TestExpandPacks_RejectsUnknownPackImportFields(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/helper/pack.toml", `
+[pack]
+name = "helper"
+schema = 1
+`)
+	writeFile(t, dir, "packs/bad/pack.toml", `
+[pack]
+name = "bad"
+schema = 2
+
+[imports.helper]
+sorce = "../helper"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/bad"}},
+		},
+	}
+
+	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown import field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "imports.helper.sorce"`) {
+		t.Fatalf("error should mention unknown import field, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `did you mean "source"`) {
+		t.Fatalf("error should suggest source, got: %v", err)
 	}
 }
 
@@ -1523,7 +1558,7 @@ name = "witness"
 	}
 }
 
-func TestExpandPacks_SessionSetupScriptAdjusted(t *testing.T) {
+func TestExpandPacks_SessionSetupScriptPreserved(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `
 [pack]
@@ -1546,8 +1581,8 @@ session_setup_script = "scripts/setup.sh"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// session_setup_script should be adjusted relative to pack dir → city root.
-	want := "packs/gt/scripts/setup.sh"
+	// session_setup_script stays pack-local and resolves later via SourceDir.
+	want := "scripts/setup.sh"
 	if cfg.Agents[0].SessionSetupScript != want {
 		t.Errorf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
 	}
@@ -3123,12 +3158,14 @@ session_setup_script = "scripts/theme.sh"
 	if a.Name != "worker" {
 		t.Errorf("name = %q, want worker", a.Name)
 	}
-	// session_setup_script should be set (resolved path).
+	// session_setup_script should be resolved against the patch pack since
+	// patches do not retain their own SourceDir at runtime.
 	if a.SessionSetupScript == "" {
 		t.Fatal("SessionSetupScript not set by patch")
 	}
-	if !strings.Contains(a.SessionSetupScript, "scripts/theme.sh") {
-		t.Errorf("SessionSetupScript = %q, want to contain scripts/theme.sh", a.SessionSetupScript)
+	wantScript := filepath.Join(dir, "packs/overlay/scripts/theme.sh")
+	if a.SessionSetupScript != wantScript {
+		t.Errorf("SessionSetupScript = %q, want %q", a.SessionSetupScript, wantScript)
 	}
 	// Nudge should be inherited from base (not cleared by patch).
 	if a.Nudge != "do work" {
@@ -3169,7 +3206,7 @@ overlay_dir = "overlays/custom"
 	}
 	a := cfg.Agents[0]
 	// Paths should be resolved relative to the overlay pack dir.
-	wantScript := "packs/overlay/scripts/neon.sh"
+	wantScript := filepath.Join(dir, "packs/overlay/scripts/neon.sh")
 	if a.SessionSetupScript != wantScript {
 		t.Errorf("SessionSetupScript = %q, want %q", a.SessionSetupScript, wantScript)
 	}
@@ -3369,6 +3406,88 @@ name = "worker"
 	}
 	if entries[1].Entry.Description != "" {
 		t.Errorf("second Entry.Description = %q, want empty", entries[1].Entry.Description)
+	}
+
+	// Fix field defaults to empty when not declared (diagnostic-only check).
+	if entries[0].Entry.Fix != "" {
+		t.Errorf("Entry.Fix = %q, want empty when not declared", entries[0].Entry.Fix)
+	}
+}
+
+func TestPackDoctorEntriesParsesFixField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", `
+[pack]
+name = "fixable"
+schema = 1
+
+[[doctor]]
+name = "check-with-fix"
+script = "doctor/check.sh"
+fix = "doctor/fix.sh"
+description = "Check that opts into auto-remediation"
+
+[[doctor]]
+name = "check-no-fix"
+script = "doctor/check2.sh"
+`)
+
+	entries := LoadPackDoctorEntries(fsys.OSFS{}, []string{dir})
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	if entries[0].Entry.Fix != "doctor/fix.sh" {
+		t.Errorf("Entry.Fix = %q, want %q", entries[0].Entry.Fix, "doctor/fix.sh")
+	}
+	if entries[1].Entry.Fix != "" {
+		t.Errorf("Entry.Fix without fix field = %q, want empty", entries[1].Entry.Fix)
+	}
+}
+
+func TestLegacyPackDoctorsRejectsEscapingFixPaths(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		fix  string
+	}{
+		{name: "absolute", fix: filepath.Join(dir, "outside.sh")},
+		{name: "relative escape", fix: "../../../outside.sh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{{
+				Name:   "check",
+				Script: "doctor/check.sh",
+				Fix:    tt.fix,
+			}}, filepath.Join(dir, "pack"), "pack")
+			if err == nil {
+				t.Fatal("legacyPackDoctors error = nil, want containment error")
+			}
+			if !strings.Contains(err.Error(), "doctor check fix") {
+				t.Fatalf("legacyPackDoctors error = %v, want check fix context", err)
+			}
+		})
+	}
+}
+
+func TestLegacyPackDoctorsRejectsMissingFixScript(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{{
+		Name:   "check",
+		Script: "doctor/check.sh",
+		Fix:    "doctor/missing-fix.sh",
+	}}, packDir, "pack")
+	if err == nil {
+		t.Fatal("legacyPackDoctors error = nil, want missing fix script error")
+	}
+	if !strings.Contains(err.Error(), "doctor check fix") {
+		t.Fatalf("legacyPackDoctors error = %v, want check fix context", err)
 	}
 }
 

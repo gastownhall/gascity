@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,7 +14,19 @@ var (
 	startupDialogAcceptDelay = 500 * time.Millisecond
 	bypassDialogConfirmDelay = 200 * time.Millisecond
 	startupDialogPeekLines   = 120
+	// When a startup stream emits only irrelevant snapshots and then goes quiet,
+	// fall back instead of waiting the full dialog timeout.
+	startupDialogStreamIdleGrace = 100 * time.Millisecond
+	// Give streamed startup snapshots a short chance to surface a follow-on
+	// dialog after an initial shell prompt appears.
+	startupDialogStreamReadyGrace = 100 * time.Millisecond
 )
+
+// StartupDialogTimeout returns the current timeout budget used by the shared
+// startup dialog helpers. Tests override the backing variable directly.
+func StartupDialogTimeout() time.Duration {
+	return dialogPollTimeout
+}
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Handles (in order):
@@ -31,6 +44,88 @@ func AcceptStartupDialogs(
 	sendKeys func(keys ...string) error,
 ) error {
 	return AcceptStartupDialogsWithTimeout(ctx, dialogPollTimeout, peek, sendKeys)
+}
+
+// AcceptStartupDialogsFromStream dismisses known startup dialogs using an
+// event stream of full-screen snapshots instead of repeated peeks.
+func AcceptStartupDialogsFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) error {
+	_, err := AcceptStartupDialogsFromStreamWithStatus(ctx, timeout, snapshots, sendKeys)
+	return err
+}
+
+// AcceptStartupDialogsFromStreamWithStatus dismisses known startup dialogs
+// using an event stream of full-screen snapshots instead of repeated peeks
+// and reports whether the stream observed readiness or a known dialog state.
+func AcceptStartupDialogsFromStreamWithStatus(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots <-chan string,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	stream := newReplayableSnapshotCursor(snapshots)
+	observed := false
+	handledDialog := false
+	trackingSendKeys := func(keys ...string) error {
+		handledDialog = true
+		return sendKeys(keys...)
+	}
+
+	phaseObserved, err := acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("workspace trust dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptBypassPermissionsWarningFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("bypass permissions warning: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptCustomAPIKeyDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("custom API key dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = dismissRateLimitDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("rate limit dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if handledDialog {
+		promptObserved, err := acceptDialogFromStream(ctx, startupDialogStreamReadyGrace, stream, nil, streamDialogSpec{
+			ready: containsPromptIndicator,
+		})
+		if err != nil {
+			return observed, fmt.Errorf("startup readiness: %w", err)
+		}
+		if !promptObserved {
+			return false, nil
+		}
+		observed = true
+	}
+	return observed, nil
 }
 
 // AcceptStartupDialogsWithTimeout dismisses known startup dialogs using the
@@ -108,11 +203,32 @@ func acceptWorkspaceTrustDialog(
 	return nil
 }
 
+func acceptWorkspaceTrustDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsWorkspaceTrustDialog,
+		matchKeys:   []string{"Enter"},
+		matchDelay:  startupDialogAcceptDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostTrustStartupDialog,
+	})
+}
+
 func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
 		strings.Contains(content, "Do you trust the files in this folder?")
+}
+
+func containsPostTrustStartupDialog(content string) bool {
+	return strings.Contains(content, "Bypass Permissions mode") ||
+		containsCustomAPIKeyDialog(content) ||
+		containsRateLimitDialog(content)
 }
 
 // acceptBypassPermissionsWarning dismisses the Claude Code bypass permissions
@@ -152,6 +268,25 @@ func acceptBypassPermissionsWarning(
 	return nil
 }
 
+func acceptBypassPermissionsWarningFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       func(content string) bool { return strings.Contains(content, "Bypass Permissions mode") },
+		matchKeys:   []string{"Down", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostBypassStartupDialog,
+	})
+}
+
+func containsPostBypassStartupDialog(content string) bool {
+	return containsCustomAPIKeyDialog(content) || containsRateLimitDialog(content)
+}
+
 // acceptCustomAPIKeyDialog dismisses Claude's API-key confirmation prompt.
 // In headless CI, Claude detects the injected ANTHROPIC_API_KEY and asks if it
 // should use it. The menu defaults to "No (recommended)", so press Up then
@@ -188,6 +323,21 @@ func acceptCustomAPIKeyDialog(
 		sleep(ctx, dialogPollInterval)
 	}
 	return nil
+}
+
+func acceptCustomAPIKeyDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsCustomAPIKeyDialog,
+		matchKeys:   []string{"Up", "Enter"},
+		matchDelay:  bypassDialogConfirmDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsRateLimitDialog,
+	})
 }
 
 func containsCustomAPIKeyDialog(content string) bool {
@@ -231,6 +381,253 @@ func dismissRateLimitDialog(
 		}
 
 		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func dismissRateLimitDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:      containsRateLimitDialog,
+		matchKeys:  []string{"Down", "Enter"},
+		matchDelay: bypassDialogConfirmDelay,
+		ready:      containsPromptIndicator,
+	})
+}
+
+type streamDialogSpec struct {
+	match       func(string) bool
+	ready       func(string) bool
+	readyOrNext func(string) bool
+	matchKeys   []string
+	matchDelay  time.Duration
+}
+
+type replayableSnapshotStream struct {
+	mu      sync.Mutex
+	history []string
+	closed  bool
+	update  chan struct{}
+}
+
+type replayableSnapshotCursor struct {
+	stream *replayableSnapshotStream
+	next   int
+	carry  []string
+}
+
+func newReplayableSnapshotCursor(src <-chan string) *replayableSnapshotCursor {
+	return newReplayableSnapshotCursorFromStream(newReplayableSnapshotStream(src))
+}
+
+func newReplayableSnapshotCursorFromStream(stream *replayableSnapshotStream) *replayableSnapshotCursor {
+	return &replayableSnapshotCursor{stream: stream}
+}
+
+func newReplayableSnapshotStream(src <-chan string) *replayableSnapshotStream {
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	go func() {
+		for content := range src {
+			stream.publish(content)
+		}
+		stream.finish()
+	}()
+	return stream
+}
+
+func (s *replayableSnapshotStream) publish(content string) {
+	s.mu.Lock()
+	s.history = append(s.history, content)
+	update := s.update
+	s.update = make(chan struct{})
+	s.mu.Unlock()
+	close(update)
+}
+
+func (s *replayableSnapshotStream) finish() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	update := s.update
+	s.mu.Unlock()
+	close(update)
+}
+
+func (s *replayableSnapshotStream) historyFrom(start int) ([]string, bool, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if start < 0 {
+		start = 0
+	}
+	if start > len(s.history) {
+		start = len(s.history)
+	}
+	snapshots := append([]string(nil), s.history[start:]...)
+	return snapshots, s.closed, s.update
+}
+
+func (c *replayableSnapshotCursor) nextBatch() ([]string, bool, <-chan struct{}) {
+	batch := append([]string(nil), c.carry...)
+	c.carry = nil
+	history, closed, updated := c.stream.historyFrom(c.next)
+	c.next += len(history)
+	if len(history) > 0 {
+		batch = append(batch, history...)
+	}
+	return batch, closed, updated
+}
+
+func (c *replayableSnapshotCursor) replay(history []string) {
+	if len(history) == 0 {
+		return
+	}
+	c.carry = append(append([]string(nil), history...), c.carry...)
+}
+
+func acceptDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+	spec streamDialogSpec,
+) (bool, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var (
+		readySeen     bool
+		latestReady   string
+		readyTimer    *time.Timer
+		readyDeadline <-chan time.Time
+		idleTimer     *time.Timer
+		idleDeadline  <-chan time.Time
+	)
+	stopTimer := func(timer *time.Timer) {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	resetIdleTimer := func() {
+		if startupDialogStreamIdleGrace <= 0 {
+			return
+		}
+		if idleTimer == nil {
+			idleTimer = time.NewTimer(startupDialogStreamIdleGrace)
+			idleDeadline = idleTimer.C
+			return
+		}
+		stopTimer(idleTimer)
+		idleTimer.Reset(startupDialogStreamIdleGrace)
+		idleDeadline = idleTimer.C
+	}
+	defer stopTimer(readyTimer)
+	defer stopTimer(idleTimer)
+
+	for {
+		history, closed, updated := snapshots.nextBatch()
+		if len(history) > 0 {
+			for idx, content := range history {
+				if spec.match != nil && spec.match(content) {
+					snapshots.replay(history[idx+1:])
+					return true, sendDialogKeys(ctx, sendKeys, spec.matchKeys, spec.matchDelay)
+				}
+				if spec.readyOrNext != nil && spec.readyOrNext(content) {
+					snapshots.replay(history[idx:])
+					return true, nil
+				}
+				if spec.ready != nil && spec.ready(content) {
+					latestReady = content
+					if !readySeen {
+						readySeen = true
+						stopTimer(idleTimer)
+						idleDeadline = nil
+						if startupDialogStreamReadyGrace <= 0 {
+							snapshots.replay([]string{latestReady})
+							return true, nil
+						}
+						readyTimer = time.NewTimer(startupDialogStreamReadyGrace)
+						readyDeadline = readyTimer.C
+					}
+				}
+			}
+			if !readySeen {
+				resetIdleTimer()
+			}
+		}
+		if closed {
+			if readySeen {
+				snapshots.replay([]string{latestReady})
+			}
+			return readySeen, nil
+		}
+		if readySeen {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-timer.C:
+				snapshots.replay([]string{latestReady})
+				return true, nil
+			case <-readyDeadline:
+				snapshots.replay([]string{latestReady})
+				return true, nil
+			case <-updated:
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timer.C:
+			return false, nil
+		case <-idleDeadline:
+			return false, nil
+		case <-updated:
+		}
+	}
+}
+
+func sendDialogKeys(
+	ctx context.Context,
+	sendKeys func(keys ...string) error,
+	keys []string,
+	delay time.Duration,
+) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if len(keys) == 1 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := sendKeys(keys[0]); err != nil {
+			return err
+		}
+		sleep(ctx, delay)
+		return ctx.Err()
+	}
+	for i, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := sendKeys(key); err != nil {
+			return err
+		}
+		if i < len(keys)-1 {
+			sleep(ctx, delay)
+		}
 	}
 	return nil
 }

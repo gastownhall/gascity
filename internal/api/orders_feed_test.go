@@ -2,6 +2,8 @@ package api
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,8 +101,46 @@ func TestBuildWorkflowRunProjectionsKeepsInProgressChildrenOnHistoryFailure(t *t
 	}
 }
 
+func TestOrderTrackingUpdatedAtLogsLookupFailure(t *testing.T) {
+	store := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	tracking := beads.Bead{
+		CreatedAt: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
+	}
+
+	var logs strings.Builder
+	origLogf := orderFeedLogf
+	orderFeedLogf = func(format string, args ...any) {
+		logs.WriteString(strings.TrimSpace(fmt.Sprintf(format, args...)))
+		logs.WriteByte('\n')
+	}
+	defer func() { orderFeedLogf = origLogf }()
+
+	got := orderTrackingUpdatedAt(store, tracking, "digest")
+	if !got.Equal(tracking.CreatedAt) {
+		t.Fatalf("updatedAt = %s, want %s", got, tracking.CreatedAt)
+	}
+	if !strings.Contains(logs.String(), "order feed update lookup failed") {
+		t.Fatalf("logs = %q, want update lookup failure warning", logs.String())
+	}
+}
+
 type workflowProjectionStore struct {
 	*beads.MemStore
+}
+
+type labelFailListStore struct {
+	beads.Store
+	failLabel string
+}
+
+func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == s.failLabel {
+		return nil, errors.New("list failed")
+	}
+	return s.Store.List(query)
 }
 
 func (s *workflowProjectionStore) List(query beads.ListQuery) ([]beads.Bead, error) {

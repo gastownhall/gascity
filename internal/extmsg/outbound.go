@@ -42,8 +42,7 @@ type OutboundDeps struct {
 //  4. Call adapter.Publish.
 //  5. Record delivery context.
 //  6. Append outbound entry to transcript.
-//  7. Notify peer conversation members (best-effort nudge).
-//  8. Emit event.
+//  7. Emit event for the caller to fan out peer notifications.
 func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req OutboundRequest) (*OutboundResult, error) {
 	if deps.Registry == nil {
 		return nil, errors.New("adapter registry is nil")
@@ -128,8 +127,7 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	}
 
 	// Step 7: Emit event.
-	// Wake is handled by the caller (HTTP handler calls state.Poke()).
-	// Peer sessions discover new entries via gc transcript check --inject.
+	// Wake and peer fanout are handled by the caller.
 	if deps.EmitEvent != nil {
 		deps.EmitEvent(events.ExtMsgOutbound, binding.SessionID, OutboundEventPayload{
 			Provider:       req.Conversation.Provider,

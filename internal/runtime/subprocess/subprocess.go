@@ -21,8 +21,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -33,7 +33,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -97,22 +96,13 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	if cfg.WorkDir != "" {
 		p.workDirs[name] = cfg.WorkDir
 	}
-
-	// Copy overlay and CopyFiles before starting the process.
-	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		_ = overlay.CopyDir(cfg.OverlayDir, cfg.WorkDir, io.Discard)
+	clearWorkDir := func() {
+		delete(p.workDirs, name)
 	}
-	for _, cf := range cfg.CopyFiles {
-		dst := cfg.WorkDir
-		if cf.RelDst != "" {
-			dst = filepath.Join(cfg.WorkDir, cf.RelDst)
-		}
-		if absSrc, err := filepath.Abs(cf.Src); err == nil {
-			if absDst, err := filepath.Abs(dst); err == nil && absSrc == absDst {
-				continue
-			}
-		}
-		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
+
+	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+		clearWorkDir()
+		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
 
 	command := cfg.Command
@@ -132,6 +122,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	// that can block on grandchildren inheriting the pipe.
 	nullFile, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
+		clearWorkDir()
 		return fmt.Errorf("opening %s for %q: %w", os.DevNull, name, err)
 	}
 	cmd.Stdout = nullFile
@@ -153,20 +144,22 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	if err := cmd.Start(); err != nil {
 		_ = nullFile.Close()
+		clearWorkDir()
 		return fmt.Errorf("starting session %q: %w", name, err)
 	}
 	_ = nullFile.Close()
 
 	// Create control socket for cross-process discovery.
-	lis, err := p.startControlSocket(name, cmd)
+	done := make(chan struct{})
+	lis, err := p.startControlSocket(name, cmd, done)
 	if err != nil {
 		// Socket creation failed — kill the process and bail.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
-	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		// Clean up socket before signaling done so ListRunning
@@ -210,7 +203,7 @@ func (p *Provider) Interrupt(name string) error {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 	if ok {
-		return signalSessionGroup(sc.cmd, syscall.SIGINT)
+		return runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
 	}
 
 	// Fall back to socket (cross-process case).
@@ -334,7 +327,7 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if relDst != "" {
 		dst = filepath.Join(wd, relDst)
 	}
-	return overlay.CopyFileOrDir(src, dst, io.Discard)
+	return runtime.StagePath(src, dst)
 }
 
 // ListRunning returns the names of all running sessions whose names
@@ -435,7 +428,7 @@ func (p *Provider) socketNameForEntry(dir, key string) string {
 //   - "interrupt" — SIGINT to the whole session process group; replies "ok"
 //   - "ping" — replies "ok"
 //   - "pid" — replies with the PID (diagnostics)
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	if err := os.MkdirAll(filepath.Dir(sp), 0o755); err != nil {
@@ -458,14 +451,14 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener,
 			if err != nil {
 				return // listener closed
 			}
-			go handleSessionConn(conn, cmd)
+			go handleSessionConn(conn, cmd, done)
 		}
 	}()
 	return lis, nil
 }
 
 // handleSessionConn reads a command from the connection and acts on the process.
-func handleSessionConn(conn net.Conn, cmd *exec.Cmd) {
+func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -474,26 +467,10 @@ func handleSessionConn(conn net.Conn, cmd *exec.Cmd) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = signalSessionGroup(cmd, syscall.SIGTERM)
-		// Wait up to 5s for graceful exit, then SIGKILL.
-		deadline := time.After(5 * time.Second)
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-		alive := true
-		for alive {
-			select {
-			case <-deadline:
-				_ = signalSessionGroup(cmd, syscall.SIGKILL)
-				alive = false
-			case <-ticker.C:
-				if !processAlive(cmd) {
-					alive = false
-				}
-			}
-		}
+		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = signalSessionGroup(cmd, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -510,7 +487,10 @@ func (p *Provider) socketAlive(name string) bool {
 // sendSocketCommand connects to the session's control socket, sends a
 // command, and waits for "ok". Returns nil on success.
 func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration) error {
-	var lastErr error
+	var (
+		lastErr            error
+		firstActionableErr error
+	)
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
 		err := func(sockPath string) error {
 			conn, err := net.DialTimeout("unix", sockPath, timeout)
@@ -534,7 +514,13 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		if err == nil {
 			return nil
 		}
+		if !isUnavailableSocketError(err) && firstActionableErr == nil {
+			firstActionableErr = err
+		}
 		lastErr = err
+	}
+	if firstActionableErr != nil {
+		return firstActionableErr
 	}
 	return lastErr
 }
@@ -543,30 +529,29 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 func (p *Provider) stopBySocket(name string) error {
 	err := p.sendSocketCommand(name, "stop", 7*time.Second)
 	if err != nil {
-		// Socket doesn't exist or can't connect — session is dead (idempotent).
-		// Clean up stale socket file if it exists.
-		os.Remove(p.sockPath(name)) //nolint:errcheck
-		_ = os.Remove(p.sockNamePath(name))
-		return nil
+		if isUnavailableSocketError(err) {
+			// Socket doesn't exist or can't connect — session is dead (idempotent).
+			// Clean up stale socket file if it exists.
+			os.Remove(p.sockPath(name)) //nolint:errcheck
+			_ = os.Remove(p.sockNamePath(name))
+			return nil
+		}
+		return err
 	}
 	return nil
+}
+
+func isUnavailableSocketError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // --- In-memory process helpers ---
 
 // terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked process.
 func terminateSessionConn(sc *sessionConn) error {
-	_ = signalSessionGroup(sc.cmd, syscall.SIGTERM)
-
-	select {
-	case <-sc.done:
-		return nil
-	case <-time.After(5 * time.Second):
-	}
-
-	_ = signalSessionGroup(sc.cmd, syscall.SIGKILL)
-	<-sc.done
-	return nil
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
 }
 
 // Capabilities reports subprocess provider capabilities. The subprocess
@@ -589,28 +574,4 @@ func (sc *sessionConn) alive() bool {
 	default:
 		return true
 	}
-}
-
-func processAlive(cmd *exec.Cmd) bool {
-	if cmd == nil || cmd.Process == nil {
-		return false
-	}
-	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		return false
-	}
-	return true
-}
-
-func signalSessionGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	// Managed subprocess sessions are started in their own process group so
-	// stop/interrupt reaches helper shells and any poller descendants.
-	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil {
-		return nil
-	}
-	// Fall back to the direct process signal for older sessions that were not
-	// started with Setpgid or for platforms where group signaling is unavailable.
-	return cmd.Process.Signal(sig)
 }

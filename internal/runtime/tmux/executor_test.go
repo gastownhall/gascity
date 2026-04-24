@@ -42,6 +42,33 @@ func (f *fakeExecutor) executeCtx(_ context.Context, args []string) (string, err
 	return f.execute(args)
 }
 
+func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+
+	env := map[string]string{
+		"LANG":     "en_US.UTF-8",
+		"LC_ALL":   "",
+		"LC_CTYPE": "",
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-locale-clear", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if len(exec.calls) == 0 {
+		t.Fatal("no tmux calls recorded")
+	}
+
+	args := exec.calls[0]
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "\x00-e\x00LANG=en_US.UTF-8\x00") {
+		t.Fatalf("new-session args missing LANG -e flag: %v", args)
+	}
+	if got := args[len(args)-1]; got != "env -u LC_ALL -u LC_CTYPE claude" {
+		t.Fatalf("command = %q, want env -u LC_ALL -u LC_CTYPE claude", got)
+	}
+}
+
 type promptFooterExecutor struct {
 	calls [][]string
 }

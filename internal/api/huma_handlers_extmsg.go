@@ -58,7 +58,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		if handleErr != nil {
 			return nil, huma.Error422UnprocessableEntity(handleErr.Error())
 		}
-		go s.extmsgNotifyMembers(s.backgroundCtx(), input.Body.Message.Conversation, *input.Body.Message)
+		go s.extmsgNotifyInboundMembers(s.backgroundCtx(), *input.Body.Message)
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
 			out.Body = *result
@@ -119,11 +119,14 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 	if err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
-	go s.extmsgNotifyMembers(s.backgroundCtx(), input.Body.Conversation, extmsg.ExternalInboundMessage{
-		Conversation: input.Body.Conversation,
-		Actor:        extmsg.ExternalActor{ID: input.Body.SessionID, DisplayName: input.Body.SessionID, IsBot: true},
-		Text:         input.Body.Text,
-	})
+	if result != nil && result.Receipt.Delivered {
+		notifyConversation := input.Body.Conversation
+		if result.Receipt.Conversation != (extmsg.ConversationRef{}) {
+			notifyConversation = result.Receipt.Conversation
+		}
+		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
+		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID)
+	}
 	out := &ExtMsgOutboundOutput{}
 	if result != nil {
 		out.Body = *result

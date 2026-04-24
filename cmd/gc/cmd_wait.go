@@ -167,7 +167,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
@@ -218,11 +218,13 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	}
 	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, waitBead)
 	if depErr != nil {
-		_ = setWaitTerminalState(store, waitBead.ID, map[string]string{
+		if err := setWaitTerminalState(store, waitBead.ID, map[string]string{
 			"state":      waitStateFailed,
 			"failed_at":  now.Format(time.RFC3339),
 			"last_error": depErr.Error(),
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session wait: setting failed state: %v\n", err) //nolint:errcheck
+		}
 		fmt.Fprintf(stderr, "gc session wait: dependency state check: %v\n", depErr) //nolint:errcheck
 		return 1
 	}
@@ -246,7 +248,10 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			return 1
 		}
 		if cityPath, err := resolveCity(); err == nil {
-			_ = pokeController(cityPath)
+			if err := pokeController(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
+				return 1
+			}
 		}
 		fmt.Fprintf(stdout, "Registered wait %s for session %s.\nSession %s draining to sleep.\n", waitBead.ID, sessionID, sessionID) //nolint:errcheck
 		return 0
@@ -380,7 +385,10 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 				return 1
 			}
 		}
-		_ = clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"])
+		if err := clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"]); err != nil {
+			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
+			return 1
+		}
 	}
 	fmt.Fprintf(stdout, "Updated wait %s to %s.\n", waitID, state) //nolint:errcheck
 	return 0
@@ -485,7 +493,7 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 		}
 		return cityStore.Get(depID)
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -686,13 +694,18 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 			return err
 		}
-		_ = store.SetMetadata(wait.ID, "nudge_id", nudgeID)
-		kind := sessionBead.Metadata["provider_kind"]
-		if kind == "" {
-			kind = sessionBead.Metadata["provider"]
+		if err := store.SetMetadata(wait.ID, "nudge_id", nudgeID); err != nil {
+			return fmt.Errorf("setting wait nudge_id: %w", err)
 		}
-		if kind == "codex" {
-			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
+		// provider_kind is stamped from ResolvedProvider.Kind /
+		// BuiltinAncestor at session-bead creation, so wrapped codex
+		// aliases (e.g. [providers.my-wrapped-codex] base = "builtin:codex")
+		// already surface as "codex" here. The provider fallback covers
+		// sessions created before provider_kind was stamped.
+		if sessionProviderFamily(sessionBead) == "codex" {
+			if err := startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
+				return fmt.Errorf("starting wait nudge poller: %w", err)
+			}
 		}
 	}
 	return nil
@@ -826,6 +839,26 @@ func waitNudgeAgent(sessionBead beads.Bead) string {
 		return agent
 	}
 	return sessionBead.Metadata["template"]
+}
+
+// sessionProviderFamily returns the built-in provider family for a session
+// bead. Preference order matches internal/session.providerKind:
+//  1. builtin_ancestor — stamped from ResolvedProvider.BuiltinAncestor
+//     at session-bead creation for explicit-base custom providers.
+//  2. provider_kind — stamped for command-matched legacy aliases.
+//  3. provider — raw provider metadata, last-resort fallback.
+//
+// Call sites that branch on provider family MUST consume this helper
+// instead of reading the provider field directly so wrapped custom
+// aliases behave like their built-in ancestor.
+func sessionProviderFamily(sessionBead beads.Bead) string {
+	if ancestor := strings.TrimSpace(sessionBead.Metadata["builtin_ancestor"]); ancestor != "" {
+		return ancestor
+	}
+	if kind := strings.TrimSpace(sessionBead.Metadata["provider_kind"]); kind != "" {
+		return kind
+	}
+	return strings.TrimSpace(sessionBead.Metadata["provider"])
 }
 
 func setWaitTerminalState(store beads.Store, waitID string, batch map[string]string) error {

@@ -21,7 +21,7 @@ schema = 1
 	writeTestFile(t, filepath.Join(packDir, "orders", "health-check"), "order.toml", `
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
@@ -54,7 +54,7 @@ schema = 1
 	writeTestFile(t, filepath.Join(packDir, "orders"), "health-check.toml", `
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 

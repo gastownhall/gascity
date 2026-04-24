@@ -188,6 +188,12 @@ func TestNeedsConditionExecution(t *testing.T) {
 	}
 }
 
+func TestDefaultGateTimeoutIs5Minutes(t *testing.T) {
+	if DefaultGateTimeout != 5*time.Minute {
+		t.Errorf("DefaultGateTimeout = %v, want 5m", DefaultGateTimeout)
+	}
+}
+
 func TestGateManualResult(t *testing.T) {
 	r := GateManualResult()
 	if r.Outcome != GatePass {

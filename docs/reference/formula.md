@@ -63,6 +63,7 @@ molecule.
 | `children` | []step | Nested sub-steps; parent acts as a container dependency |
 | `loop` | object | Static loop expansion: `count` iterations at compile time |
 | `check` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
+| `timeout` | duration string | Default timeout for this step's `check` script; `check.check.timeout` takes precedence |
 
 ## Variable Substitution
 

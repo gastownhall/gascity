@@ -18,10 +18,10 @@ and `reviewer` (along with the corresponding prompts):
 
 ```shell
 ~/my-city
-$ cat city.toml
-[workspace]
+$ cat pack.toml
+[pack]
 name = "my-city"
-provider = "claude"
+schema = 2
 
 [[agent]]
 name = "mayor"
@@ -31,9 +31,13 @@ prompt_template = "agents/mayor/prompt.template.md"
 template = "mayor"
 mode = "always"
 
+~/my-city
+$ cat city.toml
+[workspace]
+provider = "claude"
+
 [[rigs]]
 name = "my-project"
-path = "/Users/csells/my-project"
 
 ~/my-city
 $ cat agents/reviewer/agent.toml
@@ -42,6 +46,15 @@ provider = "codex"
 ```
 
 The corresponding prompt files live under `agents/<name>/prompt.template.md`.
+The machine-local workspace identity and rig binding live in `.gc/site.toml`:
+
+```toml
+workspace_name = "my-city"
+
+[[rig]]
+name = "my-project"
+path = "/Users/csells/my-project"
+```
 
 Beads are fundamental to the system. You're going to be working with crew to
 turn plans into beads that can be executed in parallel by polecats.
@@ -457,5 +470,5 @@ Gas City — sessions, mail, formulas, convoys — is built on top of them.
 
 ## What's next
 
-- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, gated
+- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, triggered
   by time, schedule, conditions, or events

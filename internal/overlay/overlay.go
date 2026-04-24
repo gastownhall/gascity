@@ -10,7 +10,8 @@ import (
 
 // CopyFileOrDir copies src into dst. If src is a directory, it recursively
 // copies all files into dst (like CopyDir). If src is a single file, it
-// copies the file to dst, creating parent directories as needed.
+// copies the file to dst, creating parent directories as needed. When dst
+// already exists as a directory, the source basename is preserved under dst.
 func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 	info, err := os.Stat(src)
 	if os.IsNotExist(err) {
@@ -21,6 +22,9 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 	}
 	if info.IsDir() {
 		return CopyDir(src, dst, stderr)
+	}
+	if dstInfo, err := os.Stat(dst); err == nil && dstInfo.IsDir() {
+		dst = filepath.Join(dst, filepath.Base(src))
 	}
 	return copyFile(src, dst)
 }

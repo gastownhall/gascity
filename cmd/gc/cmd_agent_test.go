@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -132,6 +135,92 @@ func TestDoAgentResumePackDerivedError(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "[[patches]]") {
 		t.Errorf("stderr should mention patches: %s", errMsg)
+	}
+}
+
+func TestLoadCityConfigFSEmitsProvenanceWarnings(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[agents]
+append_fragments = ["footer"]
+`)
+
+	var stderr bytes.Buffer
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("loadCityConfigFS returned nil config")
+	}
+	if !strings.Contains(stderr.String(), "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+		t.Fatalf("expected [agents] alias warning, got %q", stderr.String())
+	}
+}
+
+func TestLoadCityConfigFSEmitsMigrationWarningsAcrossCalls(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[agents]
+append_fragments = ["footer"]
+`)
+
+	var stderr bytes.Buffer
+	for i := 0; i < 2; i++ {
+		cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+		if err != nil {
+			t.Fatalf("loadCityConfigFS call %d: %v", i+1, err)
+		}
+		if cfg == nil {
+			t.Fatalf("loadCityConfigFS call %d returned nil config", i+1)
+		}
+	}
+
+	const want = "[agents] is a deprecated compatibility alias for [agent_defaults]"
+	if got := strings.Count(stderr.String(), want); got != 2 {
+		t.Fatalf("warning count = %d, want 2; stderr=%q", got, stderr.String())
+	}
+}
+
+func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
+	var stderr bytes.Buffer
+	emitLoadCityConfigWarnings(&stderr, &config.Provenance{
+		Warnings: []string{
+			`workspace.name redefined by "/city/defaults.toml"`,
+			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
+			`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
+		},
+	})
+
+	output := stderr.String()
+	if strings.Contains(output, `workspace.name redefined by "/city/defaults.toml"`) {
+		t.Fatalf("non-migration warning should be filtered, got %q", output)
+	}
+	if !strings.Contains(output, `[agents] is a deprecated compatibility alias for [agent_defaults]`) {
+		t.Fatalf("expected alias warning, got %q", output)
+	}
+	if !strings.Contains(output, `both [agent_defaults] and [agents] are present`) {
+		t.Fatalf("expected mixed-table warning, got %q", output)
+	}
+	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
+		t.Fatalf("expected unsupported-key warning, got %q", output)
+	}
+	if !strings.Contains(output, "attachment-list fields") {
+		t.Fatalf("expected attachment deprecation warning, got %q", output)
 	}
 }
 
@@ -309,6 +398,52 @@ name = "mayor"
 		if !strings.Contains(packToml, want) {
 			t.Fatalf("pack.toml missing %q after suspend:\n%s", want, packToml)
 		}
+	}
+}
+
+func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T) {
+	warnings := []string{
+		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
+		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
+		`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+		`workspace.name redefined by "/city/defaults.toml"`,
+	}
+
+	got := strictFatalLoadConfigWarnings(warnings)
+	if len(got) != 2 {
+		t.Fatalf("strictFatalLoadConfigWarnings len = %d, want 2; got=%q", len(got), got)
+	}
+	if got[0] != `/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps` {
+		t.Fatalf("strictFatalLoadConfigWarnings[0] = %q, want mixed-table warning", got[0])
+	}
+	if got[1] != `workspace.name redefined by "/city/defaults.toml"` {
+		t.Fatalf("strictFatalLoadConfigWarnings[1] = %q, want non-migration warning", got[1])
+	}
+}
+
+func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("Glob(*.go): %v", err)
+	}
+	bareCall := regexp.MustCompile(`\bloadCityConfig(FS)?\([^,\n)]*\)`)
+	var offenders []string
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") || file == "cmd_agent.go" {
+			continue
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", file, err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if bareCall.MatchString(line) {
+				offenders = append(offenders, fmt.Sprintf("%s:%d: %s", file, i+1, strings.TrimSpace(line)))
+			}
+		}
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("bare loadCityConfig callers found:\n%s", strings.Join(offenders, "\n"))
 	}
 }
 

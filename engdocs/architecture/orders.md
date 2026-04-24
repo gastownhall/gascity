@@ -9,10 +9,10 @@ title: "Orders"
 
 Orders are Gas City's derived mechanism (Layer 2-4, part of Formulas
 & Molecules) for scheduled and event-driven work dispatch without human
-intervention. Each order pairs a gate condition (when to fire) with
+intervention. Each order pairs a trigger condition (when to fire) with
 an action (a shell script or formula wisp), living as an
 `order.toml` file inside formula directories. The controller
-evaluates all non-manual gates on every patrol tick and dispatches due
+evaluates all non-manual triggers on every patrol tick and dispatches due
 orders -- exec orders run shell scripts directly with no LLM
 involvement, while formula orders instantiate wisps dispatched to
 agent pools.
@@ -21,16 +21,16 @@ agent pools.
 
 - **Order**: A parsed definition from an `order.toml` file with
   a Name (derived from subdirectory name), a dispatch action (Formula or
-  Exec, mutually exclusive), a Gate type, gate-specific parameters, and
+  Exec, mutually exclusive), a Trigger type, trigger-specific parameters, and
   optional Pool routing. Defined in the `Order` struct at
   `internal/orders/order.go`.
 
-- **Gate**: The trigger condition that controls when an order fires.
+- **Trigger**: The trigger condition that controls when an order fires.
   Five types exist: `cooldown` (minimum interval since last run), `cron`
   (5-field schedule matching), `condition` (shell command exits 0),
   `event` (matching events after a cursor position), and `manual`
   (explicit invocation only, never auto-fires). See
-  `internal/orders/gates.go`.
+  `internal/orders/triggers.go`.
 
 - **Exec Order**: An order whose action is a shell command
   (`exec` field) run directly by the controller. No LLM, no agent, no
@@ -39,7 +39,7 @@ agent pools.
   60 seconds.
 
 - **Formula Order**: An order whose action is a formula name
-  (`formula` field). When the gate opens, the controller calls `MolCook`
+  (`formula` field). When the trigger opens, the controller calls `MolCook`
   to instantiate a wisp and labels it for pool dispatch. Default timeout:
   30 seconds.
 
@@ -56,16 +56,16 @@ agent pools.
 
 - **Tracking Bead**: A bead created synchronously before each dispatch
   goroutine launches, labeled `order-run:<scopedName>`. Serves dual
-  purpose: prevents the cooldown gate from re-firing on the next tick,
+  purpose: prevents the cooldown trigger from re-firing on the next tick,
   and provides execution history for `gc order history`.
 
 ## Architecture
 
 The order subsystem spans two packages:
 
-- **`internal/orders/`** -- parsing, validation, scanning, and gate
+- **`internal/orders/`** -- parsing, validation, scanning, and trigger
   evaluation. Pure library code with no side effects beyond shell command
-  execution for condition gates.
+  execution for condition triggers.
 - **`cmd/gc/`** -- controller-side dispatch (`order_dispatch.go`)
   and CLI commands (`cmd_order.go`). Wires the library into the
   controller loop and the `gc order` command tree.
@@ -81,13 +81,13 @@ The order subsystem spans two packages:
                 │  │                                             │  │
                 │  │  for each order:                       │  │
                 │  │    ┌───────────────────────────────────┐    │  │
-                │  │    │ CheckGate(a, now, lastRunFn,      │    │  │
+                │  │    │ CheckTrigger(a, now, lastRunFn,      │    │  │
                 │  │    │          ep, cursorFn)             │    │  │
-                │  │    │ internal/orders/gates.go      │    │  │
+                │  │    │ internal/orders/triggers.go      │    │  │
                 │  │    └───────────┬───────────────────────┘    │  │
                 │  │                │                             │  │
                 │  │        ┌───────▼────────┐                   │  │
-                │  │        │ GateResult.Due? │                   │  │
+                │  │        │ TriggerResult.Due? │                   │  │
                 │  │        └──┬──────────┬──┘                   │  │
                 │  │       no  │          │ yes                   │  │
                 │  │       skip│          ▼                       │  │
@@ -120,7 +120,7 @@ The order subsystem spans two packages:
                 │    │   ├─ rigExclusiveLayers(rigLayers, city)    │
                 │    │   ├─ orders.Scan(exclusive)            │
                 │    │   └─ stamp Rig field on each order     │
-                │    ├─ filter out manual-gate orders          │
+                │    ├─ filter out manual-trigger orders          │
                 │    └─ return memoryOrderDispatcher           │
                 └──────────────────────────────────────────────────┘
 ```
@@ -136,18 +136,18 @@ The order subsystem spans two packages:
    rig's formula layers to avoid double-scanning city orders. The
    remaining rig-exclusive layers are scanned separately.
 3. Rig orders get their `Rig` field stamped with the rig name.
-4. Manual-gate orders are filtered out (they never auto-dispatch).
+4. Manual-trigger orders are filtered out (they never auto-dispatch).
 5. If no auto-dispatchable orders remain, the dispatcher is nil
    (nil-guard pattern -- callers check before use).
 
-**Gate evaluation and dispatch (on each controller tick):**
+**Trigger evaluation and dispatch (on each controller tick):**
 
 1. `dispatch()` iterates all non-manual orders.
-2. `CheckGate()` evaluates the gate condition against current time,
+2. `CheckTrigger()` evaluates the trigger condition against current time,
    last-run history (from bead store), and event state (from event bus).
 3. For each due order, a tracking bead is created **synchronously**
    with label `order-run:<scopedName>`. This is critical: it
-   prevents the cooldown gate from re-firing on the next tick.
+   prevents the cooldown trigger from re-firing on the next tick.
 4. A goroutine calls `dispatchOne()` with a context timeout derived from
    `effectiveTimeout()` (per-order timeout capped by global
    `max_timeout`).
@@ -175,11 +175,11 @@ The order subsystem spans two packages:
 ### Key Types
 
 - **`Order`** (`internal/orders/order.go`): The parsed
-  order definition. Fields: Name, Description, Formula, Exec, Gate,
+  order definition. Fields: Name, Description, Formula, Exec, Trigger,
   Interval, Schedule, Check, On, Pool, Timeout, Enabled, Source, Rig.
 
-- **`GateResult`** (`internal/orders/gates.go`): The outcome of a
-  gate check. Fields: Due (bool), Reason (human-readable), LastRun
+- **`TriggerResult`** (`internal/orders/triggers.go`): The outcome of a
+  trigger check. Fields: Due (bool), Reason (human-readable), LastRun
   (time.Time).
 
 - **`orderDispatcher`** (`cmd/gc/order_dispatch.go`): Interface
@@ -207,14 +207,14 @@ Violations indicate bugs.
   script directly on the controller. It has no agent pipeline and
   therefore no pool. `Validate()` rejects `exec` + `pool` combinations.
 
-- **Gate type requires matching parameters**: A `cooldown` gate requires
-  `interval`, a `cron` gate requires `schedule`, a `condition` gate
-  requires `check`, an `event` gate requires `on`. `Validate()` enforces
-  these per-gate-type constraints.
+- **Trigger type requires matching parameters**: A `cooldown` trigger requires
+  `interval`, a `cron` trigger requires `schedule`, a `condition` trigger
+  requires `check`, an `event` trigger requires `on`. `Validate()` enforces
+  these per-trigger-type constraints.
 
 - **Tracking beads are created before dispatch goroutines**: The tracking
   bead (labeled `order-run:<scopedName>`) is created synchronously
-  in the main dispatch loop. This prevents the cooldown gate from
+  in the main dispatch loop. This prevents the cooldown trigger from
   re-firing on the next controller tick while the dispatch goroutine is
   still running.
 
@@ -222,7 +222,7 @@ Violations indicate bugs.
   deployed to multiple rigs produces independent scoped names (e.g.,
   `dolt-health:rig:rig-a` vs `dolt-health:rig:rig-b`). Cooldown
   tracking, event cursors, and history queries all use ScopedName.
-  Firing one rig's order does not affect another rig's gate
+  Firing one rig's order does not affect another rig's trigger
   evaluation.
 
 - **Higher-priority layers override lower by name**: When the same
@@ -231,7 +231,7 @@ Violations indicate bugs.
   the layers slice). The override is total (the entire TOML definition
   replaces the lower one).
 
-- **Manual gates never auto-fire**: `CheckGate()` for a `manual` gate
+- **Manual triggers never auto-fire**: `CheckTrigger()` for a `manual` trigger
   always returns `Due: false`. Manual orders are filtered out of the
   dispatcher entirely during build. They can only be triggered via
   `gc order run`.
@@ -240,14 +240,14 @@ Violations indicate bugs.
   filters out orders with `enabled = false`. They do not appear in
   any CLI command output or dispatch evaluation.
 
-- **Cron gate fires at most once per minute**: After matching the 5-field
+- **Cron trigger fires at most once per minute**: After matching the 5-field
   schedule, `checkCron()` verifies the last run was not in the same
   truncated minute. This prevents duplicate fires within a single cron
   window.
 
-- **Event gate uses cursor-based deduplication**: Event orders track
+- **Event trigger uses cursor-based deduplication**: Event orders track
   the highest processed event sequence number via `seq:<N>` labels on
-  wisp beads. Subsequent gate checks use `AfterSeq` filtering to avoid
+  wisp beads. Subsequent trigger checks use `AfterSeq` filtering to avoid
   reprocessing already-handled events.
 
 - **Dispatch is fire-and-forget**: Once a goroutine is launched, the
@@ -264,14 +264,14 @@ Violations indicate bugs.
 | Depends on | How |
 |---|---|
 | `internal/config` | `OrdersConfig` for skip list and max timeout. `FormulaLayers` for formula directory resolution. `City` struct for config access. |
-| `internal/events` | `Recorder` for emitting `order.fired`, `order.completed`, `order.failed` events. `Provider` for event gate queries (`List` with `AfterSeq` filtering). |
+| `internal/events` | `Recorder` for emitting `order.fired`, `order.completed`, `order.failed` events. `Provider` for event trigger queries (`List` with `AfterSeq` filtering). |
 | `internal/beads` | `Store` for creating tracking beads, querying last-run history (`ListByLabel`), and instantiating wisps (`MolCook`). `CommandRunner` for bd CLI invocation. |
 | `internal/fsys` | `FS` interface for filesystem abstraction in `Scan()` (enables fake filesystem in tests). `OSFS` for production. |
 
 | Depended on by | How |
 |---|---|
 | `cmd/gc/controller.go` | The controller loop calls `buildOrderDispatcher()` on startup and config reload, then calls `dispatch()` on each tick. |
-| `cmd/gc/cmd_order.go` | CLI commands (`gc order list/show/run/check/history`) use `orders.Scan()` and `orders.CheckGate()` for user-facing operations. |
+| `cmd/gc/cmd_order.go` | CLI commands (`gc order list/show/run/check/history`) use `orders.Scan()` and `orders.CheckTrigger()` for user-facing operations. |
 | Health Patrol (`cmd/gc/`) | Order dispatch is one phase of the Health Patrol tick cycle, running after agent reconciliation and wisp GC. |
 
 ## Code Map
@@ -279,7 +279,7 @@ Violations indicate bugs.
 | File | Responsibility |
 |---|---|
 | `internal/orders/order.go` | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()` |
-| `internal/orders/gates.go` | `GateResult`, `CheckGate()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
+| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
 | `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
@@ -298,11 +298,11 @@ section in `city.toml` controls global order behavior.
 description = "Check database health"
 formula = "mol-db-health"        # dispatch action (XOR with exec)
 # exec = "scripts/check-db.sh"   # alternative: shell script dispatch
-gate = "cooldown"                # cooldown | cron | condition | event | manual
-interval = "5m"                  # required for cooldown gate
-# schedule = "0 3 * * *"         # required for cron gate (5-field)
-# check = "test -f /tmp/flag"    # required for condition gate
-# on = "bead.closed"             # required for event gate
+trigger = "cooldown"                # cooldown | cron | condition | event | manual
+interval = "5m"                  # required for cooldown trigger
+# schedule = "0 3 * * *"         # required for cron trigger (5-field)
+# check = "test -f /tmp/flag"    # required for condition trigger
+# on = "bead.closed"             # required for event trigger
 pool = "worker"                  # target pool for formula dispatch (optional)
 timeout = "90s"                  # per-order timeout (optional)
 enabled = true                   # default: true
@@ -349,15 +349,15 @@ files in the library and two in the CLI:
 
 | Test file | Coverage |
 |---|---|
-| `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all gate types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig) |
-| `internal/orders/gates_test.go` | CheckGate for all five gate types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped gates (cooldown, cron, event use ScopedName), MaxSeqFromLabels (various label configurations) |
+| `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all trigger types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig) |
+| `internal/orders/triggers_test.go` | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName), MaxSeqFromLabels (various label configurations) |
 | `internal/orders/scanner_test.go` | Scan (basic discovery, empty layers, layer override priority, skip list, disabled filtering, source path recording) |
 | `cmd/gc/order_dispatch_test.go` | Dispatcher nil-guard (no orders, manual-only), cooldown dispatch (due, not due, multiple), exec dispatch (due, failure, cooldown, ORDER_DIR env, timeout), rig-scoped dispatch (rig stamping, independent cooldown, qualified pool), rigExclusiveLayers, qualifyPool, effectiveTimeout (default, custom, capped) |
 | `cmd/gc/cmd_order_test.go` | CLI commands: list (empty, with data, exec type), show (found, not found), check (due, not due), history, findOrder |
 
 All tests use in-memory fakes (`fsys.NewFake()`, `beads.NewMemStore()`,
 stubbed `ExecRunner`, `memRecorder`) with no external infrastructure
-dependencies. Condition gate tests use real `sh -c true` and `sh -c false`
+dependencies. Condition trigger tests use real `sh -c true` and `sh -c false`
 commands. See `TESTING.md` for the overall testing philosophy and tier
 boundaries.
 
@@ -365,19 +365,19 @@ boundaries.
 
 - **No retry on dispatch failure**: Failed orders emit events but
   are not retried. The tracking bead prevents re-fire within the same
-  cooldown window, so a failed order must wait for the next gate
+  cooldown window, so a failed order must wait for the next trigger
   opening.
 
-- **Cron granularity is minutes**: The cron gate operates at
+- **Cron granularity is minutes**: The cron trigger operates at
   minute-level granularity with simple field matching (`*`, exact
   integer, comma-separated values). It does not support ranges (`1-5`),
   steps (`*/5`), or sub-minute scheduling.
 
-- **Condition gate blocks the dispatch loop**: `checkCondition()` runs
-  `sh -c <check>` synchronously during gate evaluation. A slow check
+- **Condition trigger blocks the dispatch loop**: `checkCondition()` runs
+  `sh -c <check>` synchronously during trigger evaluation. A slow check
   command blocks evaluation of subsequent orders on that tick.
 
-- **Event gate cursor is per-wisp, not per-dispatch**: The cursor
+- **Event trigger cursor is per-wisp, not per-dispatch**: The cursor
   position is computed from `seq:<N>` labels on existing wisp beads via
   `MaxSeqFromLabels()`. If wisp creation fails, the cursor is not
   advanced, which may cause duplicate event processing on retry.
@@ -395,7 +395,7 @@ boundaries.
 ## See Also
 
 - [Architecture glossary](glossary.md) -- authoritative definitions
-  of order, gate, wisp, formula, and other terms used in this
+  of order, trigger, wisp, formula, and other terms used in this
   document
 - [Health Patrol architecture](health-patrol.md) -- the controller
   loop that drives order dispatch on each tick
@@ -403,8 +403,8 @@ boundaries.
   beads, wisp instantiation via MolCook, and label-based queries
 - [Config architecture](config.md) -- FormulaLayers resolution,
   pack expansion, and OrdersConfig
-- [Gate evaluation logic](https://github.com/gastownhall/gascity/blob/main/internal/orders/gates.go) --
-  CheckGate implementation for all five gate types
+- [Trigger evaluation logic](https://github.com/gastownhall/gascity/blob/main/internal/orders/triggers.go) --
+  CheckTrigger implementation for all five trigger types
 - [Order discovery](https://github.com/gastownhall/gascity/blob/main/internal/orders/scanner.go) --
   Scan function for formula layer traversal
 - [Controller dispatch](https://github.com/gastownhall/gascity/blob/main/cmd/gc/order_dispatch.go) --

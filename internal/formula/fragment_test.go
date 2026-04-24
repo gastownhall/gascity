@@ -9,9 +9,7 @@ import (
 )
 
 func TestCompileExpansionFragmentRunsInlineExpansionAndConditionFiltering(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 
@@ -120,9 +118,7 @@ func TestApplyFragmentRecipeGraphControlsAddsInheritedScopeChecks(t *testing.T) 
 }
 
 func TestCompileExpansionFragmentValidatesRequiredVars(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 
@@ -178,12 +174,134 @@ title = "[{target.title}] Implement: {{feature}}"
 	})
 }
 
+func TestCompileExpansionFragmentRejectsImplicitGraphContract(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "implicit-graph-expansion"
+type = "expansion"
+version = 2
+
+[[template]]
+id = "{target}.review"
+title = "Review"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member" }
+
+[[template]]
+id = "{target}.submit"
+title = "Submit"
+needs = ["{target}.review"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "implicit-graph-expansion.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	target := &Step{ID: "demo.target", Title: "Target"}
+	_, err := CompileExpansionFragment(context.Background(), "implicit-graph-expansion", []string{dir}, target, nil)
+	if err == nil {
+		t.Fatal("CompileExpansionFragment succeeded, want explicit graph contract error")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("CompileExpansionFragment error = %v, want graph.v2 contract guidance", err)
+	}
+}
+
+func TestCompileExpansionFragmentRejectsDuplicateParentTemplateIDs(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	parentA := `
+formula = "fragment-parent-a"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.attempt"
+title = "Attempt A"
+`
+	if err := os.WriteFile(filepath.Join(dir, "fragment-parent-a.toml"), []byte(parentA), 0o644); err != nil {
+		t.Fatalf("write parentA: %v", err)
+	}
+
+	parentB := `
+formula = "fragment-parent-b"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.attempt"
+title = "Attempt B"
+`
+	if err := os.WriteFile(filepath.Join(dir, "fragment-parent-b.toml"), []byte(parentB), 0o644); err != nil {
+		t.Fatalf("write parentB: %v", err)
+	}
+
+	child := `
+formula = "fragment-expansion-conflict"
+type = "expansion"
+version = 2
+extends = ["fragment-parent-a", "fragment-parent-b"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "fragment-expansion-conflict.toml"), []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	target := &Step{ID: "demo.target", Title: "Target"}
+	_, err := CompileExpansionFragment(context.Background(), "fragment-expansion-conflict", []string{dir}, target, nil)
+	if err == nil {
+		t.Fatal("CompileExpansionFragment succeeded, want duplicate step ID error")
+	}
+	if !strings.Contains(err.Error(), "duplicate step IDs after expansion") {
+		t.Fatalf("CompileExpansionFragment error = %v, want duplicate step ID error", err)
+	}
+}
+
+func TestCompileExpansionFragmentAllowsConditionallyExclusiveDuplicateTemplateIDs(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "fragment-expansion-conditional"
+type = "expansion"
+version = 2
+
+[[template]]
+id = "{target}.attempt"
+title = "Fast attempt"
+condition = "{{mode}} == fast"
+
+[[template]]
+id = "{target}.attempt"
+title = "Slow attempt"
+condition = "{{mode}} == slow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "fragment-expansion-conditional.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	target := &Step{ID: "demo.target", Title: "Target"}
+	fragment, err := CompileExpansionFragment(context.Background(), "fragment-expansion-conditional", []string{dir}, target, map[string]string{"mode": "fast"})
+	if err != nil {
+		t.Fatalf("CompileExpansionFragment: %v", err)
+	}
+	if len(fragment.Steps) != 1 {
+		t.Fatalf("len(fragment.Steps) = %d, want 1", len(fragment.Steps))
+	}
+	if got := fragment.Steps[0].ID; got != "fragment-expansion-conditional.demo.target.attempt" {
+		t.Fatalf("fragment.Steps[0].ID = %q, want fragment-expansion-conditional.demo.target.attempt", got)
+	}
+}
+
 func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	t.Parallel()
 
 	template := []*Step{{
-		ID:    "{target}.worker",
-		Title: "Worker {target.title}",
+		ID:      "{target}.worker",
+		Title:   "Worker {target.title}",
+		Timeout: "{target.id}0s",
 		ExpandVars: map[string]string{
 			"who": "{target.id}",
 		},
@@ -200,6 +318,14 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 				ID:    "{target}.loop",
 				Title: "Loop {target.title}",
 			}},
+		},
+		Ralph: &RalphSpec{
+			MaxAttempts: 2,
+			Check: &RalphCheckSpec{
+				Mode:    "exec",
+				Path:    "checks/{target.id}.sh",
+				Timeout: "{target.title}0s",
+			},
 		},
 	}}
 
@@ -227,6 +353,12 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	if got := second[0].Loop.Body[0].ID; got != "beta.loop" {
 		t.Fatalf("second loop body id = %q, want beta.loop", got)
 	}
+	if got := second[0].Timeout; got != "beta0s" {
+		t.Fatalf("second timeout = %q, want beta0s", got)
+	}
+	if got := second[0].Ralph.Check.Timeout; got != "Beta0s" {
+		t.Fatalf("second ralph check timeout = %q, want Beta0s", got)
+	}
 
 	if got := template[0].ExpandVars["who"]; got != "{target.id}" {
 		t.Fatalf("template ExpandVars mutated to %q", got)
@@ -236,6 +368,12 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	}
 	if got := template[0].Loop.Body[0].ID; got != "{target}.loop" {
 		t.Fatalf("template loop body id mutated to %q", got)
+	}
+	if got := template[0].Timeout; got != "{target.id}0s" {
+		t.Fatalf("template timeout mutated to %q", got)
+	}
+	if got := template[0].Ralph.Check.Timeout; got != "{target.title}0s" {
+		t.Fatalf("template ralph check timeout mutated to %q", got)
 	}
 }
 
@@ -304,6 +442,7 @@ func TestCompileExpansionFragmentFailsWhenFormulaV2Disabled(t *testing.T) {
 formula = "needs-v2-fragment"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.work"

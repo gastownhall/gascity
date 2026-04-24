@@ -46,7 +46,7 @@ $ gc init ~/my-city
 Welcome to Gas City SDK!
 
 Choose a config template:
-  1. tutorial  — default coding agent (default)
+  1. minimal   — default coding agent (default)
   2. gastown   — multi-agent orchestration pack
   3. custom    — empty workspace, configure it yourself
 Template [1]:
@@ -66,10 +66,10 @@ Choose your coding agent:
 Agent [1]:
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
-[3/8] Writing default prompts
-[4/8] Writing default formulas
+[3/8] Scaffolding agent prompts
+[4/8] Writing pack.toml
 [5/8] Writing city configuration
-Created tutorial config (Level 1) in "my-city".
+Created minimal config (Level 1) in "my-city".
 [6/8] Checking provider readiness
 [7/8] Registering city with supervisor
 Registered city 'my-city' (/Users/csells/my-city)
@@ -92,8 +92,9 @@ same command, just providing the provider explicitly.
 $ gc init ~/my-city --provider claude
 ```
 
-Gas City created the city directory, registered it, and started it. Let's look
-at what's inside:
+Gas City created the city directory, registered it, and started it. A city
+created with `gc init` comes with `pack.toml`, `city.toml`, and the standard
+top-level directories, so let's look at what's inside:
 
 ```shell
 ~
@@ -101,13 +102,19 @@ $ cd ~/my-city
 
 ~/my-city
 $ ls
-city.toml  formulas  hooks  orders  prompts
+agents  assets  city.toml  commands  doctor  formulas  orders  overlays  pack.toml  template-fragments
 ```
 
-The main file is `city.toml` — it defines your city, using the contents of those
-directories as well as containing some definitions and local config. Assuming
-you chose the default `tutorial` config template and default provider,
-`city.toml` looks like this:
+At the top level of the city directory:
+
+- `pack.toml` — the portable pack definition layer
+- `city.toml` — city-local deployment and runtime settings
+
+This city comes with a built-in `mayor` agent. The mayor's prompt lives at
+`agents/mayor/prompt.template.md`, and `pack.toml` defines the always-on mayor
+session that uses it. Assuming you chose the default `minimal` config
+template and default provider, `city.toml` keeps the city-local runtime
+settings:
 
 ```shell
 ~/my-city
@@ -115,10 +122,20 @@ $ cat city.toml
 [workspace]
 name = "my-city"
 provider = "claude"
+```
+
+The portable pack definition lives next to it:
+
+```shell
+~/my-city
+$ cat pack.toml
+[pack]
+name = "my-city"
+schema = 2
 
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -127,16 +144,15 @@ mode = "always"
 
 The `[workspace]` section names your city and sets the default provider.
 
-Each `[[agent]]` table you configure lets you create a named set of config
-including things like the provider, the model, the prompt you want to use to
-define its role, etc. An agent is named so that you can assign it work (aka
-"sling"). Here we've created an agent called the `mayor` with a prompt template
-(the instructions for the mayor) and a default session where you instructions
-go.
+The `[[agent]]` entry in `pack.toml` defines the built-in `mayor`, and
+`[[named_session]]` keeps a `mayor` session running so you can talk to it at
+any time. When you add more agents later, Gas City creates `agents/<name>/`, with
+`prompt.template.md` for the prompt and `agent.toml` for any per-agent
+overrides.
 
 Gas City also gives you an implicit agent for each supported provider — so
 `claude`, `codex`, and `gemini` are available as agent names even though they're
-not listed in `city.toml`. These use the provider's defaults with no custom
+not listed in `pack.toml`. These use the provider's defaults with no custom
 prompt.
 
 To check on the status of your city, use `gc status`:

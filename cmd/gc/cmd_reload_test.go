@@ -35,7 +35,7 @@ func TestCmdReloadApplied(t *testing.T) {
 	})
 
 	sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
-		if cityPath != canonicalTestPath(dir) {
+		if !samePath(cityPath, dir) {
 			t.Fatalf("cityPath = %q, want %q", cityPath, canonicalTestPath(dir))
 		}
 		if !req.Wait || req.Timeout != "30s" {

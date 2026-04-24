@@ -65,12 +65,9 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 	if !ok || len(cfg.Workspace.DefaultRigIncludes) == 0 {
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
-	if len(cfg.Workspace.Includes) == 0 && len(legacyAgentFiles(ctx.CityPath)) == 0 {
-		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes preserved for ordered rig defaults")
-	}
 	return warnCheck("v2-default-rig-import-format",
-		"workspace.default_rig_includes is deprecated; migrate to [rig_defaults] imports = [...]",
-		v2MigrationHint(),
+		"workspace.default_rig_includes is deprecated; migrate to root pack.toml [defaults.rig.imports.<binding>]",
+		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
 		cfg.Workspace.DefaultRigIncludes)
 }
 
@@ -85,10 +82,6 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	if err != nil {
 		return err
 	}
-	// Snapshot the raw legacy paths before overlay so we can detect divergence
-	// with the existing site binding. Without this, ApplySiteBindingsForEdit
-	// would overwrite each legacy path with the site binding, silently discarding
-	// the legacy value when they conflict.
 	legacyByName := make(map[string]string, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
 		legacyByName[rig.Name] = strings.TrimSpace(rig.Path)
@@ -111,12 +104,6 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 		if !ok || legacy == "" || site == "" {
 			continue
 		}
-		// Normalize both sides so semantically equivalent path spellings
-		// (relative vs absolute, redundant separators, trailing slashes,
-		// symlinks, case-only differences on case-insensitive file
-		// systems) don't trigger false conflicts that block migration.
-		// The `resolveRigPaths` runtime follows the same convention:
-		// relative paths are joined to the city root, then cleaned.
 		if sameRigPath(ctx.CityPath, legacy, site) {
 			continue
 		}
@@ -130,11 +117,6 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	if _, err := config.ApplySiteBindingsForEdit(fsys.OSFS{}, ctx.CityPath, cfg); err != nil {
 		return err
 	}
-	// Write city.toml FIRST, then .gc/site.toml. A crash between the two
-	// writes leaves `.gc/site.toml` missing the new binding while city.toml
-	// already has the path stripped — which the site-binding loader surfaces
-	// via warnings (orphan legacy path) rather than silently resolving to an
-	// empty effective path.
 	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return err
@@ -144,18 +126,11 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 		return err
 	}
 	if err := config.PersistRigSiteBindings(fsys.OSFS{}, ctx.CityPath, cfg.Rigs); err != nil {
-		// Surface the half-migrated state explicitly: city.toml has
-		// already been stripped of legacy paths but .gc/site.toml was
-		// not updated, so declared rigs will load as unbound until the
-		// user re-runs the migration.
 		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs are now unbound; re-run `gc doctor --fix` to retry: %w", err)
 	}
 	return nil
 }
 
-// normalizeRigPath resolves a rig path for equality comparison: relative
-// paths are joined to cityPath, then filepath.Clean is applied. This
-// matches the runtime convention in config.resolveRigPaths.
 func normalizeRigPath(cityPath, p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" {
@@ -167,16 +142,6 @@ func normalizeRigPath(cityPath, p string) string {
 	return filepath.Clean(p)
 }
 
-// sameRigPath reports whether two rig paths refer to the same directory,
-// accounting for the normalization differences that trip up naive string
-// equality: relative vs absolute spellings, symlinks, and case-only
-// differences on case-insensitive filesystems (macOS, Windows).
-//
-// When both normalized paths exist on disk, os.Stat + os.SameFile is the
-// authoritative answer — it resolves symlinks and compares inodes, which
-// covers every spelling difference including case on case-insensitive
-// filesystems. Otherwise the function falls back to normalized string
-// equality (which catches the common relative-vs-absolute case).
 func sameRigPath(cityPath, a, b string) bool {
 	na := normalizeRigPath(cityPath, a)
 	nb := normalizeRigPath(cityPath, b)
@@ -230,11 +195,6 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 		}
 		orphan = append(orphan, name)
 	}
-	// Unbound rigs are declared in city.toml but have no legacy path AND
-	// no site binding — usually the aftermath of a half-migrated edit
-	// (e.g., city.toml written, site.toml write failed). Surface this
-	// state explicitly so operators don't silently run with rigs that
-	// won't resolve to any store.
 	var unbound []string
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) != "" {
@@ -249,11 +209,6 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 	sort.Strings(orphan)
 	sort.Strings(unbound)
 
-	// Multiple conditions may coexist (e.g., an unbound rig alongside an
-	// orphan site binding whose name no longer matches). Combine all
-	// non-empty categories into a single warning so operators see every
-	// relevant name rather than just the first category the switch
-	// would have picked.
 	var messages []string
 	var hints []string
 	var details []string
@@ -292,26 +247,165 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	if err != nil || !info.IsDir() {
 		return okCheck("v2-scripts-layout", "no top-level scripts/ directory found")
 	}
+	realFiles, sawSymlink, walkErr := inspectTopLevelScripts(path)
+	if walkErr != nil {
+		return warnCheck("v2-scripts-layout",
+			fmt.Sprintf("inspecting top-level scripts/: %v", walkErr),
+			"resolve filesystem errors and rerun gc doctor",
+			[]string{"scripts/"})
+	}
+	if len(realFiles) == 0 {
+		if sawSymlink {
+			legacyShim, provenanceErr := legacyTopLevelScriptsShim(ctx.CityPath)
+			if provenanceErr != nil {
+				return warnCheck("v2-scripts-layout",
+					fmt.Sprintf("inspecting top-level scripts/ provenance: %v", provenanceErr),
+					"fix the config load error or inspect scripts/ manually before rerunning gc doctor",
+					[]string{"scripts/"})
+			}
+			if legacyShim {
+				return warnCheck("v2-scripts-layout",
+					"top-level scripts/ only contains stale legacy symlinks",
+					"delete scripts/ or rerun gc start/gc supervisor so runtime pruning can remove the old shim",
+					[]string{"scripts/"})
+			}
+			return warnCheck("v2-scripts-layout",
+				"top-level scripts/ only contains user-managed symlinks; runtime pruning will not remove them",
+				"move scripts to commands/ or assets/, or remove the user-managed symlinks manually",
+				[]string{"scripts/"})
+		}
+		return okCheck("v2-scripts-layout", "no legacy top-level scripts found")
+	}
 	return warnCheck("v2-scripts-layout",
-		"top-level scripts/ is deprecated; move scripts to commands/ or assets/",
+		"top-level scripts/ contains legacy real files; move scripts to commands/ or assets/",
 		"move entrypoint scripts next to commands/doctor entries or under assets/",
-		[]string{"scripts/"})
+		realFiles)
+}
+
+// inspectTopLevelScripts returns relative paths (under "scripts/") of real
+// files plus whether the tree contains any symlinks. Symlinks are treated as
+// stale compatibility artifacts from the removed ResolveScripts shim, while
+// real files indicate the deprecated user-authored top-level scripts layout.
+func inspectTopLevelScripts(dir string) ([]string, bool, error) {
+	var realFiles []string
+	var sawSymlink bool
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, lErr := os.Lstat(path)
+		if lErr != nil {
+			return lErr
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			sawSymlink = true
+			return nil
+		}
+		rel, rErr := filepath.Rel(dir, path)
+		if rErr != nil {
+			return rErr
+		}
+		realFiles = append(realFiles, filepath.Join("scripts", rel))
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	sort.Strings(realFiles)
+	return realFiles, sawSymlink, nil
+}
+
+func legacyTopLevelScriptsShim(cityPath string) (bool, error) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false, err
+	}
+	origins := legacyScriptOriginsForScope(cityPath, cfg.PackDirs)
+	_, ok, err := legacyShimLinks(cityPath, origins, cityPath)
+	return ok, err
 }
 
 type v2WorkspaceNameCheck struct{}
 
-func (v2WorkspaceNameCheck) Name() string                     { return "v2-workspace-name" }
-func (v2WorkspaceNameCheck) CanFix() bool                     { return false }
-func (v2WorkspaceNameCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2WorkspaceNameCheck) Name() string { return "v2-workspace-name" }
+func (v2WorkspaceNameCheck) CanFix() bool { return true }
+func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
+	if err != nil {
+		return err
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, ctx.CityPath)
+	if err != nil {
+		return err
+	}
+
+	rawName := strings.TrimSpace(cfg.Workspace.Name)
+	rawPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	siteName := strings.TrimSpace(binding.WorkspaceName)
+	sitePrefix := strings.TrimSpace(binding.WorkspacePrefix)
+
+	var conflicts []string
+	if rawName != "" && siteName != "" && rawName != siteName {
+		conflicts = append(conflicts, fmt.Sprintf("workspace.name=%q .gc/site.toml workspace_name=%q", rawName, siteName))
+	}
+	if rawPrefix != "" && sitePrefix != "" && rawPrefix != sitePrefix {
+		conflicts = append(conflicts, fmt.Sprintf("workspace.prefix=%q .gc/site.toml workspace_prefix=%q", rawPrefix, sitePrefix))
+	}
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		return fmt.Errorf("refusing to migrate workspace identity — city.toml and .gc/site.toml disagree; resolve manually and re-run `gc doctor --fix`:\n  %s",
+			strings.Join(conflicts, "\n  "))
+	}
+
+	name := siteName
+	if name == "" {
+		name = rawName
+	}
+	prefix := sitePrefix
+	if prefix == "" {
+		prefix = rawPrefix
+	}
+
+	// Write the site binding first. If the city.toml rewrite fails
+	// afterwards, runtime identity remains stable and `gc doctor` will
+	// continue warning about the still-present legacy fields rather than
+	// silently losing the chosen name/prefix.
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, ctx.CityPath, name, prefix); err != nil {
+		return err
+	}
+	cfg.Workspace.Name = ""
+	cfg.Workspace.Prefix = ""
+	content, err := cfg.MarshalForWrite()
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"), content, 0o644)
+}
+
 func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
-	if !ok || strings.TrimSpace(cfg.Workspace.Name) == "" {
-		return okCheck("v2-workspace-name", "workspace.name already absent")
+	if !ok {
+		return okCheck("v2-workspace-name", "workspace identity migration skipped until city.toml parses")
+	}
+	rawName := strings.TrimSpace(cfg.Workspace.Name)
+	rawPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if rawName == "" && rawPrefix == "" {
+		return okCheck("v2-workspace-name", "workspace identity already absent from city.toml")
+	}
+	var details []string
+	if rawName != "" {
+		details = append(details, "workspace.name="+rawName)
+	}
+	if rawPrefix != "" {
+		details = append(details, "workspace.prefix="+rawPrefix)
 	}
 	return warnCheck("v2-workspace-name",
-		"workspace.name will move to .gc/ in a future release",
-		"review site-binding migration guidance before the hard cutover",
-		[]string{cfg.Workspace.Name})
+		"workspace identity still lives in city.toml",
+		"run `gc doctor --fix` to migrate workspace.name/workspace.prefix into .gc/site.toml",
+		details)
 }
 
 type v2PromptTemplateSuffixCheck struct{}

@@ -164,8 +164,9 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		nil,
 		[]beads.Bead{work},
+		nil,
 	)
-	if len(released) != 1 || released[0] != work.ID {
+	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
 
@@ -178,6 +179,187 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 	}
 	if got.Assignee != "" {
 		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ReopensRigStoreMissingPoolAssignee(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	citySession, err := cityStore.Create(beads.Bead{
+		Title:    "worker session",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Assignee: "worker-live",
+		Metadata: map[string]string{
+			"session_name":         "worker-dead",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create city session bead: %v", err)
+	}
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "orphaned rig pool work",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+	if citySession.ID != work.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", citySession.ID, work.ID)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		&config.City{
+			Rigs:   []config.Rig{{Name: "repo"}},
+			Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		},
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+	gotSession, err := cityStore.Get(citySession.ID)
+	if err != nil {
+		t.Fatalf("Get city session bead: %v", err)
+	}
+	if gotSession.Type != sessionBeadType {
+		t.Fatalf("city session type = %q, want %q", gotSession.Type, sessionBeadType)
+	}
+	if gotSession.Assignee != "worker-live" {
+		t.Fatalf("city session assignee = %q, want worker-live", gotSession.Assignee)
+	}
+	if gotSession.Metadata["session_name"] != "worker-dead" ||
+		gotSession.Metadata["template"] != "worker" ||
+		gotSession.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
+		t.Fatalf("city session metadata changed: %#v", gotSession.Metadata)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ReopensCrossStoreIDCollisions(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cityWork, err := cityStore.Create(beads.Bead{
+		Title:    "orphaned city pool work",
+		Assignee: "worker-city-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create city work bead: %v", err)
+	}
+	if err := cityStore.Update(cityWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set city work status: %v", err)
+	}
+	cityWork, err = cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("Reload city work bead: %v", err)
+	}
+	rigWork, err := rigStore.Create(beads.Bead{
+		Title:    "orphaned rig pool work",
+		Assignee: "worker-rig-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(rigWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	rigWork, err = rigStore.Get(rigWork.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+	if cityWork.ID != rigWork.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		&config.City{
+			Rigs:   []config.Rig{{Name: "repo"}},
+			Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		},
+		nil,
+		[]beads.Bead{cityWork, rigWork},
+		[]beads.Store{cityStore, rigStore},
+	)
+	if len(released) != 2 || released[0].ID != cityWork.ID || released[1].ID != rigWork.ID {
+		t.Fatalf("released = %v, want [%s %s]", released, cityWork.ID, rigWork.ID)
+	}
+	gotCity, err := cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("Get city work bead: %v", err)
+	}
+	if gotCity.Status != "open" || gotCity.Assignee != "" {
+		t.Fatalf("city work = status %q assignee %q, want open/unassigned", gotCity.Status, gotCity.Assignee)
+	}
+	gotRig, err := rigStore.Get(rigWork.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if gotRig.Status != "open" || gotRig.Assignee != "" {
+		t.Fatalf("rig work = status %q assignee %q, want open/unassigned", gotRig.Status, gotRig.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_SkipsStoreAwareEntryWithoutOwnerStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "orphaned rig pool work",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{nil},
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none without owner store", released)
+	}
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" {
+		t.Fatalf("rig work = status %q assignee %q, want unchanged in_progress/worker-dead", got.Status, got.Assignee)
 	}
 }
 
@@ -218,6 +400,7 @@ func TestReleaseOrphanedPoolAssignments_KeepsOpenSessionOwnership(t *testing.T) 
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		[]beads.Bead{session},
 		[]beads.Bead{work},
+		nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released = %v, want none", released)
@@ -263,8 +446,8 @@ func TestReleaseOrphanedPoolAssignments_ReopensStaleDirectAssigneeForNamedBacked
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(store, cfg, nil, []beads.Bead{work})
-	if len(released) != 1 || released[0] != work.ID {
+	released := releaseOrphanedPoolAssignments(store, cfg, nil, []beads.Bead{work}, nil)
+	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
 
@@ -308,7 +491,7 @@ func TestReleaseOrphanedPoolAssignments_PreservesCanonicalNamedIdentity(t *testi
 		ResolvedWorkspaceName: "test-city",
 	}
 
-	released := releaseOrphanedPoolAssignments(store, cfg, nil, []beads.Bead{work})
+	released := releaseOrphanedPoolAssignments(store, cfg, nil, []beads.Bead{work}, nil)
 	if len(released) != 0 {
 		t.Fatalf("released = %v, want none", released)
 	}

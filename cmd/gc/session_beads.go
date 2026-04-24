@@ -56,6 +56,38 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 	return loadSessionBeads(store)
 }
 
+func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *config.ResolvedProvider) {
+	if meta == nil || resolved == nil {
+		return
+	}
+	name := strings.TrimSpace(resolved.Name)
+	if name != "" {
+		meta["provider"] = name
+	}
+	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+		meta["provider_kind"] = family
+	}
+	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name {
+		meta["builtin_ancestor"] = ancestor
+	}
+}
+
+func queueMissingResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
+	if queue == nil || resolved == nil {
+		return
+	}
+	name := strings.TrimSpace(resolved.Name)
+	if existing["provider"] == "" && name != "" {
+		queue("provider", name)
+	}
+	if family := resolvedProviderFamilyMetadata(resolved); existing["provider_kind"] == "" && family != "" {
+		queue("provider_kind", family)
+	}
+	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); existing["builtin_ancestor"] == "" && ancestor != "" && ancestor != name {
+		queue("builtin_ancestor", ancestor)
+	}
+}
+
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
 	if identity == "" || isNamedSessionBead(b) {
 		return false
@@ -350,7 +382,7 @@ func unclaimWorkAssignedToRetiredSessionBead(store beads.Store, sessionID, fallb
 	}
 	empty := ""
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: sessionID, Status: status})
+		work, err := store.List(beads.ListQuery{Assignee: sessionID, Status: status, Live: true})
 		if err != nil {
 			fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s: %v\n", sessionID, err) //nolint:errcheck
 			continue
@@ -378,7 +410,7 @@ func reassignWorkAssignedToRetiredSessionBead(store beads.Store, oldSessionID, n
 		stderr = io.Discard
 	}
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: oldSessionID, Status: status})
+		work, err := store.List(beads.ListQuery{Assignee: oldSessionID, Status: status, Live: true})
 		if err != nil {
 			fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s: %v\n", oldSessionID, err) //nolint:errcheck
 			continue
@@ -746,9 +778,7 @@ func syncSessionBeadsWithSnapshot(
 				meta["command"] = tp.Command
 			}
 			if tp.ResolvedProvider != nil {
-				if tp.ResolvedProvider.Name != "" {
-					meta["provider"] = tp.ResolvedProvider.Name
-				}
+				stampResolvedProviderSessionMetadata(meta, tp.ResolvedProvider)
 				if tp.ResolvedProvider.ResumeFlag != "" {
 					meta["resume_flag"] = tp.ResolvedProvider.ResumeFlag
 				}
@@ -919,6 +949,14 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["continuation_epoch"] == "" {
 			queueMeta("continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch))
 		}
+		// Refresh command and resume fields. The stored command is used for
+		// `gc session attach` and — on legacy code paths — can act as the
+		// authoritative command source for respawn. If agent config changes
+		// (e.g., adding `[option_defaults] model = "opus"`), the freshly
+		// resolved tp.Command will differ from the stored value; sync here
+		// so the bead matches the current config. An empty tp.Command is
+		// ignored to avoid clobbering the stored value when resolution fails
+		// transiently.
 		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
@@ -926,6 +964,7 @@ func syncSessionBeadsWithSnapshot(
 			if tp.ResolvedProvider.Name != "" && b.Metadata["provider"] != tp.ResolvedProvider.Name {
 				queueMeta("provider", tp.ResolvedProvider.Name)
 			}
+			queueMissingResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
 			if b.Metadata["resume_flag"] == "" && tp.ResolvedProvider.ResumeFlag != "" {
 				queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
 			}
@@ -1211,6 +1250,64 @@ func syncDesiredPoolSlots(
 	}
 
 	return openBeads
+}
+
+// reapStaleSessionBeads cross-references open session beads against live
+// tmux sessions. If a bead claims a session_name but no matching tmux
+// session exists, and the bead has been in that state past the startup
+// grace period, the bead is closed.
+//
+// This prevents infinite retry loops where a dead tmux session's bead
+// blocks name availability for new sessions (see #742).
+//
+// Returns the number of beads reaped.
+func reapStaleSessionBeads(
+	store beads.Store,
+	sp runtime.Provider,
+	dt *drainTracker,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	if store == nil || sp == nil {
+		return 0
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		fmt.Fprintf(stderr, "reapStaleSessionBeads: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	now := clk.Now()
+	reaped := 0
+	for _, b := range open {
+		sn := b.Metadata["session_name"]
+		if sn == "" {
+			continue
+		}
+		// Don't reap beads whose tmux session hasn't been started yet.
+		if b.Metadata["state"] == "creating" || strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
+			continue
+		}
+		// Don't reap beads with an active drain — the drainTracker is
+		// managing their lifecycle and the tmux session may have just died
+		// as part of the drain sequence.
+		if dt != nil && dt.get(b.ID) != nil {
+			continue
+		}
+		// Session is alive — nothing to reap.
+		if sp.IsRunning(sn) {
+			continue
+		}
+		// Startup grace: don't reap beads younger than the creating-state
+		// timeout. Zero CreatedAt means unknown age — skip conservatively.
+		if b.CreatedAt.IsZero() || now.Sub(b.CreatedAt) < staleCreatingStateTimeout {
+			continue
+		}
+		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "WARN: reconciler: reaped stale session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
+			reaped++
+		}
+	}
+	return reaped
 }
 
 // closeBead sets final metadata on a session bead and closes it.

@@ -107,10 +107,11 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	// Verify session.woke event exists.
 	verifyEvents(t, cityDir, "session.woke")
 
-	// Stop the agent.
-	out, err := gc("", "stop", cityDir)
+	// Restart the city so we observe a session stop event without tearing the
+	// city out of supervisor scope before querying the API.
+	out, err := gc("", "restart", cityDir)
 	if err != nil {
-		t.Fatalf("gc stop failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc restart failed: %v\noutput: %s", err, out)
 	}
 
 	// Give the event log a moment.

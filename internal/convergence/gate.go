@@ -6,7 +6,9 @@ import (
 )
 
 // DefaultGateTimeout is the default timeout for gate condition scripts.
-const DefaultGateTimeout = 60 * time.Second
+// Set to 5 minutes to accommodate build/test commands (e.g., make check)
+// that commonly exceed the previous 60-second default.
+const DefaultGateTimeout = 5 * time.Minute
 
 // MaxGateRetries is the maximum number of retries for gate_timeout_action=retry.
 const MaxGateRetries = 3
@@ -15,7 +17,7 @@ const MaxGateRetries = 3
 type GateConfig struct {
 	Mode          string        // "manual", "condition", "hybrid"
 	Condition     string        // path to gate condition script (empty for manual-only)
-	Timeout       time.Duration // gate script timeout (default 60s)
+	Timeout       time.Duration // gate script timeout (default 5m)
 	TimeoutAction string        // "iterate", "retry", "manual", "terminate"
 }
 
@@ -38,7 +40,7 @@ func GateManualResult() GateResult {
 }
 
 // ParseGateConfig extracts gate configuration from convergence metadata.
-// Uses defaults for missing fields: timeout=60s, timeout_action=iterate.
+// Uses defaults for missing fields: timeout=5m, timeout_action=iterate.
 func ParseGateConfig(meta map[string]string) (GateConfig, error) {
 	mode := meta[FieldGateMode]
 	if mode == "" {

@@ -133,7 +133,7 @@ awareness of Gas City. Hooks wire the provider's event system into Gas City so
 agents can receive mail, pick up slung work, and drain queued nudges
 automatically.
 
-The tutorial template sets hooks at the workspace level, so all your agents
+The minimal template sets hooks at the workspace level, so all your agents
 already have them:
 
 ```toml
@@ -150,10 +150,11 @@ install_agent_hooks = ["claude"]
 
 Agent-local overrides like this live in `agents/<name>/agent.toml`.
 
-When a session starts, Gas City installs hook configuration files that the
-provider reads. For Claude, this means a `hooks/claude.json` file that fires Gas
-City commands at key moments — session start, before each turn, on shutdown.
-Those commands deliver mail, drain nudges, and surface pending work.
+When a session starts, Gas City installs hook settings that the provider reads.
+For Claude, fresh cities write the managed `.gc/settings.json` configuration,
+which fires Gas City commands at key moments — session start, before each turn,
+and on shutdown. Those commands deliver mail, drain nudges, and surface pending
+work.
 
 Without hooks, you'd have to manually tell each agent to run `gc mail check` and
 `gc prime`. With hooks, it happens on every turn.

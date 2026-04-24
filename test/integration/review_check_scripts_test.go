@@ -62,11 +62,20 @@ func (c reviewCheckCase) checkStepRef(attempt int) string {
 	return fmt.Sprintf("%s.%s.check.%d", c.formula, c.ralphStepID, attempt)
 }
 
+// Each subtest below calls setupReviewCheckScriptCity inside t.Run so
+// every case gets its own managed-Dolt instance with a fresh state
+// file. Sharing one city across the three cases caused intermittent
+// "Dolt server unreachable at 127.0.0.1:0" failures in `Integration /
+// rest` on main: when the parent city's managed Dolt raced between
+// subtests (crash, auto-stop, or a state-file write that left port 0
+// or an unreachable port), the test helper silently dropped
+// GC_DOLT_PORT and bd's own discovery fell through to port 0. See the
+// failure analysis on PR that introduced this test isolation.
 func TestReviewCheckScriptsDetectVerdictAcrossRalphStep(t *testing.T) {
-	cityDir := setupReviewCheckScriptCity(t)
-
 	for _, tc := range reviewCheckCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupReviewCheckScriptCity(t)
+
 			rootID := createJSONBead(t, cityDir, "workflow-root")
 			verdictID := createJSONBead(t, cityDir, "apply")
 			checkID := createJSONBead(t, cityDir, "check")
@@ -98,10 +107,10 @@ func TestReviewCheckScriptsDetectVerdictAcrossRalphStep(t *testing.T) {
 }
 
 func TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep(t *testing.T) {
-	cityDir := setupReviewCheckScriptCity(t)
-
 	for _, tc := range reviewCheckCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupReviewCheckScriptCity(t)
+
 			rootID := createJSONBead(t, cityDir, "workflow-root")
 			oldVerdictID := createJSONBead(t, cityDir, "apply-old")
 			updateBeadMetadata(t, cityDir, oldVerdictID,
@@ -175,11 +184,12 @@ func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T)
 
 func setupReviewCheckScriptCity(t *testing.T) string {
 	t.Helper()
-	env := newIsolatedCommandEnv(t, true)
+	env := newIsolatedCommandEnv(t, false)
+	env = replaceEnv(env, "GC_BEADS", "file")
 
 	cityDir := filepath.Join(t.TempDir(), "review-check-script-test")
 	configPath := filepath.Join(t.TempDir(), "review-check-script.toml")
-	cityToml := "[workspace]\nname = \"review-check-script-test\"\n\n[session]\nprovider = \"subprocess\"\n"
+	cityToml := "[workspace]\nname = \"review-check-script-test\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"subprocess\"\n"
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
@@ -204,17 +214,15 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 			t.Fatalf("writing %s: %v", dst, err)
 		}
 	}
-	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
-	registerCityCommandEnv(cityDir, env)
-	if _, ok := ensureManagedDoltPortForTest(cityDir); !ok {
-		configData, _ := os.ReadFile(filepath.Join(cityDir, ".beads", "config.yaml"))
-		portData, _ := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port"))
-		t.Fatalf("managed Dolt port never became ready for review-check-script city\nconfig:\n%s\nport file:\n%s", string(configData), string(portData))
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	if err != nil {
+		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
-		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
+		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
+		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 		cleanupTestCityDir(cityDir)
 	})
 
@@ -224,7 +232,7 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 func createJSONBead(t *testing.T, cityDir, title string) string {
 	t.Helper()
 
-	out, err := bdDolt(cityDir, "create", "--json", title)
+	out, err := reviewCheckBD(t, cityDir, "create", "--json", title)
 	if err != nil {
 		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
@@ -242,35 +250,41 @@ func updateBeadMetadata(t *testing.T, cityDir, beadID string, pairs ...string) {
 	for _, pair := range pairs {
 		args = append(args, "--set-metadata", pair)
 	}
-	out, err := bdDolt(cityDir, args...)
+	out, err := reviewCheckBD(t, cityDir, args...)
 	if err != nil {
 		t.Fatalf("bd update %s failed: %v\noutput: %s", beadID, err, out)
 	}
 }
 
+func reviewCheckBD(t *testing.T, cityDir string, args ...string) (string, error) {
+	t.Helper()
+
+	out, err := bd(cityDir, args...)
+	if err == nil || !managedDoltTransportRetryable(out) {
+		return out, err
+	}
+	return bdDolt(cityDir, args...)
+}
+
 func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	t.Helper()
 
-	env := commandEnvForDir(cityDir, true)
+	env := commandEnvForDir(cityDir, false)
 	env = filterEnvMany(env,
 		"GC_BEAD_ID",
+		"GC_BEADS",
 		"GC_CITY",
 		"GC_CITY_PATH",
 		"GC_CITY_ROOT",
 		"GC_CITY_RUNTIME_DIR",
-		"GC_DOLT_PORT",
 	)
 	env = append(env,
 		"GC_BEAD_ID="+beadID,
+		"GC_BEADS=file",
 		"GC_CITY="+cityDir,
 		"GC_CITY_PATH="+cityDir,
 		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 	)
-	if port, ok := ensureManagedDoltPortForTest(cityDir); ok {
-		env = append(env, "GC_DOLT_PORT="+port)
-	} else {
-		t.Fatalf("managed Dolt port did not become ready for %s", cityDir)
-	}
 	return env
 }
 
@@ -363,6 +377,66 @@ func TestReviewCheckScriptsStripBeadsRoleWarningFromStdout(t *testing.T) {
 	}
 }
 
+func TestReviewCheckScriptsRetryTransientBeadShowFailure(t *testing.T) {
+	for _, tc := range reviewCheckCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			writeFakeBDCommandWithTransientShowFailure(t, filepath.Join(fakeDir, "bd"), tc)
+
+			env := newIsolatedToolEnv(t, false)
+			envMap := parseEnvList(env)
+			env = replaceEnv(env, "PATH", prependPath(fakeDir, envMap["PATH"]))
+			env = filterEnvMany(env,
+				"GC_BEAD_ID",
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+			)
+			env = append(env, "GC_BEAD_ID=check-1")
+
+			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
+			if err != nil {
+				t.Fatalf("%s failed after transient bd show failure: %v\noutput: %s", tc.script, err, out)
+			}
+			if !strings.Contains(out, tc.approvedText) {
+				t.Fatalf("%s output = %q, want %q", tc.script, out, tc.approvedText)
+			}
+		})
+	}
+}
+
+func TestReviewCheckScriptsSurfaceVerdictOutage(t *testing.T) {
+	for _, tc := range reviewCheckCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			writeFakeBDCommandWithVerdictOutage(t, filepath.Join(fakeDir, "bd"))
+
+			env := newIsolatedToolEnv(t, false)
+			envMap := parseEnvList(env)
+			env = replaceEnv(env, "PATH", prependPath(fakeDir, envMap["PATH"]))
+			env = filterEnvMany(env,
+				"GC_BEAD_ID",
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+			)
+			env = append(env, "GC_BEAD_ID=check-1")
+
+			scriptPath := filepath.Join(repoRoot(t), "examples", "gastown", "packs", "gastown", "assets", "scripts", "checks", tc.script)
+			out, err := runCommand(repoRoot(t), env, 30*time.Second, "bash", scriptPath)
+			if err == nil {
+				t.Fatalf("%s unexpectedly succeeded during bd outage\noutput: %s", tc.script, out)
+			}
+			if !strings.Contains(out, "unable to determine") {
+				t.Fatalf("%s output = %q, want outage message", tc.script, out)
+			}
+		})
+	}
+}
+
 // writeFakeBDCommandWithWarning is writeFakeBDCommand with a stdout
 // "warning:" prefix prepended to both `show` and `list` output, mirroring
 // real `bd`'s GH#2950 diagnostic so the check scripts' json_payload
@@ -418,6 +492,97 @@ EOF
     ;;
 esac
 `, tc.attemptStepRef(1), tc.verdictKey, tc.attemptStepRef(1), tc.verdictKey)
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd command: %v", err)
+	}
+}
+
+func writeFakeBDCommandWithTransientShowFailure(t *testing.T, path string, tc reviewCheckCase) {
+	t.Helper()
+
+	statePath := filepath.Join(filepath.Dir(path), "show-count")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+
+state_file=%q
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+  show)
+    count=0
+    if [ -f "$state_file" ]; then
+      count=$(cat "$state_file")
+    fi
+    count=$((count + 1))
+    printf '%%s' "$count" >"$state_file"
+    if [ "$count" -eq 1 ]; then
+      printf '%%s\n' '{"metadata":{"gc.attempt":"1"}}'
+      exit 0
+    fi
+    printf '%%s\n' '{"metadata":{"gc.attempt":"1","gc.root_bead_id":"root-1"}}'
+    ;;
+  list)
+    cat <<'EOF'
+[
+  {
+    "id": "old-verdict",
+    "created_at": "2026-01-01T00:00:00Z",
+    "metadata": {
+      "gc.step_ref": %q,
+      "gc.root_bead_id": "root-1",
+      %q: "iterate"
+    }
+  },
+  {
+    "id": "new-verdict",
+    "created_at": "2026-01-01T00:00:01Z",
+    "metadata": {
+      "gc.step_ref": %q,
+      "gc.root_bead_id": "root-1",
+      %q: "done"
+    }
+  }
+]
+EOF
+    ;;
+  *)
+    echo "unexpected bd command: $cmd" >&2
+    exit 1
+    ;;
+esac
+`, statePath, tc.attemptStepRef(1), tc.verdictKey, tc.attemptStepRef(1), tc.verdictKey)
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd command: %v", err)
+	}
+}
+
+func writeFakeBDCommandWithVerdictOutage(t *testing.T, path string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+set -eu
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+  show)
+    printf '%s\n' '{"metadata":{"gc.attempt":"1","gc.root_bead_id":"root-1"}}'
+    ;;
+  list)
+    echo "bd unavailable" >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected bd command: $cmd" >&2
+    exit 1
+    ;;
+esac
+`
 
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd command: %v", err)

@@ -25,10 +25,10 @@ func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage orders (scheduled and event-driven dispatch)",
 		Long: `Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/*.toml files. Each order pairs a gate
+Orders live in flat orders/<name>.toml files. Each order pairs a trigger
 condition (cooldown, cron, condition, event, or manual) with an action
-(a formula or an exec script). The controller evaluates gates on each
-tick and dispatches work when a gate opens.`,
+(a formula or an exec script). The controller evaluates triggers on each
+tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -53,9 +53,9 @@ func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List available orders",
-		Long: `List all available orders with their gate type, schedule, and target.
+		Long: `List all available orders with their trigger type, schedule, and target.
 
-Scans orders/ directories for flat .toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -74,7 +74,7 @@ func newOrderShowCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Show details of an order",
 		Long: `Display detailed information about a named order.
 
-Shows the order name, description, formula reference, gate type,
+Shows the order name, description, formula reference, trigger type,
 scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
@@ -94,7 +94,7 @@ func newOrderRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <name>",
 		Short: "Execute an order manually",
-		Long: `Execute an order manually, bypassing its gate conditions.
+		Long: `Execute an order manually, bypassing its trigger conditions.
 
 Instantiates a wisp from the order's formula and routes it to the
 configured target (if any). Useful for testing orders or triggering
@@ -116,9 +116,9 @@ func newOrderCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "check",
 		Short: "Check which orders are due to run",
-		Long: `Evaluate gate conditions for all orders and show which are due.
+		Long: `Evaluate trigger conditions for all orders and show which are due.
 
-Prints a table with each order's gate, due status, and reason. Returns
+Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -168,7 +168,7 @@ func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City,
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return "", nil, nil, 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return "", nil, nil, 1
@@ -306,9 +306,9 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 
 	hasRig := anyOrderHasRig(aa)
 	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "GATE", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
 	} else {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "GATE", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
 	}
 	for _, a := range aa {
 		typ := "formula"
@@ -334,9 +334,9 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 			rig = "-"
 		}
 		if hasRig {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Gate, timing, rig, pool) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Trigger, timing, rig, pool) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Gate, timing, pool) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Trigger, timing, pool) //nolint:errcheck
 		}
 	}
 	return 0
@@ -383,7 +383,7 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 	} else {
 		w(fmt.Sprintf("Formula:     %s", a.Formula))
 	}
-	w(fmt.Sprintf("Gate:        %s", a.Gate))
+	w(fmt.Sprintf("Trigger:     %s", a.Trigger))
 	if a.Interval != "" {
 		w(fmt.Sprintf("Interval:    %s", a.Interval))
 	}
@@ -404,36 +404,6 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 }
 
 // --- gc order run ---
-
-func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	return store, 0
-}
-
-func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.Store, int) {
-	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
-	}
-	return store, 0
-}
 
 func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order run")
@@ -473,7 +443,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	// Exec orders: run the script directly.
 	if a.IsExec() {
-		cfg, cfgErr := loadCityConfig(cityPath)
+		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
@@ -483,7 +453,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	// Capture event head before wisp creation (race-free cursor).
 	var headSeq uint64
-	if a.Gate == "event" && ep != nil {
+	if a.Trigger == "event" && ep != nil {
 		headSeq, _ = ep.LatestSeq()
 	}
 
@@ -492,7 +462,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	var cityName string
 	if citylayout.HasCityConfig(cityPath) || citylayout.HasRuntimeRoot(cityPath) {
 		var err error
-		cfg, err = loadCityConfig(cityPath)
+		cfg, err = loadCityConfig(cityPath, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -506,8 +476,12 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := formula.Compile(context.Background(), a.Formula, searchPaths, nil)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), a.Formula, searchPaths, nil)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -531,7 +505,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	update := beads.UpdateOpts{
 		Labels: []string{"order-run:" + scoped},
 	}
-	if a.Gate == "event" && ep != nil {
+	if a.Trigger == "event" && ep != nil {
 		update.Labels = append(update.Labels,
 			"order:"+scoped,
 			fmt.Sprintf("seq:%d", headSeq),
@@ -557,7 +531,11 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 // doOrderRunExec runs an exec order directly via shell.
 func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) int {
-	timeout := a.TimeoutOrDefault()
+	var maxTimeout time.Duration
+	if cfg != nil {
+		maxTimeout = cfg.Orders.MaxTimeoutDuration()
+	}
+	timeout := effectiveTimeout(a, maxTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -620,29 +598,7 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 	}
 }
 
-func orderLastRunFnAcrossStores(stores ...beads.Store) orders.LastRunFunc {
-	fns := make([]orders.LastRunFunc, 0, len(stores))
-	for _, store := range stores {
-		if store != nil {
-			fns = append(fns, orderLastRunFn(store))
-		}
-	}
-	return func(name string) (time.Time, error) {
-		var latest time.Time
-		for _, fn := range fns {
-			t, err := fn(name)
-			if err != nil {
-				return time.Time{}, err
-			}
-			if t.After(latest) {
-				latest = t
-			}
-		}
-		return latest, nil
-	}
-}
-
-// doOrderCheck evaluates gates for all orders and prints a table.
+// doOrderCheck evaluates triggers for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
 func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, stdout io.Writer) int {
 	if len(aa) == 0 {
@@ -652,13 +608,13 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 
 	hasRig := anyOrderHasRig(aa)
 	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "GATE", "RIG", "DUE", "REASON") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "TRIGGER", "RIG", "DUE", "REASON") //nolint:errcheck
 	} else {
-		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "GATE", "DUE", "REASON") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "TRIGGER", "DUE", "REASON") //nolint:errcheck
 	}
 	anyDue := false
 	for _, a := range aa {
-		result := orders.CheckGate(a, now, lastRunFn, nil, nil)
+		result := orders.CheckTrigger(a, now, lastRunFn, nil, nil)
 		due := "no"
 		if result.Due {
 			due = "yes"
@@ -669,9 +625,9 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 			if rig == "" {
 				rig = "-"
 			}
-			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Gate, rig, due, result.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Trigger, rig, due, result.Reason) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Gate, due, result.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Trigger, due, result.Reason) //nolint:errcheck
 		}
 	}
 
@@ -679,94 +635,6 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 		return 0
 	}
 	return 1
-}
-
-type (
-	orderStoreResolver  func(orders.Order) (beads.Store, error)
-	orderStoresResolver func(orders.Order) ([]beads.Store, error)
-)
-
-func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresResolver {
-	stores := make(map[string]beads.Store)
-	openCached := func(target execStoreTarget) (beads.Store, error) {
-		key := orderStoreTargetKey(target)
-		if store, ok := stores[key]; ok {
-			return store, nil
-		}
-		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
-		if err != nil {
-			return nil, err
-		}
-		stores[key] = store
-		return store, nil
-	}
-	return func(a orders.Order) ([]beads.Store, error) {
-		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
-		if err != nil {
-			return nil, err
-		}
-		primary, err := openCached(target)
-		if err != nil {
-			return nil, err
-		}
-		out := []beads.Store{primary}
-		if legacyOrderCityFallbackNeeded(cityPath, target) {
-			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, legacy)
-		}
-		return out, nil
-	}
-}
-
-func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {
-	stores := make(map[string]beads.Store)
-	openCached := func(target execStoreTarget) (beads.Store, error) {
-		key := orderStoreTargetKey(target)
-		if store, ok := stores[key]; ok {
-			return store, nil
-		}
-		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
-		if err != nil {
-			return nil, err
-		}
-		stores[key] = store
-		return store, nil
-	}
-	return func(a orders.Order) ([]beads.Store, error) {
-		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
-		if err != nil {
-			return nil, err
-		}
-		primary, err := openCached(target)
-		if err != nil {
-			return nil, err
-		}
-		out := []beads.Store{primary}
-		if legacyOrderCityFallbackNeeded(cityPath, target) {
-			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
-				return out, nil
-			}
-			out = append(out, legacy)
-		}
-		return out, nil
-	}
-}
-
-func legacyOrderCityFallbackNeeded(cityPath string, target execStoreTarget) bool {
-	return target.ScopeKind == "rig" && filepath.Clean(target.ScopeRoot) != filepath.Clean(cityPath)
-}
-
-func legacyOrderCityTarget(cityPath string, cfg *config.City) execStoreTarget {
-	prefix := ""
-	if cfg != nil {
-		prefix = config.EffectiveHQPrefix(cfg)
-	}
-	return execStoreTarget{ScopeRoot: cityPath, ScopeKind: "city", Prefix: prefix}
 }
 
 func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
@@ -777,9 +645,9 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 
 	hasRig := anyOrderHasRig(aa)
 	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "GATE", "RIG", "DUE", "REASON") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "TRIGGER", "RIG", "DUE", "REASON") //nolint:errcheck
 	} else {
-		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "GATE", "DUE", "REASON") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "TRIGGER", "DUE", "REASON") //nolint:errcheck
 	}
 	anyDue := false
 	for _, a := range aa {
@@ -788,7 +656,7 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		baseLastRunFn := orderLastRunFnAcrossStores(stores...)
+		baseLastRunFn := orders.LastRunAcrossStores(stores...)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
 			last, err := baseLastRunFn(orderName)
@@ -797,8 +665,8 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 			}
 			return last, err
 		}
-		cursorFn := bdCursorFuncAcrossStores(stores...)
-		if a.Gate == "event" {
+		cursorFn := orders.CursorAcrossStores(stores...)
+		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
@@ -808,7 +676,7 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 				return cursor
 			}
 		}
-		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 		if lastRunErr != nil {
 			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
 			return 1
@@ -823,9 +691,9 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 			if rig == "" {
 				rig = "-"
 			}
-			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Gate, rig, due, result.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Trigger, rig, due, result.Reason) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Gate, due, result.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Trigger, due, result.Reason) //nolint:errcheck
 		}
 	}
 
@@ -979,18 +847,6 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 	return orders.Order{}, false
 }
 
-// bdCursorFunc returns a CursorFunc that queries BdStore for the max seq
-// label on wisps labeled order:<name>.
-func bdCursorFunc(store beads.Store) orders.CursorFunc {
-	return func(orderName string) uint64 {
-		seq, err := bdCursor(store, orderName)
-		if err != nil {
-			return 0
-		}
-		return seq
-	}
-}
-
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
 		Label:         "order:" + orderName,
@@ -1005,24 +861,6 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		labelSets[i] = b.Labels
 	}
 	return orders.MaxSeqFromLabels(labelSets), nil
-}
-
-func bdCursorFuncAcrossStores(stores ...beads.Store) orders.CursorFunc {
-	fns := make([]orders.CursorFunc, 0, len(stores))
-	for _, store := range stores {
-		if store != nil {
-			fns = append(fns, bdCursorFunc(store))
-		}
-	}
-	return func(orderName string) uint64 {
-		var maxSeq uint64
-		for _, fn := range fns {
-			if seq := fn(orderName); seq > maxSeq {
-				maxSeq = seq
-			}
-		}
-		return maxSeq
-	}
 }
 
 func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {

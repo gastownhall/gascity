@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -119,28 +122,67 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 	if store == nil {
 		return nil
 	}
-	beadID := item.BeadID
-	if beadID == "" {
-		b, ok, err := findQueuedNudgeBead(store, item.ID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return nil
-		}
-		beadID = b.ID
-	}
-	if err := store.SetMetadataBatch(beadID, map[string]string{
+	update := map[string]string{
 		"state":           state,
 		"last_attempt_at": formatOptionalTime(item.LastAttemptAt),
 		"last_error":      item.LastError,
 		"terminal_reason": reason,
 		"commit_boundary": commitBoundary,
 		"terminal_at":     now.UTC().Format(time.RFC3339),
-	}); err != nil {
+	}
+
+	tryTerminalize := func(beadID string) error {
+		if beadID == "" {
+			return beads.ErrNotFound
+		}
+		if err := store.SetMetadataBatch(beadID, update); err != nil {
+			if isMissingQueuedNudgeBeadErr(err, beadID) {
+				return beads.ErrNotFound
+			}
+			return err
+		}
+		if err := store.Close(beadID); err != nil {
+			if isMissingQueuedNudgeBeadErr(err, beadID) {
+				return beads.ErrNotFound
+			}
+			return err
+		}
+		return nil
+	}
+
+	if err := tryTerminalize(item.BeadID); err == nil {
+		return nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
 		return err
 	}
-	return store.Close(beadID)
+
+	b, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if err := tryTerminalize(b.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return err
+	}
+	return nil
+}
+
+func isMissingQueuedNudgeBeadErr(err error, beadID string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		return true
+	}
+	beadID = strings.ToLower(strings.TrimSpace(beadID))
+	if beadID == "" {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no issue found matching "+strings.ToLower(strconv.Quote(beadID))) ||
+		strings.Contains(msg, "error resolving "+beadID+": no issue found")
 }
 
 func marshalNudgeReference(ref *nudgeReference) string {

@@ -1,6 +1,8 @@
 package shellquote
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestQuote(t *testing.T) {
 	tests := []struct {

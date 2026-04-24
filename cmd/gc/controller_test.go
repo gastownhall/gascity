@@ -87,6 +87,37 @@ func TestControllerLoopTick(t *testing.T) {
 	}
 }
 
+func TestRunningSessionSetRejectsPartialListResults(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: runtime.ErrSessionNotFound},
+	}
+	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
+
+	got, ok := runningSessionSet(sp, []string{"alpha", "beta"})
+	if ok {
+		t.Fatal("runningSessionSet should reject partial list results")
+	}
+	if got != nil {
+		t.Fatalf("runningSessionSet = %v, want nil result on partial list", got)
+	}
+}
+
+func TestGracefulStopAllFallsBackWhenPartialListOmitsExplicitTarget(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:      runtime.NewFake(),
+		listErr:   &runtime.PartialListError{Err: runtime.ErrSessionNotFound},
+		listNames: []string{},
+	}
+	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
+
+	var stdout, stderr bytes.Buffer
+	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, nil, &stdout, &stderr)
+	if sp.IsRunning("alpha") {
+		t.Fatal("gracefulStopAll should stop explicit targets even when partial listing omits them")
+	}
+}
+
 func TestControllerLockExclusion(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-lock-")
 	gcDir := filepath.Join(dir, ".gc")
@@ -248,6 +279,100 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("stop did not invoke cancel via fallback socket")
 	}
+}
+
+func TestSendControllerCommandWithReadTimeout(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-controller-command-")
+	sockPath := controllerSocketPath(dir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		buf := make([]byte, 16)
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Errorf("read command: %v", err)
+			return
+		}
+		if got := strings.TrimSpace(string(buf[:n])); got != "ping" {
+			t.Errorf("command = %q, want ping", got)
+			return
+		}
+		if _, err := conn.Write([]byte("123\n")); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}()
+
+	resp, err := sendControllerCommandWithReadTimeout(dir, "ping", time.Second)
+	if err != nil {
+		t.Fatalf("sendControllerCommandWithReadTimeout: %v", err)
+	}
+	if got := strings.TrimSpace(string(resp)); got != "123" {
+		t.Fatalf("response = %q, want 123", got)
+	}
+	<-done
+}
+
+func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-controller-command-timeout-")
+	sockPath := controllerSocketPath(dir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		buf := make([]byte, 16)
+		if _, err := conn.Read(buf); err != nil {
+			t.Errorf("read command: %v", err)
+			return
+		}
+		<-time.After(200 * time.Millisecond)
+	}()
+
+	start := time.Now()
+	_, err = sendControllerCommandWithTimeouts(dir, "ping", time.Second, time.Second, 25*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected read timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("timeout took %s, want short read deadline", elapsed)
+	}
+	<-done
 }
 
 // writeCityTOML is a test helper that writes a city.toml with the given agents.

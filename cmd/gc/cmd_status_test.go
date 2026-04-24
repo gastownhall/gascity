@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // ---------------------------------------------------------------------------
@@ -117,5 +120,31 @@ func TestDoRigStatusSuspendedAgent(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "stopped  (suspended)") {
 		t.Errorf("stdout missing 'stopped  (suspended)', got:\n%s", out)
+	}
+}
+
+func TestDoRigStatusReportsObservationErrors(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "frontend--worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	dops := newFakeDrainOps()
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		return worker.LiveObservation{}, errors.New("status observation unavailable")
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
+	agents := []config.Agent{
+		{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigStatus(sp, dops, rig, agents, "/tmp/city", "city", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig status: observing") {
+		t.Fatalf("stderr = %q, want observation warning", stderr.String())
 	}
 }

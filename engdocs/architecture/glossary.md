@@ -40,7 +40,7 @@ other source should be updated.
 ## Derived Mechanisms
 
 - **Order**: A formula or shell script dispatch triggered by a
-  gate condition. Lives in formula directories as
+  trigger condition. Lives in formula directories as
   `orders/<name>/order.toml`. Exec orders run shell
   scripts directly (no LLM, no agent, no wisp). Formula orders
   create wisps dispatched to agents. See
@@ -64,11 +64,11 @@ other source should be updated.
   resolves active files with `cmd/gc/formula_resolve.go`; convergence-specific
   validation lives in [`internal/convergence/formula.go`](https://github.com/gastownhall/gascity/blob/main/internal/convergence/formula.go).
 
-- **Gate**: The trigger condition for an order. Types: `cooldown`
+- **Trigger**: The trigger condition for an order. Types: `cooldown`
   (interval since last run), `cron` (schedule), `condition` (shell
   exits 0), `event` (specific event type occurs), `manual` (explicit
   invocation only). See
-  [`internal/orders/gates.go`](https://github.com/gastownhall/gascity/blob/main/internal/orders/gates.go).
+  [`internal/orders/triggers.go`](https://github.com/gastownhall/gascity/blob/main/internal/orders/triggers.go).
 
 - **Health Patrol**: Ping agents (Agent Protocol), compare thresholds
   (Config), publish stalls (Event Bus), restart with backoff. The

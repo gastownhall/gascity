@@ -3,15 +3,22 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
+
+func fallbackPromptDir(tmpRoot string) string {
+	return filepath.Join(tmpRoot, fmt.Sprintf(".gc-%d", os.Getuid()), "tmux-prompts")
+}
 
 // startCall records a single invocation on fakeStartOps with full arguments.
 type startCall struct {
@@ -1362,9 +1369,317 @@ func TestEnsureFreshSession_LongPromptWithFlagUsesFileExpansion(t *testing.T) {
 	if !strings.HasPrefix(c.command, "sh -c '") {
 		t.Fatalf("long prompt should use sh -c wrapper, got %q", c.command)
 	}
-	// The flag must appear as a separate token before $(cat ...).
-	if !strings.Contains(c.command, "--prompt \"$(cat ") {
-		t.Errorf("flag-mode long prompt should include --prompt before $(cat ...), got %q", c.command)
+	// The flag must appear as a separate token before the loaded prompt.
+	if !strings.Contains(c.command, `--prompt "$__gc_prompt"`) {
+		t.Errorf("flag-mode long prompt should pass the loaded prompt after --prompt, got %q", c.command)
+	}
+}
+
+func longPromptScriptFromCommand(t *testing.T, command string) string {
+	t.Helper()
+	args := shellquote.Split(command)
+	if len(args) != 3 || args[0] != "sh" || args[1] != "-c" {
+		t.Fatalf("long-prompt command should be sh -c <script>, got args %#v from %q", args, command)
+	}
+	return args[2]
+}
+
+func promptFileFromLongPromptCommand(t *testing.T, command string) string {
+	t.Helper()
+	script := longPromptScriptFromCommand(t, command)
+	const marker = `$(cat `
+	start := strings.Index(script, marker)
+	if start < 0 {
+		t.Fatalf("long-prompt script missing cat expansion: %q", script)
+	}
+	start += len(marker)
+	end := strings.Index(script[start:], ` && printf .)`)
+	if end < 0 {
+		t.Fatalf("long-prompt script has unterminated prompt path: %q", script)
+	}
+	args := shellquote.Split(script[start : start+end])
+	if len(args) != 1 {
+		t.Fatalf("long-prompt script has invalid prompt path expression %q parsed as %#v", script[start:start+end], args)
+	}
+	return args[0]
+}
+
+func TestEnsureFreshSession_LongPromptRemovesPromptFileBeforeExec(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	longPrompt := "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      t.TempDir(),
+		Command:      "claude --dangerously-skip-permissions",
+		PromptSuffix: longPrompt,
+	}
+	if err := ensureFreshSession(ops, "gc-test-clean-before-exec", cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	script := longPromptScriptFromCommand(t, c.command)
+	readIdx := strings.Index(script, "$(cat ")
+	rmIdx := strings.Index(script, "rm -f ")
+	execIdx := strings.Index(script, "exec ")
+	if readIdx < 0 || rmIdx < 0 || execIdx < 0 {
+		t.Fatalf("long-prompt script missing read/remove/exec sequence: %q", script)
+	}
+	if readIdx >= rmIdx || rmIdx >= execIdx {
+		t.Fatalf("prompt file must be read and removed before exec replaces the shell, got %q", script)
+	}
+}
+
+func TestLongPromptCommandPreservesTrailingNewlines(t *testing.T) {
+	tmp := t.TempDir()
+	promptDir := filepath.Join(tmp, "dir$HOME")
+	if err := os.MkdirAll(promptDir, 0o700); err != nil {
+		t.Fatalf("create prompt dir: %v", err)
+	}
+	promptFile := filepath.Join(promptDir, "prompt.txt")
+	outFile := filepath.Join(tmp, "out.txt")
+	rawPrompt := "first line\nsecond line\n\n"
+	if err := os.WriteFile(promptFile, []byte(rawPrompt), 0o600); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	receiver := "sh -c " + shellquote.Quote(`printf %s "$1" > "$0"`) + " " + shellquote.Quote(outFile)
+	command := longPromptCommand(receiver, "", promptFile)
+	cmd := exec.Command("sh", "-c", command)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("running long prompt command: %v\n%s", err, output)
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if string(got) != rawPrompt {
+		t.Fatalf("prompt payload mismatch:\ngot  %q\nwant %q", string(got), rawPrompt)
+	}
+	if _, err := os.Stat(promptFile); !os.IsNotExist(err) {
+		t.Fatalf("prompt file should be removed by wrapper, stat err = %v", err)
+	}
+}
+
+func TestEnsureFreshSession_LongPromptShellWrapperQuotesScript(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	tmpRoot := filepath.Join(t.TempDir(), "o'brien")
+	if err := os.MkdirAll(tmpRoot, 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("TMPDIR", tmpRoot)
+
+	cfg := runtime.Config{
+		WorkDir:      "",
+		Command:      "claude",
+		PromptSuffix: "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'",
+	}
+	if err := ensureFreshSession(ops, "gc-test-quoted-tempdir", cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	promptFile := promptFileFromLongPromptCommand(t, ops.calls[0].command)
+	if !strings.HasPrefix(promptFile, tmpRoot+string(os.PathSeparator)) {
+		t.Fatalf("quoted wrapper should preserve temp path prefix %q, got %q", tmpRoot, promptFile)
+	}
+}
+
+func TestEnsureFreshSession_CreateSessionFailureRemovesPromptFile(t *testing.T) {
+	ops := &fakeStartOps{createErrs: []error{errors.New("tmux create failed")}}
+
+	workDir := t.TempDir()
+	longPrompt := "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      workDir,
+		Command:      "claude",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-create-fails", cfg)
+	if err == nil {
+		t.Fatal("expected createSession error")
+	}
+
+	promptFile := promptFileFromLongPromptCommand(t, ops.calls[0].command)
+	if _, statErr := os.Stat(promptFile); !os.IsNotExist(statErr) {
+		t.Fatalf("prompt file should be removed after createSession failure, stat err = %v", statErr)
+	}
+}
+
+func TestEnsureFreshSession_RecreateRaceRemovesUnusedPromptFile(t *testing.T) {
+	running := true
+	ops := &fakeStartOps{
+		isSessionRunningResult: &running,
+		createErrs:             []error{ErrSessionExists, ErrSessionExists},
+		isRuntimeRunningResult: false,
+	}
+
+	cfg := runtime.Config{
+		WorkDir:      t.TempDir(),
+		Command:      "claude",
+		PromptSuffix: "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'",
+		ProcessNames: []string{"claude"},
+	}
+	if err := ensureFreshSession(ops, "gc-test-recreate-race", cfg); err != nil {
+		t.Fatalf("unexpected error: %v (race should be tolerated)", err)
+	}
+
+	promptFile := promptFileFromLongPromptCommand(t, ops.calls[0].command)
+	if _, statErr := os.Stat(promptFile); !os.IsNotExist(statErr) {
+		t.Fatalf("unused prompt file should be removed after tolerated recreate race, stat err = %v", statErr)
+	}
+}
+
+// TestEnsureFreshSession_LongPromptUnusableWorkDirReturnsError verifies that
+// a non-empty invalid WorkDir remains fatal. Falling back to OS temp for the
+// prompt file would let real tmux start the pane in its default directory,
+// which can put agents in the wrong checkout.
+func TestEnsureFreshSession_LongPromptUnusableWorkDirReturnsError(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	// A deep path whose ancestors can't be created (os.MkdirAll fails on a
+	// path that descends into a regular file).
+	tmp := t.TempDir()
+	regularFile := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(regularFile, []byte("sentinel"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	unusableWorkDir := filepath.Join(regularFile, "worktree-that-cannot-exist")
+
+	longPromptRaw := strings.Repeat("x", maxInlinePromptLen+100)
+	longPrompt := "'" + longPromptRaw + "'"
+	cfg := runtime.Config{
+		WorkDir:      unusableWorkDir,
+		Command:      "claude --dangerously-skip-permissions",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-unusable-workdir", cfg)
+	if err == nil {
+		t.Fatal("expected invalid workdir error")
+	}
+	if !strings.Contains(err.Error(), "workdir unavailable") {
+		t.Fatalf("expected workdir unavailable error, got %v", err)
+	}
+	if len(ops.calls) != 0 {
+		t.Fatalf("createSession should not be called for invalid WorkDir, calls = %#v", ops.calls)
+	}
+}
+
+func TestEnsureFreshSession_LongPromptValidWorkDirUnusableTmpFallsBackToOSTemp(t *testing.T) {
+	ops := &fakeStartOps{}
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, ".gc"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	longPromptRaw := strings.Repeat("x", maxInlinePromptLen+100)
+	cfg := runtime.Config{
+		WorkDir:      workDir,
+		Command:      "claude --dangerously-skip-permissions",
+		PromptSuffix: "'" + longPromptRaw + "'",
+	}
+	if err := ensureFreshSession(ops, "gc-test-workdir-tmp-fallback", cfg); err != nil {
+		t.Fatalf("expected OS temp dir fallback, got error: %v", err)
+	}
+
+	c := ops.calls[0]
+	if strings.Contains(c.command, longPromptRaw) {
+		t.Errorf("raw prompt leaked into tmux command, command = %q", c.command)
+	}
+	promptFile := promptFileFromLongPromptCommand(t, c.command)
+	expectedDir := fallbackPromptDir(tmpRoot)
+	if !strings.HasPrefix(promptFile, expectedDir+string(os.PathSeparator)) {
+		t.Errorf("expected OS fallback prompt under %q, got %q", expectedDir, promptFile)
+	}
+}
+
+// TestEnsureFreshSession_LongPromptEmptyWorkDirFallsBackToOSTemp verifies
+// that when WorkDir is empty the long-prompt path still writes to OS temp
+// instead of silently falling back to inline embedding.
+func TestEnsureFreshSession_LongPromptEmptyWorkDirFallsBackToOSTemp(t *testing.T) {
+	ops := &fakeStartOps{}
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+
+	longPromptRaw := strings.Repeat("y", maxInlinePromptLen+100)
+	longPrompt := "'" + longPromptRaw + "'"
+	cfg := runtime.Config{
+		WorkDir:      "",
+		Command:      "claude",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-empty-workdir", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	if !strings.HasPrefix(c.command, "sh -c '") {
+		t.Fatalf("long prompt with empty workdir should use sh -c wrapper, got %q", c.command)
+	}
+	if strings.Contains(c.command, longPromptRaw) {
+		t.Errorf("raw prompt leaked into tmux command, command = %q", c.command)
+	}
+	promptFile := promptFileFromLongPromptCommand(t, c.command)
+	expectedDir := fallbackPromptDir(tmpRoot)
+	if !strings.HasPrefix(promptFile, expectedDir+string(os.PathSeparator)) {
+		t.Errorf("expected OS fallback prompt under %q, got %q", expectedDir, promptFile)
+	}
+}
+
+func TestEnsureFreshSession_LongPromptFileWriteFailureDoesNotCreateSession(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	tmp := t.TempDir()
+	regularFile := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(regularFile, []byte("sentinel"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("TMPDIR", regularFile)
+
+	cfg := runtime.Config{
+		WorkDir:      filepath.Join(regularFile, "worktree-that-cannot-exist"),
+		Command:      "claude",
+		PromptSuffix: "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'",
+	}
+	err := ensureFreshSession(ops, "gc-test-no-prompt-file", cfg)
+	if err == nil {
+		t.Fatal("expected prompt file write failure")
+	}
+	if len(ops.calls) != 0 {
+		t.Fatalf("createSession should not be called when prompt file creation fails, calls = %#v", ops.calls)
+	}
+}
+
+// TestEnsureFreshSession_LongPromptWorkDirPreferredOverOSTemp verifies that
+// when the configured WorkDir is usable, the prompt file lands inside it
+// (not OS temp). This preserves the session-scoped lifetime of the file so
+// it gets cleaned up alongside the session.
+func TestEnsureFreshSession_LongPromptWorkDirPreferredOverOSTemp(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	workDir := t.TempDir()
+	longPrompt := "'" + strings.Repeat("z", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      workDir,
+		Command:      "claude",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-prefer-workdir", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	// The prompt file path appears inside the sh -c wrapper. It should be
+	// rooted at workDir/.gc/tmp rather than os.TempDir.
+	expectedDir := filepath.Join(workDir, ".gc", "tmp")
+	if !strings.Contains(c.command, expectedDir) {
+		t.Errorf("expected prompt file under %q, got command %q", expectedDir, c.command)
 	}
 }
 

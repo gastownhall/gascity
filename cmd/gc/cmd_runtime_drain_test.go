@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -377,6 +379,98 @@ func TestProviderDrainOpsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProviderDrainOpsReportsMetadataErrors(t *testing.T) {
+	sp := runtime.NewFailFake()
+	dops := newDrainOps(sp)
+
+	if _, err := dops.isDraining("worker"); err == nil {
+		t.Fatal("isDraining should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isDrainAcked("worker"); err == nil {
+		t.Fatal("isDrainAcked should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isRestartRequested("worker"); err == nil {
+		t.Fatal("isRestartRequested should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isDriftRestart("worker"); err == nil {
+		t.Fatal("isDriftRestart should return an error when metadata lookup fails")
+	}
+	if err := dops.clearDrain("worker"); err == nil {
+		t.Fatal("clearDrain should return an error when metadata removal fails")
+	}
+	if err := dops.setDrainAck("worker"); err == nil {
+		t.Fatal("setDrainAck should return an error when metadata removal fails")
+	}
+}
+
+type recordingMetaProvider struct {
+	*runtime.Fake
+	removeErr  error
+	removeKeys []string
+	setKeys    []string
+}
+
+func (p *recordingMetaProvider) RemoveMeta(name, key string) error {
+	p.removeKeys = append(p.removeKeys, key)
+	if p.removeErr != nil {
+		return p.removeErr
+	}
+	return p.Fake.RemoveMeta(name, key)
+}
+
+func (p *recordingMetaProvider) SetMeta(name, key, value string) error {
+	p.setKeys = append(p.setKeys, key)
+	return p.Fake.SetMeta(name, key, value)
+}
+
+func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
+	sp := &recordingMetaProvider{
+		Fake:      runtime.NewFake(),
+		removeErr: errors.New("metadata removal unavailable"),
+	}
+	dops := newDrainOps(sp)
+
+	if err := dops.clearDrain("worker"); err == nil {
+		t.Fatal("clearDrain should report metadata removal errors")
+	}
+	want := []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+		"GC_DRAIN",
+	}
+	if !slices.Equal(sp.removeKeys, want) {
+		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, want)
+	}
+}
+
+func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) {
+	sp := &recordingMetaProvider{
+		Fake:      runtime.NewFake(),
+		removeErr: errors.New("metadata removal unavailable"),
+	}
+	dops := newDrainOps(sp)
+
+	if err := dops.setDrainAck("worker"); err == nil {
+		t.Fatal("setDrainAck should report metadata cleanup errors")
+	}
+	wantRemove := []string{
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	}
+	if !slices.Equal(sp.removeKeys, wantRemove) {
+		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
+	}
+	wantSet := []string{
+		reconcilerDrainAckSourceKey,
+		"GC_DRAIN_ACK",
+	}
+	if !slices.Equal(sp.setKeys, wantSet) {
+		t.Fatalf("set keys = %v, want %v", sp.setKeys, wantSet)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // doRuntimeRequestRestart tests
 // ---------------------------------------------------------------------------
@@ -413,6 +507,77 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	}
 }
 
+func TestRuntimeRequestRestartNamedOnDemandReturnsWithoutBlocking(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{"gc:session"},
+	})
+	if err != nil {
+		t.Fatalf("seeding session bead: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
+		t.Fatalf("set session_name: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
+		t.Fatalf("set configured_named_session: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "configured_named_mode", "on_demand"); err != nil {
+		t.Fatalf("set configured_named_mode: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "restart_requested", "true"); err != nil {
+		t.Fatalf("set restart_requested: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "continuation_reset_pending", "true"); err != nil {
+		t.Fatalf("set continuation_reset_pending: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cmdRuntimeRequestRestart(&stdout, &stderr)
+	}()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cmdRuntimeRequestRestart blocked for named on-demand session")
+	}
+	if !strings.Contains(stdout.String(), "Restart skipped for named session") {
+		t.Fatalf("stdout = %q, want restart skipped confirmation", stdout.String())
+	}
+	freshStore, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	refreshed, err := freshStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("fetching seeded bead: %v", err)
+	}
+	if refreshed.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared", refreshed.Metadata["restart_requested"])
+	}
+	if refreshed.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want cleared", refreshed.Metadata["continuation_reset_pending"])
+	}
+}
+
 func TestProviderDrainOpsRestartRequestedRoundTrip(t *testing.T) {
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "worker", runtime.Config{})
@@ -440,6 +605,35 @@ func TestProviderDrainOpsRestartRequestedRoundTrip(t *testing.T) {
 	requested, _ = dops.isRestartRequested("worker")
 	if requested {
 		t.Error("should not be restart-requested after clear")
+	}
+}
+
+type removeMetaErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *removeMetaErrorProvider) RemoveMeta(_, _ string) error {
+	return p.err
+}
+
+func TestProviderDrainOpsClearRestartRequestedIgnoresGoneSession(t *testing.T) {
+	dops := newDrainOps(&removeMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  errors.New("no tmux server running"),
+	})
+	if err := dops.clearRestartRequested("worker"); err != nil {
+		t.Fatalf("clearRestartRequested returned gone-session error: %v", err)
+	}
+}
+
+func TestProviderDrainOpsClearRestartRequestedReturnsCleanupErrors(t *testing.T) {
+	dops := newDrainOps(&removeMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  errors.New("permission denied"),
+	})
+	if err := dops.clearRestartRequested("worker"); err == nil {
+		t.Fatal("clearRestartRequested should return non-gone cleanup errors")
 	}
 }
 

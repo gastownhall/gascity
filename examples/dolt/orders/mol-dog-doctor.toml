@@ -1,6 +1,6 @@
 [order]
 description = "Probe Dolt server health and report status"
 formula = "mol-dog-doctor"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "dog"

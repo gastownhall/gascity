@@ -16,11 +16,11 @@ cd $WORK/handofftown
 ! exec gc handoff 'Context refresh'
 stderr 'not in session context'
 
-# --- 2. Remote handoff to existing agent (session not running) ---
+# --- 2. Remote handoff to existing on-demand named agent ---
 
 exec gc handoff --target mayor 'Context refresh' 'Please review inbox for latest status'
 stdout 'Handoff.*sent mail.*to mayor'
-stdout 'session not running'
+stdout 'named session; kill skipped'
 
 # --- 3. Remote handoff creates mail ---
 

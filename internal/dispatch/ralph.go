@@ -166,10 +166,20 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	}
 
 	timeout := convergence.DefaultGateTimeout
-	if raw := bead.Metadata["gc.check_timeout"]; raw != "" {
-		parsed, parseErr := time.ParseDuration(raw)
+	// Per-step timeout (from formula step.timeout) applies first as a
+	// general override. The check-specific gc.check_timeout (from
+	// ralph.check.timeout) takes precedence if also set.
+	if raw := bead.Metadata["gc.step_timeout"]; raw != "" {
+		parsed, parseErr := parsePositiveRalphTimeout(bead.ID, "gc.step_timeout", raw)
 		if parseErr != nil {
-			return convergence.GateResult{}, fmt.Errorf("%s: parsing gc.check_timeout %q: %w", bead.ID, raw, parseErr)
+			return convergence.GateResult{}, parseErr
+		}
+		timeout = parsed
+	}
+	if raw := bead.Metadata["gc.check_timeout"]; raw != "" {
+		parsed, parseErr := parsePositiveRalphTimeout(bead.ID, "gc.check_timeout", raw)
+		if parseErr != nil {
+			return convergence.GateResult{}, parseErr
 		}
 		timeout = parsed
 	}
@@ -181,6 +191,17 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		WorkDir:   resolvedWorkDir,
 	}, timeout, 0)
 	return result, nil
+}
+
+func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: parsing %s %q: %w", beadID, key, raw, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s: %s must be positive, got %v", beadID, key, parsed)
+	}
+	return parsed, nil
 }
 
 func persistCheckResult(store beads.Store, beadID string, result convergence.GateResult) error {
@@ -521,6 +542,9 @@ func appendRalphRetryGraphEdges(plan *beads.GraphApplyPlan, store beads.Store, o
 		return err
 	}
 	for _, dep := range deps {
+		if dep.Type == "parent-child" {
+			continue
+		}
 		edge := beads.GraphApplyEdge{
 			FromKey: oldID,
 			Type:    dep.Type,

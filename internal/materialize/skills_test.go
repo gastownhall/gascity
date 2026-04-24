@@ -13,23 +13,18 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// requireBootstrapNames asserts every name in want exists in the
-// production bootstrap pack list. The materialize tests build fake
-// implicit-import.toml entries for these names; if a pack is renamed
-// or removed in production code, the test helper would silently drop
-// the entry from discovery and the assertions would pass vacuously.
-// This guard fails loudly instead.
-func requireBootstrapNames(t *testing.T, want ...string) {
+func overrideBootstrapPacks(t *testing.T, names ...string) {
 	t.Helper()
-	have := make(map[string]struct{})
-	for _, name := range bootstrap.PackNames() {
-		have[name] = struct{}{}
+	prev := append([]bootstrap.Entry(nil), bootstrap.BootstrapPacks...)
+	entries := make([]bootstrap.Entry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, bootstrap.Entry{
+			Name:   name,
+			Source: "github.com/example/" + name,
+		})
 	}
-	for _, name := range want {
-		if _, ok := have[name]; !ok {
-			t.Fatalf("test fixture references bootstrap pack %q which is no longer in bootstrap.PackNames() = %v", name, bootstrap.PackNames())
-		}
-	}
+	bootstrap.BootstrapPacks = entries
+	t.Cleanup(func() { bootstrap.BootstrapPacks = prev })
 }
 
 func TestReadSkillDescription(t *testing.T) {
@@ -209,7 +204,7 @@ func TestLoadCityCatalogCityOnly(t *testing.T) {
 }
 
 func TestLoadCityCatalogBootstrapMerge(t *testing.T) {
-	requireBootstrapNames(t, "core", "registry")
+	overrideBootstrapPacks(t, "core", "registry")
 	gcHome := setupBootstrapHome(t, map[string][]string{
 		"core":     {"alpha", "shared"},
 		"registry": {"reg-only"},
@@ -347,7 +342,7 @@ func TestLoadCityCatalogPreservesLaterImportedOwnedRootsOnEarlyReadError(t *test
 }
 
 func TestLoadCityCatalogIgnoresUnknownImplicitImport(t *testing.T) {
-	requireBootstrapNames(t, "core")
+	overrideBootstrapPacks(t, "core")
 	gcHome := setupBootstrapHome(t, map[string][]string{
 		"core": {"alpha"},
 	})

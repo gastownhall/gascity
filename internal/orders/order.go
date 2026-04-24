@@ -1,4 +1,4 @@
-// Package orders provides parsing, scanning, and gate evaluation for Gas City
+// Package orders provides parsing, scanning, and trigger evaluation for Gas City
 // orders. Orders are discovered from top-level orders/<name>.toml files, with
 // deprecated fallback support for older flat and directory layouts.
 package orders
@@ -16,21 +16,23 @@ type Order struct {
 	Name string `toml:"-"`
 	// Description explains what this order does.
 	Description string `toml:"description,omitempty"`
-	// Formula is the formula name to dispatch when the gate opens.
+	// Formula is the formula name to dispatch when the trigger fires.
 	// Mutually exclusive with Exec.
 	Formula string `toml:"formula,omitempty"`
 	// Exec is a shell command run directly by the controller, bypassing
 	// the agent pipeline. Mutually exclusive with Formula.
 	Exec string `toml:"exec,omitempty"`
-	// Gate is the gate type: "cooldown", "cron", "condition", or "manual".
-	Gate string `toml:"gate"`
-	// Interval is the minimum time between runs (for cooldown gates). Go duration string.
+	// Trigger is the order scheduler selector: "cooldown", "cron",
+	// "condition", "event", or "manual". This is distinct from the
+	// separate "gate" concepts used elsewhere in the system.
+	Trigger string `toml:"trigger"`
+	// Interval is the minimum time between runs (for cooldown triggers). Go duration string.
 	Interval string `toml:"interval,omitempty"`
-	// Schedule is a cron-like expression (for cron gates).
+	// Schedule is a cron-like expression (for cron triggers).
 	Schedule string `toml:"schedule,omitempty"`
-	// Check is a shell command that returns exit 0 when the formula should run (for condition gates).
+	// Check is a shell command that returns exit 0 when the formula should run (for condition triggers).
 	Check string `toml:"check,omitempty"`
-	// On is the event type to match (for event gates). E.g., "bead.closed".
+	// On is the event type to match (for event triggers). E.g., "bead.closed".
 	On string `toml:"on,omitempty"`
 	// Pool is the target agent/pool for dispatching the wisp.
 	Pool string `toml:"pool,omitempty"`
@@ -58,9 +60,44 @@ func (a *Order) ScopedName() string {
 	return a.Name + ":rig:" + a.Rig
 }
 
+type orderDecode struct {
+	Description string `toml:"description,omitempty"`
+	Formula     string `toml:"formula,omitempty"`
+	Exec        string `toml:"exec,omitempty"`
+	Trigger     string `toml:"trigger,omitempty"`
+	Gate        string `toml:"gate,omitempty"`
+	Interval    string `toml:"interval,omitempty"`
+	Schedule    string `toml:"schedule,omitempty"`
+	Check       string `toml:"check,omitempty"`
+	On          string `toml:"on,omitempty"`
+	Pool        string `toml:"pool,omitempty"`
+	Timeout     string `toml:"timeout,omitempty"`
+	Enabled     *bool  `toml:"enabled,omitempty"`
+}
+
+func (d orderDecode) normalized() Order {
+	trigger := d.Trigger
+	if trigger == "" {
+		trigger = d.Gate
+	}
+	return Order{
+		Description: d.Description,
+		Formula:     d.Formula,
+		Exec:        d.Exec,
+		Trigger:     trigger,
+		Interval:    d.Interval,
+		Schedule:    d.Schedule,
+		Check:       d.Check,
+		On:          d.On,
+		Pool:        d.Pool,
+		Timeout:     d.Timeout,
+		Enabled:     d.Enabled,
+	}
+}
+
 // orderFile wraps the TOML structure with an [order] header.
 type orderFile struct {
-	Order Order `toml:"order"`
+	Order orderDecode `toml:"order"`
 }
 
 // IsEnabled reports whether the order is enabled. Defaults to true if not set.
@@ -97,10 +134,10 @@ func Parse(data []byte) (Order, error) {
 	if _, err := toml.Decode(string(data), &af); err != nil {
 		return Order{}, fmt.Errorf("parsing order: %w", err)
 	}
-	return af.Order, nil
+	return af.Order.normalized(), nil
 }
 
-// Validate checks an Order for structural correctness based on its gate type.
+// Validate checks an Order for structural correctness based on its trigger type.
 func Validate(a Order) error {
 	// formula XOR exec — exactly one required.
 	if a.Formula == "" && a.Exec == "" {
@@ -119,32 +156,32 @@ func Validate(a Order) error {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
 		}
 	}
-	switch a.Gate {
+	switch a.Trigger {
 	case "cooldown":
 		if a.Interval == "" {
-			return fmt.Errorf("order %q: cooldown gate requires interval", a.Name)
+			return fmt.Errorf("order %q: cooldown trigger requires interval", a.Name)
 		}
 		if _, err := time.ParseDuration(a.Interval); err != nil {
 			return fmt.Errorf("order %q: invalid interval %q: %w", a.Name, a.Interval, err)
 		}
 	case "cron":
 		if a.Schedule == "" {
-			return fmt.Errorf("order %q: cron gate requires schedule", a.Name)
+			return fmt.Errorf("order %q: cron trigger requires schedule", a.Name)
 		}
 	case "condition":
 		if a.Check == "" {
-			return fmt.Errorf("order %q: condition gate requires check command", a.Name)
+			return fmt.Errorf("order %q: condition trigger requires check command", a.Name)
 		}
 	case "event":
 		if a.On == "" {
-			return fmt.Errorf("order %q: event gate requires on (event type)", a.Name)
+			return fmt.Errorf("order %q: event trigger requires on (event type)", a.Name)
 		}
 	case "manual":
 		// No additional fields required.
 	case "":
-		return fmt.Errorf("order %q: gate is required", a.Name)
+		return fmt.Errorf("order %q: trigger is required", a.Name)
 	default:
-		return fmt.Errorf("order %q: unknown gate type %q", a.Name, a.Gate)
+		return fmt.Errorf("order %q: unknown trigger type %q", a.Name, a.Trigger)
 	}
 	return nil
 }

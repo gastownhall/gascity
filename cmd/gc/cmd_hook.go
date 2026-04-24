@@ -85,7 +85,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		if inject {
 			return 0
@@ -124,11 +124,12 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		return 1
 	}
 
+	cityName := loadedCityName(cfg, cityPath)
 	workQuery := a.EffectiveWorkQuery()
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
-	workQuery = expandAgentCommandTemplate(cityPath, cfg.Workspace.Name, &a, cfg.Rigs, "work_query", workQuery, stderr)
+	workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, stderr)
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 
 	// Build the work query subprocess environment. Rig-backed agents get
@@ -139,7 +140,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	// names; named-session context preserves the runtime-supplied owner
 	// env while selecting the backing config through GC_TEMPLATE.
 	resolvedAgentName := a.QualifiedName()
-	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
+	resolvedSessionName := cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	agentForQuery := resolvedAgentName
 	sessionForQuery := resolvedSessionName
 	if sessionTemplateContext {

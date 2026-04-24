@@ -63,12 +63,10 @@ path = %q
 	if suspended {
 		toml += "suspended = true\n"
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRigAnywhereCityToml(t, cityPath, toml)
 
 	reg := registryAt(t, os.Getenv("GC_HOME"))
-	if err := reg.RegisterRig(rigDir, rigName, cityPath); err != nil {
+	if err := reg.Register(cityPath, "demo-city"); err != nil {
 		t.Fatal(err)
 	}
 

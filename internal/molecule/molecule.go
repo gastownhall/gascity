@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -45,7 +46,30 @@ type Options struct {
 	// coercing legacy non-workflow roots to molecule containers. Attach uses
 	// this for executable sub-DAG roots such as retry attempts.
 	PreserveRootType bool
+
+	// DeferAssignees creates assignable beads without an assignee and stores
+	// the intended assignee in metadata for later activation.
+	DeferAssignees bool
 }
+
+const (
+	// DeferredAssigneeMetadataKey stores an assignee withheld during speculative
+	// molecule creation. Activating the molecule restores the value as Assignee.
+	DeferredAssigneeMetadataKey = "gc.deferred_assignee"
+
+	// DeferredRoutedToMetadataKey stores gc.routed_to withheld during
+	// speculative molecule creation.
+	DeferredRoutedToMetadataKey = "gc.deferred_routed_to"
+
+	// DeferredExecutionRoutedToMetadataKey stores gc.execution_routed_to withheld
+	// during speculative molecule creation.
+	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
+
+	// DeferredTypeMetadataKey stores the bead type withheld during speculative
+	// molecule creation. Speculative actionable work is created as a ready-
+	// excluded type and restored on activation.
+	DeferredTypeMetadataKey = "gc.deferred_type"
+)
 
 // FragmentOptions configures instantiation of a rootless recipe fragment into
 // an existing workflow root.
@@ -103,9 +127,12 @@ func Cook(ctx context.Context, store beads.Store, formulaName string, searchPath
 	if compileVars == nil {
 		compileVars = map[string]string{}
 	}
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, compileVars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
 		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+	}
+	if err := ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		return nil, err
 	}
 	return Instantiate(ctx, store, recipe, opts)
 }
@@ -227,6 +254,9 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 			return nil, ErrEpochConflict
 		}
 	}
+	if err := ValidateRecipeRuntimeVars(recipe, Options{Title: opts.Title, Vars: opts.Vars}); err != nil {
+		return nil, fmt.Errorf("validate runtime vars: %w", err)
+	}
 
 	// Stamp every step with the parent workflow's graph metadata.
 	for i := range recipe.Steps {
@@ -339,7 +369,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
-	if IsGraphApplyEnabled() {
+	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := store.(beads.GraphApplyStore); ok {
 			return instantiateViaGraphApply(ctx, applier, recipe, opts)
 		}
@@ -352,6 +382,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 
 	// Build the list of beads to create.
 	idMapping := make(map[string]string, len(recipe.Steps))
+	createdParentByStep := make(map[string]string, len(recipe.Steps))
 	var createdIDs []string
 	embeddedDeps := make(map[string]bool)
 	pendingAssignees := make(map[string]string)
@@ -364,6 +395,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		}
 
 		b := stepToBead(step, vars, priorityOverride)
+		if opts.DeferAssignees {
+			deferBeadRouting(&b)
+		}
 		hasFutureBlocker := false
 		for _, dep := range recipe.Deps {
 			if dep.StepID != step.ID || dep.Type == "parent-child" {
@@ -388,7 +422,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			}
 			b.Ref = recipe.Name
 			if opts.Title != "" {
-				b.Title = opts.Title
+				b.Title = formula.Substitute(opts.Title, vars)
 			}
 			if opts.ParentID != "" && step.Metadata["gc.kind"] != "workflow" {
 				b.ParentID = opts.ParentID
@@ -456,6 +490,10 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
 		}
+		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
+		}
 
 		created, err := store.Create(b)
 		if err != nil {
@@ -465,6 +503,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		}
 
 		idMapping[step.ID] = created.ID
+		createdParentByStep[step.ID] = created.ParentID
 		createdIDs = append(createdIDs, created.ID)
 
 	}
@@ -477,12 +516,16 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if !fromOK || !toOK {
 				continue // step was filtered out (RootOnly or condition)
 			}
-			// Skip parent-child deps — already handled via ParentID field.
-			if dep.Type == "parent-child" {
-				continue
-			}
 			if embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] {
 				continue
+			}
+			if dep.Type == "parent-child" && createdParentByStep[dep.StepID] != toID {
+				parentID := toID
+				if err := store.Update(fromID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
+					markFailed(store, createdIDs)
+					return nil, fmt.Errorf("setting parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+				}
+				createdParentByStep[dep.StepID] = toID
 			}
 			if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
 				markFailed(store, createdIDs)
@@ -553,22 +596,18 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	idMapping := make(map[string]string, len(recipe.Steps))
 	var createdIDs []string
+	createdParentByStep := make(map[string]string, len(recipe.Steps))
 	embeddedDeps := make(map[string]bool)
 	pendingAssignees := make(map[string]string)
 	existingLogicalBeadIDs, err := existingLogicalBeadIDIndex(store, opts.RootID)
 	if err != nil {
 		return nil, fmt.Errorf("indexing existing logical beads: %w", err)
 	}
-	externalDepsByStep := make(map[string][]ExternalDep)
-	for _, dep := range opts.ExternalDeps {
-		if dep.StepID == "" || dep.DependsOnID == "" {
-			continue
-		}
-		if dep.Type == "" {
-			dep.Type = "blocks"
-		}
-		externalDepsByStep[dep.StepID] = append(externalDepsByStep[dep.StepID], dep)
+	externalDepsByStep, err := groupExternalDeps(opts.ExternalDeps)
+	if err != nil {
+		return nil, err
 	}
+	recipeParentByStep := recipeParentDeps(recipe.Deps)
 
 	for _, step := range recipe.Steps {
 		b := stepToBead(step, vars, priorityOverride)
@@ -590,10 +629,27 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 			embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] = true
 		}
 		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "parent-child" {
+				continue
+			}
 			if dep.Type == "blocks" {
 				b.Needs = append(b.Needs, dep.DependsOnID)
 			} else {
 				b.Needs = append(b.Needs, dep.Type+":"+dep.DependsOnID)
+			}
+		}
+		for _, dep := range recipe.Deps {
+			if dep.StepID == step.ID && dep.Type == "parent-child" {
+				if parentBeadID, ok := idMapping[dep.DependsOnID]; ok {
+					b.ParentID = parentBeadID
+					break
+				}
+			}
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if b.ParentID == "" && recipeParentByStep[step.ID] == "" && dep.Type == "parent-child" && dep.DependsOnID != "" {
+				b.ParentID = dep.DependsOnID
+				break
 			}
 		}
 
@@ -626,6 +682,10 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
 		}
+		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
+		}
 
 		created, err := store.Create(b)
 		if err != nil {
@@ -633,21 +693,48 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 			return nil, fmt.Errorf("creating fragment bead for step %q: %w", step.ID, err)
 		}
 		idMapping[step.ID] = created.ID
+		createdParentByStep[step.ID] = created.ParentID
 		createdIDs = append(createdIDs, created.ID)
 	}
 
 	for _, dep := range recipe.Deps {
 		fromID, fromOK := idMapping[dep.StepID]
 		toID, toOK := idMapping[dep.DependsOnID]
-		if !fromOK || !toOK || dep.Type == "parent-child" {
+		if !fromOK || !toOK {
 			continue
 		}
 		if embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] {
 			continue
 		}
+		if dep.Type == "parent-child" && createdParentByStep[dep.StepID] != toID {
+			parentID := toID
+			if err := store.Update(fromID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("setting fragment parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+			}
+			createdParentByStep[dep.StepID] = toID
+		}
 		if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
 			markFailed(store, createdIDs)
 			return nil, fmt.Errorf("wiring fragment dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+		}
+	}
+	for stepID, deps := range externalDepsByStep {
+		if recipeParentByStep[stepID] != "" {
+			continue
+		}
+		fromID, fromOK := idMapping[stepID]
+		if !fromOK {
+			continue
+		}
+		for _, dep := range deps {
+			if dep.Type != "parent-child" {
+				continue
+			}
+			if err := store.DepAdd(fromID, dep.DependsOnID, dep.Type); err != nil {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("wiring external fragment dep %s->%s: %w", stepID, dep.DependsOnID, err)
+			}
 		}
 	}
 
@@ -669,6 +756,37 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		IDMapping: idMapping,
 		Created:   len(createdIDs),
 	}, nil
+}
+
+func recipeParentDeps(deps []formula.RecipeDep) map[string]string {
+	parents := make(map[string]string)
+	for _, dep := range deps {
+		if dep.Type == "parent-child" && dep.StepID != "" && dep.DependsOnID != "" && parents[dep.StepID] == "" {
+			parents[dep.StepID] = dep.DependsOnID
+		}
+	}
+	return parents
+}
+
+func groupExternalDeps(deps []ExternalDep) (map[string][]ExternalDep, error) {
+	byStep := make(map[string][]ExternalDep)
+	parentByStep := make(map[string]string)
+	for _, dep := range deps {
+		if dep.StepID == "" || dep.DependsOnID == "" {
+			continue
+		}
+		if dep.Type == "" {
+			dep.Type = "blocks"
+		}
+		if dep.Type == "parent-child" {
+			if parentByStep[dep.StepID] != "" {
+				return nil, fmt.Errorf("step %q has multiple external parent-child deps", dep.StepID)
+			}
+			parentByStep[dep.StepID] = dep.DependsOnID
+		}
+		byStep[dep.StepID] = append(byStep[dep.StepID], dep)
+	}
+	return byStep, nil
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
@@ -699,6 +817,61 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func validateTimeoutMetadataVars(stepID string, metadata map[string]string) error {
+	for _, key := range []string{"gc.step_timeout", "gc.check_timeout"} {
+		raw := metadata[key]
+		if raw == "" {
+			continue
+		}
+		if residual := formula.CheckResidualTimeoutVars(raw); len(residual) > 0 {
+			return fmt.Errorf("step %q: metadata %s contains unresolved timeout variable(s) %s — missing or misspelled --var(s)?", stepID, key, strings.Join(residual, ", "))
+		}
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("step %q: metadata %s has invalid timeout %q: %w", stepID, key, raw, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("step %q: metadata %s timeout must be positive, got %v", stepID, key, parsed)
+		}
+	}
+	return nil
+}
+
+func deferBeadRouting(b *beads.Bead) {
+	beadType := b.Type
+	if beadType == "" {
+		beadType = "task"
+	}
+	if !beads.IsReadyExcludedType(beadType) {
+		ensureBeadMetadata(b)
+		b.Metadata[DeferredTypeMetadataKey] = beadType
+		b.Type = "gate"
+	}
+	if b.Assignee != "" {
+		ensureBeadMetadata(b)
+		b.Metadata[DeferredAssigneeMetadataKey] = b.Assignee
+		b.Assignee = ""
+	}
+	deferBeadMetadataValue(b, "gc.routed_to", DeferredRoutedToMetadataKey)
+	deferBeadMetadataValue(b, "gc.execution_routed_to", DeferredExecutionRoutedToMetadataKey)
+}
+
+func deferBeadMetadataValue(b *beads.Bead, sourceKey, deferredKey string) {
+	if b.Metadata == nil {
+		return
+	}
+	if value := b.Metadata[sourceKey]; value != "" {
+		b.Metadata[deferredKey] = value
+		delete(b.Metadata, sourceKey)
+	}
+}
+
+func ensureBeadMetadata(b *beads.Bead) {
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string, 1)
+	}
 }
 
 // substituteLabels applies variable substitution to each label.
@@ -741,6 +914,74 @@ func applyVarDefaults(vars map[string]string, defs map[string]*formula.VarDef) m
 		result[k] = v
 	}
 	return result
+}
+
+// ValidateRecipeRuntimeVars validates runtime variables for a compiled recipe.
+// It checks declared formula vars, unresolved title placeholders, and avoids
+// duplicating title errors for vars that were already reported as required.
+func ValidateRecipeRuntimeVars(recipe *formula.Recipe, opts Options) error {
+	validationVars := runtimeValidationVars(recipe, opts)
+	validationErrs, missingRequired := formula.CollectVarValidationErrors(recipe.Vars, validationVars)
+	titleErrs := unresolvedTitleValidationErrorsWithVars(recipe, opts, validationVars, missingRequired)
+	if len(validationErrs) == 0 && len(titleErrs) == 0 {
+		return nil
+	}
+	errs := make([]string, 0, len(validationErrs)+len(titleErrs))
+	errs = append(errs, validationErrs...)
+	errs = append(errs, titleErrs...)
+	return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+}
+
+func runtimeValidationVars(recipe *formula.Recipe, opts Options) map[string]string {
+	if opts.Title == "" || recipe == nil || recipe.Vars == nil {
+		return opts.Vars
+	}
+	if _, ok := recipe.Vars["title"]; !ok {
+		return opts.Vars
+	}
+	vars := applyVarDefaults(opts.Vars, recipe.Vars)
+	result := make(map[string]string, len(vars)+1)
+	for k, v := range vars {
+		result[k] = v
+	}
+	result["title"] = formula.Substitute(opts.Title, vars)
+	return result
+}
+
+func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Options, providedVars map[string]string, missingRequired map[string]bool) []string {
+	if recipe == nil || len(recipe.Steps) == 0 {
+		return nil
+	}
+	vars := applyVarDefaults(providedVars, recipe.Vars)
+	errs := make([]string, 0)
+	for i, step := range recipe.Steps {
+		if recipe.RootOnly && i > 0 {
+			break
+		}
+		rawTitle := step.Title
+		if step.IsRoot && opts.Title != "" {
+			rawTitle = opts.Title
+		}
+		title := formula.Substitute(rawTitle, vars)
+		if !strings.Contains(title, "{{") {
+			continue
+		}
+		residual := formula.CheckResidualVars(title)
+		unexplained := make([]string, 0, len(residual))
+		for _, name := range residual {
+			if missingRequired[name] {
+				continue
+			}
+			unexplained = append(unexplained, name)
+		}
+		if len(unexplained) == 0 {
+			continue
+		}
+		errs = append(errs,
+			fmt.Sprintf(`step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?`,
+				step.ID, strings.Join(unexplained, ", ")))
+	}
+	return errs
 }
 
 // markFailed sets "molecule_failed" metadata on all created beads.

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -25,8 +24,9 @@ func newRegisterCmd(stdout, stderr io.Writer) *cobra.Command {
 If no path is given, registers the current city (discovered from cwd).
 Use --name to set the machine-local registration alias. The alias is stored
 in the machine-local supervisor registry and never written back to city.toml.
-When --name is omitted, workspace.name is used if present, otherwise
-[pack].name is used — in either case city.toml is not modified.
+When --name is omitted, the current effective city identity is used
+(site-bound workspace name if present, otherwise legacy workspace.name,
+otherwise the directory basename) — in every case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.`,
 		Args: cobra.MaximumNArgs(1),
@@ -83,30 +83,7 @@ func resolveRegistrationName(cityPath, nameOverride string) (string, error) {
 	if alias := strings.TrimSpace(nameOverride); alias != "" {
 		return alias, nil
 	}
-	if current := strings.TrimSpace(cfg.Workspace.Name); current != "" {
-		return current, nil
-	}
-
-	return readPackName(filepath.Join(cityPath, "pack.toml"))
-}
-
-func readPackName(packTomlPath string) (string, error) {
-	data, err := os.ReadFile(packTomlPath)
-	if err != nil {
-		return "", fmt.Errorf("reading %q: %w", packTomlPath, err)
-	}
-	var meta struct {
-		Pack struct {
-			Name string `toml:"name"`
-		} `toml:"pack"`
-	}
-	if _, err := toml.Decode(string(data), &meta); err != nil {
-		return "", fmt.Errorf("parsing %q: %w", packTomlPath, err)
-	}
-	if strings.TrimSpace(meta.Pack.Name) == "" {
-		return "", fmt.Errorf("%s: missing [pack].name for registration fallback", packTomlPath)
-	}
-	return meta.Pack.Name, nil
+	return config.EffectiveCityName(cfg, filepath.Base(filepath.Clean(cityPath))), nil
 }
 
 func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -162,10 +139,11 @@ func newCitiesCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE:  runList,
 	}
 	cmd.AddCommand(&cobra.Command{
-		Use:   "list",
-		Short: "List registered cities",
-		Args:  cobra.NoArgs,
-		RunE:  runList,
+		Use:     "list",
+		Short:   "List registered cities",
+		Aliases: []string{"ls"},
+		Args:    cobra.NoArgs,
+		RunE:    runList,
 	})
 	return cmd
 }

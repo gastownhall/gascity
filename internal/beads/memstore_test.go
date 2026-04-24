@@ -282,6 +282,38 @@ func TestMemStoreAddAndRemoveLabels(t *testing.T) {
 	}
 }
 
+func TestMemStoreGetReturnsClonedDependencies(t *testing.T) {
+	s := beads.NewMemStore()
+	created, err := s.Create(beads.Bead{
+		Title: "test",
+		Dependencies: []beads.Dep{
+			{IssueID: "gc-1", DependsOnID: "dep-1", Type: "blocks"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created.Dependencies[0].DependsOnID = "mutated"
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Dependencies[0].DependsOnID != "dep-1" {
+		t.Fatalf("DependsOnID after returned bead mutation = %q, want dep-1", got.Dependencies[0].DependsOnID)
+	}
+
+	got.Dependencies[0].DependsOnID = "changed-again"
+	again, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Dependencies[0].DependsOnID != "dep-1" {
+		t.Fatalf("DependsOnID after Get mutation = %q, want dep-1", again.Dependencies[0].DependsOnID)
+	}
+}
+
 // --- DepAdd / DepRemove / DepList ---
 
 func TestMemStoreDepAddAndList(t *testing.T) {
@@ -420,6 +452,73 @@ func TestMemStoreReadyRespectsBlockingDeps(t *testing.T) {
 	}
 	if got[0].ID != blocked.ID || got[1].ID != ready.ID {
 		t.Fatalf("Ready() after closing blocker IDs = [%s %s], want [%s %s]", got[0].ID, got[1].ID, blocked.ID, ready.ID)
+	}
+}
+
+func TestMemStoreReadyIgnoresParentChildDeps(t *testing.T) {
+	s := beads.NewMemStore()
+
+	parent, err := s.Create(beads.Bead{Title: "parent", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.Create(beads.Bead{Title: "child", Type: "task", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DepAdd(child.ID, parent.ID, "parent-child"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready() returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != child.ID {
+		t.Fatalf("Ready()[0].ID = %s, want %s", got[0].ID, child.ID)
+	}
+}
+
+func TestMemStoreReadyPreservesBlocksWhenParentChildSharesPair(t *testing.T) {
+	s := beads.NewMemStore()
+
+	parent, err := s.Create(beads.Bead{Title: "parent", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.Create(beads.Bead{Title: "child", Type: "task", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DepAdd(child.ID, parent.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DepAdd(child.ID, parent.ID, "parent-child"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bead := range got {
+		if bead.ID == child.ID {
+			t.Fatalf("child is ready while parent blocker is still open; ready=%v", got)
+		}
+	}
+
+	if err := s.Close(parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != child.ID {
+		t.Fatalf("Ready() after closing parent = %v, want only child", got)
 	}
 }
 

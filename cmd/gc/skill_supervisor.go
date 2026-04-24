@@ -41,17 +41,20 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		if cat, ok := catalogs[rigName]; ok {
 			return cat
 		}
-		cat, err := loadSharedSkillCatalog(cfg, rigName)
-		if err != nil {
+		result := loadSharedSkillCatalogWithFallback(cityPath, cfg, rigName)
+		cat := result.Catalog
+		if result.Err != nil {
 			if stderr != nil {
 				if rigName == "" {
-					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for city scope: %v\n", err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for city scope: %v\n", result.Err) //nolint:errcheck // best-effort stderr
 				} else {
-					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for rig %q: %v\n", rigName, err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: load shared skill catalog for rig %q: %v\n", rigName, result.Err) //nolint:errcheck // best-effort stderr
 				}
 			}
-			cat.Entries = nil
-			cat.Shadowed = nil
+			if result.Mode == sharedCatalogLoadDirect {
+				cat.Entries = nil
+				cat.Shadowed = nil
+			}
 			catalogs[rigName] = cat
 			return catalogs[rigName]
 		}
@@ -64,7 +67,7 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
 			continue
 		}
-		provider := effectiveAgentProvider(agent, cfg.Workspace.Provider)
+		provider := effectiveAgentProviderFamily(agent, cfg.Workspace.Provider, cfg.Providers)
 		vendor, ok := materialize.VendorSink(provider)
 		if !ok {
 			continue

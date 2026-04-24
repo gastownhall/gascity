@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -38,6 +39,16 @@ type SessionStreamRawMessageEvent struct {
 }
 
 var sessionStreamPendingStallTimeout = 5 * time.Second
+
+func runtimePendingInteraction(pending *worker.PendingInteraction) runtime.PendingInteraction {
+	return runtime.PendingInteraction{
+		RequestID: pending.RequestID,
+		Kind:      pending.Kind,
+		Prompt:    pending.Prompt,
+		Options:   append([]string(nil), pending.Options...),
+		Metadata:  cloneStringMap(pending.Metadata),
+	}
+}
 
 func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	store := s.state.CityBeadStore()
@@ -726,7 +737,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		}
 		lastPendingID = pending.RequestID
 		seq++
-		_ = send(sse.Message{ID: seq, Data: *pending})
+		_ = send(sse.Message{ID: seq, Data: runtimePendingInteraction(pending)})
 		return true
 	}
 
@@ -928,7 +939,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 		if err == nil && pending != nil && pending.RequestID != lastPendingID {
 			lastPendingID = pending.RequestID
 			seq++
-			_ = send(sse.Message{ID: seq, Data: *pending})
+			_ = send(sse.Message{ID: seq, Data: runtimePendingInteraction(pending)})
 		} else if pending == nil && lastPendingID != "" {
 			lastPendingID = ""
 		}

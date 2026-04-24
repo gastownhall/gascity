@@ -57,14 +57,17 @@ type ProviderGetInput struct {
 type ProviderCreateInput struct {
 	CityScope
 	Body struct {
-		Name         string            `json:"name" doc:"Provider name." minLength:"1"`
-		DisplayName  string            `json:"display_name,omitempty" doc:"Human-readable display name."`
-		Command      string            `json:"command" doc:"Provider command binary." minLength:"1"`
-		Args         []string          `json:"args,omitempty" doc:"Command arguments."`
-		PromptMode   string            `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
-		PromptFlag   string            `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
-		ReadyDelayMs int               `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
-		Env          map[string]string `json:"env,omitempty" doc:"Environment variables."`
+		Name               string            `json:"name" doc:"Provider name." minLength:"1"`
+		DisplayName        string            `json:"display_name,omitempty" doc:"Human-readable display name."`
+		Base               *string           `json:"base,omitempty" doc:"Optional provider base for inheritance."`
+		Command            string            `json:"command,omitempty" doc:"Provider command binary. Omit for base-only descendants."`
+		Args               []string          `json:"args,omitempty" doc:"Command arguments."`
+		ArgsAppend         []string          `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
+		PromptMode         string            `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
+		PromptFlag         string            `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
+		ReadyDelayMs       int               `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
+		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
+		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
 	}
 }
 
@@ -73,13 +76,16 @@ type ProviderUpdateInput struct {
 	CityScope
 	Name string `path:"name" doc:"Provider name."`
 	Body struct {
-		DisplayName  *string           `json:"display_name,omitempty" doc:"Human-readable display name."`
-		Command      *string           `json:"command,omitempty" doc:"Provider command binary."`
-		Args         []string          `json:"args,omitempty" doc:"Command arguments."`
-		PromptMode   *string           `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
-		PromptFlag   *string           `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
-		ReadyDelayMs *int              `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
-		Env          map[string]string `json:"env,omitempty" doc:"Environment variables."`
+		DisplayName        *string           `json:"display_name,omitempty" doc:"Human-readable display name."`
+		Base               *string           `json:"base,omitempty" doc:"Provider base for inheritance."`
+		Command            *string           `json:"command,omitempty" doc:"Provider command binary."`
+		Args               []string          `json:"args,omitempty" doc:"Command arguments."`
+		ArgsAppend         []string          `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
+		PromptMode         *string           `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
+		PromptFlag         *string           `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
+		ReadyDelayMs       *int              `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
+		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
+		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
 	}
 }
 

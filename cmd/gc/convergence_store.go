@@ -122,6 +122,16 @@ func (a *convergenceStoreAdapter) CloseBead(id string) error {
 	return nil
 }
 
+func (a *convergenceStoreAdapter) DeleteBead(id string) error {
+	if err := a.store.Delete(id); err != nil {
+		return err
+	}
+	if a.activeIndex != nil {
+		delete(a.activeIndex, id)
+	}
+	return nil
+}
+
 func (a *convergenceStoreAdapter) Children(parentID string) ([]convergence.BeadInfo, error) {
 	children, err := a.store.List(beads.ListQuery{
 		ParentID: parentID,
@@ -138,6 +148,14 @@ func (a *convergenceStoreAdapter) Children(parentID string) ([]convergence.BeadI
 }
 
 func (a *convergenceStoreAdapter) PourWisp(parentID, formula, idempotencyKey string, vars map[string]string, evaluatePrompt string) (string, error) {
+	return a.pourWisp(parentID, formula, idempotencyKey, vars, evaluatePrompt, false)
+}
+
+func (a *convergenceStoreAdapter) PourSpeculativeWisp(parentID, formula, idempotencyKey string, vars map[string]string, evaluatePrompt string) (string, error) {
+	return a.pourWisp(parentID, formula, idempotencyKey, vars, evaluatePrompt, true)
+}
+
+func (a *convergenceStoreAdapter) pourWisp(parentID, formula, idempotencyKey string, vars map[string]string, evaluatePrompt string, deferAssignees bool) (string, error) {
 	// Idempotency: check if a wisp with this key already exists (crash-retry safety).
 	// Fail closed on lookup errors to prevent duplicate wisps.
 	existing, found, err := a.FindByIdempotencyKey(idempotencyKey)
@@ -160,11 +178,56 @@ func (a *convergenceStoreAdapter) PourWisp(parentID, formula, idempotencyKey str
 		Vars:           cookVars,
 		ParentID:       parentID,
 		IdempotencyKey: idempotencyKey,
+		DeferAssignees: deferAssignees,
 	})
 	if err != nil {
 		return "", err
 	}
 	return result.RootID, nil
+}
+
+func (a *convergenceStoreAdapter) ActivateWisp(id string) error {
+	return a.activateDeferredAssignees(id)
+}
+
+func (a *convergenceStoreAdapter) activateDeferredAssignees(id string) error {
+	b, err := a.store.Get(id)
+	if err != nil {
+		return err
+	}
+	update := beads.UpdateOpts{}
+	if assignee := b.Metadata[molecule.DeferredAssigneeMetadataKey]; assignee != "" && b.Assignee != assignee {
+		update.Assignee = &assignee
+	}
+	metadata := map[string]string{}
+	if routedTo := b.Metadata[molecule.DeferredRoutedToMetadataKey]; routedTo != "" && b.Metadata["gc.routed_to"] != routedTo {
+		metadata["gc.routed_to"] = routedTo
+	}
+	if executionRoutedTo := b.Metadata[molecule.DeferredExecutionRoutedToMetadataKey]; executionRoutedTo != "" && b.Metadata["gc.execution_routed_to"] != executionRoutedTo {
+		metadata["gc.execution_routed_to"] = executionRoutedTo
+	}
+	if typ := b.Metadata[molecule.DeferredTypeMetadataKey]; typ != "" && b.Type != typ {
+		update.Type = &typ
+	}
+	if len(metadata) > 0 {
+		update.Metadata = metadata
+	}
+	if update.Assignee != nil || update.Type != nil || len(update.Metadata) > 0 {
+		if err := a.store.Update(id, update); err != nil {
+			return fmt.Errorf("assigning deferred bead %q: %w", id, err)
+		}
+	}
+
+	children, err := a.store.Children(id, beads.IncludeClosed)
+	if err != nil {
+		return fmt.Errorf("listing children for activation %q: %w", id, err)
+	}
+	for _, child := range children {
+		if err := a.activateDeferredAssignees(child.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool, error) {

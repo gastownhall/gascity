@@ -42,16 +42,23 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
-func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) {
-	_ = m.store.SetMetadata(id, "session_key", "")
-	_ = m.store.SetMetadata(id, "started_config_hash", "")
-	_ = m.store.SetMetadata(id, "continuation_reset_pending", "true")
+func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
+	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
+		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
+	}
+	if err := m.store.SetMetadata(id, "started_config_hash", ""); err != nil {
+		return fmt.Errorf("clearing stale resume metadata started_config_hash: %w", err)
+	}
+	if err := m.store.SetMetadata(id, "continuation_reset_pending", "true"); err != nil {
+		return fmt.Errorf("clearing stale resume metadata continuation_reset_pending: %w", err)
+	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
 	}
 	b.Metadata["session_key"] = ""
 	b.Metadata["started_config_hash"] = ""
 	b.Metadata["continuation_reset_pending"] = "true"
+	return nil
 }
 
 func (m *Manager) retryFreshStartAfterStaleKey(
@@ -67,7 +74,12 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		return false, nil
 	}
 	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
-	m.clearStaleResumeMetadata(id, b)
+	if err := m.clearStaleResumeMetadata(id, b); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, err
+	}
 	if freshCmd == resumeCommand {
 		if unroute != nil {
 			unroute()
@@ -231,9 +243,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		continuationEpoch,
 		instanceToken,
 	))
-	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
-		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-	} else if gcProvider := strings.TrimSpace(b.Metadata["provider"]); gcProvider != "" {
+	if gcProvider := providerKind(b); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)

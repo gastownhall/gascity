@@ -431,9 +431,10 @@ func TestBuildAttemptRecipeEnrichesNestedRalphChildren(t *testing.T) {
 		Ralph: &formula.RalphSpec{MaxAttempts: 5},
 		Children: []*formula.Step{
 			{
-				ID:    "inner-converge",
-				Title: "Inner Converge",
-				Type:  "task",
+				ID:      "inner-converge",
+				Title:   "Inner Converge",
+				Type:    "task",
+				Timeout: "2m",
 				Ralph: &formula.RalphSpec{
 					MaxAttempts: 3,
 					Check: &formula.RalphCheckSpec{
@@ -482,6 +483,9 @@ func TestBuildAttemptRecipeEnrichesNestedRalphChildren(t *testing.T) {
 	}
 	if innerStep.Metadata["gc.check_timeout"] != "30s" {
 		t.Errorf("inner gc.check_timeout = %q, want 30s", innerStep.Metadata["gc.check_timeout"])
+	}
+	if innerStep.Metadata["gc.step_timeout"] != "2m" {
+		t.Errorf("inner gc.step_timeout = %q, want 2m", innerStep.Metadata["gc.step_timeout"])
 	}
 	// Frozen step spec stored as a separate spec bead.
 	var innerSpecStep *formula.RecipeStep

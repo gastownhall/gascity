@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,20 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type partialListPoolProvider struct {
+	*runtime.Fake
+	listErr   error
+	listNames []string
+}
+
+func (p *partialListPoolProvider) ListRunning(prefix string) ([]string, error) {
+	names := p.listNames
+	if names == nil {
+		names, _ = p.Fake.ListRunning(prefix)
+	}
+	return names, p.listErr
+}
 
 func TestEvaluatePoolSuccess(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: 10, Check: "echo 5"}
@@ -339,6 +354,21 @@ func TestDiscoverPoolInstancesUnlimited(t *testing.T) {
 	}
 }
 
+func TestDiscoverPoolInstancesUnlimitedFailsClosedOnPartialResults(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+	_ = sp.Start(context.Background(), "myrig--worker-1", runtime.Config{})
+	_ = sp.Start(context.Background(), "myrig--worker-3", runtime.Config{})
+
+	pool := scaleParams{Min: 0, Max: -1}
+	instances := discoverPoolInstances("worker", "myrig", pool, nil, "city", "", sp)
+	if len(instances) != 0 {
+		t.Fatalf("len = %d, want fail-closed empty result on partial list (instances: %v)", len(instances), instances)
+	}
+}
+
 func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
@@ -347,6 +377,20 @@ func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
 	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: -1}, nil, "city", "", sp)
 	if count != 2 {
 		t.Errorf("count = %d, want 2", count)
+	}
+}
+
+func TestCountRunningPoolInstancesUsesPartialListResults(t *testing.T) {
+	sp := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
+	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
+
+	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
+	if count != 2 {
+		t.Errorf("count = %d, want 2 from per-session fallback", count)
 	}
 }
 
@@ -471,21 +515,55 @@ func TestExpandSessionSetup_Empty(t *testing.T) {
 }
 
 func TestResolveSetupScript_Relative(t *testing.T) {
-	got := resolveSetupScript("scripts/setup.sh", "/home/user/city")
-	if got != "/home/user/city/scripts/setup.sh" {
+	got := resolveSetupScript("scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
 		t.Errorf("got %q, want absolute path", got)
 	}
 }
 
+func TestResolveSetupScript_DoubleSlashUsesCityRoot(t *testing.T) {
+	got := resolveSetupScript("//scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/scripts/setup.sh" {
+		t.Errorf("got %q, want city-root path", got)
+	}
+}
+
+func TestResolveSetupScript_LegacyCityRelativeStillWorks(t *testing.T) {
+	got := resolveSetupScript("packs/gastown/scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
+		t.Errorf("got %q, want legacy city-root-relative path to remain supported", got)
+	}
+}
+
+func TestResolveSetupScript_LegacySharedCityRelativeFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	sourceDir := filepath.Join(cityPath, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityScript := filepath.Join(cityPath, "packs", "shared", "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(cityScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cityScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveSetupScript("packs/shared/scripts/setup.sh", sourceDir, cityPath)
+	if got != cityScript {
+		t.Errorf("got %q, want legacy shared city-root-relative path to remain supported", got)
+	}
+}
+
 func TestResolveSetupScript_Absolute(t *testing.T) {
-	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city")
+	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
 	if got != "/usr/local/bin/setup.sh" {
 		t.Errorf("got %q, want unchanged absolute path", got)
 	}
 }
 
 func TestResolveSetupScript_Empty(t *testing.T) {
-	got := resolveSetupScript("", "/home/user/city")
+	got := resolveSetupScript("", "/home/user/city/packs/gastown", "/home/user/city")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
@@ -551,61 +629,64 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	trueVal := true
 	intVal := 42
 	src := config.Agent{
-		Name:                   "original",
-		Description:            "test agent description",
-		Dir:                    "original-dir",
-		WorkDir:                ".gc/agents/original",
-		Scope:                  "city",
-		Suspended:              true,
-		PreStart:               []string{"pre-cmd"},
-		PromptTemplate:         "prompts/test.md",
-		Nudge:                  "nudge text",
-		Session:                "acp",
-		Provider:               "claude",
-		StartCommand:           "claude --dangerously",
-		Args:                   []string{"--arg1"},
-		PromptMode:             "flag",
-		PromptFlag:             "--prompt",
-		ReadyDelayMs:           &intVal,
-		ReadyPromptPrefix:      "ready>",
-		ProcessNames:           []string{"claude"},
-		EmitsPermissionWarning: &trueVal,
-		Env:                    map[string]string{"K": "V"},
-		MaxActiveSessions:      intPtr(5),
-		MinActiveSessions:      intPtr(1),
-		ScaleCheck:             "echo 3",
-		WorkQuery:              "bd ready",
-		SlingQuery:             "bd update {}",
-		IdleTimeout:            "15m",
-		SleepAfterIdle:         "30s",
-		SleepAfterIdleSource:   "agent",
-		InstallAgentHooks:      []string{"claude"},
-		SkillsDir:              "/skills",
-		MCPDir:                 "/mcp",
-		HooksInstalled:         &trueVal,
-		InjectAssignedSkills:   &trueVal,
-		SessionSetup:           []string{"setup-cmd"},
-		SessionSetupScript:     "scripts/setup.sh",
-		SessionLive:            []string{"live-cmd"},
-		OverlayDir:             "overlays/test",
-		SourceDir:              "/src",
-		DefaultSlingFormula:    strPtr("mol-work"),
-		InjectFragments:        []string{"frag1"},
-		Attach:                 &trueVal,
-		Fallback:               true,
-		PoolName:               "template/name",
-		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
-		DependsOn:              []string{"other-agent"},
-		WakeMode:               "fresh",
-		Implicit:               true,
-		DrainTimeout:           "10m",
-		OnBoot:                 "echo boot",
-		OnDeath:                "echo death",
-		Namepool:               "names.txt",
-		NamepoolNames:          []string{"alpha", "bravo"},
-		OptionDefaults:         map[string]string{"effort": "max"},
-		BindingName:            "gastown",
-		PackName:               "gastown",
+		Name:                         "original",
+		Description:                  "test agent description",
+		Dir:                          "original-dir",
+		WorkDir:                      ".gc/agents/original",
+		Scope:                        "city",
+		Suspended:                    true,
+		PreStart:                     []string{"pre-cmd"},
+		PromptTemplate:               "prompts/test.md",
+		Nudge:                        "nudge text",
+		Session:                      "acp",
+		Provider:                     "claude",
+		StartCommand:                 "claude --dangerously",
+		Args:                         []string{"--arg1"},
+		PromptMode:                   "flag",
+		PromptFlag:                   "--prompt",
+		ReadyDelayMs:                 &intVal,
+		ReadyPromptPrefix:            "ready>",
+		ProcessNames:                 []string{"claude"},
+		EmitsPermissionWarning:       &trueVal,
+		Env:                          map[string]string{"K": "V"},
+		MaxActiveSessions:            intPtr(5),
+		MinActiveSessions:            intPtr(1),
+		ScaleCheck:                   "echo 3",
+		WorkQuery:                    "bd ready",
+		SlingQuery:                   "bd update {}",
+		IdleTimeout:                  "15m",
+		SleepAfterIdle:               "30s",
+		SleepAfterIdleSource:         "agent",
+		InstallAgentHooks:            []string{"claude"},
+		SkillsDir:                    "/skills",
+		MCPDir:                       "/mcp",
+		HooksInstalled:               &trueVal,
+		InjectAssignedSkills:         &trueVal,
+		SessionSetup:                 []string{"setup-cmd"},
+		SessionSetupScript:           "scripts/setup.sh",
+		SessionLive:                  []string{"live-cmd"},
+		OverlayDir:                   "overlays/test",
+		SourceDir:                    "/src",
+		DefaultSlingFormula:          strPtr("mol-work"),
+		InheritedDefaultSlingFormula: strPtr("mol-pack"),
+		InjectFragments:              []string{"frag1"},
+		AppendFragments:              []string{"agent-footer"},
+		InheritedAppendFragments:     []string{"pack-footer"},
+		Attach:                       &trueVal,
+		Fallback:                     true,
+		PoolName:                     "template/name",
+		ResumeCommand:                "claude --resume {{.SessionKey}} --dangerously",
+		DependsOn:                    []string{"other-agent"},
+		WakeMode:                     "fresh",
+		Implicit:                     true,
+		DrainTimeout:                 "10m",
+		OnBoot:                       "echo boot",
+		OnDeath:                      "echo death",
+		Namepool:                     "names.txt",
+		NamepoolNames:                []string{"alpha", "bravo"},
+		OptionDefaults:               map[string]string{"effort": "max"},
+		BindingName:                  "gastown",
+		PackName:                     "gastown",
 	}
 
 	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not
@@ -663,6 +744,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	src.Args[0] = "MUTATED"
 	src.ProcessNames[0] = "MUTATED"
 	src.InjectFragments[0] = "MUTATED"
+	src.AppendFragments[0] = "MUTATED"
+	src.InheritedAppendFragments[0] = "MUTATED"
 	src.InstallAgentHooks[0] = "MUTATED"
 	newMin := 999
 	src.MinActiveSessions = &newMin
@@ -684,6 +767,12 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	}
 	if dst.InjectFragments[0] == "MUTATED" {
 		t.Error("InjectFragments is not a deep copy")
+	}
+	if dst.AppendFragments[0] == "MUTATED" {
+		t.Error("AppendFragments is not a deep copy")
+	}
+	if dst.InheritedAppendFragments[0] == "MUTATED" {
+		t.Error("InheritedAppendFragments is not a deep copy")
 	}
 	if dst.InstallAgentHooks[0] == "MUTATED" {
 		t.Error("InstallAgentHooks is not a deep copy")

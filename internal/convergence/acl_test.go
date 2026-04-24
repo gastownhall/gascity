@@ -1,6 +1,8 @@
 package convergence
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestRequiresToken(t *testing.T) {
 	tests := []struct {

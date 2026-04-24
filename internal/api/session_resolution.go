@@ -60,6 +60,17 @@ type apiSessionResolveOptions struct {
 
 type apiNamedSessionSpec = session.NamedSessionSpec
 
+func apiResolvedProviderFamilyMetadata(resolved *config.ResolvedProvider) string {
+	if resolved == nil {
+		return ""
+	}
+	name := strings.TrimSpace(resolved.Name)
+	if family := strings.TrimSpace(resolved.BuiltinAncestor); family != "" && family != name {
+		return family
+	}
+	return ""
+}
+
 func apiNormalizeSessionTarget(target string) string {
 	return session.NormalizeNamedSessionTarget(target)
 }
@@ -192,7 +203,7 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 		return nil
 	}
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status})
+		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true})
 		if err != nil {
 			return fmt.Errorf("listing work assigned to retired session %s: %w", oldID, err)
 		}
@@ -274,20 +285,30 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if err != nil {
 		return "", err
 	}
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil)
+	if err != nil {
+		return "", err
+	}
+	resume := session.ProviderResume{
+		ResumeFlag:    resolved.ResumeFlag,
+		ResumeStyle:   resolved.ResumeStyle,
+		ResumeCommand: resolved.ResumeCommand,
+		SessionIDFlag: resolved.SessionIDFlag,
+	}
+	mgr := s.sessionManager(store)
 	extraMeta := map[string]string{
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	resolvedCfg, err := resolvedSessionConfigForProvider(spec.Identity, spec.SessionName, qualifiedTemplate, spec.Identity, transport, extraMeta, resolved, "", workDir)
-	if err != nil {
-		return "", err
+	if family := apiResolvedProviderFamilyMetadata(resolved); family != "" {
+		extraMeta["provider_kind"] = family
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
-	if err != nil {
-		return "", err
+	if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+		extraMeta["builtin_ancestor"] = resolved.BuiltinAncestor
 	}
+	hints := sessionCreateHints(resolved)
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
@@ -297,7 +318,21 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return err
 		}
 		var createErr error
-		info, createErr = handle.Create(ctx, worker.CreateModeStarted)
+		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
+			ctx,
+			spec.Identity,
+			spec.SessionName,
+			qualifiedTemplate,
+			spec.Identity,
+			launchCommand.Command,
+			workDir,
+			resolved.Name,
+			transport,
+			resolved.Env,
+			resume,
+			hints,
+			extraMeta,
+		)
 		return createErr
 	})
 	if err == nil {

@@ -34,6 +34,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		userText      string
 		checkReadOnly bool
 		checkDeleted  bool
+		forceReset    bool
 		logLevel      string
 		timeoutMS     int
 	)
@@ -229,6 +230,21 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = existingManaged.MarkFlagRequired("port")
 	cmd.AddCommand(existingManaged)
 
+	nowMS := &cobra.Command{
+		Use:    "now-ms",
+		Short:  "Print the current Unix time in milliseconds",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if _, err := fmt.Fprintln(stdout, time.Now().UnixMilli()); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state now-ms: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.AddCommand(nowMS)
+
 	queryProbe := &cobra.Command{
 		Use:    "query-probe",
 		Short:  "Probe managed Dolt SQL readiness",
@@ -270,6 +286,30 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	readOnlyCheck.Flags().StringVar(&userText, "user", "", "Dolt user")
 	_ = readOnlyCheck.MarkFlagRequired("port")
 	cmd.AddCommand(readOnlyCheck)
+
+	resetProbe := &cobra.Command{
+		Use:    "reset-probe",
+		Short:  "Drop the managed Dolt health probe database",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if !forceReset {
+				fmt.Fprintf(stderr, "gc dolt-state reset-probe: refusing to drop %s without --force; this database may contain a legacy bead store in old metadata\n", managedDoltProbeDatabase) //nolint:errcheck
+				return errExit
+			}
+			if err := managedDoltResetProbe(hostText, portText, userText); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state reset-probe: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	resetProbe.Flags().StringVar(&hostText, "host", "", "Dolt host")
+	resetProbe.Flags().StringVar(&portText, "port", "", "Dolt port")
+	resetProbe.Flags().StringVar(&userText, "user", "", "Dolt user")
+	resetProbe.Flags().BoolVar(&forceReset, "force", false, "acknowledge dropping the managed probe database")
+	_ = resetProbe.MarkFlagRequired("port")
+	cmd.AddCommand(resetProbe)
 
 	healthCheck := &cobra.Command{
 		Use:    "health-check",

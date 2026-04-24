@@ -64,6 +64,7 @@ func cloneBead(b Bead) Bead {
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)
+	b.Dependencies = slices.Clone(b.Dependencies)
 	return b
 }
 
@@ -386,8 +387,11 @@ func (m *MemStore) DepAdd(issueID, dependsOnID, depType string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, d := range m.deps {
-		if d.IssueID == issueID && d.DependsOnID == dependsOnID {
-			m.deps[i].Type = depType // update type on re-add
+		if d.IssueID == issueID && d.DependsOnID == dependsOnID && d.Type == depType {
+			return nil
+		}
+		if d.IssueID == issueID && d.DependsOnID == dependsOnID && d.Type != "parent-child" && depType != "parent-child" {
+			m.deps[i].Type = depType
 			return nil
 		}
 	}

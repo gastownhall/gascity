@@ -42,6 +42,16 @@ func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
 	}
 }
 
+func TestNormalizeTraceOutcomeCodeAcceptsDeferredActive(t *testing.T) {
+	got, raw := normalizeTraceOutcomeCode(string(TraceOutcomeDeferredActive))
+	if got != TraceOutcomeDeferredActive {
+		t.Fatalf("outcome = %q, want %q", got, TraceOutcomeDeferredActive)
+	}
+	if raw != "" {
+		t.Fatalf("raw outcome = %q, want empty", raw)
+	}
+}
+
 func TestTraceArmStorePersistence(t *testing.T) {
 	cityDir := t.TempDir()
 	store := newSessionReconcilerTraceArmStore(cityDir)

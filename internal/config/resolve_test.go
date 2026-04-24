@@ -501,6 +501,200 @@ func TestLookupProviderCityOverride(t *testing.T) {
 	}
 }
 
+// TestLookupProviderBaseChainIntegration verifies the full path from
+// lookupProvider through the chain walker: a wrapper provider with
+// base = "builtin:codex" must come back with inherited PermissionModes
+// and OptionsSchema from the built-in codex. This test would have
+// caught the bug where the runtime launch command for codex-mini was
+// missing --dangerously-bypass-approvals-and-sandbox because
+// lookupProvider ignored the Base field.
+func TestLookupProviderBaseChainIntegration(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:          &b,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--", "-m", "gpt-5.3"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+	}
+	spec, err := lookupProvider("codex-mini", city, lookPathAll)
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	// Leaf-level overrides preserved.
+	if spec.Command != "aimux" {
+		t.Errorf("Command = %q, want aimux (leaf override)", spec.Command)
+	}
+	// Inherited from built-in codex: PermissionModes must contain the
+	// unrestricted key that maps to --dangerously-bypass flag.
+	if spec.PermissionModes == nil {
+		t.Fatal("PermissionModes is nil — built-in codex inheritance did not propagate via lookupProvider")
+	}
+	want := "--dangerously-bypass-approvals-and-sandbox"
+	if got := spec.PermissionModes["unrestricted"]; got != want {
+		t.Errorf("PermissionModes[\"unrestricted\"] = %q, want %q", got, want)
+	}
+	// Inherited OptionsSchema: must contain permission_mode with choices
+	// including unrestricted → FlagArgs [--dangerously-bypass-approvals-and-sandbox].
+	found := false
+	for _, opt := range spec.OptionsSchema {
+		if opt.Key != "permission_mode" {
+			continue
+		}
+		for _, c := range opt.Choices {
+			if c.Value == "unrestricted" {
+				if len(c.FlagArgs) == 0 || c.FlagArgs[0] != want {
+					t.Errorf("permission_mode unrestricted FlagArgs = %v, want %v", c.FlagArgs, []string{want})
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("OptionsSchema did not inherit permission_mode.unrestricted from built-in codex")
+	}
+	// Inherited scalars.
+	if spec.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want arg (inherited)", spec.PromptMode)
+	}
+	if spec.ReadyDelayMs != 3000 {
+		t.Errorf("ReadyDelayMs = %d, want 3000 (inherited)", spec.ReadyDelayMs)
+	}
+}
+
+func TestLookupProviderExplicitEmptyBaseOptsOutOfLegacyMerge(t *testing.T) {
+	empty := ""
+	city := map[string]ProviderSpec{
+		"codex": {
+			Base:    &empty,
+			Command: "codex",
+		},
+	}
+	spec, err := lookupProvider("codex", city, lookPathAll)
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	if spec.Base == nil || *spec.Base != "" {
+		t.Fatalf("Base = %v, want explicit empty", spec.Base)
+	}
+	if len(spec.PermissionModes) != 0 {
+		t.Errorf("explicit base=\"\" should not inherit PermissionModes, got %v", spec.PermissionModes)
+	}
+	if len(spec.OptionsSchema) != 0 {
+		t.Errorf("explicit base=\"\" should not inherit OptionsSchema, got %v", spec.OptionsSchema)
+	}
+}
+
+// TestResolveProviderBaseChainEmitsDangerousBypass verifies that a
+// wrapped codex provider with base = "builtin:codex" produces a
+// ResolvedProvider whose ResolveDefaultArgs() includes
+// --dangerously-bypass-approvals-and-sandbox. This is the end-to-end
+// launch-command invariant for the aimux-codex fix.
+func TestResolveProviderBaseChainEmitsDangerousBypass(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:          &b,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--", "-m", "gpt-5.3"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-mini", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if resolved.BuiltinAncestor != "codex" {
+		t.Errorf("BuiltinAncestor = %q, want codex", resolved.BuiltinAncestor)
+	}
+	if len(resolved.OptionsSchema) == 0 {
+		t.Fatal("OptionsSchema empty — built-in inheritance did not reach ResolvedProvider")
+	}
+	args := resolved.ResolveDefaultArgs()
+	want := "--dangerously-bypass-approvals-and-sandbox"
+	found := false
+	for _, a := range args {
+		if a == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ResolveDefaultArgs() = %v, missing %q — session would hang on first sandboxed command", args, want)
+	}
+}
+
+func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"codex": {
+			Base:          basePtr("builtin:codex"),
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-max": {
+			Base:       basePtr("codex"),
+			ArgsAppend: []string{"-m", "gpt-5.4"},
+		},
+	}
+	resolved, err := ResolveProviderChain("codex-max", custom["codex-max"], custom)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	want := []string{"run", "codex", "--", "-m", "gpt-5.4"}
+	if !reflect.DeepEqual(resolved.Args, want) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, want)
+	}
+}
+
+func TestMergeProviderOverBuiltinOptionsSchemaByKeyAndOmit(t *testing.T) {
+	base := ProviderSpec{
+		OptionsSchema: []ProviderOption{
+			{Key: "model", Label: "Model", Default: "old"},
+			{Key: "permission_mode", Label: "Permission", Default: "plan"},
+		},
+		OptionDefaults: map[string]string{
+			"model":           "old",
+			"permission_mode": "plan",
+		},
+	}
+	city := ProviderSpec{
+		OptionsSchemaMerge: "by_key",
+		OptionsSchema: []ProviderOption{
+			{Key: "model", Label: "Model", Default: "new"},
+			{Key: "permission_mode", Omit: true},
+			{Key: "effort", Label: "Effort", Default: "high"},
+		},
+		OptionDefaults: map[string]string{
+			"model":  "new",
+			"effort": "high",
+		},
+	}
+	merged := MergeProviderOverBuiltin(base, city)
+	if got := optionKeys(merged.OptionsSchema); !reflect.DeepEqual(got, []string{"model", "effort"}) {
+		t.Fatalf("option keys = %v, want [model effort]", got)
+	}
+	if merged.OptionsSchema[0].Default != "new" {
+		t.Errorf("model default = %q, want new", merged.OptionsSchema[0].Default)
+	}
+	if _, ok := merged.OptionDefaults["permission_mode"]; ok {
+		t.Errorf("omitted option default survived: %v", merged.OptionDefaults)
+	}
+	if got := merged.OptionDefaults["effort"]; got != "high" {
+		t.Errorf("effort default = %q, want high", got)
+	}
+}
+
+func optionKeys(opts []ProviderOption) []string {
+	keys := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		keys = append(keys, opt.Key)
+	}
+	return keys
+}
+
 func TestLookupProviderUnknown(t *testing.T) {
 	_, err := lookupProvider("vim", nil, lookPathAll)
 	if err == nil {
@@ -569,8 +763,8 @@ func TestLookupProviderCityInheritsBuiltin(t *testing.T) {
 		t.Errorf("Args = %v, want [--yolo --model claude-haiku-4.5]", spec.Args)
 	}
 	// Should inherit SupportsHooks from built-in copilot.
-	if spec.SupportsHooks != builtinCopilot.SupportsHooks {
-		t.Errorf("SupportsHooks = %v, want %v (inherited)", spec.SupportsHooks, builtinCopilot.SupportsHooks)
+	if derefBool(spec.SupportsHooks) != derefBool(builtinCopilot.SupportsHooks) {
+		t.Errorf("SupportsHooks = %v, want %v (inherited)", derefBool(spec.SupportsHooks), derefBool(builtinCopilot.SupportsHooks))
 	}
 }
 
@@ -619,7 +813,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 		PromptFlag:        "--prompt",
 		ReadyDelayMs:      5000,
 		ReadyPromptPrefix: "❯ ",
-		SupportsACP:       true,
+		SupportsACP:       boolPtr(true),
 		Env:               map[string]string{"BASE_KEY": "base_val"},
 		PermissionModes:   map[string]string{"unrestricted": "--yolo"},
 	}
@@ -646,7 +840,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	if result.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", result.ReadyDelayMs)
 	}
-	if !result.SupportsACP {
+	if !derefBool(result.SupportsACP) {
 		t.Error("SupportsACP should be inherited")
 	}
 	// Env merged additively.
@@ -659,6 +853,110 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	// PermissionModes inherited.
 	if result.PermissionModes["unrestricted"] != "--yolo" {
 		t.Error("PermissionModes not inherited")
+	}
+}
+
+// --- Tri-state capability bool tests ---
+//
+// These verify the three-way *bool semantics for SupportsHooks,
+// SupportsACP, and EmitsPermissionWarning per the provider-inheritance
+// design §Tri-state capability bools.
+
+func TestMergeProviderOverBuiltinTriStateChildDisablesParentEnable(t *testing.T) {
+	// Parent sets &true, child explicitly sets &false → final &false.
+	base := ProviderSpec{Command: "x", SupportsHooks: boolPtr(true)}
+	city := ProviderSpec{SupportsHooks: boolPtr(false)}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want &false")
+	}
+	if *result.SupportsHooks != false {
+		t.Errorf("SupportsHooks = %v, want false (child explicit disable wins)", *result.SupportsHooks)
+	}
+}
+
+func TestMergeProviderOverBuiltinTriStateChildNilInheritsParent(t *testing.T) {
+	// Parent sets &true, child absent (nil) → final inherits &true.
+	base := ProviderSpec{Command: "x", SupportsHooks: boolPtr(true)}
+	city := ProviderSpec{}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want inherited &true")
+	}
+	if *result.SupportsHooks != true {
+		t.Errorf("SupportsHooks = %v, want true (inherited)", *result.SupportsHooks)
+	}
+}
+
+func TestMergeProviderOverBuiltinTriStateChildEnablesParentNil(t *testing.T) {
+	// Parent absent (nil), child sets &true → final &true.
+	base := ProviderSpec{Command: "x"}
+	city := ProviderSpec{SupportsHooks: boolPtr(true)}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want &true")
+	}
+	if *result.SupportsHooks != true {
+		t.Errorf("SupportsHooks = %v, want true (child enabled)", *result.SupportsHooks)
+	}
+}
+
+// TestSupportsHooksFalseRegressionTOML verifies that a raw TOML config
+// with supports_hooks = false decodes into *bool = &false and propagates
+// through resolution as a suppression (resolved.SupportsHooks == false).
+// This is the back-compat regression test called out in the migration.
+func TestSupportsHooksFalseRegressionTOML(t *testing.T) {
+	// Parse TOML that sets supports_hooks = false on a custom provider
+	// that inherits from builtin claude (which has SupportsHooks = &true).
+	// The explicit false must win over the inherited true.
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.no-hooks-claude]
+base = "builtin:claude"
+supports_hooks = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	spec, ok := cfg.Providers["no-hooks-claude"]
+	if !ok {
+		t.Fatal("provider no-hooks-claude not loaded")
+	}
+	if spec.SupportsHooks == nil {
+		t.Fatal("SupportsHooks decoded as nil, want &false (TOML explicit)")
+	}
+	if *spec.SupportsHooks != false {
+		t.Errorf("SupportsHooks = %v, want false", *spec.SupportsHooks)
+	}
+
+	// Resolve through the chain and confirm the explicit false survives
+	// inheritance from builtin claude (which has SupportsHooks = &true).
+	resolved, err := ResolveProviderChain("no-hooks-claude", spec, cfg.Providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if resolved.SupportsHooks {
+		t.Error("resolved SupportsHooks = true, want false (explicit disable must win over inherited enable)")
+	}
+}
+
+// TestSupportsHooksComposeFragmentDisables verifies that a fragment with
+// supports_hooks = false, composed over a builtin-derived provider with
+// no local declaration, produces a final &false on the merged spec.
+func TestSupportsHooksComposeFragmentDisables(t *testing.T) {
+	// Fragment that disables hooks on a provider already present in base.
+	base := ProviderSpec{Command: "claude", SupportsHooks: boolPtr(true)}
+	// deepMergeProvider uses fragMeta.IsDefined to detect explicit
+	// presence, so simulate that by merging directly through
+	// MergeProviderOverBuiltin which is the authoritative path.
+	frag := ProviderSpec{SupportsHooks: boolPtr(false)}
+	merged := MergeProviderOverBuiltin(base, frag)
+	if merged.SupportsHooks == nil || *merged.SupportsHooks != false {
+		t.Errorf("merged SupportsHooks = %v, want &false", merged.SupportsHooks)
 	}
 }
 
@@ -704,7 +1002,7 @@ func TestResolveInstallHooksNeitherSet(t *testing.T) {
 func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 	agent := &Agent{Name: "mayor"}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "claude") {
+	if !AgentHasHooks(agent, ws, "claude", nil) {
 		t.Error("claude should always have hooks")
 	}
 }
@@ -712,7 +1010,7 @@ func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini", "opencode"}}
-	if !AgentHasHooks(agent, ws, "gemini") {
+	if !AgentHasHooks(agent, ws, "gemini", nil) {
 		t.Error("gemini with install_agent_hooks should have hooks")
 	}
 }
@@ -720,7 +1018,7 @@ func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
-	if AgentHasHooks(agent, ws, "codex") {
+	if AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("codex not in install_agent_hooks should not have hooks")
 	}
 }
@@ -728,7 +1026,7 @@ func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 func TestAgentHasHooks_NoHooksByDefault(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "test"}
-	if AgentHasHooks(agent, ws, "codex") {
+	if AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("codex with no install_agent_hooks should not have hooks")
 	}
 }
@@ -737,7 +1035,7 @@ func TestAgentHasHooks_ExplicitOverrideTrue(t *testing.T) {
 	yes := true
 	agent := &Agent{Name: "worker", HooksInstalled: &yes}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "codex") {
+	if !AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("hooks_installed=true should override to true")
 	}
 }
@@ -747,7 +1045,7 @@ func TestAgentHasHooks_ExplicitOverrideFalse(t *testing.T) {
 	agent := &Agent{Name: "worker", HooksInstalled: &no}
 	ws := &Workspace{Name: "test"}
 	// Even claude should be overridden to false when explicit.
-	if AgentHasHooks(agent, ws, "claude") {
+	if AgentHasHooks(agent, ws, "claude", nil) {
 		t.Error("hooks_installed=false should override even claude")
 	}
 }
@@ -756,11 +1054,27 @@ func TestAgentHasHooks_AgentLevelInstallHooks(t *testing.T) {
 	agent := &Agent{Name: "worker", InstallAgentHooks: []string{"copilot"}}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
 	// Agent-level overrides workspace — only copilot in list.
-	if !AgentHasHooks(agent, ws, "copilot") {
+	if !AgentHasHooks(agent, ws, "copilot", nil) {
 		t.Error("agent install_agent_hooks should be checked")
 	}
-	if AgentHasHooks(agent, ws, "opencode") {
+	if AgentHasHooks(agent, ws, "opencode", nil) {
 		t.Error("opencode not in agent install_agent_hooks")
+	}
+}
+
+// TestAgentHasHooks_WrappedClaudeRecognizedViaBuiltinFamily verifies
+// that a wrapped custom provider (e.g. claude-max with base = "builtin:claude")
+// is recognized as claude-family and gets hooks installed by default —
+// matching what literal "claude" would get.
+func TestAgentHasHooks_WrappedClaudeRecognizedViaBuiltinFamily(t *testing.T) {
+	base := "builtin:claude"
+	cityProviders := map[string]ProviderSpec{
+		"claude-max": {Base: &base, Command: "claude-max"},
+	}
+	agent := &Agent{Name: "mayor"}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "claude-max", cityProviders) {
+		t.Error("claude-max (wrapped claude) should be recognized as claude-family and have hooks")
 	}
 }
 
@@ -893,7 +1207,11 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 // zero value. This catches fields that were added to the struct but not
 // wired into the merge function.
 func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
+	basePtr := "builtin:custom"
 	city := ProviderSpec{
+		Base:                   &basePtr,
+		ArgsAppend:             []string{"--extra"},
+		OptionsSchemaMerge:     "by_key",
 		DisplayName:            "Custom",
 		Command:                "custom-cmd",
 		Args:                   []string{"--flag"},
@@ -902,11 +1220,11 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ReadyDelayMs:           5000,
 		ReadyPromptPrefix:      "$ ",
 		ProcessNames:           []string{"custom"},
-		EmitsPermissionWarning: true,
+		EmitsPermissionWarning: boolPtr(true),
 		Env:                    map[string]string{"K": "V"},
 		PathCheck:              "custom-bin",
-		SupportsACP:            true,
-		SupportsHooks:          true,
+		SupportsACP:            boolPtr(true),
+		SupportsHooks:          boolPtr(true),
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",

@@ -110,14 +110,25 @@ type RigUpdate struct {
 
 // ProviderUpdate holds optional fields for a partial provider update.
 // Pointer fields distinguish "not set" from "set to zero value."
+//
+// Base uses **string so callers can distinguish four PATCH cases:
+//
+//   - nil              → no-op (don't touch Base)
+//   - &(*string)(nil)  → clear Base declaration (remove the TOML key)
+//   - &(&"")           → set explicit empty (standalone opt-out)
+//   - &(&"<name>")     → set concrete value
 type ProviderUpdate struct {
-	DisplayName  *string
-	Command      *string
-	Args         []string // nil = not set, non-nil = replace
-	PromptMode   *string
-	PromptFlag   *string
-	ReadyDelayMs *int
-	Env          map[string]string // nil = not set, non-nil = additive merge
+	DisplayName        *string
+	Base               **string
+	Command            *string
+	Args               []string // nil = not set, non-nil = replace
+	ArgsAppend         []string // nil = not set, non-nil = replace
+	PromptMode         *string
+	PromptFlag         *string
+	ReadyDelayMs       *int
+	Env                map[string]string // nil = not set, non-nil = additive merge
+	OptionsSchemaMerge *string
+	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
 }
 
 // RawConfigProvider is optionally implemented by State to provide the

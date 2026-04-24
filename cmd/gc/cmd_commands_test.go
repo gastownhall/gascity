@@ -268,6 +268,51 @@ done
 	}
 }
 
+func TestAddDiscoveredCommandsToRoot_HelpFlagShowsBuiltInHelp(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "status")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho should-not-run\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helpPath := filepath.Join(sourceDir, "help.md")
+	if err := os.WriteFile(helpPath, []byte("Long discovered help.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := &cobra.Command{Use: "gc"}
+	addDiscoveredCommandsToRoot(root, []config.DiscoveredCommand{{
+		BindingName: "ops",
+		PackName:    "ops",
+		Command:     []string{"status"},
+		Description: "Show status",
+		RunScript:   scriptPath,
+		HelpFile:    helpPath,
+		SourceDir:   sourceDir,
+		PackDir:     packDir,
+	}}, dir, "testcity", &bytes.Buffer{}, &bytes.Buffer{}, true)
+
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"ops", "status", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Long discovered help.") {
+		t.Fatalf("stdout missing built-in help text, got:\n%s", out)
+	}
+	if strings.Contains(out, "should-not-run") {
+		t.Fatalf("help should not execute the discovered command, got:\n%s", out)
+	}
+}
+
 func TestAddDiscoveredCommandsToRoot_CollisionProtection(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
 	root.AddCommand(&cobra.Command{Use: "start"})

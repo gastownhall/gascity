@@ -1,0 +1,43 @@
+name: Homebrew Tap Smoke
+
+on:
+  schedule:
+    - cron: "25 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-tap-smoke-${{ github.ref || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  tap-smoke:
+    name: Tap install smoke
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Update Homebrew metadata
+        run: brew update
+
+      - name: Tap gastownhall/gascity
+        run: brew tap gastownhall/gascity
+
+      - name: Show current tap formula
+        run: brew cat gastownhall/gascity/gascity | sed -n '1,120p'
+
+      - name: Remove any existing gascity install
+        run: brew uninstall --force gascity || true
+
+      - name: Install gascity from the live tap
+        run: brew install --build-from-source gastownhall/gascity/gascity
+
+      - name: Run formula test block
+        run: brew test gastownhall/gascity/gascity
+
+      - name: Verify installed gc version
+        run: gc version

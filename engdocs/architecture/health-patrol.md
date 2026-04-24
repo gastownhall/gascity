@@ -38,7 +38,7 @@ are child specs, and "let it crash" is realized through GUPP + beads
   with no session I/O activity is killed and restarted. Queries
   `runtime.Provider.GetLastActivity()` on each tick.
 
-- **Order Dispatch**: The controller evaluates gate conditions
+- **Order Dispatch**: The controller evaluates trigger conditions
   (cooldown, cron, condition, event, manual) on every tick and fires
   due orders. Exec orders run shell scripts directly. Formula
   orders instantiate wisps dispatched to agent pools.
@@ -183,9 +183,9 @@ waves with bounded parallelism.
   `runtime.Provider.SetMeta()`/`GetMeta()` for hash persistence.
 
 - **`orderDispatcher`** (`cmd/gc/order_dispatch.go`): Interface
-  for order gate evaluation and dispatch. Production impl
+  for order trigger evaluation and dispatch. Production impl
   `memoryOrderDispatcher` holds the scanned order list, a bead
-  store for tracking, an events provider for event gates, and an exec
+  store for tracking, an events provider for event triggers, and an exec
   runner for shell commands.
 
 - **`DaemonConfig`** (`internal/config/config.go`): Configuration struct
@@ -225,7 +225,7 @@ indicate bugs.
   regardless of when they were loaded.
 
 - **Order tracking beads are created synchronously before dispatch
-  goroutines**: This prevents the cooldown gate from re-firing on the
+  goroutines**: This prevents the cooldown trigger from re-firing on the
   next tick while the dispatch is still running.
 
 - **No PID files for liveness**: Agent liveness is determined by querying
@@ -267,9 +267,9 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
+| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event trigger queries. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
-| `internal/orders` | `Scan()` to discover orders from formula layers. `CheckGate()` to evaluate gate conditions. `Order` struct for dispatch metadata. |
+| `internal/orders` | `Scan()` to discover orders from formula layers. `CheckTrigger()` to evaluate trigger conditions. `Order` struct for dispatch metadata. |
 | `internal/agent` | `Agent` interface wrapping config + session provider for `Start()`/`Stop()`/`IsRunning()`/`SessionName()` operations. |
 | `github.com/fsnotify/fsnotify` | File system watcher for config directory change detection. |
 
@@ -288,11 +288,11 @@ All Health Patrol implementation lives in `cmd/gc/`:
 | `cmd/gc/reconcile.go` | `reconcileOps` interface, `doReconcileAgents()` (4-state reconciliation + parallel starts + orphan cleanup), `doStopOrphans()` |
 | `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` (in-memory restart history with sliding window pruning) |
 | `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` (per-agent timeout + GetLastActivity query) |
-| `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher` (gate evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle) |
+| `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher` (trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle) |
 | `internal/config/config.go` | `DaemonConfig` struct with `PatrolIntervalDuration()`, `MaxRestartsOrDefault()`, `RestartWindowDuration()`, `ShutdownTimeoutDuration()` |
 | `internal/config/revision.go` | `Revision()` (SHA-256 bundle hash of all config sources + pack dirs), `WatchDirs()` |
 | `internal/runtime/fingerprint.go` | `ConfigFingerprint()` (SHA-256 of command + env + extras for drift detection) |
-| `internal/orders/gates.go` | `CheckGate()` with cooldown, cron, condition, event, and manual gate evaluators |
+| `internal/orders/triggers.go` | `CheckTrigger()` with cooldown, cron, condition, event, and manual trigger evaluators |
 | `internal/orders/order.go` | `Order` struct definition, `Scan()` for discovery |
 
 ## Configuration
@@ -332,7 +332,7 @@ Each Health Patrol component has dedicated unit tests:
 | `cmd/gc/reconcile_test.go` | All four reconciliation states (not running/healthy/orphan/drifted), parallel starts, zombie capture, crash loop quarantine integration, idle restart, pool drain, suspended agent handling |
 | `cmd/gc/crash_tracker_test.go` | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker) |
 | `cmd/gc/idle_tracker_test.go` | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard |
-| `cmd/gc/order_dispatch_test.go` | Gate evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
+| `cmd/gc/order_dispatch_test.go` | Trigger evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
 
 All tests use in-memory fakes (`runtime.Fake`, `events.Discard`,
 stubbed `ExecRunner`) with no external infrastructure dependencies. See
@@ -373,8 +373,8 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
 - [Runtime Provider interface](https://github.com/gastownhall/gascity/blob/main/internal/runtime/runtime.go) --
   the provider interface that Health Patrol queries for liveness, metadata,
   and activity
-- [Order gate evaluation](https://github.com/gastownhall/gascity/blob/main/internal/orders/gates.go) --
-  gate types (cooldown, cron, condition, event, manual) and their
+- [Order trigger evaluation](https://github.com/gastownhall/gascity/blob/main/internal/orders/triggers.go) --
+  trigger types (cooldown, cron, condition, event, manual) and their
   check logic
 - [Event type constants](https://github.com/gastownhall/gascity/blob/main/internal/events/events.go) -- all event
   types emitted by Health Patrol

@@ -13,6 +13,10 @@ type ProviderOption struct {
 	Type    string         `toml:"type"    json:"type"` // "select" only (v1)
 	Default string         `toml:"default" json:"default"`
 	Choices []OptionChoice `toml:"choices" json:"choices"`
+	// Omit is the removal sentinel for options_schema_merge = "by_key".
+	// When set on a child layer's entry, the matching Key inherited from
+	// a parent layer is pruned from the resolved schema.
+	Omit bool `toml:"omit,omitempty" json:"omit,omitempty"`
 }
 
 // OptionChoice is one allowed value for a "select" option.
@@ -29,6 +33,19 @@ type OptionChoice struct {
 // Built-in presets are returned by BuiltinProviders(). Users can override
 // or define new providers via [providers.xxx] in city.toml.
 type ProviderSpec struct {
+	// Base names the parent provider this spec inherits from. Supported
+	// forms:
+	//   "<name>"          - custom first (self-excluded), then built-in
+	//   "builtin:<name>"  - force built-in lookup
+	//   "provider:<name>" - force custom lookup
+	//   ""                - explicit standalone opt-out
+	//   nil               - field absent; no explicit declaration
+	Base *string `toml:"base,omitempty"`
+	// ArgsAppend accumulates extra args after each layer's Args replacement.
+	ArgsAppend []string `toml:"args_append,omitempty"`
+	// OptionsSchemaMerge controls OptionsSchema merge mode across the
+	// chain: "replace" (default) or "by_key".
+	OptionsSchemaMerge string `toml:"options_schema_merge,omitempty" jsonschema:"enum=replace,enum=by_key"`
 	// DisplayName is the human-readable name shown in UI and logs.
 	DisplayName string `toml:"display_name,omitempty"`
 	// Command is the executable to run for this provider.
@@ -45,8 +62,9 @@ type ProviderSpec struct {
 	ReadyPromptPrefix string `toml:"ready_prompt_prefix,omitempty"`
 	// ProcessNames lists process names to look for when checking if the provider is running.
 	ProcessNames []string `toml:"process_names,omitempty"`
-	// EmitsPermissionWarning indicates whether the provider emits permission prompts.
-	EmitsPermissionWarning bool `toml:"emits_permission_warning,omitempty"`
+	// EmitsPermissionWarning is tri-state: nil = inherit, &true = enable,
+	// &false = explicit disable.
+	EmitsPermissionWarning *bool `toml:"emits_permission_warning,omitempty"`
 	// Env sets additional environment variables for the provider process.
 	Env map[string]string `toml:"env,omitempty"`
 	// PathCheck overrides the binary name used for PATH detection.
@@ -58,10 +76,10 @@ type ProviderSpec struct {
 	// SupportsACP indicates the binary speaks the Agent Client Protocol
 	// (JSON-RPC 2.0 over stdio). When an agent sets session = "acp",
 	// its resolved provider must have SupportsACP = true.
-	SupportsACP bool `toml:"supports_acp,omitempty"`
+	SupportsACP *bool `toml:"supports_acp,omitempty"`
 	// SupportsHooks indicates the provider has an executable hook mechanism
 	// (settings.json, plugins, etc.) for lifecycle events.
-	SupportsHooks bool `toml:"supports_hooks,omitempty"`
+	SupportsHooks *bool `toml:"supports_hooks,omitempty"`
 	// InstructionsFile is the filename the provider reads for project instructions
 	// (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md".
 	InstructionsFile string `toml:"instructions_file,omitempty"`
@@ -111,6 +129,27 @@ type ProviderSpec struct {
 	TitleModel string `toml:"title_model,omitempty"`
 }
 
+// Reserved prefixes for the Base field.
+const (
+	BasePrefixBuiltin  = "builtin:"
+	BasePrefixProvider = "provider:"
+)
+
+// RawProviderSpec marks a ProviderSpec as unresolved.
+type RawProviderSpec = ProviderSpec
+
+// HopIdentity identifies a single hop in a resolved provider chain.
+type HopIdentity struct {
+	Kind string // "builtin" | "custom"
+	Name string // canonical name (without prefix)
+}
+
+// ChainEntry annotates one hop of the resolved chain.
+type ChainEntry struct {
+	HopIdentity
+	BaseTagIsExplicit bool
+}
+
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
 // All fields are populated after resolution (built-in + city override + agent override).
 type ResolvedProvider struct {
@@ -118,7 +157,16 @@ type ResolvedProvider struct {
 	// Kind is the canonical builtin provider name when this provider derives
 	// from a builtin (e.g. "claude" even if Name is "my-fast-claude"). Empty
 	// when the provider is fully custom with no builtin base.
-	Kind                   string
+	//
+	// Deprecated: use BuiltinAncestor. Kept during transition.
+	Kind string
+	// BuiltinAncestor is the nearest built-in provider in the resolved
+	// chain, derived from hop identity during the chain walk.
+	BuiltinAncestor string
+	// Chain records the resolved ancestry from leaf (index 0) to root.
+	Chain []HopIdentity
+	// Provenance records per-field and per-map-key layer attribution.
+	Provenance             ProviderProvenance
 	Command                string
 	Args                   []string
 	PromptMode             string
@@ -203,6 +251,17 @@ func (ps *ProviderSpec) pathCheckBinary() string {
 	return ps.Command
 }
 
+// boolPtr returns a pointer to the given bool for tri-state capability fields.
+func boolPtr(b bool) *bool { return &b }
+
+// derefBool safely dereferences a *bool, returning false for nil.
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
+}
+
 // BuiltinProviderOrder returns the provider names in their canonical order.
 // Used by the wizard for display and by auto-detection for priority.
 func BuiltinProviderOrder() []string {
@@ -222,6 +281,9 @@ func BuiltinProviders() map[string]ProviderSpec {
 
 func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec {
 	return ProviderSpec{
+		Base:                   nil,
+		ArgsAppend:             nil,
+		OptionsSchemaMerge:     "",
 		DisplayName:            spec.DisplayName,
 		Command:                spec.Command,
 		Args:                   cloneStrings(spec.Args),
@@ -230,11 +292,11 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
 		ProcessNames:           cloneStrings(spec.ProcessNames),
-		EmitsPermissionWarning: spec.EmitsPermissionWarning,
+		EmitsPermissionWarning: boolPtr(spec.EmitsPermissionWarning),
 		Env:                    cloneStringMap(spec.Env),
 		PathCheck:              spec.PathCheck,
-		SupportsACP:            spec.SupportsACP,
-		SupportsHooks:          spec.SupportsHooks,
+		SupportsACP:            boolPtr(spec.SupportsACP),
+		SupportsHooks:          boolPtr(spec.SupportsHooks),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,

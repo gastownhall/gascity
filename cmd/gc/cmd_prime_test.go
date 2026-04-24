@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,7 +251,7 @@ prompt_template = "prompts/polecat.template.md"
 	t.Setenv("GC_SESSION_ID", "sess-777")
 
 	var stdout, stderr bytes.Buffer
-	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -264,4 +265,189 @@ prompt_template = "prompts/polecat.template.md"
 	if strings.Contains(out, "# Gas City Agent") {
 		t.Fatalf("stdout = %q, want resolved hook prompt, not generic fallback", out)
 	}
+}
+
+func TestDoPrimeWithHook_StartupPromptDeliveryEnvControlsPromptSuppression(t *testing.T) {
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	for _, tc := range []struct {
+		name             string
+		delivered        string
+		managedHook      string
+		envHookSource    string
+		envHookEvent     string
+		wantPromptInHook bool
+	}{
+		{
+			name:             "startup hook delivered",
+			delivered:        "1",
+			managedHook:      "1",
+			envHookSource:    "startup",
+			envHookEvent:     "SessionStart",
+			wantPromptInHook: false,
+		},
+		{
+			name:             "resume hook delivered",
+			delivered:        "1",
+			managedHook:      "1",
+			envHookSource:    "resume",
+			envHookEvent:     "SessionStart",
+			wantPromptInHook: false,
+		},
+		{name: "manual command with inherited marker", delivered: "1", wantPromptInHook: true},
+		{
+			name:             "unmanaged session start keeps prompt",
+			delivered:        "1",
+			envHookEvent:     "SessionStart",
+			wantPromptInHook: true,
+		},
+		{
+			name:             "startup hook not delivered",
+			managedHook:      "1",
+			envHookSource:    "startup",
+			envHookEvent:     "SessionStart",
+			wantPromptInHook: true,
+		},
+		{
+			name:             "non startup event keeps prompt",
+			delivered:        "1",
+			envHookSource:    "startup",
+			envHookEvent:     "UserPromptSubmit",
+			wantPromptInHook: true,
+		},
+		{
+			name:             "session start ignores source value",
+			delivered:        "1",
+			managedHook:      "1",
+			envHookSource:    "manual",
+			envHookEvent:     "SessionStart",
+			wantPromptInHook: false,
+		},
+		{name: "unset source not delivered", wantPromptInHook: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withPrimeHookStdin(t, nil)
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_SESSION_NAME", "gastown--worker")
+			t.Setenv("GC_SESSION_ID", "sess-777")
+			t.Setenv(managedSessionHookEnv, tc.managedHook)
+			t.Setenv("GC_HOOK_SOURCE", tc.envHookSource)
+			t.Setenv("GC_HOOK_EVENT_NAME", tc.envHookEvent)
+			t.Setenv(startupPromptDeliveredEnv, tc.delivered)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			out := stdout.String()
+			if got := strings.Contains(out, promptContent); got != tc.wantPromptInHook {
+				t.Fatalf("stdout = %q, prompt present = %v, want %v", out, got, tc.wantPromptInHook)
+			}
+			if !strings.Contains(out, "[gastown] worker") {
+				t.Fatalf("stdout = %q, want hook beacon", out)
+			}
+		})
+	}
+}
+
+func TestDoPrimeWithHook_DeliveredStartupPromptJSONHookFormat(t *testing.T) {
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	t.Setenv("GC_SESSION_ID", "sess-777")
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatGemini, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var got struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+	if strings.Contains(context, promptContent) {
+		t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+	}
+	if !strings.Contains(context, "[gastown] worker") {
+		t.Fatalf("additionalContext = %q, want hook beacon", context)
+	}
+}
+
+func withPrimeHookStdin(t *testing.T, payload map[string]string) {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload != nil {
+		if err := json.NewEncoder(writer).Encode(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPrimeStdin := primeStdin
+	primeStdin = func() *os.File { return reader }
+	t.Cleanup(func() {
+		primeStdin = oldPrimeStdin
+		_ = reader.Close()
+	})
 }

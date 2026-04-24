@@ -16,7 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -189,11 +188,12 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := loadSlingCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	emitLoadCityConfigWarnings(stderr, prov)
 	applyFeatureFlags(cfg)
 
 	var target, beadOrFormula string
@@ -245,10 +245,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	}
 
 	sp := newSessionProvider()
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
+	cityName := loadedCityName(cfg, cityPath)
 
 	storeDir := resolveSlingStoreRoot(cfg, cityPath, beadOrFormula, a)
 	store, err := openStoreAtForCity(storeDir, cityPath)
@@ -256,7 +253,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		fmt.Fprintf(stderr, "gc sling: opening store %s: %v\n", storeDir, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
+	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
 	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
 
 	// Inline text mode: if the argument doesn't look like a bead ID
@@ -335,6 +332,10 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
+}
+
+func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
 func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {

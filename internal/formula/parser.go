@@ -192,10 +192,14 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Formula:     formula.Formula,
 		Description: formula.Description,
 		Version:     formula.Version,
+		Contract:    formula.Contract,
 		Type:        formula.Type,
 		Source:      formula.Source,
+		Phase:       formula.Phase,
+		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
 		Steps:       nil,
+		Template:    nil,
 		Compose:     nil,
 	}
 
@@ -212,6 +216,25 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
 
+		if merged.Contract == "" {
+			merged.Contract = parent.Contract
+		}
+
+		// Phase cascades from the first parent that declares one; child
+		// declaration wins because merged was seeded from the child.
+		if merged.Phase == "" {
+			merged.Phase = parent.Phase
+		}
+
+		// Pour is an opt-in escalation: any parent or the child requesting
+		// pour promotes the merged formula. With a plain bool the zero value
+		// is indistinguishable from "unset", so OR is the simplest coherent
+		// rule that preserves monotonic opt-in; a *bool field would allow
+		// explicit child opt-out but isn't worth the complexity for this flag.
+		if !merged.Pour {
+			merged.Pour = parent.Pour
+		}
+
 		// Merge parent vars (parent vars are inherited, child overrides)
 		for name, varDef := range parent.Vars {
 			if _, exists := merged.Vars[name]; !exists {
@@ -221,6 +244,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 
 		// Merge parent steps (append, child steps come after)
 		merged.Steps = append(merged.Steps, parent.Steps...)
+
+		// Parent templates append in declaration order. Only the child gets
+		// override semantics so parent-parent conflicts still surface later.
+		merged.Template = append(merged.Template, parent.Template...)
 
 		// Merge parent compose rules
 		merged.Compose = mergeComposeRules(merged.Compose, parent.Compose)
@@ -234,6 +261,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	// Merge child steps: override parent steps by ID (preserving position),
 	// append new child steps at the end.
 	merged.Steps = mergeSteps(merged.Steps, formula.Steps)
+	merged.Template = mergeSteps(merged.Template, formula.Template)
 
 	merged.Compose = mergeComposeRules(merged.Compose, formula.Compose)
 
@@ -422,17 +450,91 @@ func CheckResidualVars(s string) []string {
 	return names
 }
 
+// CheckResidualTimeoutVars returns unresolved {{var}} and {var} placeholders
+// in timeout strings after all available substitutions have been applied.
+func CheckResidualTimeoutVars(s string) []string {
+	seen := make(map[string]bool)
+	var names []string
+	add := func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+
+	for _, name := range CheckResidualVars(s) {
+		add(name)
+	}
+	for _, match := range rangeVarPattern.FindAllStringSubmatchIndex(s, -1) {
+		start, end := match[0], match[1]
+		if start > 0 && s[start-1] == '{' {
+			continue
+		}
+		if end < len(s) && s[end] == '}' {
+			continue
+		}
+		add(s[match[2]:match[3]])
+	}
+	return names
+}
+
 // ValidateVars checks that all required variables are provided
 // and all values pass their constraints.
 func ValidateVars(formula *Formula, values map[string]string) error {
-	var errs []string
+	errs, _ := CollectVarValidationErrors(formula.Vars, values)
+	return formatVarValidationErrors(errs)
+}
 
-	for name, def := range formula.Vars {
+// ValidateVarDefs validates explicit var definitions against provided values.
+// This is the recipe-level equivalent of ValidateVars, used after formula
+// compilation when only the remaining VarDef map is available.
+func ValidateVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	errs, _ := CollectVarValidationErrors(defs, values)
+	return formatVarValidationErrors(errs)
+}
+
+// ValidateProvidedVarDefs validates constraints for values the caller supplied
+// without requiring every required variable to be present.
+func ValidateProvidedVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	providedDefs := make(map[string]*VarDef)
+	for name := range values {
+		if def, ok := defs[name]; ok {
+			providedDefs[name] = def
+		}
+	}
+	errs, _ := collectVarValidationErrors(providedDefs, values, false)
+	return formatVarValidationErrors(errs)
+}
+
+// CollectVarValidationErrors validates explicit var definitions against the
+// provided values and returns raw error strings plus the set of missing
+// required vars. Callers that need the historical wrapped error can pass the
+// returned error strings through formatVarValidationErrors.
+func CollectVarValidationErrors(defs map[string]*VarDef, values map[string]string) ([]string, map[string]bool) {
+	return collectVarValidationErrors(defs, values, true)
+}
+
+func collectVarValidationErrors(defs map[string]*VarDef, values map[string]string, requireMissing bool) ([]string, map[string]bool) {
+	var errs []string
+	missingRequired := make(map[string]bool)
+	names := make([]string, 0, len(defs))
+	for name := range defs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		def := defs[name]
+		if def == nil {
+			continue
+		}
 		val, provided := values[name]
 
 		// Check required
-		if def.Required && !provided {
+		if requireMissing && def.Required && !provided {
 			errs = append(errs, fmt.Sprintf("variable %q is required", name))
+			missingRequired[name] = true
 			continue
 		}
 
@@ -471,11 +573,17 @@ func ValidateVars(formula *Formula, values map[string]string) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	if len(missingRequired) == 0 {
+		missingRequired = nil
 	}
+	return errs, missingRequired
+}
 
-	return nil
+func formatVarValidationErrors(errs []string) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
 // ApplyDefaults returns a new map with default values filled in.

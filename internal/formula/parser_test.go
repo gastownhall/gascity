@@ -173,6 +173,302 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	}
 }
 
+func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-implicit-v2",
+		Version: 2,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "work",
+				Title: "Do the work",
+				Retry: &RetrySpec{MaxAttempts: 2},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should reject graph-only v2 workflow without contract")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	}
+}
+
+func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-implicit-fanout",
+		Version: 2,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "survey",
+				Title: "Survey",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.items",
+					Bond:    "mol-item",
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should reject graph-only on_complete workflow without contract")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	}
+}
+
+func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-detached-v1",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:       "work",
+				Title:    "Do the work",
+				Metadata: map[string]string{"gc.kind": "retry"},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should reject detached graph metadata without contract")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	}
+}
+
+func TestValidate_ValidTimeout(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-timeout",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "build", Title: "Build", Timeout: "5m", Ralph: validTestRalphSpec()},
+			{ID: "test", Title: "Test", Timeout: "10m30s", Ralph: validTestRalphSpec()},
+			{ID: "lint", Title: "Lint", Timeout: "300s", Ralph: validTestRalphSpec()},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate should pass for valid timeouts: %v", err)
+	}
+}
+
+func TestValidate_AllowsUnresolvedTimeoutPlaceholders(t *testing.T) {
+	check := validTestRalphSpec()
+	check.Check.Timeout = "{{check_timeout}}"
+	formula := &Formula{
+		Formula: "mol-placeholder-timeout",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1", Timeout: "{step_timeout}", Ralph: check},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate should allow unresolved timeout placeholders, got: %v", err)
+	}
+}
+
+func validTestRalphSpec() *RalphSpec {
+	return &RalphSpec{
+		MaxAttempts: 1,
+		Check: &RalphCheckSpec{
+			Mode: "exec",
+			Path: "checks/pass.sh",
+		},
+	}
+}
+
+func TestValidate_TimeoutRequiresRalph(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-timeout-without-ralph",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1", Timeout: "5m"},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should fail for timeout on a non-Ralph step")
+	}
+	if !strings.Contains(err.Error(), "timeout requires check") {
+		t.Fatalf("Validate error = %v, want timeout requires check", err)
+	}
+}
+
+func TestValidate_InvalidTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "invalid format", timeout: "not-a-duration"},
+		{name: "zero duration", timeout: "0s"},
+		{name: "negative duration", timeout: "-5s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			formula := &Formula{
+				Formula: "mol-bad-timeout",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{ID: "step1", Title: "Step 1", Timeout: tt.timeout, Ralph: validTestRalphSpec()},
+				},
+			}
+
+			err := formula.Validate()
+			if err == nil {
+				t.Fatalf("Validate should fail for timeout %q", tt.timeout)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidRalphCheckTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "invalid format", timeout: "bogus"},
+		{name: "zero duration", timeout: "0s"},
+		{name: "negative duration", timeout: "-5s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			check := validTestRalphSpec()
+			check.Check.Timeout = tt.timeout
+			formula := &Formula{
+				Formula: "mol-bad-check-timeout",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{ID: "step1", Title: "Step 1", Ralph: check},
+				},
+			}
+
+			err := formula.Validate()
+			if err == nil {
+				t.Fatalf("Validate should fail for ralph check timeout %q", tt.timeout)
+			}
+			if !strings.Contains(err.Error(), "timeout") {
+				t.Fatalf("Validate error = %v, want timeout error", err)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidTimeoutInChild(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "invalid format", timeout: "bogus"},
+		{name: "zero duration", timeout: "0s"},
+		{name: "negative duration", timeout: "-5s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			formula := &Formula{
+				Formula: "mol-bad-child-timeout",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{
+						ID:    "epic",
+						Title: "Epic",
+						Children: []*Step{
+							{ID: "child1", Title: "Child 1", Timeout: tt.timeout},
+						},
+					},
+				},
+			}
+
+			err := formula.Validate()
+			if err == nil {
+				t.Fatalf("Validate should fail for child timeout %q", tt.timeout)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-bad-loop-timeout",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "loop",
+				Title: "Loop",
+				Loop: &LoopSpec{
+					Count: 1,
+					Body: []*Step{
+						{
+							ID:      "check",
+							Title:   "Check",
+							Timeout: "bogus",
+							Ralph:   validTestRalphSpec(),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should fail for invalid timeout in loop body")
+	}
+	if !strings.Contains(err.Error(), "invalid timeout") {
+		t.Fatalf("Validate error = %v, want invalid timeout", err)
+	}
+}
+
+func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-loop-timeout-var",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "loop",
+				Title: "Loop",
+				Loop: &LoopSpec{
+					Range: "1..2",
+					Var:   "seconds",
+					Body: []*Step{
+						{
+							ID:      "check",
+							Title:   "Check",
+							Timeout: "{seconds}s",
+							Ralph:   validTestRalphSpec(),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for loop-variable timeout: %v", err)
+	}
+}
+
 func TestValidate_ChildSteps(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-children",
@@ -425,6 +721,34 @@ func TestCheckResidualVars(t *testing.T) {
 	}
 }
 
+func TestCheckResidualTimeoutVars(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "no placeholders", input: "5m", want: nil},
+		{name: "double brace", input: "{{timeout}}", want: []string{"timeout"}},
+		{name: "single brace", input: "{step_timeout}", want: []string{"step_timeout"}},
+		{name: "mixed", input: "{{timeout}}-{fallback}", want: []string{"timeout", "fallback"}},
+		{name: "dedupes across syntaxes", input: "{{timeout}}/{timeout}", want: []string{"timeout"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckResidualTimeoutVars(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("CheckResidualTimeoutVars(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("CheckResidualTimeoutVars(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestApplyDefaults(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-defaults",
@@ -524,6 +848,170 @@ func TestParseFile_AndResolve(t *testing.T) {
 	}
 	if resolved.Steps[1].ID != "deploy" {
 		t.Errorf("Steps[1].ID = %q, want 'deploy' (child)", resolved.Steps[1].ID)
+	}
+}
+
+func TestResolve_InheritsGraphContractFromParent(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "graph-parent",
+  "version": 2,
+  "type": "workflow",
+  "contract": "graph.v2",
+  "steps": [
+    {"id": "init", "title": "Initialize"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	child := `{
+  "formula": "graph-child",
+  "version": 2,
+  "type": "workflow",
+  "extends": ["graph-parent"],
+  "steps": [
+    {"id": "follow-up", "title": "Follow up", "depends_on": ["init"]}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "graph-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := resolved.Contract; got != "graph.v2" {
+		t.Fatalf("resolved.Contract = %q, want graph.v2", got)
+	}
+}
+
+func TestResolve_ExpansionExtendsPreservesTemplateAndInheritedContract(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "graph-expansion-parent",
+  "version": 2,
+  "type": "expansion",
+  "contract": "graph.v2"
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-expansion-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	child := `{
+  "formula": "graph-expansion-child",
+  "version": 2,
+  "type": "expansion",
+  "extends": ["graph-expansion-parent"],
+  "template": [
+    {
+      "id": "{target}.attempt",
+      "title": "Attempt",
+      "retry": {"max_attempts": 2}
+    }
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "graph-expansion-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := resolved.Contract; got != "graph.v2" {
+		t.Fatalf("resolved.Contract = %q, want graph.v2", got)
+	}
+	if len(resolved.Template) != 1 {
+		t.Fatalf("len(resolved.Template) = %d, want 1", len(resolved.Template))
+	}
+	if got := resolved.Template[0].ID; got != "{target}.attempt" {
+		t.Fatalf("resolved.Template[0].ID = %q, want {target}.attempt", got)
+	}
+	if resolved.Template[0].Retry == nil {
+		t.Fatal("resolved.Template[0].Retry = nil, want retry spec preserved")
+	}
+}
+
+func TestResolve_ExpansionExtendsInheritsParentTemplateAndChildOverrides(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "template-parent",
+  "version": 2,
+  "type": "expansion",
+  "contract": "graph.v2",
+  "template": [
+    {"id": "{target}.prepare", "title": "Prepare"},
+    {"id": "{target}.shared", "title": "Parent shared"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "template-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	child := `{
+  "formula": "template-child",
+  "version": 2,
+  "type": "expansion",
+  "extends": ["template-parent"],
+  "template": [
+    {"id": "{target}.shared", "title": "Child shared"}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "template-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resolved.Template) != 2 {
+		t.Fatalf("len(resolved.Template) = %d, want 2", len(resolved.Template))
+	}
+	if got := resolved.Template[0].ID; got != "{target}.prepare" {
+		t.Fatalf("resolved.Template[0].ID = %q, want {target}.prepare", got)
+	}
+	if got := resolved.Template[1].Title; got != "Child shared" {
+		t.Fatalf("resolved.Template[1].Title = %q, want Child shared", got)
 	}
 }
 
@@ -1348,6 +1836,7 @@ type = "workflow"
 [[steps]]
 id = "implement"
 title = "Implement"
+timeout = "10m"
 
 [steps.check]
 max_attempts = 2
@@ -1370,6 +1859,9 @@ timeout = "30s"
 	step := formula.Steps[0]
 	if step.Ralph == nil {
 		t.Fatal("Steps[0].Ralph is nil")
+	}
+	if step.Timeout != "10m" {
+		t.Fatalf("Steps[0].Timeout = %q, want 10m", step.Timeout)
 	}
 	if step.Ralph.MaxAttempts != 2 {
 		t.Fatalf("Steps[0].Ralph.MaxAttempts = %d, want 2", step.Ralph.MaxAttempts)

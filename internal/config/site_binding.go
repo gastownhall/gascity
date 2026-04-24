@@ -13,6 +13,34 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+const (
+	legacyRigPathSiteBindingWarningFragment = "still declares path in city.toml; move it to .gc/site.toml"
+	unknownRigSiteBindingWarningPrefix      = ".gc/site.toml declares a binding for unknown rig "
+)
+
+// IsNonFatalSiteBindingWarning reports whether warning is migration guidance
+// that should stay non-fatal in strict mode.
+func IsNonFatalSiteBindingWarning(warning string) bool {
+	return strings.Contains(warning, legacyRigPathSiteBindingWarningFragment) ||
+		strings.HasPrefix(warning, unknownRigSiteBindingWarningPrefix)
+}
+
+func legacyRigPathSiteBindingWarning(name string) string {
+	return fmt.Sprintf("rig %q %s (run `gc doctor --fix`)", name, legacyRigPathSiteBindingWarningFragment)
+}
+
+func missingRigSiteBindingWarning(name string) string {
+	return fmt.Sprintf(
+		"rig %q is declared in city.toml but has no path binding in .gc/site.toml; run `gc rig add <dir> --name %s` to bind it",
+		name,
+		name,
+	)
+}
+
+func unknownRigSiteBindingWarning(name string) string {
+	return fmt.Sprintf("%s%q", unknownRigSiteBindingWarningPrefix, name)
+}
+
 // SiteBindingPath returns the machine-local site binding file for a city.
 func SiteBindingPath(cityRoot string) string {
 	return filepath.Join(cityRoot, citylayout.RuntimeRoot, "site.toml")
@@ -20,7 +48,9 @@ func SiteBindingPath(cityRoot string) string {
 
 // SiteBinding stores machine-local rig bindings for a city.
 type SiteBinding struct {
-	Rigs []RigSiteBinding `toml:"rig,omitempty"`
+	WorkspaceName   string           `toml:"workspace_name,omitempty"`
+	WorkspacePrefix string           `toml:"workspace_prefix,omitempty"`
+	Rigs            []RigSiteBinding `toml:"rig,omitempty"`
 }
 
 // RigSiteBinding binds a declared rig name to a machine-local path.
@@ -68,6 +98,7 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 	if err != nil {
 		return nil, err
 	}
+	applyWorkspaceIdentityBinding(cityRoot, binding, cfg)
 	paths := make(map[string]string, len(binding.Rigs))
 	for _, rig := range binding.Rigs {
 		name := strings.TrimSpace(rig.Name)
@@ -91,31 +122,77 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 		if keepLegacy || legacyPath != "" {
 			cfg.Rigs[i].Path = legacyPath
 			if legacyPath != "" && !keepLegacy {
-				warnings = append(warnings,
-					fmt.Sprintf("rig %q still declares path in city.toml; move it to .gc/site.toml (run `gc doctor --fix`)", name))
+				warnings = append(warnings, legacyRigPathSiteBindingWarning(name))
 			}
 			continue
 		}
 		cfg.Rigs[i].Path = ""
 		if !keepLegacy {
-			warnings = append(warnings,
-				fmt.Sprintf("rig %q is declared in city.toml but has no path binding in .gc/site.toml; run `gc rig add <dir> --name %s` to bind it", name, name))
+			warnings = append(warnings, missingRigSiteBindingWarning(name))
 		}
 	}
 	for name := range paths {
 		if _, ok := seen[name]; ok {
 			continue
 		}
-		warnings = append(warnings, fmt.Sprintf(".gc/site.toml declares a binding for unknown rig %q", name))
+		warnings = append(warnings, unknownRigSiteBindingWarning(name))
 	}
 	sort.Strings(warnings)
 	return warnings, nil
 }
 
+// ResolveWorkspaceIdentity applies workspace identity from site binding when
+// present, otherwise falls back to declared config and finally directory
+// basename. Callers that need the effective city identity without mutating raw
+// workspace fields should use this helper.
+func ResolveWorkspaceIdentity(fs fsys.FS, cityRoot string, cfg *City) error {
+	if cfg == nil {
+		return nil
+	}
+	binding, err := LoadSiteBinding(fs, cityRoot)
+	if err != nil {
+		return err
+	}
+	applyWorkspaceIdentityBinding(cityRoot, binding, cfg)
+	return nil
+}
+
+func applyWorkspaceIdentityBinding(cityRoot string, binding *SiteBinding, cfg *City) {
+	if cfg == nil {
+		return
+	}
+	name := strings.TrimSpace(filepath.Base(filepath.Clean(cityRoot)))
+	if raw := strings.TrimSpace(cfg.Workspace.Name); raw != "" {
+		name = raw
+	}
+	if binding != nil {
+		if site := strings.TrimSpace(binding.WorkspaceName); site != "" {
+			name = site
+		}
+	}
+	cfg.ResolvedWorkspaceName = name
+
+	prefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if binding != nil {
+		if site := strings.TrimSpace(binding.WorkspacePrefix); site != "" {
+			prefix = site
+		}
+	}
+	cfg.ResolvedWorkspacePrefix = prefix
+}
+
 // PersistRigSiteBindings writes the current machine-local rig bindings to
 // .gc/site.toml. Rigs without paths are left unbound and omitted.
 func PersistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig) error {
-	binding := SiteBinding{Rigs: make([]RigSiteBinding, 0, len(rigs))}
+	existing, err := LoadSiteBinding(fs, cityRoot)
+	if err != nil {
+		return err
+	}
+	binding := SiteBinding{
+		WorkspaceName:   strings.TrimSpace(existing.WorkspaceName),
+		WorkspacePrefix: strings.TrimSpace(existing.WorkspacePrefix),
+		Rigs:            make([]RigSiteBinding, 0, len(rigs)),
+	}
 	for _, rig := range rigs {
 		name := strings.TrimSpace(rig.Name)
 		path := strings.TrimSpace(rig.Path)
@@ -128,8 +205,27 @@ func PersistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig) error {
 		return binding.Rigs[i].Name < binding.Rigs[j].Name
 	})
 
+	return persistSiteBinding(fs, cityRoot, binding)
+}
+
+// PersistWorkspaceSiteBinding writes machine-local workspace identity to
+// .gc/site.toml while preserving any existing rig bindings.
+func PersistWorkspaceSiteBinding(fs fsys.FS, cityRoot, name, prefix string) error {
+	existing, err := LoadSiteBinding(fs, cityRoot)
+	if err != nil {
+		return err
+	}
+	binding := SiteBinding{
+		WorkspaceName:   strings.TrimSpace(name),
+		WorkspacePrefix: strings.TrimSpace(prefix),
+		Rigs:            append([]RigSiteBinding(nil), existing.Rigs...),
+	}
+	return persistSiteBinding(fs, cityRoot, binding)
+}
+
+func persistSiteBinding(fs fsys.FS, cityRoot string, binding SiteBinding) error {
 	path := SiteBindingPath(cityRoot)
-	if len(binding.Rigs) == 0 {
+	if len(binding.Rigs) == 0 && binding.WorkspaceName == "" && binding.WorkspacePrefix == "" {
 		if err := fs.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing site binding %q: %w", path, err)
 		}

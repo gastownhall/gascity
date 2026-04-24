@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,9 +33,9 @@ func TestOrderListEmpty(t *testing.T) {
 
 func TestOrderList(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
-		{Name: "cleanup", Gate: "cron", Schedule: "0 3 * * *", Formula: "mol-cleanup"},
-		{Name: "deploy", Gate: "manual", Formula: "mol-deploy"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
+		{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *", Formula: "mol-cleanup"},
+		{Name: "deploy", Trigger: "manual", Formula: "mol-deploy"},
 	}
 
 	var stdout bytes.Buffer
@@ -52,8 +53,8 @@ func TestOrderList(t *testing.T) {
 
 func TestOrderListExecType(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "poll", Gate: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "poll", Trigger: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
 	}
 
 	var stdout bytes.Buffer
@@ -185,7 +186,7 @@ func TestScanAllOrdersCityFlatFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "orders", "health-check.order.toml"), []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -216,31 +217,39 @@ func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"
-	commit := "abc123def456"
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
-	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+	repoDir := filepath.Join(home, "orders-pack-work")
+	if err := os.MkdirAll(filepath.Join(repoDir, "formulas"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "formulas"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "orders"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repoDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(cacheDir, "pack.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "pack.toml"), []byte(`
 [pack]
 name = "ops"
 schema = 1
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cacheDir, "orders", "health-check.order.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "orders", "health-check.order.toml"), []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitImport(t, repoDir, "init")
+	mustGitImport(t, repoDir, "add", ".")
+	mustGitImport(t, repoDir, "commit", "-m", "initial")
+	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
+
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repoDir, cacheDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,7 +275,7 @@ schema = 1
 
 [packs."https://github.com/example/orders-pack.git"]
 version = "1.2.3"
-commit = "abc123def456"
+commit = "`+commit+`"
 fetched = "2026-04-10T00:00:00Z"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -301,7 +310,7 @@ func TestScanAllOrdersCityLegacyFormulaOrdersWarns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"), []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -337,7 +346,7 @@ func TestOrderShow(t *testing.T) {
 			Name:        "digest",
 			Description: "Generate daily digest",
 			Formula:     "mol-digest",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "24h",
 			Pool:        "dog",
 			Source:      "/city/formulas/orders/digest/order.toml",
@@ -383,7 +392,7 @@ func TestOrderShowExec(t *testing.T) {
 			Name:        "poll",
 			Description: "Poll wasteland",
 			Exec:        "$ORDER_DIR/scripts/poll.sh",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "2m",
 			Source:      "/city/formulas/orders/poll/order.toml",
 		},
@@ -422,7 +431,7 @@ func TestOrderShowNotFound(t *testing.T) {
 
 func TestOrderCheck(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -443,7 +452,7 @@ func TestOrderCheck(t *testing.T) {
 
 func TestOrderCheckNoneDue(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "deploy", Gate: "manual", Formula: "mol-deploy"},
+		{Name: "deploy", Trigger: "manual", Formula: "mol-deploy"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -500,7 +509,7 @@ func TestOrderLastRunFn(t *testing.T) {
 
 func TestOrderCheckWithLastRun(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	// Last ran 1 hour ago — cooldown of 24h means NOT due.
@@ -535,7 +544,7 @@ func TestOrderCheckWithStoresResolverUsesRigStore(t *testing.T) {
 	aa := []orders.Order{{
 		Name:     "digest",
 		Rig:      "frontend",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "24h",
 		Formula:  "mol-digest",
 	}}
@@ -569,7 +578,7 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	aa := []orders.Order{{
 		Name:     "digest",
 		Rig:      "frontend",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "24h",
 		Formula:  "mol-digest",
 	}}
@@ -602,7 +611,7 @@ func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *test
 	aa := []orders.Order{{
 		Name:    "watch",
 		Rig:     "frontend",
-		Gate:    "event",
+		Trigger: "event",
 		On:      events.BeadClosed,
 		Formula: "mol-watch",
 	}}
@@ -633,7 +642,7 @@ func TestOrderCheckWithStoresResolverFailsWhenLegacyLastRunReadFails(t *testing.
 	aa := []orders.Order{{
 		Name:     "digest",
 		Rig:      "frontend",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "24h",
 		Formula:  "mol-digest",
 	}}
@@ -658,7 +667,7 @@ func TestOrderCheckWithStoresResolverFailsWhenLegacyLastRunReadFails(t *testing.
 
 func TestOrderRun(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Formula: "mol-digest", Gate: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
 	}
 
 	store := beads.NewMemStore()
@@ -683,7 +692,7 @@ func TestOrderRun(t *testing.T) {
 
 func TestOrderRunNoPool(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "cleanup", Formula: "mol-cleanup", Gate: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
+		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
 	}
 
 	store := beads.NewMemStore()
@@ -710,6 +719,56 @@ func TestOrderRunNoPool(t *testing.T) {
 	}
 }
 
+func TestOrderRunReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	formulaBody := `
+formula = "order-required-vars"
+version = 1
+
+[vars.target_id]
+description = "Bead being worked on"
+required = true
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Do work for {{target_id}}"
+description = "Target: {{target_id}}, workspace: {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "order-required-vars.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:         "digest",
+		Formula:      "order-required-vars",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		FormulaLayer: dir,
+	}}
+
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("stderr = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("stderr = %q, want consolidated required-var validation instead of title-only failure", errText)
+	}
+}
+
 func TestOrderRunGraphWorkflowDecoratesStepRouting(t *testing.T) {
 	cityDir := t.TempDir()
 	formulaDir := t.TempDir()
@@ -731,6 +790,7 @@ max_active_sessions = 1
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -741,7 +801,7 @@ title = "Do work"
 	}
 
 	aa := []orders.Order{
-		{Name: "acceptance-patrol", Formula: "graph-work", Gate: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
+		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
 	}
 	store := beads.NewMemStore()
 
@@ -823,7 +883,7 @@ prefix = "fe"
 	a := orders.Order{
 		Name:     "poll",
 		Rig:      "frontend",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     fmt.Sprintf(`pwd > %q && printf '%%s\n%%s\n%%s\n%%s\n%%s\n%%s\n' "$BEADS_DIR" "$GC_STORE_ROOT" "$GC_STORE_SCOPE" "$GC_BEADS_PREFIX" "$GC_RIG" "$GC_RIG_ROOT" >> %q`, outPath, outPath),
 	}
@@ -861,6 +921,313 @@ prefix = "fe"
 	}
 	if lines[6] != rigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", lines[6], rigDir)
+	}
+}
+
+func TestOrderRunExecProjectsExternalDoltTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"dolt.host: external.example.internal",
+		"dolt.port: 4406",
+		"dolt.user: maintenance-user",
+		"",
+	}, "\n"))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	outPath := filepath.Join(cityDir, "exec-dolt-env.txt")
+	a := orders.Order{
+		Name:     "poll",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf '%%s\n%%s\n%%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile(exec-dolt-env): %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("exec dolt env lines = %d, want 3 (%q)", len(lines), string(data))
+	}
+	if lines[0] != "external.example.internal" {
+		t.Fatalf("GC_DOLT_HOST = %q, want external.example.internal", lines[0])
+	}
+	if lines[1] != "4406" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4406", lines[1])
+	}
+	if lines[2] != "maintenance-user" {
+		t.Fatalf("GC_DOLT_USER = %q, want maintenance-user", lines[2])
+	}
+}
+
+func TestOrderRunExecPreservesAuthOnlyOverridesForManagedLocal(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	port := fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)
+	stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(stateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+		os.Getpid(),
+		port,
+		filepath.Join(cityDir, ".beads", "dolt"),
+	))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_HOST", "ambient.invalid")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("GC_DOLT_USER", "ambient-user")
+	t.Setenv("GC_DOLT_PASSWORD", "ambient-secret")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads.invalid")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9998")
+	t.Setenv("BEADS_DOLT_SERVER_USER", "ambient-beads-user")
+	t.Setenv("BEADS_DOLT_PASSWORD", "ambient-beads-secret")
+	outPath := filepath.Join(cityDir, "exec-dolt-env.txt")
+	a := orders.Order{
+		Name:     "poll",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec: fmt.Sprintf(
+			`printf 'host=<%%s>\nport=<%%s>\nuser=<%%s>\npass=<%%s>\nbeads_host=<%%s>\nbeads_port=<%%s>\nbeads_user=<%%s>\nbeads_pass=<%%s>\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$GC_DOLT_PASSWORD" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT" "$BEADS_DOLT_SERVER_USER" "$BEADS_DOLT_PASSWORD" > %q`,
+			outPath,
+		),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile(exec-dolt-env): %v", err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{
+		"host=<>",
+		"port=<" + port + ">",
+		"user=<ambient-user>",
+		"pass=<ambient-secret>",
+		"beads_host=<>",
+		"beads_port=<" + port + ">",
+		"beads_user=<ambient-user>",
+		"beads_pass=<ambient-secret>",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("exec dolt env:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestOrderRunExecMarksExternalDoltTargetForManagedLocalOnlyOrders(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_PACK_STATE_DIR", filepath.Join(t.TempDir(), "poison-pack-state"))
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "poison-dolt-data"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(t.TempDir(), "poison-dolt-config.yaml"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: city_canonical",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"dolt.host: external.example.internal",
+		"dolt.port: 4406",
+		"",
+	}, "\n"))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	outPath := filepath.Join(cityDir, "exec-managed-marker.txt")
+	a := orders.Order{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := strings.TrimSpace(readFileString(t, outPath))
+	externalRoot := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "external-target")
+	want := strings.Join([]string{
+		"managed=<0>",
+		"host=<external.example.internal>",
+		"port=<4406>",
+		"pack_state=<>",
+		"data=<" + externalRoot + ">",
+		"config=<" + filepath.Join(externalRoot, "dolt-config.yaml") + ">",
+		"state=<" + filepath.Join(externalRoot, "dolt-state.json") + ">",
+	}, "\n")
+	if got != want {
+		t.Fatalf("order exec env:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOrderRunExecPropagatesManagedDoltLayout(t *testing.T) {
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "managed-dolt")
+	configFile := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	writeFile(t, filepath.Join(cityDir, ".beads", "config.yaml"), strings.Join([]string{
+		"issue_prefix: ct",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+		"",
+	}, "\n"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close listener: %v", err)
+		}
+	}()
+	port := fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)
+	stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(stateDir, "dolt-state.json"), fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+		os.Getpid(),
+		port,
+		dataDir,
+	))
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(t.TempDir(), "poison-dolt-data"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(t.TempDir(), "poison-dolt-config.yaml"))
+	t.Setenv("GC_PACK_STATE_DIR", filepath.Join(t.TempDir(), "poison-pack-state"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(t.TempDir(), "poison-state.json"))
+	outPath := filepath.Join(cityDir, "exec-managed-layout.txt")
+	a := orders.Order{
+		Name:     "dolt-gc-nudge",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nport=<%%s>\ndata=<%%s>\nconfig=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_PORT" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" > %q`, outPath),
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := strings.TrimSpace(readFileString(t, outPath))
+	want := strings.Join([]string{
+		"managed=<1>",
+		"port=<" + port + ">",
+		"data=<" + dataDir + ">",
+		"config=<" + configFile + ">",
+	}, "\n")
+	if got != want {
+		t.Fatalf("order exec env:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Orders: config.OrdersConfig{MaxTimeout: "50ms"},
+	}
+	a := orders.Order{
+		Name:    "slow-exec",
+		Trigger: "manual",
+		Exec:    "while :; do :; done",
+		Timeout: "5s",
+	}
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	elapsed := time.Since(start)
+	if code == 0 {
+		t.Fatalf("doOrderRunExec = 0, want timeout failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("doOrderRunExec elapsed = %s, want capped below 1s", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "exec failed") {
+		t.Fatalf("stderr = %q, want exec failure", stderr.String())
 	}
 }
 
@@ -1156,8 +1523,8 @@ func TestOrderHistoryWithStoresResolverSortsMergedStoresByRecency(t *testing.T) 
 
 func TestOrderListWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
-		{Name: "db-health", Gate: "cooldown", Interval: "5m", Pool: "polecat", Formula: "mol-db-health", Rig: "demo-repo"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
+		{Name: "db-health", Trigger: "cooldown", Interval: "5m", Pool: "polecat", Formula: "mol-db-health", Rig: "demo-repo"},
 	}
 
 	var stdout bytes.Buffer
@@ -1166,8 +1533,9 @@ func TestOrderListWithRig(t *testing.T) {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
 	out := stdout.String()
+	header := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
 	// RIG column should appear because at least one order has a rig.
-	if !strings.Contains(out, "RIG") {
+	if !strings.Contains(header, " RIG") {
 		t.Errorf("stdout missing 'RIG' column:\n%s", out)
 	}
 	if !strings.Contains(out, "demo-repo") {
@@ -1177,7 +1545,7 @@ func TestOrderListWithRig(t *testing.T) {
 
 func TestOrderListCityOnly(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
 	}
 
 	var stdout bytes.Buffer
@@ -1186,17 +1554,18 @@ func TestOrderListCityOnly(t *testing.T) {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
 	out := stdout.String()
+	header := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
 	// No RIG column when all orders are city-level.
-	if strings.Contains(out, "RIG") {
+	if strings.Contains(header, " RIG") {
 		t.Errorf("stdout should not have 'RIG' column for city-only:\n%s", out)
 	}
 }
 
 func TestFindOrderRigScoped(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "dolt-health", Gate: "cooldown", Interval: "1h", Formula: "mol-dh"},
-		{Name: "dolt-health", Gate: "cooldown", Interval: "5m", Formula: "mol-dh", Rig: "repo-a"},
-		{Name: "dolt-health", Gate: "cooldown", Interval: "10m", Formula: "mol-dh", Rig: "repo-b"},
+		{Name: "dolt-health", Trigger: "cooldown", Interval: "1h", Formula: "mol-dh"},
+		{Name: "dolt-health", Trigger: "cooldown", Interval: "5m", Formula: "mol-dh", Rig: "repo-a"},
+		{Name: "dolt-health", Trigger: "cooldown", Interval: "10m", Formula: "mol-dh", Rig: "repo-b"},
 	}
 
 	// No rig → first match (city-level).
@@ -1226,8 +1595,8 @@ func TestFindOrderRigScoped(t *testing.T) {
 
 func TestOrderCheckWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
-		{Name: "db-health", Gate: "cooldown", Interval: "5m", Formula: "mol-db-health", Rig: "demo-repo"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "db-health", Trigger: "cooldown", Interval: "5m", Formula: "mol-db-health", Rig: "demo-repo"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -1238,7 +1607,7 @@ func TestOrderCheckWithRig(t *testing.T) {
 		t.Fatalf("doOrderCheck = %d, want 0", code)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "RIG") {
+	if !strings.Contains(out, " RIG") {
 		t.Errorf("stdout missing 'RIG' column:\n%s", out)
 	}
 	if !strings.Contains(out, "demo-repo") {
@@ -1248,7 +1617,7 @@ func TestOrderCheckWithRig(t *testing.T) {
 
 func TestOrderShowWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "db-health", Formula: "mol-db-health", Gate: "cooldown", Interval: "5m", Rig: "demo-repo", Source: "/topo/orders/db-health/order.toml"},
+		{Name: "db-health", Formula: "mol-db-health", Trigger: "cooldown", Interval: "5m", Rig: "demo-repo", Source: "/topo/orders/db-health/order.toml"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1267,7 +1636,7 @@ func TestOrderShowWithRig(t *testing.T) {
 
 func TestOrderRunRigQualifiesPool(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "db-health", Formula: "mol-db-health", Gate: "cooldown", Interval: "5m", Pool: "polecat", Rig: "demo-repo", FormulaLayer: sharedTestFormulaDir},
+		{Name: "db-health", Formula: "mol-db-health", Trigger: "cooldown", Interval: "5m", Pool: "polecat", Rig: "demo-repo", FormulaLayer: sharedTestFormulaDir},
 	}
 
 	store := beads.NewMemStore()

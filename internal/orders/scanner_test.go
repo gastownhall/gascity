@@ -12,7 +12,7 @@ func TestScan(t *testing.T) {
 	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
@@ -20,7 +20,7 @@ pool = "dog"
 	fs.Files["/layer1/orders/cleanup/order.toml"] = []byte(`
 [order]
 formula = "mol-cleanup"
-gate = "cron"
+trigger = "cron"
 schedule = "0 3 * * *"
 `)
 
@@ -61,7 +61,7 @@ func TestScanLayerOverride(t *testing.T) {
 	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
@@ -70,7 +70,7 @@ pool = "dog"
 	fs.Files["/layer2/orders/digest/order.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "8h"
 pool = "dog"
 `)
@@ -93,14 +93,14 @@ func TestScanSkip(t *testing.T) {
 	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 `)
 	fs.Dirs["/layer1/orders/cleanup"] = true
 	fs.Files["/layer1/orders/cleanup/order.toml"] = []byte(`
 [order]
 formula = "mol-cleanup"
-gate = "manual"
+trigger = "manual"
 `)
 
 	orders, err := Scan(fs, []string{"/layer1"}, []string{"digest"})
@@ -121,7 +121,7 @@ func TestScanDisabled(t *testing.T) {
 	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 enabled = false
 `)
@@ -141,7 +141,7 @@ func TestScanFormulaLayer(t *testing.T) {
 	fs.Files["/pack/formulas/orders/health/order.toml"] = []byte(`
 [order]
 exec = "$PACK_DIR/scripts/health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1m"
 `)
 
@@ -164,7 +164,7 @@ func TestScanFormulaLayerOverride(t *testing.T) {
 	fs.Files["/base/formulas/orders/health/order.toml"] = []byte(`
 [order]
 exec = "$PACK_DIR/scripts/health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1h"
 `)
 	// Layer 2: higher priority overrides.
@@ -172,7 +172,7 @@ interval = "1h"
 	fs.Files["/pack/formulas/orders/health/order.toml"] = []byte(`
 [order]
 exec = "$PACK_DIR/scripts/health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 `)
 
@@ -195,7 +195,7 @@ func TestScanSourcePath(t *testing.T) {
 	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "manual"
+trigger = "manual"
 `)
 
 	orders, err := Scan(fs, []string{"/layer1"}, nil)

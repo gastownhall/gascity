@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -677,6 +678,339 @@ func TestFindSessionFileByIDRejectsTraversalSessionID(t *testing.T) {
 	}
 }
 
+func TestFindSessionFileByIDUsesClaudeProjectPathAlias(t *testing.T) {
+	skipUnlessDarwinClaudePathAliases(t)
+
+	base := t.TempDir()
+	storedWorkDir := "/tmp/gcac/gctutenv-123/home/my-city"
+	providerWorkDir := "/private/tmp/gcac/gctutenv-123/home/my-city"
+	slugDir := filepath.Join(base, ProjectSlug(providerWorkDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFileByID([]string{base}, storedWorkDir, "session-123"); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want %q", got, want)
+	}
+}
+
+func TestFindSessionFileByIDPrefersStoredWorkDirSpelling(t *testing.T) {
+	skipUnlessDarwinClaudePathAliases(t)
+
+	base := t.TempDir()
+	storedWorkDir := "/tmp/gcac/gctutenv-123/home/my-city"
+	providerWorkDir := "/private/tmp/gcac/gctutenv-123/home/my-city"
+	rawSlugDir := filepath.Join(base, ProjectSlug(storedWorkDir))
+	aliasSlugDir := filepath.Join(base, ProjectSlug(providerWorkDir))
+	for _, dir := range []string{rawSlugDir, aliasSlugDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := filepath.Join(rawSlugDir, "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	aliasPath := filepath.Join(aliasSlugDir, "session-123.jsonl")
+	if err := os.WriteFile(aliasPath, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Unix(1_700_000_000, 0)
+	for _, path := range []string{want, aliasPath} {
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := FindSessionFileByID([]string{base}, storedWorkDir, "session-123"); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want stored spelling %q", got, want)
+	}
+}
+
+func TestFindSessionFileByIDForCandidatesUsesNewestMatch(t *testing.T) {
+	base := t.TempDir()
+	storedSlugDir := filepath.Join(base, "stored-slug")
+	aliasSlugDir := filepath.Join(base, "alias-slug")
+	for _, dir := range []string{storedSlugDir, aliasSlugDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	storedPath := filepath.Join(storedSlugDir, "session-123.jsonl")
+	if err := os.WriteFile(storedPath, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(storedPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(aliasSlugDir, "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSessionFileByIDForCandidates([]string{base}, []string{"stored-slug", "alias-slug"}, "session-123.jsonl")
+	if got != want {
+		t.Fatalf("findSessionFileByIDForCandidates() = %q, want newest match %q", got, want)
+	}
+}
+
+func TestFindSessionFileByIDForCandidatesPrefersEarlierSearchPath(t *testing.T) {
+	firstBase := t.TempDir()
+	secondBase := t.TempDir()
+	for _, base := range []string{firstBase, secondBase} {
+		if err := os.MkdirAll(filepath.Join(base, "alias-slug"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	want := filepath.Join(firstBase, "alias-slug", "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newerInLaterBase := filepath.Join(secondBase, "alias-slug", "session-123.jsonl")
+	if err := os.WriteFile(newerInLaterBase, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(want, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSessionFileByIDForCandidates([]string{firstBase, secondBase}, []string{"alias-slug"}, "session-123.jsonl")
+	if got != want {
+		t.Fatalf("findSessionFileByIDForCandidates() = %q, want earlier search path %q", got, want)
+	}
+}
+
+func TestFindSessionFileUsesClaudeProjectPathAlias(t *testing.T) {
+	skipUnlessDarwinClaudePathAliases(t)
+
+	base := t.TempDir()
+	storedWorkDir := "/tmp/gcac/gctutenv-123/home/my-city"
+	providerWorkDir := "/private/tmp/gcac/gctutenv-123/home/my-city"
+	slugDir := filepath.Join(base, ProjectSlug(providerWorkDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFile([]string{base}, storedWorkDir); got != want {
+		t.Fatalf("FindSessionFile() = %q, want %q", got, want)
+	}
+}
+
+func TestFindSessionFileUsesNewestClaudeProjectPathAliasMatch(t *testing.T) {
+	skipUnlessDarwinClaudePathAliases(t)
+
+	base := t.TempDir()
+	storedWorkDir := "/tmp/gcac/gctutenv-123/home/my-city"
+	providerWorkDir := "/private/tmp/gcac/gctutenv-123/home/my-city"
+	rawSlugDir := filepath.Join(base, ProjectSlug(storedWorkDir))
+	aliasSlugDir := filepath.Join(base, ProjectSlug(providerWorkDir))
+	for _, dir := range []string{rawSlugDir, aliasSlugDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	storedPath := filepath.Join(rawSlugDir, "stored-session.jsonl")
+	if err := os.WriteFile(storedPath, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(storedPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(aliasSlugDir, "alias-session.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFile([]string{base}, storedWorkDir); got != want {
+		t.Fatalf("FindSessionFile() = %q, want newest alias match %q", got, want)
+	}
+}
+
+func TestFindSlugSessionFileForCandidatesUsesNewestMatch(t *testing.T) {
+	base := t.TempDir()
+	storedSlugDir := filepath.Join(base, "stored-slug")
+	aliasSlugDir := filepath.Join(base, "alias-slug")
+	for _, dir := range []string{storedSlugDir, aliasSlugDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	storedPath := filepath.Join(storedSlugDir, "stored-session.jsonl")
+	if err := os.WriteFile(storedPath, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(storedPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(aliasSlugDir, "alias-session.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSlugSessionFileForCandidates([]string{base}, []string{"stored-slug", "alias-slug"})
+	if got != want {
+		t.Fatalf("findSlugSessionFileForCandidates() = %q, want newest match %q", got, want)
+	}
+}
+
+func TestFindClaudeLatestSessionFileForCandidatesUsesNewestMatch(t *testing.T) {
+	base := t.TempDir()
+	storedSlugDir := filepath.Join(base, "stored-slug")
+	aliasSlugDir := filepath.Join(base, "alias-slug")
+	for _, dir := range []string{storedSlugDir, aliasSlugDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	storedPath := filepath.Join(storedSlugDir, "latest-session.jsonl")
+	if err := os.WriteFile(storedPath, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(storedPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(aliasSlugDir, "latest-session.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findClaudeLatestSessionFileForCandidates([]string{base}, []string{"stored-slug", "alias-slug"})
+	if got != want {
+		t.Fatalf("findClaudeLatestSessionFileForCandidates() = %q, want newest match %q", got, want)
+	}
+}
+
+func TestFindClaudeLatestSessionFileForCandidatesPrefersEarlierSearchPath(t *testing.T) {
+	firstBase := t.TempDir()
+	secondBase := t.TempDir()
+	for _, base := range []string{firstBase, secondBase} {
+		if err := os.MkdirAll(filepath.Join(base, "alias-slug"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	want := filepath.Join(firstBase, "alias-slug", "latest-session.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newerInLaterBase := filepath.Join(secondBase, "alias-slug", "latest-session.jsonl")
+	if err := os.WriteFile(newerInLaterBase, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(want, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findClaudeLatestSessionFileForCandidates([]string{firstBase, secondBase}, []string{"alias-slug"})
+	if got != want {
+		t.Fatalf("findClaudeLatestSessionFileForCandidates() = %q, want earlier search path %q", got, want)
+	}
+}
+
+func TestFindSessionFileUsesResolvedSymlinkProjectSlug(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+
+	base := t.TempDir()
+	workRoot := t.TempDir()
+	realWorkDir := filepath.Join(workRoot, "real-city")
+	linkWorkDir := filepath.Join(workRoot, "link-city")
+	if err := os.MkdirAll(realWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realWorkDir, linkWorkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	slugDir := filepath.Join(base, ProjectSlug(realWorkDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFile([]string{base}, linkWorkDir); got != want {
+		t.Fatalf("FindSessionFile() = %q, want resolved symlink slug %q", got, want)
+	}
+}
+
+func TestFindSessionFileUsesResolvedMissingSymlinkPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+
+	base := t.TempDir()
+	workRoot := t.TempDir()
+	realRoot := filepath.Join(workRoot, "real-root")
+	linkRoot := filepath.Join(workRoot, "link-root")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	missingWorkDir := filepath.Join(linkRoot, "missing-city")
+	slugDir := filepath.Join(base, ProjectSlug(filepath.Join(realRoot, "missing-city")))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, "session-123.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFile([]string{base}, missingWorkDir); got != want {
+		t.Fatalf("FindSessionFile() = %q, want resolved missing-path slug %q", got, want)
+	}
+}
+
+func TestFindClaudeLatestSessionFileUsesProjectPathAlias(t *testing.T) {
+	skipUnlessDarwinClaudePathAliases(t)
+
+	base := t.TempDir()
+	storedWorkDir := "/tmp/gcac/gctutenv-123/home/my-city"
+	providerWorkDir := "/private/tmp/gcac/gctutenv-123/home/my-city"
+	slugDir := filepath.Join(base, ProjectSlug(providerWorkDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, "latest-session.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := findClaudeLatestSessionFile([]string{base}, storedWorkDir); got != want {
+		t.Fatalf("findClaudeLatestSessionFile() = %q, want %q", got, want)
+	}
+}
+
 func TestProjectSlug(t *testing.T) {
 	tests := []struct {
 		path string
@@ -1146,6 +1480,13 @@ func TestFindGeminiSessionFileUsesObservedRoots(t *testing.T) {
 	got := FindGeminiSessionFile([]string{root}, workDir)
 	if got != sessionFile {
 		t.Errorf("got %q, want %q", got, sessionFile)
+	}
+}
+
+func skipUnlessDarwinClaudePathAliases(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only /tmp <-> /private/tmp Claude project path alias")
 	}
 }
 

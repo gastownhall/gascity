@@ -457,9 +457,14 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 
 // ApplyGraphRouting decorates a compiled recipe with routing metadata.
 // For graph.v2 workflows it delegates to DecorateGraphWorkflowRecipe. For
-// legacy [[steps]] recipes it stamps gc.routed_to on every non-root step
-// so EffectiveWorkQuery tier-3 and pool scale_check can see the work
-// (fixes #796). Returns early with no effect when cfg is nil.
+// standalone legacy [[steps]] recipes it stamps gc.routed_to on every
+// non-root step so EffectiveWorkQuery tier-3 and pool scale_check can see
+// the work (fixes #796). Attached legacy formulas intentionally stay on the
+// molecule_id flow: only the source bead is routed, and the internal molecule
+// steps remain private instructions for the assignee. Pool demand for attached
+// legacy formulas comes from the already-routed source bead via the ready and
+// in_progress tiers; the molecule count is only for standalone routed roots.
+// Returns early with no effect when cfg is nil.
 func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City, deps Deps) error {
 	if recipe == nil || cfg == nil {
 		return nil
@@ -470,6 +475,9 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 	// and Agent deep-copy on every controller tick that dispatches a legacy
 	// order.
 	if !IsCompiledGraphWorkflow(recipe) {
+		if strings.TrimSpace(sourceBeadID) != "" {
+			return nil
+		}
 		stampLegacyRecipeRouting(recipe, routedTo)
 		return nil
 	}

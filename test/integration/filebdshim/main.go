@@ -257,6 +257,8 @@ func parseListArgs(args []string) (beads.ListQuery, bool, error) {
 		switch {
 		case arg == "--json":
 			jsonOut = true
+		case arg == "--all":
+			q.IncludeClosed = true
 		case arg == "--unassigned":
 			q.Assignee = ""
 		case strings.HasPrefix(arg, "--assignee="):
@@ -351,6 +353,25 @@ func parseUpdateArgs(args []string) (id string, opts beads.UpdateOpts, jsonOut b
 			i++
 			status := args[i]
 			opts.Status = &status
+		case strings.HasPrefix(arg, "--set-metadata="):
+			key, value, ok := strings.Cut(strings.TrimPrefix(arg, "--set-metadata="), "=")
+			if !ok || key == "" {
+				return "", opts, false, fmt.Errorf("invalid metadata %q", arg)
+			}
+			if opts.Metadata == nil {
+				opts.Metadata = map[string]string{}
+			}
+			opts.Metadata[key] = value
+		case arg == "--set-metadata" && i+1 < len(args):
+			i++
+			key, value, ok := strings.Cut(args[i], "=")
+			if !ok || key == "" {
+				return "", opts, false, fmt.Errorf("invalid metadata %q", args[i])
+			}
+			if opts.Metadata == nil {
+				opts.Metadata = map[string]string{}
+			}
+			opts.Metadata[key] = value
 		case strings.HasPrefix(arg, "-"):
 			return "", opts, false, fmt.Errorf("unsupported update flag %q", arg)
 		case id == "":
@@ -398,13 +419,7 @@ func record(recorder *events.FileRecorder, eventType string, actorName, subject,
 
 func writeBead(stdout io.Writer, b beads.Bead, jsonOut bool, created bool) error {
 	if jsonOut {
-		return json.NewEncoder(stdout).Encode(map[string]any{
-			"id":       b.ID,
-			"title":    b.Title,
-			"status":   b.Status,
-			"assignee": b.Assignee,
-			"type":     b.Type,
-		})
+		return json.NewEncoder(stdout).Encode(beadWireMap(b))
 	}
 	if created {
 		_, err := fmt.Fprintf(stdout, "Created bead: %s\n", b.ID)
@@ -425,13 +440,7 @@ func writeList(stdout io.Writer, items []beads.Bead, jsonOut bool) error {
 	if jsonOut {
 		out := make([]map[string]any, 0, len(items))
 		for _, b := range items {
-			out = append(out, map[string]any{
-				"id":       b.ID,
-				"title":    b.Title,
-				"status":   b.Status,
-				"assignee": b.Assignee,
-				"type":     b.Type,
-			})
+			out = append(out, beadWireMap(b))
 		}
 		return json.NewEncoder(stdout).Encode(out)
 	}
@@ -445,4 +454,17 @@ func writeList(stdout io.Writer, items []beads.Bead, jsonOut bool) error {
 		}
 	}
 	return nil
+}
+
+func beadWireMap(b beads.Bead) map[string]any {
+	return map[string]any{
+		"id":         b.ID,
+		"title":      b.Title,
+		"status":     b.Status,
+		"assignee":   b.Assignee,
+		"type":       b.Type,
+		"created_at": b.CreatedAt,
+		"updated_at": b.CreatedAt,
+		"metadata":   b.Metadata,
+	}
 }

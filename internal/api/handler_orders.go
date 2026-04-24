@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -16,6 +14,7 @@ import (
 var (
 	errOrderNotFound  = errors.New("order not found")
 	errOrderAmbiguous = errors.New("ambiguous order name")
+	errNoOrderStores  = errors.New("order bead stores unavailable")
 )
 
 type orderResponse struct {
@@ -23,7 +22,8 @@ type orderResponse struct {
 	ScopedName    string `json:"scoped_name"`
 	Description   string `json:"description,omitempty"`
 	Type          string `json:"type"`
-	Gate          string `json:"gate"`
+	Trigger       string `json:"trigger,omitempty"`
+	Gate          string `json:"gate,omitempty" deprecated:"true"`
 	Interval      string `json:"interval,omitempty"`
 	Schedule      string `json:"schedule,omitempty"`
 	Check         string `json:"check,omitempty"`
@@ -76,7 +76,8 @@ func toOrderResponse(a orders.Order) orderResponse {
 		ScopedName:    a.ScopedName(),
 		Description:   a.Description,
 		Type:          typ,
-		Gate:          a.Gate,
+		Trigger:       a.Trigger,
+		Gate:          a.Trigger, // Deprecated alias: mirror trigger during the migration window.
 		Interval:      a.Interval,
 		Schedule:      a.Schedule,
 		Check:         a.Check,
@@ -89,28 +90,6 @@ func toOrderResponse(a orders.Order) orderResponse {
 		Enabled:       a.IsEnabled(),
 		Rig:           a.Rig,
 		CaptureOutput: a.IsExec(), // exec orders capture output
-	}
-}
-
-func beadLastRunFunc(store beads.Store) orders.LastRunFunc {
-	return func(name string) (time.Time, error) {
-		if store == nil {
-			return time.Time{}, nil
-		}
-		label := "order-run:" + name
-		results, err := store.List(beads.ListQuery{
-			Label:         label,
-			Limit:         1,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-		})
-		if err != nil {
-			return time.Time{}, err
-		}
-		if len(results) == 0 {
-			return time.Time{}, nil
-		}
-		return results[0].CreatedAt, nil
 	}
 }
 

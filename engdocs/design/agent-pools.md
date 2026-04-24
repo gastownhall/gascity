@@ -111,7 +111,7 @@ list; the reconciler makes reality match.
 
 ## Scaling signal: `check`
 
-Following the order gate `condition` pattern (§16.2), the scaling
+Following the order trigger `condition` pattern (§16.2), the scaling
 signal is a **user-supplied shell command** (field name: `check`):
 
 - Go runs the command via `sh -c`
@@ -155,7 +155,7 @@ The spec explicitly allows:
 - **Deterministic infrastructure operations** in Go (concepts.md:
   "Some infrastructure operations must be deterministic to be safe")
 - **Config-driven thresholds** read by Go (health patrol pattern)
-- **Shell command execution** for user-supplied policy (order gate
+- **Shell command execution** for user-supplied policy (order trigger
   `condition` pattern, §16.2)
 - **Lifecycle handlers** as shell commands (§19)
 

@@ -2,7 +2,9 @@
 
 package tutorialgoldens
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestClaudeStatusOutputLoggedIn(t *testing.T) {
 	t.Parallel()

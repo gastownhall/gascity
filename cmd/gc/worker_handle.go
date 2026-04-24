@@ -11,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -323,13 +322,15 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 		return nil
 	}
 
-	command := resolved.CommandString()
-	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-		command = command + " " + shellquote.Join(defaultArgs)
+	command := strings.TrimSpace(info.Command)
+	if !shouldPreserveStoredRuntimeCommand(command, resolved.CommandString()) {
+		launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, nil)
+		command = resolved.CommandString()
+		if err == nil {
+			command = launchCommand.Command
+		}
 	}
-	if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
-		command = command + " " + sa
-	}
+	command = firstNonEmptyGCString(command, info.Provider, resolved.Name)
 
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
@@ -338,7 +339,7 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
-		Provider:   resolved.Name,
+		Provider:   firstNonEmptyGCString(info.Provider, resolved.Name),
 		SessionEnv: resolved.Env,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
@@ -348,12 +349,24 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		},
 		Resume: session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
+			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),
+			ResumeStyle:   firstNonEmptyGCString(resolved.ResumeStyle, info.ResumeStyle),
+			ResumeCommand: firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand),
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}
+}
+
+func shouldPreserveStoredRuntimeCommand(storedCommand, resolvedCommand string) bool {
+	storedCommand = strings.TrimSpace(storedCommand)
+	if storedCommand == "" {
+		return false
+	}
+	resolvedCommand = strings.TrimSpace(resolvedCommand)
+	if resolvedCommand == "" {
+		return true
+	}
+	return storedCommand == resolvedCommand || strings.HasPrefix(storedCommand, resolvedCommand+" ")
 }
 
 func resolveWorkerRuntimeWithConfig(cfg *config.City, info session.Info, sessionKind string) *config.ResolvedProvider {
@@ -394,4 +407,13 @@ func workerNudgeDeliveryForMode(mode nudgeDeliveryMode) (worker.NudgeDelivery, b
 	default:
 		return "", false
 	}
+}
+
+func firstNonEmptyGCString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -152,7 +151,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -241,8 +240,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				"agent_name":     sessionQualifiedName,
 				"session_origin": "manual",
 			}
-			if resolved.Kind != "" && resolved.Kind != resolved.Name {
-				kindMeta["provider_kind"] = resolved.Kind
+			if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+				kindMeta["provider_kind"] = family
+			}
+			if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+				kindMeta["builtin_ancestor"] = resolved.BuiltinAncestor
 			}
 			handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
 				cityPath,
@@ -321,8 +323,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		"agent_name":     sessionQualifiedName,
 		"session_origin": "manual",
 	}
-	if resolved.Kind != "" && resolved.Kind != resolved.Name {
-		kindMeta["provider_kind"] = resolved.Kind
+	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+		kindMeta["provider_kind"] = family
+	}
+	if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+		kindMeta["builtin_ancestor"] = resolved.BuiltinAncestor
 	}
 	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
 		cityPath,
@@ -401,28 +406,11 @@ func resolvedSessionCommand(cityPath string, resolved *config.ResolvedProvider, 
 	if resolved == nil {
 		return "", fmt.Errorf("resolved provider is nil")
 	}
-	command := resolved.CommandString()
-	if len(resolved.OptionsSchema) > 0 {
-		fullOptions := make(map[string]string, len(resolved.EffectiveDefaults)+len(optionOverrides))
-		for k, v := range resolved.EffectiveDefaults {
-			fullOptions[k] = v
-		}
-		for k, v := range optionOverrides {
-			if k == "initial_message" {
-				continue
-			}
-			fullOptions[k] = v
-		}
-		if args, err := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions); err != nil {
-			return "", fmt.Errorf("resolving provider defaults: %w", err)
-		} else if len(args) > 0 {
-			command = replaceSchemaFlags(command, resolved.OptionsSchema, args)
-		}
+	launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, optionOverrides)
+	if err != nil {
+		return "", fmt.Errorf("resolving provider launch command: %w", err)
 	}
-	if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
-		command = command + " " + sa
-	}
-	return command, nil
+	return launchCommand.Command, nil
 }
 
 func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
@@ -481,12 +469,7 @@ func waitForSession(sp runtime.Provider, sessionName string, timeout time.Durati
 	deadline := time.Now().Add(timeout)
 	lastProgress := time.Now()
 	for time.Now().Before(deadline) {
-		target := sessionName
-		if store != nil && beadID != "" {
-			target = beadID
-		}
-		running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, target)
-		if err == nil && running {
+		if sp.IsRunning(sessionName) {
 			return nil
 		}
 		// Check for early failure: bead closed or stuck in creating.
@@ -591,10 +574,16 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
-	// Build attachment cache from worker observations so reason evaluation
-	// does not bypass the worker boundary for attachment checks.
+	// Build attachment cache. Active sessions already have Info.Attached
+	// populated by ListFullFromBeads; for inactive sessions, query the
+	// provider directly while preserving the old "running and attached"
+	// semantics. Going through workerSessionTargetAttachedWithConfig here
+	// triggered 2-3 extra bd show subprocess lookups per session.
 	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
-		return workerSessionTargetAttachedWithConfig("", store, sp, cfg, info.ID)
+		if info.State == session.StateActive || sp == nil {
+			return info.Attached, nil
+		}
+		return sessionAttachedForWakeReason(sp, info.SessionName), nil
 	})
 
 	if len(sessions) == 0 {
@@ -648,9 +637,9 @@ func sessionListTitle(s session.Info) string {
 	return title
 }
 
-// attachmentCachingProvider wraps a runtime.Provider and serves attachment
-// state from a worker-populated cache so session list reason evaluation does
-// not fall back to raw runtime attachment checks.
+// attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
+// results to avoid redundant tmux subprocess calls. wakeReasons calls
+// IsAttached per session, but cmdSessionList already queried it.
 type attachmentCachingProvider struct {
 	runtime.Provider
 	cache map[string]bool
@@ -667,7 +656,10 @@ func (p *attachmentCachingProvider) IsAttached(name string) bool {
 	if v, ok := p.cache[name]; ok {
 		return v
 	}
-	return false
+	if p.Provider == nil {
+		return false
+	}
+	return p.Provider.IsAttached(name)
 }
 
 func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
@@ -677,15 +669,49 @@ func (p *attachmentCachingProvider) SleepCapability(name string) runtime.Session
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-func buildAttachmentCache(sessions []session.Info, observe func(session.Info) (bool, error)) map[string]bool {
+func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
+		return ip.Pending(name)
+	}
+	return nil, runtime.ErrInteractionUnsupported
+}
+
+func (p *attachmentCachingProvider) Respond(name string, response runtime.InteractionResponse) error {
+	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
+		return ip.Respond(name, response)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+func sessionAttachedForWakeReason(sp runtime.Provider, name string) bool {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	if !sp.IsAttached(name) {
+		return false
+	}
+	// attachmentCachingProvider caches the already-vetted attachment state for
+	// the list path, so re-checking IsRunning here would just add the extra
+	// tmux probe this shortcut was introduced to avoid.
+	if _, ok := sp.(*attachmentCachingProvider); ok {
+		return true
+	}
+	return sp.IsRunning(name)
+}
+
+func buildAttachmentCache(sessions []session.Info, observe ...func(session.Info) (bool, error)) map[string]bool {
 	cache := make(map[string]bool)
+	var observeFn func(session.Info) (bool, error)
+	if len(observe) > 0 {
+		observeFn = observe[0]
+	}
 	for _, s := range sessions {
 		if s.State == "" || s.SessionName == "" {
 			continue
 		}
 		attached := s.Attached
-		if observe != nil {
-			if observed, err := observe(s); err == nil {
+		if observeFn != nil {
+			if observed, err := observeFn(s); err == nil {
 				attached = observed
 			}
 		}
@@ -837,7 +863,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -919,7 +945,8 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		// continue so `gc session attach` still starts the agent. The strict
 		// path is resolveTemplate at reconciler time, which fails agent
 		// creation on projection errors.
-		sa, saErr := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, resolved.Name, stderr)
+		providerFamily := resolvedProviderLaunchFamily(resolved)
+		sa, saErr := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, providerFamily, stderr)
 		if saErr == nil && sa != "" {
 			command = command + " " + sa
 		} else if saErr != nil {
@@ -931,7 +958,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 			// with a malformed override, attach therefore launches without
 			// --settings; on an older city with a readable prior projection,
 			// attach uses that projection.
-			if probe := settingsArgsIfReadable(cityPath, resolved.Name); probe != "" {
+			if probe := settingsArgsIfReadable(cityPath, providerFamily); probe != "" {
 				command = command + " " + probe
 			}
 		}
@@ -1003,7 +1030,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1079,7 +1106,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1139,7 +1166,7 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1289,7 +1316,7 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1303,6 +1330,7 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
 	output, err := handle.Peek(context.Background(), lines)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1348,7 +1376,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
@@ -1362,6 +1390,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
 	if err := handle.Kill(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1447,7 +1476,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		}
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1469,7 +1498,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	result, err := handle.Message(context.Background(), worker.MessageRequest{
+	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
 	})
@@ -1477,7 +1506,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitSessionSubmitResult(stdout, target, intent, result.Queued)
+	emitSessionSubmitResult(stdout, target, intent, outcome.Queued)
 	return 0
 }
 
@@ -1514,10 +1543,7 @@ func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (str
 }
 
 func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
-	cityName := filepath.Base(cityPath)
-	if cfg != nil && cfg.Workspace.Name != "" {
-		cityName = cfg.Workspace.Name
-	}
+	cityName := loadedCityName(cfg, cityPath)
 	var rigs []config.Rig
 	if cfg != nil {
 		rigs = cfg.Rigs

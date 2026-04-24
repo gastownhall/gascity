@@ -296,12 +296,19 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 	if patch.DisplayName != nil {
 		spec.DisplayName = *patch.DisplayName
 	}
+	if patch.Base != nil {
+		spec.Base = *patch.Base
+	}
 	if patch.Command != nil {
 		spec.Command = *patch.Command
 	}
 	if patch.Args != nil {
 		spec.Args = make([]string, len(patch.Args))
 		copy(spec.Args, patch.Args)
+	}
+	if patch.ArgsAppend != nil {
+		spec.ArgsAppend = make([]string, len(patch.ArgsAppend))
+		copy(spec.ArgsAppend, patch.ArgsAppend)
 	}
 	if patch.PromptMode != nil {
 		spec.PromptMode = *patch.PromptMode
@@ -319,6 +326,12 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 		for k, v := range patch.Env {
 			spec.Env[k] = v
 		}
+	}
+	if patch.OptionsSchemaMerge != nil {
+		spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
+	}
+	if patch.OptionsSchema != nil {
+		spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 	}
 	f.cfg.Providers[name] = spec
 	return nil

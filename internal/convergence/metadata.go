@@ -37,6 +37,7 @@ const (
 	FieldGateStderr        = "convergence.gate_stderr"
 	FieldGateDurationMs    = "convergence.gate_duration_ms"
 	FieldGateTruncated     = "convergence.gate_truncated"
+	FieldPendingNextWisp   = "convergence.pending_next_wisp"
 )
 
 // VarPrefix is the metadata key prefix for template variables.

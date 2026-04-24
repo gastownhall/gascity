@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,6 +101,210 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 	info, err := os.Stat(bdToml)
 	if err == nil && info.Mode()&0o111 != 0 {
 		t.Errorf("pack.toml should not be executable: mode %v", info.Mode())
+	}
+}
+
+func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	for _, tt := range []struct {
+		pack     string
+		rel      string
+		needle   string
+		minCount int
+	}{
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), "^dolt_cluster$\\|^__gc_probe$", 1},
+		{"dolt", filepath.Join("commands", "list", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
+		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 1},
+		{"dolt", filepath.Join("commands", "health", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
+		{"dolt", filepath.Join("commands", "sync", "run.sh"), "information_schema|mysql|dolt_cluster|__gc_probe", 2},
+		{"dolt", filepath.Join("formulas", "mol-dog-stale-db.toml"), "__gc_probe", 1},
+		{"dolt", filepath.Join("formulas", "mol-dog-doctor.toml"), "__gc_probe", 1},
+	} {
+		path := filepath.Join(dir, citylayout.SystemPacksRoot, tt.pack, tt.rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s/%s): %v", tt.pack, tt.rel, err)
+		}
+		if got := strings.Count(string(data), tt.needle); got < tt.minCount {
+			t.Fatalf("%s/%s database enumeration must contain %q at least %d time(s), got %d", tt.pack, tt.rel, tt.needle, tt.minCount, got)
+		}
+	}
+}
+
+func TestDoltSyncRejectsManagedProbeDatabaseFilter(t *testing.T) {
+	for _, dbName := range []string{managedDoltProbeDatabase, strings.ToUpper(managedDoltProbeDatabase), " " + managedDoltProbeDatabase + " "} {
+		t.Run(dbName, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := MaterializeBuiltinPacks(dir); err != nil {
+				t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+			}
+			packDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt")
+			script := filepath.Join(packDir, "commands", "sync", "run.sh")
+			cmd := exec.Command(script, "--db", dbName)
+			cmd.Env = sanitizedBaseEnv("GC_CITY_PATH="+dir, "GC_PACK_DIR="+packDir)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("gc dolt sync unexpectedly accepted %s:\n%s", dbName, out)
+			}
+			if !strings.Contains(string(out), "reserved Dolt database name: "+managedDoltProbeDatabase) {
+				t.Fatalf("gc dolt sync output = %s, want reserved database error", out)
+			}
+		})
+	}
+}
+
+func TestBuiltinDoltDoctorAllowsOlderVersionWhenProbeSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	binDir := t.TempDir()
+	for _, tool := range []struct {
+		name string
+		body string
+	}{
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.75.2\\n'\n"},
+		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
+		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(binDir, tool.name), []byte(tool.body), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", tool.name, err)
+		}
+	}
+
+	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	cmd := exec.Command(script)
+	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check-dolt unexpectedly rejected old Dolt probe: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "dolt available (dolt version 1.75.2)") {
+		t.Fatalf("check-dolt output = %s, want successful version probe", out)
+	}
+}
+
+func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	binDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "timeout-argv")
+	for _, tool := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "timeout",
+			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
+		},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
+		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
+		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(binDir, tool.name), []byte(tool.body), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", tool.name, err)
+		}
+	}
+
+	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	cmd := exec.Command(script)
+	cmd.Env = append(
+		sanitizedBaseEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"TIMEOUT_CAPTURE="+capturePath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check-dolt with fake timeout failed: %v\n%s", err, out)
+	}
+
+	capture, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("ReadFile(timeout capture): %v", err)
+	}
+	if !strings.Contains(string(capture), "--kill-after=2 10 dolt version") {
+		t.Fatalf("timeout argv = %q, want bounded dolt version probe", capture)
+	}
+}
+
+func TestBuiltinDoltDoctorReportsTimedOutVersionProbe(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	binDir := t.TempDir()
+	for _, tool := range []struct {
+		name string
+		body string
+	}{
+		{name: "timeout", body: "#!/bin/sh\nexit 124\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
+		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
+		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(binDir, tool.name), []byte(tool.body), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", tool.name, err)
+		}
+	}
+
+	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	cmd := exec.Command(script)
+	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("check-dolt unexpectedly accepted timed out version probe:\n%s", out)
+	}
+	if !strings.Contains(string(out), "dolt version timed out after 10s") {
+		t.Fatalf("check-dolt output = %s, want timeout warning", out)
+	}
+}
+
+func TestBuiltinDoltDoctorFailsClosedWithoutBoundedRunner(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	binDir := t.TempDir()
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("LookPath(bash): %v", err)
+	}
+	if err := os.Symlink(bashPath, filepath.Join(binDir, "bash")); err != nil {
+		t.Fatalf("symlink bash: %v", err)
+	}
+	for _, tool := range []struct {
+		name string
+		body string
+	}{
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
+		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
+		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(binDir, tool.name), []byte(tool.body), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", tool.name, err)
+		}
+	}
+
+	script := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh")
+	cmd := exec.Command(script)
+	cmd.Env = append(sanitizedBaseEnv(), "PATH="+binDir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("check-dolt unexpectedly succeeded without bounded runner:\n%s", out)
+	}
+	if !strings.Contains(string(out), "dolt version timed out after 10s") {
+		t.Fatalf("check-dolt output = %s, want timeout warning", out)
 	}
 }
 
@@ -435,26 +640,5 @@ func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("maintenance pack not found in bd includes: %v", includes)
-	}
-}
-
-func TestMaterializeGastownPacks(t *testing.T) {
-	dir := t.TempDir()
-
-	// MaterializeGastownPacks is a no-op shim — verify it returns nil.
-	if err := MaterializeGastownPacks(dir); err != nil {
-		t.Fatalf("MaterializeGastownPacks() error: %v", err)
-	}
-}
-
-func TestMaterializeGastownPacks_Idempotent(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := MaterializeGastownPacks(dir); err != nil {
-		t.Fatal(err)
-	}
-	// Second call should succeed without error.
-	if err := MaterializeGastownPacks(dir); err != nil {
-		t.Fatalf("second call failed: %v", err)
 	}
 }

@@ -56,21 +56,19 @@ func preWakeCommit(
 		sleepReason = "idle-timeout"
 	}
 
-	// Use one batched metadata update to avoid paying multiple bd update
-	// round-trips before every wake.
-	batch := map[string]string{
-		"instance_token":             token,
-		"continuation_epoch":         strconv.Itoa(continuationEpoch),
-		"continuation_reset_pending": "",
-		"detached_at":                "",
-		"last_woke_at":               clk.Now().UTC().Format(time.RFC3339),
-		"sleep_reason":               sleepReason,
-		"sleep_intent":               "",
-		"generation":                 strconv.Itoa(newGen),
-	}
+	freshWake := session.Metadata["wake_mode"] == "fresh"
+	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+		Generation:        newGen,
+		InstanceToken:     token,
+		ContinuationEpoch: continuationEpoch,
+		Now:               clk.Now(),
+		SleepReason:       sleepReason,
+		FreshWake:         freshWake,
+	})
 	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
+	traceFreshWakeMetadataReset(name, session.Metadata, batch, freshWake)
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
 	}
@@ -79,6 +77,27 @@ func preWakeCommit(
 	}
 
 	return newGen, token, nil
+}
+
+func traceFreshWakeMetadataReset(name string, before map[string]string, batch sessions.MetadataPatch, freshWake bool) {
+	if !freshWake || os.Getenv("GC_TMUX_TRACE") != "1" {
+		return
+	}
+	cleared := make([]string, 0, len(sessions.FreshWakeConversationResetKeys()))
+	for _, key := range sessions.FreshWakeConversationResetKeys() {
+		if strings.TrimSpace(before[key]) == "" || batch[key] != "" {
+			continue
+		}
+		cleared = append(cleared, key)
+	}
+	if len(cleared) == 0 {
+		return
+	}
+	log.Printf(
+		"[WAKE-TRACE] preWakeCommit session=%s wake_mode=fresh cleared_provider_metadata=%s",
+		name,
+		strings.Join(cleared, ","),
+	)
 }
 
 func shouldBumpContinuationEpoch(meta map[string]string) bool {
@@ -113,6 +132,12 @@ func validateWorkDir(dir string) error {
 // beginSessionDrain initiates an async drain. Returns immediately.
 // The drainTracker stores in-memory state; advanceSessionDrains progresses it.
 //
+// Returns true when this call enqueued a new drain (a state transition) and
+// false when a drain was already enqueued for this session (no-op). Callers
+// that emit user-visible log lines or convergence events tied to the drain
+// MUST gate on the return value — otherwise those emissions fire every
+// reconciler tick for the life of a stuck drain.
+//
 // The interrupt signal (Ctrl-C) is NOT sent immediately. It is deferred to
 // the next reconciler tick via advanceSessionDrains. This gives the drain
 // one full tick to be canceled (e.g., if the session was falsely orphaned
@@ -125,9 +150,13 @@ func beginSessionDrain(
 	reason string,
 	clk clock.Clock,
 	timeout time.Duration,
-) {
+) bool {
+	name := session.Metadata["session_name"]
 	if dt.get(session.ID) != nil {
-		return // already draining
+		if os.Getenv("GC_TMUX_TRACE") == "1" {
+			log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s noop=already-draining", name, reason)
+		}
+		return false
 	}
 	gen, _ := strconv.Atoi(session.Metadata["generation"])
 
@@ -138,11 +167,11 @@ func beginSessionDrain(
 		generation: gen,
 	})
 
-	name := session.Metadata["session_name"]
 	if os.Getenv("GC_TMUX_TRACE") == "1" {
 		log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s", name, reason)
 	}
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "begin")
+	return true
 }
 
 func drainReasonCancelable(reason string) bool {
@@ -184,10 +213,11 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 }
 
 func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) {
-	_ = sp.RemoveMeta(name, "GC_DRAIN_ACK")
-	_ = sp.RemoveMeta(name, reconcilerDrainAckSourceKey)
-	_ = sp.RemoveMeta(name, reconcilerDrainAckReasonKey)
-	_ = sp.RemoveMeta(name, reconcilerDrainAckGenerationKey)
+	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+		if err := sp.RemoveMeta(name, key); err != nil {
+			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
+		}
+	}
 }
 
 // cancelSessionDrain removes a cancelable drain if wake reasons reappeared for

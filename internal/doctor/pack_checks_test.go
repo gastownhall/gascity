@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -178,6 +180,140 @@ func TestPackScriptCheckEnvVars(t *testing.T) {
 		" state=" + filepath.Join(cityPath, ".gc", "runtime", "packs", "topo")
 	if result.Message != expected {
 		t.Errorf("Message = %q, want %q", result.Message, expected)
+	}
+}
+
+func writeFixScript(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fix.sh")
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestPackScriptCheckCanFixWithoutScript(t *testing.T) {
+	c := &PackScriptCheck{
+		CheckName: "topo:diag-only",
+		Script:    "/irrelevant",
+		PackDir:   t.TempDir(),
+		PackName:  "topo",
+	}
+	if c.CanFix() {
+		t.Error("CanFix() = true without FixScript, want false")
+	}
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Errorf("Fix() on diagnostic-only check returned error: %v", err)
+	}
+}
+
+func TestPackScriptCheckCanFixWithScript(t *testing.T) {
+	dir := t.TempDir()
+	fix := writeFixScript(t, dir, "#!/bin/sh\nexit 0\n")
+	c := &PackScriptCheck{
+		CheckName: "topo:fixable",
+		Script:    "/irrelevant",
+		FixScript: fix,
+		PackDir:   dir,
+		PackName:  "topo",
+	}
+	if !c.CanFix() {
+		t.Error("CanFix() = false with FixScript set, want true")
+	}
+}
+
+func TestPackScriptCheckFixSuccess(t *testing.T) {
+	dir := t.TempDir()
+	city := t.TempDir()
+	// Fix script: create a marker at $GC_CITY_PATH/.marker. Exit 0.
+	fix := writeFixScript(t, dir,
+		"#!/bin/sh\nset -e\necho hello\necho 'pack='$GC_PACK_DIR\n: > \"$GC_CITY_PATH/.marker\"\nexit 0\n")
+	c := &PackScriptCheck{
+		CheckName: "topo:fix-ok",
+		Script:    "/irrelevant",
+		FixScript: fix,
+		PackDir:   dir,
+		PackName:  "topo",
+	}
+
+	if err := c.Fix(&CheckContext{CityPath: city}); err != nil {
+		t.Fatalf("Fix() returned unexpected error: %v", err)
+	}
+	// Marker file confirms (a) the fix executed, (b) GC_CITY_PATH env
+	// var was delivered, and (c) the script had write access to the
+	// city directory.
+	marker := filepath.Join(city, ".marker")
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("marker not created by fix script: %v", err)
+	}
+}
+
+func TestPackScriptCheckFixFailure(t *testing.T) {
+	dir := t.TempDir()
+	// Fix script prints details and exits non-zero.
+	fix := writeFixScript(t, dir,
+		"#!/bin/sh\necho 'remediation failed'\necho 'reason: disk full'\nexit 5\n")
+	c := &PackScriptCheck{
+		CheckName: "topo:fix-fail",
+		Script:    "/irrelevant",
+		FixScript: fix,
+		PackDir:   dir,
+		PackName:  "topo",
+	}
+
+	err := c.Fix(&CheckContext{CityPath: t.TempDir()})
+	if err == nil {
+		t.Fatal("Fix() returned nil, want error for non-zero exit")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "status 5") {
+		t.Errorf("error missing exit code: %q", msg)
+	}
+	if !strings.Contains(msg, "remediation failed") {
+		t.Errorf("error missing captured output: %q", msg)
+	}
+}
+
+func TestDoctorRunPackScriptCheckReportsFixFailure(t *testing.T) {
+	dir := t.TempDir()
+	check := writeCheckScript(t, dir, "#!/bin/sh\necho 'marker missing'\nexit 2\n")
+	fix := writeFixScript(t, dir, "#!/bin/sh\necho 'cannot create marker'\nexit 5\n")
+	d := &Doctor{}
+	d.Register(&PackScriptCheck{
+		CheckName: "topo:fix-fail",
+		Script:    check,
+		FixScript: fix,
+		PackDir:   dir,
+		PackName:  "topo",
+	})
+
+	var buf bytes.Buffer
+	report := d.Run(&CheckContext{CityPath: t.TempDir()}, &buf, true)
+
+	if report.Fixed != 0 {
+		t.Errorf("Fixed = %d, want 0", report.Fixed)
+	}
+	if report.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", report.Failed)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "fix failed: fix script exited with status 5: cannot create marker") {
+		t.Errorf("output missing fix script failure: %q", out)
+	}
+}
+
+func TestPackScriptCheckFixMissingScript(t *testing.T) {
+	c := &PackScriptCheck{
+		CheckName: "topo:fix-missing",
+		Script:    "/irrelevant",
+		FixScript: "/nonexistent/fix.sh",
+		PackDir:   t.TempDir(),
+		PackName:  "topo",
+	}
+
+	err := c.Fix(&CheckContext{CityPath: t.TempDir()})
+	if err == nil {
+		t.Fatal("Fix() returned nil for missing script, want error")
 	}
 }
 

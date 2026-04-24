@@ -95,14 +95,16 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	}
 
 	// Step 1: Build desired set.
-	// Drained and dependency_only beads are excluded from demand-driven wake.
+	// Drained beads are excluded from generic template demand, but explicit
+	// compatible wake causes (pending create, named-always, assigned work) may
+	// still reuse the same bead.
 	desired := make(map[string]string) // sessionName → reason
 
 	// Newly created beads that still carry a controller create claim must be
 	// launched at least once, even if the work signal that materialized them
 	// is no longer visible on the very next tick.
 	for _, bead := range input.SessionBeads {
-		if bead.Drained || !bead.PendingCreate {
+		if !bead.PendingCreate {
 			continue
 		}
 		desired[bead.SessionName] = "pending-create"
@@ -117,7 +119,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		case "always":
 			if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
-				if bead != nil && !bead.Drained && !bead.DependencyOnly {
+				if bead != nil && !bead.DependencyOnly {
 					desired[sn] = "named-always"
 				}
 			} else {
@@ -201,7 +203,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	// accept current session_name and exact configured named identity tokens,
 	// but normal targeting surfaces write the concrete bead ID.
 	for _, bead := range input.SessionBeads {
-		if bead.State == "closed" || bead.Drained {
+		if bead.State == "closed" {
 			continue
 		}
 		if _, already := desired[bead.SessionName]; already {
@@ -275,8 +277,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 		// Durable pin override — wakes and keeps the session awake while
 		// still respecting hard blockers applied below.
-		pinBlockedByState := bead.State == "suspended" || bead.State == "closed"
-		if !decision.ShouldWake && bead.Pinned && !pinBlockedByState && !bead.DependencyOnly && !bead.Drained && !bead.WaitHold {
+		pinBlockedByState := bead.State == "suspended" || bead.State == "closed" || bead.Drained
+		if !decision.ShouldWake && bead.Pinned && !pinBlockedByState && !bead.DependencyOnly && !bead.WaitHold {
 			if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
 				decision.ShouldWake = true
 				decision.Reason = "pin"

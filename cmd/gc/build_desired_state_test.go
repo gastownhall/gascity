@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -46,7 +47,7 @@ func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T)
 		t.Fatalf("create queued bead: %v", err)
 	}
 
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1: %#v", len(got), got)
 	}
@@ -81,7 +82,7 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 		t.Fatalf("add blocking dep: %v", err)
 	}
 
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
 	}
@@ -105,7 +106,7 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}); err != nil {
 		t.Fatalf("create unrouted bead: %v", err)
 	}
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0", len(got))
 	}
@@ -143,12 +144,111 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task bead: %v", err)
 	}
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1 (task only): %#v", len(got), got)
 	}
 	if got[0].ID != task.ID {
 		t.Fatalf("expected task %q, got %q", task.ID, got[0].ID)
+	}
+}
+
+func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "assigned rig work",
+		Type:     "task",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set rig work in_progress: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("reload rig work bead: %v", err)
+	}
+
+	got, stores, partial := collectAssignedWorkBeadsWithStores(
+		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
+		cityStore,
+		map[string]beads.Store{"repo": rigStore},
+		nil,
+	)
+	if partial {
+		t.Fatal("partial = true, want false")
+	}
+	if len(got) != 1 || got[0].ID != work.ID {
+		t.Fatalf("collectAssignedWorkBeadsWithStores returned %#v, want [%s]", got, work.ID)
+	}
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("stores = %#v, want [rig store]", stores)
+	}
+}
+
+func TestCollectAssignedWorkBeadsWithStores_PreservesCrossStoreIDCollisions(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cityWork, err := cityStore.Create(beads.Bead{
+		Title:    "assigned city work",
+		Type:     "task",
+		Assignee: "worker-city",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create city work bead: %v", err)
+	}
+	if err := cityStore.Update(cityWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set city work in_progress: %v", err)
+	}
+	cityWork, err = cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("reload city work bead: %v", err)
+	}
+	rigWork, err := rigStore.Create(beads.Bead{
+		Title:    "assigned rig work",
+		Type:     "task",
+		Assignee: "worker-rig",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(rigWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set rig work in_progress: %v", err)
+	}
+	rigWork, err = rigStore.Get(rigWork.ID)
+	if err != nil {
+		t.Fatalf("reload rig work bead: %v", err)
+	}
+	if cityWork.ID != rigWork.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
+	}
+
+	got, stores, partial := collectAssignedWorkBeadsWithStores(
+		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
+		cityStore,
+		map[string]beads.Store{"repo": rigStore},
+		nil,
+	)
+	if partial {
+		t.Fatal("partial = true, want false")
+	}
+	if len(got) != 2 {
+		t.Fatalf("collectAssignedWorkBeadsWithStores returned %d beads, want 2: %#v", len(got), got)
+	}
+	if len(stores) != len(got) {
+		t.Fatalf("stores length = %d, want %d", len(stores), len(got))
+	}
+	if got[0].ID != cityWork.ID || stores[0] != cityStore {
+		t.Fatalf("first collected work = (%s, %#v), want city work/store", got[0].ID, stores[0])
+	}
+	if got[1].ID != rigWork.ID || stores[1] != rigStore {
+		t.Fatalf("second collected work = (%s, %#v), want rig work/store", got[1].ID, stores[1])
 	}
 }
 
@@ -243,6 +343,153 @@ func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T)
 	}
 }
 
+func TestBuildDesiredState_IncludesImportedAlwaysNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repo")
+	for path, contents := range map[string]string{
+		filepath.Join(cityPath, "pack.toml"): `
+[pack]
+name = "import-regression"
+schema = 2
+
+[imports.gs]
+source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, "city.toml"): `
+[workspace]
+name = "import-regression"
+provider = "claude"
+
+[[rigs]]
+name = "repo"
+path = "./repo"
+
+[rigs.imports.gs]
+source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, "assets", "sidecar", "pack.toml"): `
+[pack]
+name = "sidecar"
+schema = 2
+
+[[named_session]]
+template = "captain"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "watcher"
+scope = "rig"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "captain", "prompt.md"):  "You are the imported captain.\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "agent.toml"): "scope = \"rig\"\n",
+		filepath.Join(cityPath, "assets", "sidecar", "agents", "watcher", "prompt.md"):  "You are the imported watcher.\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", rigPath, err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
+
+	captain, ok := dsResult.State["gs__captain"]
+	if !ok {
+		t.Fatalf("desired state missing gs__captain; keys=%v", mapKeys(dsResult.State))
+	}
+	if captain.TemplateName != "gs.captain" {
+		t.Fatalf("gs__captain TemplateName = %q, want %q", captain.TemplateName, "gs.captain")
+	}
+	if captain.ConfiguredNamedIdentity != "gs.captain" {
+		t.Fatalf("gs__captain ConfiguredNamedIdentity = %q, want %q", captain.ConfiguredNamedIdentity, "gs.captain")
+	}
+
+	watcher, ok := dsResult.State["repo--gs__watcher"]
+	if !ok {
+		t.Fatalf("desired state missing repo--gs__watcher; keys=%v", mapKeys(dsResult.State))
+	}
+	if watcher.TemplateName != "repo/gs.watcher" {
+		t.Fatalf("repo--gs__watcher TemplateName = %q, want %q", watcher.TemplateName, "repo/gs.watcher")
+	}
+	if watcher.ConfiguredNamedIdentity != "repo/gs.watcher" {
+		t.Fatalf("repo--gs__watcher ConfiguredNamedIdentity = %q, want %q", watcher.ConfiguredNamedIdentity, "repo/gs.watcher")
+	}
+}
+
+func TestBuildDesiredState_TransitiveFalseSkipsNestedImportedNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	for path, contents := range map[string]string{
+		filepath.Join(cityPath, "city.toml"): `
+[workspace]
+name = "import-regression"
+provider = "claude"
+
+[imports.outer]
+source = "./assets/outer"
+transitive = false
+`,
+		filepath.Join(cityPath, "assets", "outer", "pack.toml"): `
+[pack]
+name = "outer"
+schema = 2
+
+[imports.inner]
+source = "../inner"
+
+[[named_session]]
+template = "captain"
+scope = "city"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "outer", "agents", "captain", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "outer", "agents", "captain", "prompt.md"):  "You are the outer captain.\n",
+		filepath.Join(cityPath, "assets", "inner", "pack.toml"): `
+[pack]
+name = "inner"
+schema = 2
+
+[[named_session]]
+template = "watcher"
+scope = "city"
+mode = "always"
+`,
+		filepath.Join(cityPath, "assets", "inner", "agents", "watcher", "agent.toml"): "scope = \"city\"\n",
+		filepath.Join(cityPath, "assets", "inner", "agents", "watcher", "prompt.md"):  "You are the inner watcher.\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
+	if _, ok := dsResult.State["outer__captain"]; !ok {
+		t.Fatalf("desired state missing outer__captain; keys=%v", mapKeys(dsResult.State))
+	}
+	if _, ok := dsResult.State["outer__watcher"]; ok {
+		t.Fatalf("desired state should not include nested named session when transitive=false; keys=%v", mapKeys(dsResult.State))
+	}
+}
+
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
@@ -285,6 +532,70 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 	}
 	if claudeSessions != 1 {
 		t.Fatalf("claude desired sessions = %d, want 1 (scale_check only)", claudeSessions)
+	}
+}
+
+func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(t *testing.T) {
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+	jqPath, err := findPreferredBinary("jq")
+	if err != nil {
+		t.Skip("jq not installed")
+	}
+
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("BEADS_DIR", beadsDir)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
+
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+		"BEADS_DIR": beadsDir,
+	}))
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued polecat work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "polecat",
+		},
+	}); err != nil {
+		t.Fatalf("create routed work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if len(dsResult.AssignedWorkBeads) != 0 {
+		t.Fatalf("AssignedWorkBeads = %d, want 0 for routed unassigned work", len(dsResult.AssignedWorkBeads))
+	}
+	if got := dsResult.ScaleCheckCounts["polecat"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[polecat] = %d, want 1 from default scale_check routed ready work", got)
+	}
+	polecatSessions := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "polecat" {
+			polecatSessions++
+		}
+	}
+	if polecatSessions != 1 {
+		t.Fatalf("polecat desired sessions = %d, want 1 for min=0 routed ready work; stderr:\n%s", polecatSessions, stderr.String())
 	}
 }
 
@@ -1321,6 +1632,50 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	}
 	if got := sessionBeads[0].Metadata[poolManagedMetadataKey]; got != "true" {
 		t.Fatalf("pool_managed = %q, want true", got)
+	}
+}
+
+func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var (
+		sessionName string
+		firstTP     TemplateParams
+	)
+	for sn, tp := range first.State {
+		if tp.TemplateName == "gascity/polecat" {
+			sessionName = sn
+			firstTP = tp
+			break
+		}
+	}
+	if sessionName == "" {
+		t.Fatalf("first desired state missing gascity/polecat session: %#v", first.State)
+	}
+	startedHash := runtime.CoreFingerprint(templateParamsToConfig(firstTP))
+
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	secondTP, ok := second.State[sessionName]
+	if !ok {
+		t.Fatalf("second desired state missing existing session %q: %#v", sessionName, second.State)
+	}
+	currentHash := runtime.CoreFingerprint(templateParamsToConfig(secondTP))
+	if currentHash != startedHash {
+		t.Fatalf("pool session core fingerprint changed across desired-state ticks: first=%s second=%s first_alias=%q second_alias=%q",
+			startedHash, currentHash, firstTP.Env["GC_ALIAS"], secondTP.Env["GC_ALIAS"])
 	}
 }
 

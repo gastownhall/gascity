@@ -321,10 +321,7 @@ scope = "city"
 }
 
 func TestEffectiveMCPForAgent_BootstrapLayerIncluded(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
-
-	coreCacheDir := config.GlobalRepoCachePath(gcHome, "github.com/gastownhall/gc-core", "deadbeef")
+	coreCacheDir := t.TempDir()
 	mustWriteFile(t, filepath.Join(coreCacheDir, "pack.toml"), `
 [pack]
 name = "core"
@@ -334,31 +331,16 @@ schema = 1
 name = "bootstrap"
 command = "uvx"
 `)
-	mustWriteFile(t, filepath.Join(gcHome, "implicit-import.toml"), `
-schema = 1
 
-[imports.core]
-source = "github.com/gastownhall/gc-core"
-version = "0.1.0"
-commit = "deadbeef"
-`)
-
-	cityDir := t.TempDir()
-	mustWriteFile(t, filepath.Join(cityDir, "city.toml"), `
-[workspace]
-name = "test-city"
-
-[[agent]]
-name = "mayor"
-scope = "city"
-`)
-
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	if !cfg.BootstrapImportBindings["core"] {
-		t.Fatalf("BootstrapImportBindings[core]=false, want true")
+	cfg := &config.City{
+		BootstrapImportPackDirs: []string{coreCacheDir},
+		BootstrapImportMCPBindings: map[string]string{
+			coreCacheDir: "core",
+		},
+		Agents: []config.Agent{{
+			Name:  "mayor",
+			Scope: "city",
+		}},
 	}
 
 	mayor := mustFindAgent(t, cfg, "mayor")

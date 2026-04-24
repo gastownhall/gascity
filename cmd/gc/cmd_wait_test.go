@@ -25,6 +25,17 @@ type waitErrorStore struct {
 	*beads.MemStore
 }
 
+type waitNudgeMetadataFailStore struct {
+	*beads.MemStore
+}
+
+func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
+	if key == "nudge_id" {
+		return errors.New("set nudge id failed")
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
 var (
 	waitTestRealBDPathOnce sync.Once
 	waitTestRealBDCached   string
@@ -37,7 +48,7 @@ var (
 
 func waitTestEnv(overrides map[string]string) []string {
 	env := map[string]string{}
-	for _, entry := range os.Environ() {
+	for _, entry := range sanitizedBaseEnv() {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
@@ -786,6 +797,98 @@ func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 	}
 }
 
+func TestDispatchReadyWaitNudges_PropagatesNudgeIDMetadataFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := waitNudgeMetadataFailStore{MemStore: beads.NewMemStore()}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	err = dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "setting wait nudge_id") {
+		t.Fatalf("dispatchReadyWaitNudges error = %v, want nudge_id failure", err)
+	}
+}
+
+func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		return errors.New("poller failed")
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	err = dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "starting wait nudge poller") {
+		t.Fatalf("dispatchReadyWaitNudges error = %v, want poller failure", err)
+	}
+}
+
 func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -1215,10 +1318,20 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 	script := gcBeadsBdScriptPath(cityPath)
+	poisonRuntimeDir := filepath.Join(t.TempDir(), "poison-runtime")
+	poisonPackStateDir := filepath.Join(poisonRuntimeDir, "packs", "dolt")
+	poisonStateFile := filepath.Join(poisonPackStateDir, "dolt-provider-state.json")
+	t.Setenv("GC_CITY_RUNTIME_DIR", poisonRuntimeDir)
+	t.Setenv("GC_PACK_STATE_DIR", poisonPackStateDir)
+	t.Setenv("GC_DOLT_STATE_FILE", poisonStateFile)
+	scriptEnv := sanitizedBaseEnv(
+		"GC_CITY="+cityPath,
+		"GC_CITY_PATH="+cityPath,
+	)
 	runScript := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command(script, args...)
-		cmd.Env = os.Environ()
+		cmd.Env = scriptEnv
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", strings.Join(args, " "), err, out)
@@ -1226,11 +1339,14 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	}
 	t.Cleanup(func() {
 		cmd := exec.Command(script, "stop")
-		cmd.Env = os.Environ()
+		cmd.Env = scriptEnv
 		_, _ = cmd.CombinedOutput()
 	})
 
 	runScript("start")
+	if _, err := os.Stat(poisonStateFile); !os.IsNotExist(err) {
+		t.Fatalf("start leaked ambient GC_* state to %q, stat err = %v", poisonStateFile, err)
+	}
 	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
 		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}

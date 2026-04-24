@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,7 +96,7 @@ func TestWispGC_EmptyList(t *testing.T) {
 	}
 }
 
-func TestWispGC_DeleteErrorContinues(t *testing.T) {
+func TestWispGC_DeleteErrorIsSurfacedAndContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -105,13 +106,241 @@ func TestWispGC_DeleteErrorContinues(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour)
 	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected delete error to be surfaced")
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-2")
+}
+
+func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+		{
+			ID:        "mol-1.2",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1.1",
+		},
+	})
+	if err := store.DepAdd("mol-1.1", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1->mol-1): %v", err)
+	}
+	if err := store.DepAdd("mol-1.2", "mol-1.1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.2->mol-1.1): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 root purge accounting", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1", "mol-1.1", "mol-1.2")
+	for _, id := range []string{"mol-1", "mol-1.1", "mol-1.2"} {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("Get(%s) succeeded after GC delete", id)
+		}
+	}
+}
+
+func TestWispGC_DoesNotDeleteExternalDependents(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+		makeGCBead("external-1", now.Add(-2*time.Hour), "open", "task"),
+	})
+	if err := store.DepAdd("mol-1.1", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1->mol-1): %v", err)
+	}
+	if err := store.DepAdd("external-1", "mol-1.1", "blocks"); err != nil {
+		t.Fatalf("DepAdd(external-1->mol-1.1): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-2")
+	assertDeletedIDs(t, store.deletedIDs, "mol-1", "mol-1.1")
+	if _, err := store.Get("external-1"); err != nil {
+		t.Fatalf("external dependent was deleted: %v", err)
+	}
+}
+
+func TestWispGC_PurgesParentChildOwnedDependentsWithoutMetadata(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+		{
+			ID:        "mol-1.2",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+		},
+	})
+	if err := store.DepAdd("mol-1.1", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1->mol-1): %v", err)
+	}
+	if err := store.DepAdd("mol-1.2", "mol-1.1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.2->mol-1.1): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1", "mol-1.1", "mol-1.2")
+}
+
+func TestWispGC_LeavesRootWhenChildDeleteFails(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+	})
+	if err := store.DepAdd("mol-1.1", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1->mol-1): %v", err)
+	}
+	store.deleteErrors["mol-1.1"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected child delete error")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 when child delete fails", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none", store.deletedIDs)
+	}
+	if _, err := store.Get("mol-1"); err != nil {
+		t.Fatalf("root deleted after child failure: %v", err)
+	}
+	if _, err := store.Get("mol-1.1"); err != nil {
+		t.Fatalf("child unexpectedly deleted after failure: %v", err)
+	}
+}
+
+func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+		{
+			ID:        "mol-1.1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1.1",
+		},
+		{
+			ID:        "mol-1.2",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+	})
+	if err := store.DepAdd("mol-1.1", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1->mol-1): %v", err)
+	}
+	if err := store.DepAdd("mol-1.1.1", "mol-1.1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1.1->mol-1.1): %v", err)
+	}
+	if err := store.DepAdd("mol-1.2", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.2->mol-1): %v", err)
+	}
+	store.deleteErrors["mol-1.2"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected first pass child delete error")
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("first pass err = %v, want delete failure to be included", err)
+	}
+	if purged != 0 {
+		t.Fatalf("first purged = %d, want 0", purged)
+	}
+	if _, err := store.Get("mol-1"); err != nil {
+		t.Fatalf("root deleted after partial child failure: %v", err)
+	}
+	if _, err := store.Get("mol-1.2"); err != nil {
+		t.Fatalf("failing child deleted unexpectedly: %v", err)
+	}
+	if _, err := store.Get("mol-1.1"); err == nil {
+		t.Fatalf("expected an earlier child to be deleted before downstream failure")
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1.1.1", "mol-1.1")
+
+	delete(store.deleteErrors, "mol-1.2")
+	purged, err = wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC second pass: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("second purged = %d, want 1", purged)
+	}
+	for _, id := range []string{"mol-1", "mol-1.2"} {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("Get(%s) succeeded after retry cleanup", id)
+		}
+	}
 }
 
 func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
@@ -134,7 +363,7 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
 }
 
-func TestWispGC_TrackingListErrorIsBestEffort(t *testing.T) {
+func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -144,13 +373,46 @@ func TestWispGC_TrackingListErrorIsBestEffort(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour)
 	purged, err := wg.runGC(store, now)
+	if err == nil {
+		t.Fatal("expected tracking list error to be surfaced")
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if !strings.Contains(err.Error(), "tracking list failed") {
+		t.Fatalf("err = %v, want tracking list failure to be included", err)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+}
+
+func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithLabels("track-old", now.Add(-3*time.Hour), "closed", "task", labelOrderTracking),
+		{
+			ID:        "track-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-3 * time.Hour),
+			ParentID:  "track-old",
+		},
+	})
+	if err := store.DepAdd("track-child", "track-old", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(track-child->track-old): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+	assertDeletedIDs(t, store.deletedIDs, "track-old")
+	if _, err := store.Get("track-child"); err != nil {
+		t.Fatalf("tracking child was deleted: %v", err)
+	}
 }
 
 func TestWispGC_ListErrorFailsRun(t *testing.T) {

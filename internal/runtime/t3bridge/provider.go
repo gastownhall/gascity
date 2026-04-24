@@ -164,6 +164,7 @@ func readRuntimeWSURL() (string, error) {
 
 func resolveRuntimeStatePaths() []string {
 	home := os.Getenv("HOME")
+	explicitT3Home := strings.TrimSpace(os.Getenv("T3_HOME")) != ""
 	baseDir := resolveT3BaseDir()
 	paths := make([]string, 0, 4)
 	seen := make(map[string]struct{})
@@ -181,7 +182,7 @@ func resolveRuntimeStatePaths() []string {
 
 	add(filepath.Join(baseDir, "server-runtime.json"))
 	add(filepath.Join(baseDir, "dev", "server-runtime.json"))
-	if strings.TrimSpace(home) != "" {
+	if !explicitT3Home && strings.TrimSpace(home) != "" {
 		add(filepath.Join(home, ".t3", "server-runtime.json"))
 		add(filepath.Join(home, ".t3", "dev", "server-runtime.json"))
 	}

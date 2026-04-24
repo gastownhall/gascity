@@ -43,8 +43,9 @@ func TestDoRegister(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS).
-	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	// Registry.Register stores the same canonical comparison form used by
+	// runtime path comparisons.
+	resolvedCityPath := canonicalTestPath(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Errorf("expected 1 entry at %s, got %v", resolvedCityPath, entries)
 	}
@@ -200,7 +201,44 @@ func TestDoRegisterWithoutNameStillUsesWorkspaceName(t *testing.T) {
 	}
 }
 
-func TestDoRegisterWithoutNameFallsBackToPackNameWithoutMutatingCityToml(t *testing.T) {
+func TestDoRegisterWithoutNameUsesSiteBoundWorkspaceName(t *testing.T) {
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = nil
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte("workspace_name = \"site-name\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegister([]string{cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", code, stderr.String())
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %v", entries)
+	}
+	if entries[0].Name != "site-name" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "site-name")
+	}
+}
+
+func TestDoRegisterWithoutNameFallsBackToDirBasenameWithoutMutatingCityToml(t *testing.T) {
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = nil
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
@@ -233,8 +271,8 @@ func TestDoRegisterWithoutNameFallsBackToPackNameWithoutMutatingCityToml(t *test
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %v", entries)
 	}
-	if entries[0].Name != "pack-name" {
-		t.Fatalf("registry name = %q, want %q", entries[0].Name, "pack-name")
+	if entries[0].Name != "my-city" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "my-city")
 	}
 
 	gotCityToml, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
@@ -246,7 +284,7 @@ func TestDoRegisterWithoutNameFallsBackToPackNameWithoutMutatingCityToml(t *test
 	}
 }
 
-func TestDoRegisterWithoutNameErrorsWhenWorkspaceAndPackNameMissing(t *testing.T) {
+func TestDoRegisterWithoutNameUsesDirBasenameWhenWorkspaceAndPackNameMissing(t *testing.T) {
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = nil
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
@@ -266,11 +304,20 @@ func TestDoRegisterWithoutNameErrorsWhenWorkspaceAndPackNameMissing(t *testing.T
 
 	var stdout, stderr bytes.Buffer
 	code := doRegister([]string{cityPath}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("expected exit 1, got %d", code)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "missing [pack].name") {
-		t.Fatalf("stderr = %q, want missing [pack].name", stderr.String())
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %v", entries)
+	}
+	if entries[0].Name != "my-city" {
+		t.Fatalf("registry name = %q, want %q", entries[0].Name, "my-city")
 	}
 }
 
@@ -422,11 +469,11 @@ func TestDoRegister_Regression602_DoesNotMutateCityToml(t *testing.T) {
 			wantRegName:  "machine-alias",
 		},
 		{
-			name:         "no --name, workspace.name empty, pack.name fallback — city.toml unchanged",
+			name:         "no --name, workspace.name empty, basename fallback — city.toml unchanged",
 			cityToml:     "[workspace]\n",
 			packToml:     "[pack]\nname = \"pack-name\"\nschema = 2\n",
 			nameOverride: "",
-			wantRegName:  "pack-name",
+			wantRegName:  "my-city",
 		},
 	}
 
@@ -492,11 +539,13 @@ func TestCitiesListSubcommandAliasesDefaultAction(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newCitiesCmd(&stdout, &stderr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"list"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("gc cities list failed: %v\nstderr: %s", err, stderr.String())
+		t.Fatalf("gc cities list: %v; stderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "bright-lights") {
-		t.Errorf("expected 'bright-lights' in output, got: %s", stdout.String())
+		t.Fatalf("stdout = %q, want bright-lights listing", stdout.String())
 	}
 }

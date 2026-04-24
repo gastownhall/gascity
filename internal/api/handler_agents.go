@@ -202,14 +202,25 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
-// findActiveBead returns the ID of the first in_progress bead assigned to the
-// given agent. If rig is non-empty, only that rig's store is searched;
-// otherwise all stores are searched. Returns "" if no match.
-//
-// Uses ListByAssignee with limit=1 instead of List() to avoid fetching all
-// beads from every store — a critical performance fix when bead counts are
-// large (e.g., 2200+ beads × 102 agents = ~186 full-list subprocess spawns).
+// findActiveBeadForAssignees returns the ID of the first in_progress bead
+// assigned to the given identities using the cached active snapshot. If rig is
+// non-empty, only that rig's store is searched; otherwise all stores are
+// searched. Returns "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
+	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
+}
+
+// findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
+// assigned to the given identities, bypassing the cache. Use this on
+// lower-frequency detail views where external reassignment freshness matters.
+func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
+	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
+}
+
+// findActiveBeadForAssigneesWithFreshness uses a targeted ListQuery with
+// Limit=1 instead of broad scans so active-bead lookup stays cheap even when
+// bead counts are large.
+func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
 	if rig != "" {
@@ -235,6 +246,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 			matches, err := stores[rn].List(beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
+				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			})
@@ -252,12 +264,33 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // providerPathCheck returns the binary name to check for PATH availability.
 // Uses the provider's PathCheck field if set (e.g., "claude" for the sh -c wrapper),
 // otherwise falls back to the provider's Command.
+//
+// Lookup order:
+//  1. Resolved-provider cache (ResolvedProviderCached) — picks up
+//     inherited Command/PathCheck for base-only descendants.
+//  2. Raw city-level spec — fallback for Phase A configs without `base`.
+//  3. Builtin spec — covers pure-builtin providers with no city override.
+//  4. The provider name itself — last-resort sentinel so callers can
+//     still exec.LookPath something readable.
 func providerPathCheck(providerName string, cfg *config.City) string {
+	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+		// ResolvedProvider.Command is fully inherited; PathCheck is
+		// on the raw spec, so check it first on the raw then fall
+		// through to the resolved Command.
+		if spec, ok := cfg.Providers[providerName]; ok && spec.PathCheck != "" {
+			return spec.PathCheck
+		}
+		if resolved.Command != "" {
+			return resolved.Command
+		}
+	}
 	if spec, ok := cfg.Providers[providerName]; ok {
 		if spec.PathCheck != "" {
 			return spec.PathCheck
 		}
-		return spec.Command
+		if spec.Command != "" {
+			return spec.Command
+		}
 	}
 	builtins := config.BuiltinProviders()
 	if spec, ok := builtins[providerName]; ok {
@@ -271,6 +304,11 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 
 // resolveProviderInfo resolves the provider name and display name for an agent.
 // Falls back to workspace default if the agent doesn't specify a provider.
+//
+// DisplayName lookup consults the resolved-provider cache first so
+// base-only descendants inherit their ancestor's display name when the
+// leaf didn't declare its own. Raw city spec and builtin spec are
+// fallbacks for Phase A configs where the cache may not have an entry.
 func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, displayName string) {
 	provider = agentProvider
 	if provider == "" {
@@ -280,9 +318,21 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 		return "", ""
 	}
 
-	// Check city-level provider overrides first.
+	// Prefer the raw spec's DisplayName when explicitly set — leaf
+	// authors expect their city.toml's display_name to win. If the
+	// leaf didn't set one, consult the cache (so inherited names
+	// surface for base-only descendants). Fall through to builtins.
 	if spec, ok := cfg.Providers[provider]; ok && spec.DisplayName != "" {
 		return provider, spec.DisplayName
+	}
+	// Cached resolution doesn't carry DisplayName today (the field
+	// sits on ProviderSpec, not ResolvedProvider). Use the base
+	// chain's builtin ancestor as a proxy: if the cache reports a
+	// BuiltinAncestor, look up its DisplayName.
+	if resolved, ok := config.ResolvedProviderCached(cfg, provider); ok && resolved.BuiltinAncestor != "" {
+		if bspec, bok := config.BuiltinProviders()[resolved.BuiltinAncestor]; bok && bspec.DisplayName != "" {
+			return provider, bspec.DisplayName
+		}
 	}
 	// Fall back to built-in providers.
 	if spec, ok := config.BuiltinProviders()[provider]; ok {

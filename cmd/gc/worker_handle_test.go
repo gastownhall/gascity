@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,6 +100,45 @@ STUB_ENV = "present"
 	}
 	if start.Env["STUB_ENV"] != "present" {
 		t.Fatalf("Env[STUB_ENV] = %q, want present", start.Env["STUB_ENV"])
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "claude",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": claude,
+		},
+	}
+
+	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "")
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if !strings.Contains(resolved.Command, "--dangerously-skip-permissions") {
+		t.Fatalf("Command = %q, want unrestricted default", resolved.Command)
+	}
+	if !strings.Contains(resolved.Command, "--effort max") {
+		t.Fatalf("Command = %q, want effort max default", resolved.Command)
+	}
+	if !strings.Contains(resolved.Command, "--settings") {
+		t.Fatalf("Command = %q, want settings arg", resolved.Command)
 	}
 }
 
@@ -459,7 +500,7 @@ ready_delay_ms = 250
 	}
 }
 
-func TestWorkerSessionRuntimeResolverWithConfigReturnsErrorForInvalidResolvedRuntime(t *testing.T) {
+func TestWorkerSessionRuntimeResolverWithConfigFallsBackToProviderNameWhenResolvedCommandMissing(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -476,8 +517,122 @@ func TestWorkerSessionRuntimeResolverWithConfigReturnsErrorForInvalidResolvedRun
 		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
 	}
 
-	_, err := resolver(session.Info{Template: "worker"}, "")
-	if err == nil {
-		t.Fatal("resolver error = nil, want invalid resolved runtime error")
+	runtimeCfg, err := resolver(session.Info{Template: "worker"}, "")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolver() = nil")
+	}
+	if got, want := runtimeCfg.Command, "stub"; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Provider, "stub"; got != want {
+		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+}
+
+func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnIncompleteResolvedConfig(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "stub",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				ReadyPromptPrefix: "resolved-ready>",
+				ReadyDelayMs:      321,
+			},
+		},
+	}
+
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	if resolver == nil {
+		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
+	}
+
+	info := session.Info{
+		Template:      "worker",
+		Command:       "persisted-worker --dangerously-skip-permissions",
+		Provider:      "persisted-provider",
+		WorkDir:       "/tmp/persisted-workdir",
+		ResumeFlag:    "--resume-persisted",
+		ResumeStyle:   "subcommand",
+		ResumeCommand: "persisted resume {{.SessionKey}}",
+	}
+
+	runtimeCfg, err := resolver(info, "")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolver() = nil")
+	}
+	if got, want := runtimeCfg.Command, info.Command; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Provider, info.Provider; got != want {
+		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.WorkDir, info.WorkDir; got != want {
+		t.Fatalf("WorkDir = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Resume.ResumeFlag, info.ResumeFlag; got != want {
+		t.Fatalf("Resume.ResumeFlag = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Resume.ResumeStyle, info.ResumeStyle; got != want {
+		t.Fatalf("Resume.ResumeStyle = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Resume.ResumeCommand, info.ResumeCommand; got != want {
+		t.Fatalf("Resume.ResumeCommand = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.WorkDir, info.WorkDir; got != want {
+		t.Fatalf("Hints.WorkDir = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.ReadyPromptPrefix, "resolved-ready>"; got != want {
+		t.Fatalf("Hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.ReadyDelayMs, 321; got != want {
+		t.Fatalf("Hints.ReadyDelayMs = %d, want %d", got, want)
+	}
+}
+
+func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedProviderWhenCommandMissing(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "resolved-provider",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"resolved-provider": {
+				ReadyPromptPrefix: "resolved-ready>",
+			},
+		},
+	}
+
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	if resolver == nil {
+		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
+	}
+
+	info := session.Info{
+		Template: "worker",
+		Provider: "persisted-provider",
+	}
+
+	runtimeCfg, err := resolver(info, "")
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolver() = nil")
+	}
+	if got, want := runtimeCfg.Command, info.Provider; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Provider, info.Provider; got != want {
+		t.Fatalf("Provider = %q, want %q", got, want)
 	}
 }

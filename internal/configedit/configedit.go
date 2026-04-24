@@ -101,7 +101,7 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
-	if err := config.ValidateRigs(cfg.Rigs, cfg.Workspace.Name); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -149,7 +149,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	if err := config.ValidateAgents(raw.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
-	if err := config.ValidateRigs(raw.Rigs, raw.Workspace.Name); err != nil {
+	if err := config.ValidateRigs(raw.Rigs, config.EffectiveHQPrefix(raw)); err != nil {
 		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	if err := config.ValidateServices(raw.Services); err != nil {
@@ -690,14 +690,24 @@ func (e *Editor) DeleteRig(name string) error {
 
 // ProviderUpdate holds optional fields for a partial provider update.
 // Pointer fields distinguish "not set" from "set to zero value."
+//
+// Base uses **string so callers can distinguish four cases:
+//   - nil              → no-op (don't touch Base)
+//   - &(*string)(nil)  → clear Base declaration (remove the TOML key)
+//   - &(&"")           → set explicit empty (standalone opt-out)
+//   - &(&"<name>")     → set concrete value
 type ProviderUpdate struct {
-	DisplayName  *string
-	Command      *string
-	Args         []string // nil = not set, non-nil = replace
-	PromptMode   *string
-	PromptFlag   *string
-	ReadyDelayMs *int
-	Env          map[string]string // nil = not set, non-nil = additive merge
+	DisplayName        *string
+	Base               **string
+	Command            *string
+	Args               []string // nil = not set, non-nil = replace
+	ArgsAppend         []string // nil = not set, non-nil = replace
+	PromptMode         *string
+	PromptFlag         *string
+	ReadyDelayMs       *int
+	Env                map[string]string // nil = not set, non-nil = additive merge
+	OptionsSchemaMerge *string
+	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -730,12 +740,22 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		if patch.DisplayName != nil {
 			spec.DisplayName = *patch.DisplayName
 		}
+		if patch.Base != nil {
+			// Outer non-nil: patch touches Base. Inner may be nil (clear
+			// to absent/inherit) or a pointer to a string ("" opt-out
+			// or concrete).
+			spec.Base = *patch.Base
+		}
 		if patch.Command != nil {
 			spec.Command = *patch.Command
 		}
 		if patch.Args != nil {
 			spec.Args = make([]string, len(patch.Args))
 			copy(spec.Args, patch.Args)
+		}
+		if patch.ArgsAppend != nil {
+			spec.ArgsAppend = make([]string, len(patch.ArgsAppend))
+			copy(spec.ArgsAppend, patch.ArgsAppend)
 		}
 		if patch.PromptMode != nil {
 			spec.PromptMode = *patch.PromptMode
@@ -753,6 +773,12 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 			for k, v := range patch.Env {
 				spec.Env[k] = v
 			}
+		}
+		if patch.OptionsSchemaMerge != nil {
+			spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
+		}
+		if patch.OptionsSchema != nil {
+			spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 		}
 		cfg.Providers[name] = spec
 		return nil
@@ -867,22 +893,78 @@ func (e *Editor) DeleteProviderPatch(name string) error {
 	})
 }
 
-// SetOrderOverride creates or updates an order override in
+// SetOrderOverride creates or replaces an order override in
 // [orders.overrides]. Matches by name and rig.
 func (e *Editor) SetOrderOverride(ov config.OrderOverride) error {
+	return e.setOrderOverride(ov, false)
+}
+
+// MergeOrderOverride creates or updates an order override in
+// [orders.overrides], preserving existing fields when the incoming
+// override leaves them unset. Matches by name and rig.
+func (e *Editor) MergeOrderOverride(ov config.OrderOverride) error {
+	return e.setOrderOverride(ov, true)
+}
+
+func (e *Editor) setOrderOverride(ov config.OrderOverride, merge bool) error {
 	return e.Edit(func(cfg *config.City) error {
 		if ov.Name == "" {
 			return fmt.Errorf("order override: name is required")
 		}
+		normalizeOrderOverrideForWrite(&ov)
 		for i := range cfg.Orders.Overrides {
 			if cfg.Orders.Overrides[i].Name == ov.Name && cfg.Orders.Overrides[i].Rig == ov.Rig {
-				cfg.Orders.Overrides[i] = ov
+				if merge {
+					mergeOrderOverride(&cfg.Orders.Overrides[i], ov)
+				} else {
+					cfg.Orders.Overrides[i] = ov
+				}
 				return nil
 			}
 		}
 		cfg.Orders.Overrides = append(cfg.Orders.Overrides, ov)
 		return nil
 	})
+}
+
+func normalizeOrderOverrideForWrite(ov *config.OrderOverride) {
+	if ov == nil {
+		return
+	}
+	if ov.Trigger == nil {
+		ov.Trigger = ov.Gate
+	}
+	ov.Gate = nil
+}
+
+func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
+	if dst == nil {
+		return
+	}
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if src.Trigger != nil {
+		dst.Trigger = src.Trigger
+	}
+	if src.Interval != nil {
+		dst.Interval = src.Interval
+	}
+	if src.Schedule != nil {
+		dst.Schedule = src.Schedule
+	}
+	if src.Check != nil {
+		dst.Check = src.Check
+	}
+	if src.On != nil {
+		dst.On = src.On
+	}
+	if src.Pool != nil {
+		dst.Pool = src.Pool
+	}
+	if src.Timeout != nil {
+		dst.Timeout = src.Timeout
+	}
 }
 
 // DeleteOrderOverride removes an order override by name and rig.
@@ -898,12 +980,27 @@ func (e *Editor) DeleteOrderOverride(name, rig string) error {
 	})
 }
 
-// validateProviders checks that all city-level providers have a command set.
+// validateProviders checks that every city-level provider is authorable:
+// either it declares a Command directly, or it has a Base set (in which
+// case Command can be inherited via the chain walk). A provider with
+// neither a Command nor a Base is rejected.
+//
+// Base presence is presence-aware (*string): any non-nil pointer counts
+// as "base declared" — including the explicit-empty opt-out `base = ""`.
+// The chain walker later resolves whether the declared base actually
+// produces a Command; that's a load-time concern, not a CRUD one.
 func validateProviders(providers map[string]config.ProviderSpec) error {
 	for name, spec := range providers {
-		if spec.Command == "" {
-			return fmt.Errorf("provider %q: command is required", name)
+		if spec.Command != "" {
+			continue
 		}
+		if spec.Base != nil {
+			continue
+		}
+		return fmt.Errorf("provider %q: command is required (or set base to inherit)", name)
+	}
+	if err := config.ValidateCustomProviderOptions(providers); err != nil {
+		return err
 	}
 	return nil
 }

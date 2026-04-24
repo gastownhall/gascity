@@ -137,6 +137,27 @@ func TestDoctor_FixFails(t *testing.T) {
 	if r.Failed != 1 {
 		t.Errorf("Failed = %d, want 1", r.Failed)
 	}
+	if !strings.Contains(buf.String(), "fix failed: fix failed") {
+		t.Errorf("output missing fix error: %q", buf.String())
+	}
+}
+
+func TestDoctor_FixSucceedsButCheckStillFails(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&unchangedFixCheck{})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if r.Fixed != 0 {
+		t.Errorf("Fixed = %d, want 0", r.Fixed)
+	}
+	if r.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", r.Failed)
+	}
+	if !strings.Contains(buf.String(), "fix attempted; check still failing") {
+		t.Errorf("output missing fix-attempt signal: %q", buf.String())
+	}
 }
 
 func TestDoctor_NoChecks(t *testing.T) {
@@ -241,3 +262,16 @@ func (c *hintCheck) Run(_ *CheckContext) *CheckResult {
 }
 func (c *hintCheck) CanFix() bool              { return false }
 func (c *hintCheck) Fix(_ *CheckContext) error { return nil }
+
+type unchangedFixCheck struct{}
+
+func (c *unchangedFixCheck) Name() string { return "unchanged-fix" }
+func (c *unchangedFixCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:    "unchanged-fix",
+		Status:  StatusError,
+		Message: "still bad",
+	}
+}
+func (c *unchangedFixCheck) CanFix() bool              { return true }
+func (c *unchangedFixCheck) Fix(_ *CheckContext) error { return nil }

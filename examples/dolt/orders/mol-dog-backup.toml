@@ -1,6 +1,6 @@
 [order]
 description = "Sync Dolt backups to configured remotes"
 formula = "mol-dog-backup"
-gate = "cooldown"
-interval = "15m"
+trigger = "cooldown"
+interval = "6h"
 pool = "dog"

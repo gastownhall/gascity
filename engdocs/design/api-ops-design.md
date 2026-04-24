@@ -753,7 +753,7 @@ GET    /v0/order/{name}/history               (new)
 GET    /v0/orders/check                       (new)
 ```
 
-**`POST /v0/order/{name}/run`** — Manual trigger, bypasses gate.
+**`POST /v0/order/{name}/run`** — Manual trigger, bypasses trigger checks.
 
 **`POST /v0/order/{name}/enable`** / **`disable`** — Persists as
 `OrderOverride` in city.toml.

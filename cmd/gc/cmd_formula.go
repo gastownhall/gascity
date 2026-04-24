@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/spf13/cobra"
@@ -18,13 +19,13 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage and inspect formulas",
 	}
 
-	cmd.AddCommand(newFormulaListCmd(stdout))
+	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
 	return cmd
 }
 
-func newFormulaListCmd(stdout io.Writer) *cobra.Command {
+func newFormulaListCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List available formulas",
@@ -33,7 +34,7 @@ func newFormulaListCmd(stdout io.Writer) *cobra.Command {
 Formulas are discovered from city-level and rig-level formula directories
 configured via packs and formulas_dir settings.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			paths := allFormulaSearchPaths()
+			paths := allFormulaSearchPaths(stderr)
 			if len(paths) == 0 {
 				_, _ = fmt.Fprintln(stdout, "No formula search paths configured.")
 				return nil
@@ -79,7 +80,7 @@ configured via packs and formulas_dir settings.`,
 	}
 }
 
-func newFormulaShowCmd(stdout, _ io.Writer) *cobra.Command {
+func newFormulaShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <formula-name>",
 		Short: "Show a compiled formula recipe",
@@ -106,9 +107,18 @@ Examples:
 
 			compileVars := vars
 
-			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(), compileVars)
+			searchPaths, err := formulaSearchPathsForScope(stderr)
 			if err != nil {
 				return err
+			}
+			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
+			if err != nil {
+				return err
+			}
+			if len(vars) > 0 {
+				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
+					return err
+				}
 			}
 
 			// Apply var substitution for display only when --var flags were provided.
@@ -136,20 +146,48 @@ Examples:
 				_, _ = fmt.Fprintln(stdout, "Root only: true")
 			}
 			if len(recipe.Vars) > 0 {
-				_, _ = fmt.Fprintln(stdout, "\nVariables:")
-				for vname, def := range recipe.Vars {
-					var attrs []string
-					if def.Required {
-						attrs = append(attrs, "required")
+				names := make([]string, 0, len(recipe.Vars))
+				for name := range recipe.Vars {
+					names = append(names, name)
+				}
+				slices.Sort(names)
+
+				requiredNames := make([]string, 0, len(names))
+				optionalNames := make([]string, 0, len(names))
+				for _, name := range names {
+					def := recipe.Vars[name]
+					if def != nil && def.Required {
+						requiredNames = append(requiredNames, name)
+						continue
 					}
-					if def.Default != nil {
-						attrs = append(attrs, "default="+*def.Default)
+					optionalNames = append(optionalNames, name)
+				}
+
+				if len(requiredNames) > 0 {
+					_, _ = fmt.Fprintln(stdout, "\nRequired vars:")
+					for _, name := range requiredNames {
+						def := recipe.Vars[name]
+						_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s\n", name, def.Description)
 					}
-					attrStr := ""
-					if len(attrs) > 0 {
-						attrStr = " (" + strings.Join(attrs, ", ") + ")"
+				}
+				if len(optionalNames) > 0 {
+					header := "\nVariables:"
+					if len(requiredNames) > 0 {
+						header = "\nOptional vars:"
 					}
-					_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", vname, def.Description, attrStr)
+					_, _ = fmt.Fprintln(stdout, header)
+					for _, name := range optionalNames {
+						def := recipe.Vars[name]
+						var attrs []string
+						if def != nil && def.Default != nil {
+							attrs = append(attrs, "default="+*def.Default)
+						}
+						attrStr := ""
+						if len(attrs) > 0 {
+							attrStr = " (" + strings.Join(attrs, ", ") + ")"
+						}
+						_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", name, def.Description, attrStr)
+					}
 				}
 			}
 
@@ -201,7 +239,7 @@ Examples:
 	return cmd
 }
 
-func newFormulaCookCmd(stdout, _ io.Writer) *cobra.Command {
+func newFormulaCookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var title string
 	var vars []string
 	var metadata []string
@@ -225,11 +263,15 @@ bead into a sub-workflow at runtime.`,
 			if err != nil {
 				return err
 			}
-			cfg, err := loadCityConfig(cityPath)
+			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
 				return err
 			}
-			store, err := openStoreAtForCity(cityPath, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath)
+			if err != nil {
+				return err
+			}
+			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
 			if err != nil {
 				return err
 			}
@@ -237,7 +279,7 @@ bead into a sub-workflow at runtime.`,
 			cookVars := parseFormulaVars(vars)
 
 			if attach != "" {
-				recipe, err := formula.Compile(cmd.Context(), args[0], cfg.FormulaLayers.City, cookVars)
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
 					return fmt.Errorf("compile: %w", err)
 				}
@@ -259,7 +301,7 @@ bead into a sub-workflow at runtime.`,
 				return nil
 			}
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], cfg.FormulaLayers.City, molecule.Options{
+			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
 				Title: title,
 				Vars:  cookVars,
 			})
@@ -329,29 +371,81 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 	return out, nil
 }
 
-// cityFormulaSearchPaths returns the city-level formula search paths.
-// Best-effort: returns nil if no city is loaded.
-func cityFormulaSearchPaths() []string {
+// formulaScope is the resolved rig/city context for a formula invocation.
+// searchPaths falls back to city-level layers when the rig has no
+// rig-specific entry (see FormulaLayers.SearchPaths).
+type formulaScope struct {
+	storeRoot   string
+	searchPaths []string
+}
+
+// resolveFormulaScope determines the rig (if any) under which a formula
+// invocation should run. Priority: --rig flag > enclosing rig from cwd >
+// city.
+func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error) {
+	if name := strings.TrimSpace(rigFlag); name != "" {
+		rig, ok := rigByName(cfg, name)
+		if !ok {
+			return formulaScope{}, fmt.Errorf("rig %q not found", name)
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return formulaScope{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
+		}
+		return rigFormulaScope(cfg, cityPath, rig), nil
+	}
+
+	if cwd, err := os.Getwd(); err == nil {
+		// resolveRigForDir already filters unbound rigs (see
+		// rig_scope_resolution.go), so a true return guarantees rig.Path is
+		// non-empty.
+		if rig, ok, rerr := resolveRigForDir(cfg, cityPath, cwd); rerr != nil {
+			return formulaScope{}, rerr
+		} else if ok {
+			return rigFormulaScope(cfg, cityPath, rig), nil
+		}
+	}
+
+	return formulaScope{
+		storeRoot:   cityPath,
+		searchPaths: cfg.FormulaLayers.City,
+	}, nil
+}
+
+func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaScope {
+	return formulaScope{
+		storeRoot:   resolveStoreScopeRoot(cityPath, rig.Path),
+		searchPaths: cfg.FormulaLayers.SearchPaths(rig.Name),
+	}
+}
+
+// formulaSearchPathsForScope resolves the active formula scope (honoring
+// --rig and cwd) and returns its search paths. Used by read-only commands
+// like `gc formula show` that don't need to open a store.
+func formulaSearchPathsForScope(warningWriter ...io.Writer) ([]string, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return cfg.FormulaLayers.City
+	scope, err := resolveFormulaScope(cfg, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return scope.searchPaths, nil
 }
 
 // allFormulaSearchPaths returns the deduplicated union of formula search
 // paths across city and all rigs. Used by gc formula list to discover
 // every available formula regardless of scope.
-func allFormulaSearchPaths() []string {
+func allFormulaSearchPaths(warningWriter ...io.Writer) []string {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nil
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
 		return nil
 	}

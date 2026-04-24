@@ -92,14 +92,14 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		}
 		switch intent {
 		case SubmitIntentFollowUp:
-			if err := m.pendingInteractionLocked(sessName); err != nil {
-				return err
-			}
 			if !m.supportsFollowUpLocked(b) {
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 				return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+			}
+			if err := m.pendingInteractionLocked(sessName); err != nil {
+				return err
 			}
 			if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 				return err
@@ -253,18 +253,47 @@ func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Be
 }
 
 // providerKind returns the canonical provider kind for a session bead.
-// It checks provider_kind metadata first (set for custom aliases that derive
-// from a builtin), then falls back to the raw provider metadata value.
-func providerKind(b beads.Bead) string {
-	if kind := strings.TrimSpace(b.Metadata["provider_kind"]); kind != "" {
+// Preference order:
+//  1. builtin_ancestor — stamped from ResolvedProvider.BuiltinAncestor
+//     at session-bead creation for custom providers with explicit
+//     `base = "builtin:..."` (see cmd/gc session-bead creation sites).
+//  2. provider_kind — stamped for command-matched custom aliases
+//     (legacy Phase A auto-inheritance path).
+//  3. provider — raw provider metadata value as a last-resort fallback.
+//
+// Callers that branch on Claude/Codex/Gemini-family behavior
+// (idle-wait-after-interrupt, soft-escape interrupt, default submit,
+// etc.) consume this helper so wrapped custom aliases inherit the
+// correct family behavior without every call site re-deriving it.
+func providerKindFromMetadata(meta map[string]string, fallback string) string {
+	if ancestor := strings.TrimSpace(meta["builtin_ancestor"]); ancestor != "" {
+		return ancestor
+	}
+	if kind := strings.TrimSpace(meta["provider_kind"]); kind != "" {
 		return kind
 	}
-	return strings.TrimSpace(b.Metadata["provider"])
+	if provider := strings.TrimSpace(meta["provider"]); provider != "" {
+		return provider
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func providerKind(b beads.Bead) string {
+	return providerKindFromMetadata(b.Metadata, "")
+}
+
+func wrappedProviderFamily(b beads.Bead, family string) bool {
+	ancestor := strings.TrimSpace(b.Metadata["builtin_ancestor"])
+	provider := strings.TrimSpace(b.Metadata["provider"])
+	return ancestor == family && provider != "" && provider != family
 }
 
 func usesSoftEscapeInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
+	}
+	if wrappedProviderFamily(b, "gemini") {
+		return true
 	}
 	switch providerKind(b) {
 	case "codex":
@@ -276,6 +305,9 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 
 func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	if wrappedProviderFamily(b, "codex") || wrappedProviderFamily(b, "gemini") {
 		return false
 	}
 	switch providerKind(b) {
@@ -348,7 +380,8 @@ func requiresInterruptBoundaryWait(b beads.Bead) bool {
 	return providerKind(b) == "codex"
 }
 
-func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {
+func usesImmediateDefaultSubmit(b beads.Bead, resuming ...bool) bool {
+	isResuming := len(resuming) > 0 && resuming[0]
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
@@ -356,7 +389,7 @@ func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {
 	case "codex":
 		return true
 	case "gemini":
-		return resuming
+		return isResuming
 	default:
 		return false
 	}

@@ -327,6 +327,26 @@ func TestWakeReasons_Attached(t *testing.T) {
 	}
 }
 
+func TestWakeReasons_IgnoresAttachedNonRunningSession(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{}
+
+	sp := runtime.NewFake()
+	sp.SetAttached("test-worker", true)
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker",
+	})
+
+	reasons := wakeReasons(session, cfg, sp, nil, nil, nil, clk)
+	if containsWakeReason(reasons, WakeAttached) {
+		t.Fatalf("non-running attached session should not get WakeAttached, got %v", reasons)
+	}
+}
+
 func TestWakeReasons_DemandWakesSession(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

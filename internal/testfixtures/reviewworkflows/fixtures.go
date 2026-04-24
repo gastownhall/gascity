@@ -10,6 +10,7 @@ and synthesis without depending on private production formulas.
 """
 formula = "expansion-review-pr"
 version = 2
+contract = "graph.v2"
 type = "expansion"
 
 [vars.skip_gemini]
@@ -72,6 +73,7 @@ production formulas.
 """
 formula = "expansion-design-review"
 version = 2
+contract = "graph.v2"
 type = "expansion"
 
 [vars.skip_gemini]
@@ -174,6 +176,7 @@ Gemini soft-fail retries, finalize, and teardown.
 """
 formula = "mol-adopt-pr-v2"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.issue]
@@ -284,6 +287,7 @@ production formulas.
 """
 formula = "mol-personal-work-v2"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.issue]

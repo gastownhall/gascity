@@ -256,6 +256,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}
+	cs.Poke()
 }
 
 // update replaces the config, session provider, and reopens stores.
@@ -448,7 +449,7 @@ func (cs *controllerState) Orders() []orders.Order {
 // EnableOrder creates or updates an override with enabled=true.
 func (cs *controllerState) EnableOrder(name, rig string) error {
 	enabled := true
-	return cs.editor.SetOrderOverride(config.OrderOverride{
+	return cs.editor.MergeOrderOverride(config.OrderOverride{
 		Name:    name,
 		Rig:     rig,
 		Enabled: &enabled,
@@ -458,7 +459,7 @@ func (cs *controllerState) EnableOrder(name, rig string) error {
 // DisableOrder creates or updates an override with enabled=false.
 func (cs *controllerState) DisableOrder(name, rig string) error {
 	enabled := false
-	return cs.editor.SetOrderOverride(config.OrderOverride{
+	return cs.editor.MergeOrderOverride(config.OrderOverride{
 		Name:    name,
 		Rig:     rig,
 		Enabled: &enabled,
@@ -554,13 +555,17 @@ func (cs *controllerState) CreateProvider(name string, spec config.ProviderSpec)
 // UpdateProvider partially updates an existing city-level provider.
 func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate) error {
 	return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
-		DisplayName:  patch.DisplayName,
-		Command:      patch.Command,
-		Args:         patch.Args,
-		PromptMode:   patch.PromptMode,
-		PromptFlag:   patch.PromptFlag,
-		ReadyDelayMs: patch.ReadyDelayMs,
-		Env:          patch.Env,
+		DisplayName:        patch.DisplayName,
+		Base:               patch.Base,
+		Command:            patch.Command,
+		Args:               patch.Args,
+		ArgsAppend:         patch.ArgsAppend,
+		PromptMode:         patch.PromptMode,
+		PromptFlag:         patch.PromptFlag,
+		ReadyDelayMs:       patch.ReadyDelayMs,
+		Env:                patch.Env,
+		OptionsSchemaMerge: patch.OptionsSchemaMerge,
+		OptionsSchema:      patch.OptionsSchema,
 	})
 }
 

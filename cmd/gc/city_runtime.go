@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -63,7 +68,8 @@ type CityRuntime struct {
 	standaloneRigStores map[string]beads.Store
 
 	// Bead-driven reconciler state (Phase 2f).
-	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
+	sessionDrains  *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
+	demandSnapshot *runtimeDemandSnapshot
 
 	convHandler         *convergence.Handler     // nil until bead store available
 	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
@@ -78,6 +84,14 @@ type CityRuntime struct {
 	shutdownOnce   sync.Once
 	logPrefix      string // "gc start" or "gc supervisor"
 	stdout, stderr io.Writer
+}
+
+const runtimeDemandSnapshotMaxAge = 30 * time.Second
+
+type runtimeDemandSnapshot struct {
+	createdAt          time.Time
+	sessionFingerprint string
+	result             DesiredStateResult
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -114,12 +128,20 @@ type CityRuntimeParams struct {
 	Stdout, Stderr io.Writer
 }
 
-var cityRuntimeStartBeadsLifecycle = startBeadsLifecycle
+var (
+	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycle
+	cityRuntimeReloadLifecycleRetryDelay = time.Second
+)
+
+const cityRuntimeReloadLifecycleRetryLimit = 2
 
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
 // provided parameters.
 func newCityRuntime(p CityRuntimeParams) *CityRuntime {
+	configName := lockedConfigName(p.Cfg, p.CityPath)
+	applyRuntimeCityIdentity(p.Cfg, p.CityName)
+
 	var ct crashTracker
 	if maxR := p.Cfg.Daemon.MaxRestartsOrDefault(); maxR > 0 {
 		ct = newCrashTracker(maxR, p.Cfg.Daemon.RestartWindowDuration())
@@ -162,7 +184,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	cr := &CityRuntime{
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
-		configName:              lockedConfigName(p.Cfg, p.CityPath),
+		configName:              configName,
 		tomlPath:                p.TomlPath,
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
@@ -276,24 +298,68 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	retryDelay := cr.cfg.Daemon.PatrolIntervalDuration()
+	startupRetryLimit := cr.cfg.Daemon.MaxRestartsOrDefault()
+	waitForRetry := func() bool {
+		timer := time.NewTimer(retryDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	retryStartupStep := func(trigger string, complete func() bool, run func()) bool {
+		for attempt := 1; !complete(); attempt++ {
+			panicked := cr.safeTick(run, trigger)
+			if ctx.Err() != nil {
+				return false
+			}
+			if complete() {
+				return true
+			}
+			if !panicked {
+				fmt.Fprintf(cr.stderr, "%s: %s did not complete without panic; stopping city runtime\n", //nolint:errcheck
+					cr.logPrefix, trigger)
+				return false
+			}
+			if startupRetryLimit > 0 && attempt >= startupRetryLimit {
+				fmt.Fprintf(cr.stderr, "%s: %s did not complete after %d attempt(s); stopping city runtime\n", //nolint:errcheck
+					cr.logPrefix, trigger, attempt)
+				return false
+			}
+			if !waitForRetry() {
+				return false
+			}
+		}
+		return true
+	}
+
 	// Adoption barrier: ensure every running session has a bead.
 	// Runs on every startup (rerunnable, crash-safe).
-	if cr.onStatus != nil {
-		cr.onStatus("adopting_sessions")
-	}
-	if cr.cityBeadStore() != nil {
-		result, passed := runAdoptionBarrier(cr.cityBeadStore(), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
-		if result.Adopted > 0 {
-			fmt.Fprintf(cr.stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
+	adoptionComplete := false
+	if !retryStartupStep("adoption-barrier", func() bool { return adoptionComplete }, func() {
+		if cr.onStatus != nil {
+			cr.onStatus("adopting_sessions")
 		}
-		if !passed {
-			// Sessions that fail adoption AND have no matching agent are
-			// invisible to the bead reconciler (which only processes beaded
-			// sessions). They will be cleaned up when they naturally exit.
-			// Sessions with matching agents get beads via syncSessionBeads
-			// on the next tick.
-			fmt.Fprintf(cr.stderr, "%s: adoption barrier: %d session(s) failed bead creation\n", cr.logPrefix, result.Skipped) //nolint:errcheck
+		if cr.cityBeadStore() != nil {
+			result, passed := runAdoptionBarrier(cr.cityBeadStore(), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
+			if result.Adopted > 0 {
+				fmt.Fprintf(cr.stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
+			}
+			if !passed {
+				// Sessions that fail adoption AND have no matching agent are
+				// invisible to the bead reconciler (which only processes beaded
+				// sessions). They will be cleaned up when they naturally exit.
+				// Sessions with matching agents get beads via syncSessionBeads
+				// on the next tick.
+				fmt.Fprintf(cr.stderr, "%s: adoption barrier: %d session(s) failed bead creation\n", cr.logPrefix, result.Skipped) //nolint:errcheck
+			}
 		}
+		adoptionComplete = true
+	}) {
+		return
 	}
 	if ctx.Err() != nil {
 		return
@@ -308,53 +374,63 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Session bead sync BEFORE reconciliation: ensures beads exist for
 	// the reconciler to read/write hashes. Uses ListByLabel (indexed,
 	// fast even before CachingStore is primed).
-	sessionBeads := cr.loadSessionBeadSnapshot()
-	startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
-	result := cr.buildDesiredState(sessionBeads, startupTrace)
-	sessionBeads = cr.loadSessionBeadSnapshot()
-	result = refreshDesiredStateWithSessionBeads(
-		result,
-		cr.cityName,
-		cr.cityPath,
-		cr.cfg,
-		cr.sp,
-		cr.cityBeadStore(),
-		sessionBeads,
-		cr.stderr,
-	)
-	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
-	result = refreshDesiredStateWithSessionBeads(
-		result,
-		cr.cityName,
-		cr.cityPath,
-		cr.cfg,
-		cr.sp,
-		cr.cityBeadStore(),
-		sessionBeads,
-		cr.stderr,
-	)
-	if ctx.Err() != nil {
-		if startupTrace != nil {
-			startupTrace.end(TraceCompletionAborted, traceRecordPayload{"phase": "startup"})
+	//
+	// Wrapped in safeTick so a panic during startup reconciliation (e.g.
+	// a transient bead-store failure triggering a downstream nil deref)
+	// does not propagate to the supervisor's panic recovery and cascade
+	// into cityRuntime.shutdown(). See issue #663. The trace cycle is
+	// ended inside the closure via defer so it's closed out on panic,
+	// ctx cancellation, or normal completion alike.
+	startupComplete := false
+	if !retryStartupStep("startup", func() bool { return startupComplete }, func() {
+		sessionBeads := cr.loadSessionBeadSnapshot()
+		startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
+		completion := TraceCompletionAborted
+		defer func() {
+			if startupTrace != nil {
+				startupTrace.end(completion, traceRecordPayload{"phase": "startup"})
+			}
+		}()
+
+		// Reap stale session beads from a previous run before building desired
+		// state, so desired state does not reference already-closed beads (#742).
+		if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
+		result := cr.buildDesiredState(sessionBeads, startupTrace)
+		sessionBeads = cr.loadSessionBeadSnapshot()
+		result = refreshDesiredStateWithSessionBeads(
+			result,
+			cr.cityName,
+			cr.cityPath,
+			cr.cfg,
+			cr.sp,
+			cr.cityBeadStore(),
+			sessionBeads,
+			cr.stderr,
+		)
+		sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
+		result = refreshDesiredStateWithSessionBeads(
+			result,
+			cr.cityName,
+			cr.cityPath,
+			cr.cfg,
+			cr.sp,
+			cr.cityBeadStore(),
+			sessionBeads,
+			cr.stderr,
+		)
+		if ctx.Err() != nil {
+			return
+		}
+
+		if cr.sessionDrains != nil {
+			cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace)
+		}
+		completion = TraceCompletionCompleted
+		startupComplete = true
+	}) {
 		return
-	}
-
-	// Mark city as started. Convergence startup reconciliation runs on
-	// the first tick (it calls List() which waits for the full async prime).
-	if cr.onStatus != nil {
-		cr.onStatus("starting_agents")
-	}
-	if cr.onStarted != nil {
-		cr.onStarted()
-	}
-	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
-
-	if cr.sessionDrains != nil {
-		cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace)
-	}
-	if startupTrace != nil {
-		startupTrace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "startup"})
 	}
 	if ctx.Err() != nil {
 		return
@@ -364,14 +440,46 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// beads that were interrupted by a controller crash. Runs after "City
 	// started" so it doesn't block readiness. List() waits for the full
 	// CachingStore prime, then serves from memory.
-	cr.convergenceStartupReconcile(ctx)
+	//
+	// Wrapped in safeTick so a panic during convergence recovery (same
+	// class of transient store failure as #663) doesn't cascade to
+	// cityRuntime.shutdown(). Startup does not advance until the active
+	// convergence index is populated, so later patrols can drain pending
+	// convergence beads.
+	convergenceStartupDone := convergenceStartupComplete(cr)
+	if !retryStartupStep("convergence-startup", func() bool { return convergenceStartupDone }, func() {
+		cr.convergenceStartupReconcile(ctx)
+		convergenceStartupDone = true
+	}) {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Mark city as started only after all retry-critical startup work has
+	// completed. Publishing readiness before bead reconciliation or
+	// convergence index population would let API callers observe a started
+	// city whose one-shot startup state is still incomplete.
+	if cr.onStatus != nil {
+		cr.onStatus("starting_agents")
+	}
+	if cr.onStarted != nil {
+		cr.onStarted()
+	}
+	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
 	if ctx.Err() != nil {
 		return
 	}
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
+	runTick := func(trigger string) {
+		cr.safeTick(func() {
+			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
+		}, trigger)
+	}
 	if dirty.Load() {
-		cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "startup-poke")
+		runTick("startup-poke")
 		if ctx.Err() != nil {
 			return
 		}
@@ -384,16 +492,20 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "patrol")
+			runTick("patrol")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Trigger an immediate tick so the reconciler sees the new
 			// work via workSet/poolDesired and wakes the target promptly.
-			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "poke")
+			runTick("poke")
 		case <-cr.controlDispatcherCh:
-			cr.controlDispatcherTick(ctx)
+			cr.safeTick(func() {
+				cr.controlDispatcherTick(ctx)
+			}, "control-dispatcher")
 		case req := <-cr.reloadReqCh:
-			cr.handleReloadRequest(&req)
+			cr.safeTick(func() {
+				cr.handleReloadRequest(&req)
+			}, "reload-request")
 		case req := <-cr.convergenceReqCh:
 			// Low-latency path: process convergence commands between ticks.
 			// processConvergenceRequests() in tick() drains any that arrived
@@ -401,13 +513,60 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// are atomic, so each request is processed exactly once.
 			// Note: ordering relative to convergenceTick is non-deterministic
 			// via this path, but handlers are idempotent so interleaving is safe.
-			reply := cr.safeHandleConvergenceRequest(ctx, req)
-			req.replyCh <- reply
+			cr.safeTick(func() {
+				reply := cr.safeHandleConvergenceRequest(ctx, req)
+				req.replyCh <- reply
+			}, "convergence-request")
 		case <-ctx.Done():
 			cr.failActiveReload("Reload canceled because the controller is shutting down.")
 			return
 		}
 	}
+}
+
+// safeTick runs fn with panic recovery. A panic inside fn is logged to
+// stderr and swallowed so the reconciler loop can continue to the next
+// tick. Without this wrapper, a panic in the reconciliation body
+// propagates to cmd_supervisor.go's per-city goroutine recovery, which
+// escalates to cityRuntime.shutdown() -> gracefulStopAll for every
+// session in the city. Transient bead-store failures (e.g. Dolt EOF on
+// a single metadata write) must not cascade into a full-city restart:
+// the next tick is idempotent and will retry the failed work.
+//
+// This intentionally swallows ALL panics, including non-transient bugs
+// (e.g. nil derefs from broken invariants). That tradeoff is explicit:
+// a latent invariant bug that panics every tick will log visibly on
+// each patrol interval, surfacing the bug via repetition, which is
+// strictly better than the prior behavior of one panic killing every
+// session in the city with no log of what triggered it. Operators
+// should treat repeated "reconciler tick panicked" lines as a bug
+// report, not a steady-state condition. The panic signal is intentionally
+// stderr-only because recovery must not depend on event-bus availability
+// during store or controller failures.
+//
+// Trigger identifies which tick site fired so operators can correlate
+// the log with the cause.
+func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			// Include the recovered type and a stack trace so a latent
+			// invariant bug (e.g. nil deref) is diagnosable from the log
+			// alone — crucial because safeTick intentionally swallows
+			// the panic and the bug may only surface via repetition.
+			fmt.Fprintf(cr.stderr, "%s: reconciler tick panicked (trigger=%s): %v (type=%T)\n%s\n", //nolint:errcheck // best-effort stderr
+				cr.logPrefix, trigger, r, r, debug.Stack())
+		}
+	}()
+	fn()
+	return false
+}
+
+func convergenceStartupComplete(cr *CityRuntime) bool {
+	return cr.convHandler == nil ||
+		cr.convergenceReqCh == nil ||
+		cr.convStoreAdapter == nil ||
+		cr.convStoreAdapter.activeIndex != nil
 }
 
 // tick performs one reconciliation tick: pool death detection, config
@@ -428,46 +587,95 @@ func (cr *CityRuntime) tick(
 		traceDetail = "manual_reload"
 	}
 	trace := cr.beginTraceCycle(traceTrigger, traceDetail, sessionBeads)
+	// End the trace via defer so a panic recovered by safeTick still
+	// closes the cycle (aborted). completion flips to Completed at the
+	// normal end of the tick body below.
+	completion := TraceCompletionAborted
+	defer func() {
+		if trace != nil {
+			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
+		}
+	}()
 	// Detect pool instance deaths since last tick.
 	if len(cr.poolDeathHandlers) > 0 {
-		currentRunning, _ := cr.sp.ListRunning("")
-		currentSet := make(map[string]bool, len(currentRunning))
-		for _, name := range currentRunning {
-			currentSet[name] = true
-		}
-		if *prevPoolRunning != nil {
-			for sn, info := range cr.poolDeathHandlers {
-				if (*prevPoolRunning)[sn] && !currentSet[sn] {
-					if _, err := shellRunHook(info.Command, info.Dir, info.Env); err != nil {
-						fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+		currentRunning, listErr := cr.sp.ListRunning("")
+		if listErr != nil {
+			if runtime.IsPartialListError(listErr) {
+				fmt.Fprintf(cr.stderr, "%s: pool death check skipped due to partial session listing: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(cr.stderr, "%s: pool death check skipped while listing sessions: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+			}
+		} else {
+			currentSet := make(map[string]bool, len(currentRunning))
+			for _, name := range currentRunning {
+				currentSet[name] = true
+			}
+			if *prevPoolRunning != nil {
+				for sn, info := range cr.poolDeathHandlers {
+					if (*prevPoolRunning)[sn] && !currentSet[sn] {
+						if _, err := shellRunHook(info.Command, info.Dir, info.Env); err != nil {
+							fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+						}
 					}
 				}
 			}
-		}
-		*prevPoolRunning = make(map[string]bool)
-		for sn := range cr.poolDeathHandlers {
-			if currentSet[sn] {
-				(*prevPoolRunning)[sn] = true
+			*prevPoolRunning = make(map[string]bool)
+			for sn := range cr.poolDeathHandlers {
+				if currentSet[sn] {
+					(*prevPoolRunning)[sn] = true
+				}
 			}
 		}
 	}
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
-	if dirty.Swap(false) {
+	manualReloadCompleted := false
+	manualReloadReplied := false
+	dirtyCleared := false
+	tickCompleted := false
+	defer func() {
+		if dirtyCleared && !tickCompleted && manualReload == nil {
+			dirty.Store(true)
+		}
+		if manualReload == nil || manualReloadReplied {
+			return
+		}
+		reply := reloadControlReply{
+			Outcome: reloadOutcomeFailed,
+			Error:   fmt.Sprintf("Reload failed because reconciliation tick %q panicked before completion.", trigger),
+		}
+		if manualReloadCompleted {
+			reply = manualReply
+		}
+		cr.sendReloadReply(manualReload.doneCh, reply)
+		cr.activeReload = nil
+	}()
+	configChanged := dirty.Swap(false)
+	if configChanged {
+		dirtyCleared = true
 		source := reloadSourceWatch
 		if cr.activeReload != nil {
 			source = reloadSourceManual
 			manualReload = cr.activeReload
 		}
 		manualReply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace, source)
+		if manualReload != nil {
+			manualReloadCompleted = true
+		}
 	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
 	// Post-reconcile sync was intentionally removed: the daemon's next tick
 	// corrects bead state, and the pre-reconcile sync is sufficient for
 	// the reconciler to read/write hashes during reconciliation.
-	result := cr.buildDesiredState(sessionBeads, trace)
+	// Reap open session beads whose tmux session is dead before loading demand
+	// so stale names cannot block desired-state computation (#742).
+	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
+	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
+	result := demand.result
 	sessionBeads = cr.loadSessionBeadSnapshot()
 	result = refreshDesiredStateWithSessionBeads(
 		result,
@@ -505,8 +713,14 @@ func (cr *CityRuntime) tick(
 	if store := cr.cityBeadStore(); cr.wg != nil && store != nil && cr.wg.shouldRun(time.Now()) {
 		purged, gcErr := cr.wg.runGC(store, time.Now())
 		if gcErr != nil {
-			fmt.Fprintf(cr.stderr, "%s: wisp gc: %v\n", cr.logPrefix, gcErr) //nolint:errcheck // best-effort stderr
-		} else if purged > 0 {
+			for _, line := range strings.Split(gcErr.Error(), "\n") {
+				if line == "" {
+					continue
+				}
+				fmt.Fprintf(cr.stderr, "%s: wisp gc: %s\n", cr.logPrefix, line) //nolint:errcheck // best-effort stderr
+			}
+		}
+		if purged > 0 {
 			fmt.Fprintf(cr.stdout, "Bead GC: purged %d expired bead(s)\n", purged) //nolint:errcheck // best-effort stdout
 		}
 	}
@@ -532,15 +746,12 @@ func (cr *CityRuntime) tick(
 	// Convergence tick: process active convergence loops.
 	cr.convergenceTick(ctx)
 	if manualReload != nil {
-		select {
-		case manualReload.doneCh <- manualReply:
-		default:
-		}
+		cr.sendReloadReply(manualReload.doneCh, manualReply)
+		manualReloadReplied = true
 		cr.activeReload = nil
 	}
-	if trace != nil {
-		trace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
-	}
+	completion = TraceCompletionCompleted
+	tickCompleted = true
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
@@ -573,14 +784,24 @@ func (cr *CityRuntime) failActiveReload(message string) {
 	if cr.activeReload == nil {
 		return
 	}
-	select {
-	case cr.activeReload.doneCh <- reloadControlReply{
+	cr.sendReloadReply(cr.activeReload.doneCh, reloadControlReply{
 		Outcome: reloadOutcomeFailed,
 		Error:   message,
-	}:
+	})
+	cr.activeReload = nil
+}
+
+func (cr *CityRuntime) sendReloadReply(ch chan<- reloadControlReply, reply reloadControlReply) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(cr.stderr, "%s: reload reply panicked: %v (type=%T)\n%s\n", //nolint:errcheck // best-effort stderr
+				cr.logPrefix, r, r, debug.Stack())
+		}
+	}()
+	select {
+	case ch <- reply:
 	default:
 	}
-	cr.activeReload = nil
 }
 
 // reloadConfig attempts to reload city.toml and update all internal
@@ -652,6 +873,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	oldRigCount := len(cr.cfg.Rigs)
 	oldRevision := cr.configRev
 	nextCfg := result.Cfg
+	applyRuntimeCityIdentity(nextCfg, cr.cityName)
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
@@ -684,8 +906,22 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("config reload: %v", err))
 	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
-	if err := cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr); err != nil {
-		err := fmt.Errorf("config reload: %w", err)
+	var lifecycleErr error
+	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {
+		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr)
+		if lifecycleErr == nil {
+			break
+		}
+		if attempt == cityRuntimeReloadLifecycleRetryLimit || !isRetryableManagedDoltLifecycleError(lifecycleErr) {
+			break
+		}
+		appendWarning(fmt.Sprintf("config reload: transient bead lifecycle failure: %v; retrying", lifecycleErr))
+		if cityRuntimeReloadLifecycleRetryDelay > 0 {
+			time.Sleep(cityRuntimeReloadLifecycleRetryDelay)
+		}
+	}
+	if lifecycleErr != nil {
+		err := fmt.Errorf("config reload: %w", lifecycleErr)
 		fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
@@ -714,22 +950,30 @@ func (cr *CityRuntime) reloadConfigTraced(
 		}
 	}
 
-	// Resolve script symlinks for newly activated packs.
-	if len(nextCfg.ScriptLayers.City) > 0 {
-		if err := ResolveScripts(cityRoot, nextCfg.ScriptLayers.City); err != nil {
-			appendWarning(fmt.Sprintf("config reload: city scripts: %v", err))
-		}
-	}
-	for _, r := range nextCfg.Rigs {
-		if layers, ok := nextCfg.ScriptLayers.Rigs[r.Name]; ok && len(layers) > 0 {
-			if err := ResolveScripts(r.Path, layers); err != nil {
-				appendWarning(fmt.Sprintf("config reload: rig %q scripts: %v", r.Name, err))
-			}
-		}
-	}
+	// Prune legacy top-level scripts/ symlinks from older runtime shims.
+	pruneLegacyConfiguredScripts(cityRoot, nextCfg, func(scope string, err error) {
+		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
+	})
 
 	if providerChanged {
-		if running, lErr := cr.sp.ListRunning(""); lErr == nil && len(running) > 0 {
+		running, lErr := cr.sp.ListRunning("")
+		if lErr != nil {
+			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
+			if runtime.IsPartialListError(lErr) {
+				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+			}
+			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+			if trace != nil {
+				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+			}
+			return reloadControlReply{
+				Outcome:  reloadOutcomeFailed,
+				Error:    err.Error(),
+				Warnings: warnings,
+			}
+		}
+		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
 				displayProviderName(*lastProviderName), displayProviderName(pendingProviderName), len(running))
 			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
@@ -838,10 +1082,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 }
 
 func lockedConfigName(cfg *config.City, cityPath string) string {
-	if cfg != nil && cfg.Workspace.Name != "" {
-		return cfg.Workspace.Name
-	}
-	return filepath.Base(cityPath)
+	return loadedCityName(cfg, cityPath)
 }
 
 func (cr *CityRuntime) configWatcherTargets() []config.WatchTarget {
@@ -907,28 +1148,23 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if sessionBeads == nil {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
+	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
-	if released := releaseOrphanedPoolAssignments(store, cr.cfg, sessionBeads.Open(), assignedWorkBeads); len(released) > 0 {
-		releasedSet := make(map[string]struct{}, len(released))
-		for _, id := range released {
-			releasedSet[id] = struct{}{}
-			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", id) //nolint:errcheck
+	if released := releaseOrphanedPoolAssignments(store, cr.cfg, sessionBeads.Open(), assignedWorkBeads, result.AssignedWorkStores); len(released) > 0 {
+		for _, r := range released {
+			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
-		filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
-		for _, wb := range assignedWorkBeads {
-			if _, ok := releasedSet[wb.ID]; ok {
-				continue
-			}
-			filtered = append(filtered, wb)
-		}
-		assignedWorkBeads = filtered
+		assignedWorkBeads = filterReleasedAssignedWorkBeads(assignedWorkBeads, released)
 	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
 	// work beads + new tier from scale_check + min fill.
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-		cr.cfg, assignedWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+	poolDesired := result.PoolDesiredCounts
+	if poolDesired == nil {
+		poolDesired = PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+			cr.cfg, assignedWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+	}
 	// Merge named-session assignee demand so on-demand named sessions with
 	// direct work (Assignee match, no gc.routed_to) stay config-eligible.
 	if poolDesired == nil {
@@ -947,7 +1183,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	if sweepUndesiredPoolSessionBeads(
 		store,
-		cr.rigBeadStores(),
+		rigStores,
 		sessionBeads,
 		desiredState,
 		cr.cfg,
@@ -972,7 +1208,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// workSet: defense-in-depth wake signal from work_query. When work_query
 	// detects pending work but scale_check hasn't caught up yet, workSet
 	// ensures at least one session wakes without waiting for the next tick.
-	workSet := computeWorkSet(cr.cfg, shellScaleCheck, cityName, cr.cityPath, store, sessionBeads, cr.stderr)
+	workSet := result.WorkSet
+	if workSet == nil {
+		workSet = computeWorkSet(cr.cfg, shellScaleCheck, cityName, cr.cityPath, store, sessionBeads, cr.stderr)
+	}
 	if trace != nil {
 		templateNames := make(map[string]struct{})
 		openCounts := make(map[string]int)
@@ -1053,7 +1292,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	reconcileSessionBeadsTraced(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
-		assignedWorkBeads, cr.rigBeadStores(), readyWaitSet, cr.sessionDrains, poolDesired,
+		assignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, poolDesired,
 		result.StoreQueryPartial,
 		workSet, cityName,
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
@@ -1078,6 +1317,33 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 
 	// Idle recovery: detect pool sessions stuck at the prompt after
+}
+
+func filterReleasedAssignedWorkBeads(assignedWorkBeads []beads.Bead, released []releasedPoolAssignment) []beads.Bead {
+	if len(assignedWorkBeads) == 0 || len(released) == 0 {
+		return assignedWorkBeads
+	}
+	releasedIndexes := make(map[int]struct{}, len(released))
+	for _, r := range released {
+		if r.Index >= 0 && r.Index < len(assignedWorkBeads) {
+			if assignedWorkBeads[r.Index].ID != r.ID {
+				log.Printf("filterReleasedAssignedWorkBeads: released index %d points at bead %q, want %q", r.Index, assignedWorkBeads[r.Index].ID, r.ID)
+				continue
+			}
+			releasedIndexes[r.Index] = struct{}{}
+		}
+	}
+	if len(releasedIndexes) == 0 {
+		return assignedWorkBeads
+	}
+	filtered := make([]beads.Bead, 0, len(assignedWorkBeads)-len(releasedIndexes))
+	for i, wb := range assignedWorkBeads {
+		if _, ok := releasedIndexes[i]; ok {
+			continue
+		}
+		filtered = append(filtered, wb)
+	}
+	return filtered
 }
 
 func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
@@ -1365,6 +1631,120 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	return cr.buildFn(cr.cfg, cr.sp, store)
 }
 
+func (cr *CityRuntime) loadDemandSnapshot(
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	trigger string,
+	configChanged bool,
+) runtimeDemandSnapshot {
+	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
+	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+		result := cr.buildDesiredState(sessionBeads, trace)
+		var openSessionBeads []beads.Bead
+		if sessionBeads != nil {
+			openSessionBeads = sessionBeads.Open()
+		}
+		result.PoolDesiredCounts = PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+			cr.cfg, result.AssignedWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace))
+		if result.PoolDesiredCounts == nil {
+			result.PoolDesiredCounts = make(map[string]int)
+		}
+		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
+		result.WorkSet = computeWorkSet(cr.cfg, shellScaleCheck, cr.cityName, cr.cityPath, cr.cityBeadStore(), sessionBeads, cr.stderr)
+		cr.demandSnapshot = &runtimeDemandSnapshot{
+			createdAt:          time.Now(),
+			sessionFingerprint: sessionFingerprint,
+			result:             result,
+		}
+	}
+	if cr.demandSnapshot == nil {
+		return runtimeDemandSnapshot{}
+	}
+	snapshot := *cr.demandSnapshot
+	cr.installDemandSnapshotSideEffects(snapshot.result)
+	return snapshot
+}
+
+func (cr *CityRuntime) shouldRefreshDemandSnapshot(
+	trigger string,
+	configChanged bool,
+	sessionFingerprint string,
+) bool {
+	if !cr.demandSnapshotsEnabled() {
+		return true
+	}
+	if configChanged || trigger != "patrol" {
+		return true
+	}
+	if cr.demandSnapshot == nil {
+		return true
+	}
+	if cr.demandSnapshot.sessionFingerprint != sessionFingerprint {
+		return true
+	}
+	return time.Since(cr.demandSnapshot.createdAt) >= runtimeDemandSnapshotMaxAge
+}
+
+func (cr *CityRuntime) demandSnapshotsEnabled() bool {
+	return cr.cs != nil && cr.cs.EventProvider() != nil && demandSnapshotDemandSourcesEventBacked(cr.cfg)
+}
+
+func demandSnapshotDemandSourcesEventBacked(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		if strings.TrimSpace(cfg.Agents[i].ScaleCheck) != "" || strings.TrimSpace(cfg.Agents[i].WorkQuery) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (cr *CityRuntime) installDemandSnapshotSideEffects(result DesiredStateResult) {
+	autoSP, ok := cr.sp.(*sessionauto.Provider)
+	if !ok {
+		return
+	}
+	for _, tp := range result.State {
+		if !tp.IsACP || strings.TrimSpace(tp.SessionName) == "" {
+			continue
+		}
+		autoSP.RouteACP(tp.SessionName)
+	}
+}
+
+func sessionBeadSnapshotFingerprint(snapshot *sessionBeadSnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	open := snapshot.Open()
+	sort.Slice(open, func(i, j int) bool {
+		return open[i].ID < open[j].ID
+	})
+	h := fnv.New64a()
+	for _, bead := range open {
+		_, _ = io.WriteString(h, bead.ID)
+		_, _ = io.WriteString(h, "\x00")
+		_, _ = io.WriteString(h, bead.Status)
+		_, _ = io.WriteString(h, "\x00")
+		_, _ = io.WriteString(h, bead.Assignee)
+		_, _ = io.WriteString(h, "\x00")
+		keys := make([]string, 0, len(bead.Metadata))
+		for key := range bead.Metadata {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			_, _ = io.WriteString(h, key)
+			_, _ = io.WriteString(h, "\x00")
+			_, _ = io.WriteString(h, bead.Metadata[key])
+			_, _ = io.WriteString(h, "\x00")
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil
@@ -1419,7 +1799,14 @@ func (cr *CityRuntime) shutdown() {
 			}
 		}
 		timeout := cr.cfg.Daemon.ShutdownTimeoutDuration()
-		running, _ := cr.sp.ListRunning("")
+		running, listErr := cr.sp.ListRunning("")
+		if listErr != nil {
+			if runtime.IsPartialListError(listErr) {
+				fmt.Fprintf(cr.stderr, "%s: shutdown session listing partially failed; stopping %d visible agent(s): %v\n", cr.logPrefix, len(running), listErr) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(cr.stderr, "%s: shutdown session listing failed: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+			}
+		}
 		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
 	})
 }

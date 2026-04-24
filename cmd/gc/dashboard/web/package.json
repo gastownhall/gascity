@@ -3,12 +3,19 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
+  },
   "description": "Gas City dashboard SPA. Typed against the supervisor OpenAPI spec.",
   "scripts": {
     "gen": "openapi-ts && openapi-typescript ../../../../internal/api/openapi.json -o src/generated/schema.d.ts",
+    "pretest": "npm run gen --silent",
     "test": "vitest run --environment jsdom",
+    "pretypecheck": "npm run gen --silent",
     "typecheck": "tsc --noEmit",
+    "prebuild": "npm run gen --silent",
     "build": "vite build",
+    "predev": "npm run gen --silent",
     "dev": "vite",
     "preview": "vite preview"
   },
@@ -17,8 +24,8 @@
     "jsdom": "^26.0.0",
     "openapi-typescript": "^7.5.0",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10",
-    "vitest": "^2.1.8"
+    "vite": "^6.4.2",
+    "vitest": "^4.1.4"
   },
   "dependencies": {
     "@hey-api/client-fetch": "^0.13.1",

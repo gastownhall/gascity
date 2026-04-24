@@ -109,7 +109,7 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().IntVar(&maxIterations, "max-iterations", 5, "Maximum iterations")
 	cmd.Flags().StringVar(&gateMode, "gate", "manual", "Gate mode: manual, condition, hybrid")
 	cmd.Flags().StringVar(&gateCondition, "gate-condition", "", "Path to gate condition script")
-	cmd.Flags().StringVar(&gateTimeout, "gate-timeout", "30s", "Gate execution timeout")
+	cmd.Flags().StringVar(&gateTimeout, "gate-timeout", convergence.DefaultGateTimeout.String(), "Gate execution timeout")
 	cmd.Flags().StringVar(&gateTimeoutAction, "gate-timeout-action", "iterate", "Action on gate timeout: iterate, retry, manual, terminate")
 	cmd.Flags().StringVar(&title, "title", "", "Convergence loop title")
 	cmd.Flags().StringVar(&evaluatePrompt, "evaluate-prompt", "", "Custom evaluate prompt (overrides formula default)")

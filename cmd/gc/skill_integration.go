@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
+
+const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 
 // canStage1Materialize reports whether stage-1 skill materialization
 // (supervisor-tick-level writes into the agent's scope root) should
@@ -179,6 +182,29 @@ func effectiveAgentProvider(agent *config.Agent, workspaceProvider string) strin
 	return workspaceProvider
 }
 
+// effectiveAgentProviderFamily resolves the agent's effective provider to
+// its built-in family name (e.g. a wrapped custom "my-fast-claude" with
+// base = "builtin:claude" resolves to "claude"). When the effective
+// provider is already a built-in, its name is returned unchanged. When it
+// has no built-in ancestor, the raw name is returned so downstream lookups
+// (e.g. materialize.VendorSink) fail closed on truly-unknown providers
+// rather than silently widening the match.
+//
+// Vendor-sink and hook-family lookups use this helper so wrapped providers
+// behave like their ancestor. cityProviders may be nil (tests, legacy
+// paths with no custom providers) — the helper degrades to identity
+// resolution.
+func effectiveAgentProviderFamily(agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec) string {
+	raw := effectiveAgentProvider(agent, workspaceProvider)
+	if raw == "" {
+		return ""
+	}
+	if family := config.BuiltinFamily(raw, cityProviders); family != "" {
+		return family
+	}
+	return raw
+}
+
 // effectiveSkillsForAgent returns the post-precedence desired skill set
 // for one agent. Returns nil when the agent's effective provider has
 // no vendor sink, when no catalog produced any entries, or when the
@@ -188,11 +214,11 @@ func effectiveAgentProvider(agent *config.Agent, workspaceProvider string) strin
 // city-catalog pattern in newAgentBuildParams) so a permissions
 // glitch on an agent's skills_dir is observable rather than silently
 // dropping agent-local skills.
-func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, stderr io.Writer) []materialize.SkillEntry {
+func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec, stderr io.Writer) []materialize.SkillEntry {
 	if agent == nil {
 		return nil
 	}
-	provider := effectiveAgentProvider(agent, workspaceProvider)
+	provider := effectiveAgentProviderFamily(agent, workspaceProvider, cityProviders)
 	if _, ok := materialize.VendorSink(provider); !ok {
 		return nil
 	}
@@ -272,8 +298,8 @@ func effectiveInjectAssignedSkills(agent *config.Agent) bool {
 //
 // The fragment uses the SKILL.md frontmatter description for each
 // entry so agents see both the name and a one-line purpose. Origin
-// tags identify whether a shared skill came from the city pack or a
-// bootstrap implicit-import pack (e.g. `core`).
+// tags identify where a shared skill came from: the city pack, an
+// imported pack binding, or a legacy compatibility bootstrap pack.
 func buildAssignedSkillsPromptFragment(
 	agent *config.Agent,
 	city *materialize.CityCatalog,
@@ -325,8 +351,8 @@ func buildAssignedSkillsPromptFragment(
 
 // writeSkillBullets renders a bullet list of skill entries. When
 // originTag is non-empty, each bullet trails with " *(origin)*" so
-// shared entries can show whether they came from the city pack or a
-// bootstrap pack (e.g. `core`). Descriptions are included when the
+// shared entries can show whether they came from the city pack, an
+// import binding, or a compatibility bootstrap pack. Descriptions are included when the
 // SKILL.md frontmatter provided one.
 func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
 	for _, e := range entries {
@@ -348,10 +374,14 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 
 // appendMaterializeSkillsPreStart appends a PreStart command that
 // invokes `gc internal materialize-skills --agent <name> --workdir
-// <path>` for per-session-worktree materialization. The command is
-// APPENDED to any existing user-configured PreStart so worktree
-// creation and other setup runs first; materialization runs
-// immediately before the agent command.
+// <path>` for per-session-worktree materialization.
+//
+// The shared-catalog snapshot itself is staged to a deterministic file
+// under the workdir (see writeSkillSnapshotFile) and materialize-skills
+// re-discovers that path at runtime. Keeping the command shape stable
+// avoids flipping the runtime fingerprint for already-running sessions
+// during upgrade while still moving the large catalog blob off tmux's
+// env/argv paths.
 //
 // The gc binary path comes from $GC_BIN (populated by the runtime env
 // setup) with "gc" as a fallback if the env var isn't available at
@@ -360,4 +390,78 @@ func appendMaterializeSkillsPreStart(prestart []string, qualifiedName, workDir s
 	cmd := `"${GC_BIN:-gc}" internal materialize-skills --agent ` +
 		shellquote.Join([]string{qualifiedName}) + ` --workdir ` + shellquote.Join([]string{workDir})
 	return append(prestart, cmd)
+}
+
+// skillSnapshotFilePath returns the deterministic path used to persist
+// the shared skill catalog snapshot for one agent/workdir pair.
+func skillSnapshotFilePath(workDir, qualifiedName string) string {
+	if workDir == "" || qualifiedName == "" {
+		return ""
+	}
+	safeName := strings.ReplaceAll(qualifiedName, string(filepath.Separator), "_")
+	safeName = strings.ReplaceAll(safeName, "/", "_")
+	return filepath.Join(workDir, ".gc", "tmp", "skill-catalog-"+safeName+".b64")
+}
+
+// removeSkillSnapshotFile clears the deterministic staged snapshot path
+// so stage-2 materialize-skills falls back to live catalog loading
+// instead of consuming stale shared-catalog data.
+func removeSkillSnapshotFile(workDir, qualifiedName string) {
+	path := skillSnapshotFilePath(workDir, qualifiedName)
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// writeSkillSnapshotFile persists a base64-encoded shared skill catalog
+// snapshot to a file under <workDir>/.gc/tmp so the PreStart materialize
+// command can read it back without forcing the catalog through tmux's
+// new-session protocol buffer or argv. Returns the absolute path on
+// success, "" on any failure (caller falls back to letting
+// materialize-skills load the live catalog from disk).
+//
+// The filename is keyed by agent so repeat spawns of the same agent
+// reuse one file rather than littering .gc/tmp with one snapshot per
+// reconciler tick. The blob itself is overwritten each call because the
+// catalog can drift between ticks.
+func writeSkillSnapshotFile(workDir, qualifiedName, snapshot string) string {
+	path := skillSnapshotFilePath(workDir, qualifiedName)
+	if path == "" || snapshot == "" {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	tmp, err := os.CreateTemp(dir, "skill-catalog-*.tmp")
+	if err != nil {
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write([]byte(snapshot)); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		removeSkillSnapshotFile(workDir, qualifiedName)
+		return ""
+	}
+	return path
 }

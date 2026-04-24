@@ -117,14 +117,13 @@ func TestApplyRetriesBasic(t *testing.T) {
 }
 
 func TestCompileRetryManagedStepBlocksWorkflowOnLogicalBead(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 	formulaContent := `
 formula = "retry-demo"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "review"

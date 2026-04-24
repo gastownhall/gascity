@@ -37,9 +37,7 @@ name = "helper"
 scope = "city"
 `)
 	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
-	if err := os.MkdirAll(filepath.Join(cityDir, "scripts"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(scripts): %v", err)
-	}
+	writeDoctorFile(t, cityDir, "scripts/legacy.sh", "#!/bin/sh\necho legacy\n")
 
 	var buf bytes.Buffer
 	d := &doctor.Doctor{}
@@ -66,11 +64,211 @@ scope = "city"
 	if !strings.Contains(out, "gc doctor --fix") || !strings.Contains(out, "gc doctor") {
 		t.Fatalf("doctor output missing doctor migration guidance:\n%s", out)
 	}
-	if !strings.Contains(out, "[rig_defaults] imports = [...]") {
-		t.Fatalf("doctor output missing rig_defaults guidance:\n%s", out)
+	if !strings.Contains(out, "[defaults.rig.imports.<binding>]") {
+		t.Fatalf("doctor output missing rig defaults guidance:\n%s", out)
 	}
 	if !strings.Contains(out, ".template.md") {
 		t.Fatalf("doctor output missing .template.md guidance:\n%s", out)
+	}
+}
+
+func TestV2ScriptsLayoutWarnsForSymlinkOnlyDir(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcFile := filepath.Join(cityDir, "assets", "scripts", "helper.sh")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("symlink-only scripts/ should warn as stale legacy state; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "stale legacy symlinks") {
+		t.Fatalf("symlink-only scripts/ should report stale legacy state, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutWarnsForUserManagedSymlinkOnlyDir(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "helper.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("user-managed symlink-only scripts/ should still warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "user-managed symlinks") {
+		t.Fatalf("user-managed symlink-only scripts/ should report preserved symlink state, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutTreatsTopLevelScriptsTargetsAsUserManaged(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(scriptsDir, "generated", "helper.sh"), filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("top-level scripts/ symlinks should still warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "user-managed symlinks") {
+		t.Fatalf("top-level scripts/ symlink targets should be treated as user-managed, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutTreatsRelayoutIntoAssetsScriptsAsUserManaged(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcFile := filepath.Join(cityDir, "assets", "scripts", "helper.sh")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "custom-helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("relayout symlink-only scripts/ should still warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "user-managed symlinks") {
+		t.Fatalf("relayout symlink-only scripts/ should be treated as user-managed, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutWarnsOnRealFilesAlongsideSymlinks(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	srcFile := filepath.Join(cityDir, "assets", "scripts", "resolved.sh")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(srcFile, filepath.Join(scriptsDir, "resolved.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "legacy.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(legacy): %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("mixed scripts/ should warn; got status=%v", res.Status)
+	}
+	var hasLegacy, hasResolved bool
+	for _, d := range res.Details {
+		if strings.Contains(d, "legacy.sh") {
+			hasLegacy = true
+		}
+		if strings.Contains(d, "resolved.sh") {
+			hasResolved = true
+		}
+	}
+	if !hasLegacy {
+		t.Errorf("warning should cite legacy.sh; details=%v", res.Details)
+	}
+	if hasResolved {
+		t.Errorf("warning should not cite symlinked resolved.sh; details=%v", res.Details)
 	}
 }
 
@@ -159,6 +357,56 @@ path = "/tmp/frontend"
 	}
 }
 
+func TestV2DeprecationChecksWarnAndFixLegacyWorkspaceIdentity(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+prefix = "lc"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "v2-workspace-name") {
+		t.Fatalf("doctor output missing workspace identity warning:\n%s", out)
+	}
+	if !strings.Contains(out, ".gc/site.toml") {
+		t.Fatalf("doctor output missing site binding guidance:\n%s", out)
+	}
+
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	rawData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	if strings.Contains(string(rawData), `name = "legacy-city"`) || strings.Contains(string(rawData), `prefix = "lc"`) {
+		t.Fatalf("city.toml should no longer store workspace identity:\n%s", rawData)
+	}
+
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if binding.WorkspaceName != "legacy-city" || binding.WorkspacePrefix != "lc" {
+		t.Fatalf("binding = %+v, want workspace_name=legacy-city workspace_prefix=lc", binding)
+	}
+
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+	out = buf.String()
+	if strings.Contains(out, "⚠ v2-workspace-name") {
+		t.Fatalf("workspace identity warning should clear after fix:\n%s", out)
+	}
+}
+
 func TestV2DeprecationChecksWarnOnLegacyTemplateSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +446,9 @@ name = "modern-city"
 schema = 1
 
 [imports.gastown]
+source = "./assets/imports/gastown"
+
+[defaults.rig.imports.gastown]
 source = "./assets/imports/gastown"
 `)
 	writeDoctorFile(t, cityDir, "agents/mayor/prompt.md", "Hello world\n")

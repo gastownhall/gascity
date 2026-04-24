@@ -5,6 +5,7 @@ package config
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,6 +40,529 @@ includes = ["../mypk"]
 	}
 	if !strings.Contains(err.Error(), "agents/bad/agent.toml") {
 		t.Errorf("error should mention agent.toml path; got: %v", err)
+	}
+}
+
+func TestImport_TransitiveFalseSuppressesNestedPackWarnings(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[agents]
+append_fragments = ["direct"]
+
+[imports.c]
+source = "../c"
+
+[[agent]]
+name = "direct"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[agent_defaults]
+provider = "claude"
+
+[[agent]]
+name = "transitive"
+scope = "city"
+`)
+
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	warnings := strings.Join(prov.Warnings, "\n")
+	if !strings.Contains(warnings, filepath.Join(dir, "b", "pack.toml")) {
+		t.Fatalf("expected direct import warning from b pack.toml; got %q", warnings)
+	}
+	if strings.Contains(warnings, filepath.Join(dir, "c", "pack.toml")) {
+		t.Fatalf("nested pack warnings should be suppressed by transitive=false; got %q", warnings)
+	}
+}
+
+func TestImport_TransitiveFalseSuppressesNestedNamedSessions(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[[agent]]
+name = "direct"
+scope = "city"
+
+[[named_session]]
+template = "direct"
+scope = "city"
+mode = "always"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[[agent]]
+name = "transitive"
+scope = "city"
+
+[[named_session]]
+template = "transitive"
+scope = "city"
+mode = "always"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, named := range cfg.NamedSessions {
+		found[named.QualifiedName()] = true
+	}
+	if !found["b.direct"] {
+		t.Fatalf("expected direct named session from b; got %v", found)
+	}
+	for qn := range found {
+		if strings.Contains(qn, "transitive") {
+			t.Fatalf("transitive=false should block nested named sessions; got %v", found)
+		}
+	}
+}
+
+func TestImport_TransitiveFalseSuppressesLegacyIncludedPackDeps(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+includes = ["../c"]
+
+[[agent]]
+name = "direct"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[[agent]]
+name = "legacy-transitive"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, agent := range cfg.Agents {
+		found[agent.QualifiedName()] = true
+	}
+	if !found["b.direct"] {
+		t.Fatalf("expected direct agent from b; got %v", found)
+	}
+	for qn := range found {
+		if strings.Contains(qn, "legacy-transitive") {
+			t.Fatalf("transitive=false should block nested legacy includes; got %v", found)
+		}
+	}
+}
+
+func TestImport_TransitiveFalseSuppressesNestedCityImportArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[providers.direct-helper]
+command = "direct-provider"
+
+[global]
+session_live = ["echo direct-global"]
+
+[[agent]]
+name = "direct"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "formulas/direct.md", "direct")
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[providers.nested-helper]
+command = "nested-provider"
+
+[global]
+session_live = ["echo nested-global"]
+
+[[pack.requires]]
+scope = "city"
+agent = "missing-nested"
+
+[[agent]]
+name = "nested"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "formulas/nested.md", "nested")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if _, ok := cfg.Providers["direct-helper"]; !ok {
+		t.Fatalf("expected direct provider from b; got %v", cfg.Providers)
+	}
+	if _, ok := cfg.Providers["nested-helper"]; ok {
+		t.Fatalf("transitive=false should block nested provider definitions; got %v", cfg.Providers)
+	}
+
+	var directAgent *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "b.direct" {
+			directAgent = &cfg.Agents[i]
+			break
+		}
+	}
+	if directAgent == nil {
+		t.Fatalf("expected direct imported agent b.direct; got %v", explicitAgents(cfg.Agents))
+	}
+	if !slices.Contains(directAgent.SessionLive, "echo direct-global") {
+		t.Fatalf("expected direct global on b.direct; got %v", directAgent.SessionLive)
+	}
+	if slices.Contains(directAgent.SessionLive, "echo nested-global") {
+		t.Fatalf("transitive=false should block nested globals; got %v", directAgent.SessionLive)
+	}
+
+	directFormulaDir := filepath.Join(dir, "b", "formulas")
+	nestedFormulaDir := filepath.Join(dir, "c", "formulas")
+	if !slices.Contains(cfg.FormulaLayers.City, directFormulaDir) {
+		t.Fatalf("expected direct formula layer %q; got %v", directFormulaDir, cfg.FormulaLayers.City)
+	}
+	if slices.Contains(cfg.FormulaLayers.City, nestedFormulaDir) {
+		t.Fatalf("transitive=false should block nested formula layers; got %v", cfg.FormulaLayers.City)
+	}
+}
+
+func TestImport_TransitiveFalseSuppressesNestedPackImportArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "outer", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["../outer"]
+`)
+	writeTestFile(t, filepath.Join(dir, "outer"), "pack.toml", `
+[pack]
+name = "outer"
+schema = 1
+
+[imports.tools]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[providers.direct-helper]
+command = "direct-provider"
+
+[global]
+session_live = ["echo direct-global"]
+
+[[agent]]
+name = "direct"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "formulas/direct.md", "direct")
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[providers.nested-helper]
+command = "nested-provider"
+
+[global]
+session_live = ["echo nested-global"]
+
+[[pack.requires]]
+scope = "city"
+agent = "missing-nested"
+
+[[agent]]
+name = "nested"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "formulas/nested.md", "nested")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if _, ok := cfg.Providers["direct-helper"]; !ok {
+		t.Fatalf("expected direct provider from b; got %v", cfg.Providers)
+	}
+	if _, ok := cfg.Providers["nested-helper"]; ok {
+		t.Fatalf("transitive=false should block nested provider definitions from pack imports; got %v", cfg.Providers)
+	}
+
+	var directAgent *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "tools.direct" {
+			directAgent = &cfg.Agents[i]
+			break
+		}
+	}
+	if directAgent == nil {
+		t.Fatalf("expected direct imported agent tools.direct; got %v", explicitAgents(cfg.Agents))
+	}
+	if !slices.Contains(directAgent.SessionLive, "echo direct-global") {
+		t.Fatalf("expected direct global on tools.direct; got %v", directAgent.SessionLive)
+	}
+	if slices.Contains(directAgent.SessionLive, "echo nested-global") {
+		t.Fatalf("transitive=false should block nested globals from pack imports; got %v", directAgent.SessionLive)
+	}
+
+	directFormulaDir := filepath.Join(dir, "b", "formulas")
+	nestedFormulaDir := filepath.Join(dir, "c", "formulas")
+	if !slices.Contains(cfg.FormulaLayers.City, directFormulaDir) {
+		t.Fatalf("expected direct formula layer %q; got %v", directFormulaDir, cfg.FormulaLayers.City)
+	}
+	if slices.Contains(cfg.FormulaLayers.City, nestedFormulaDir) {
+		t.Fatalf("transitive=false should block nested formula layers from pack imports; got %v", cfg.FormulaLayers.City)
+	}
+}
+
+func TestImport_RigImportTransitiveFalseSuppressesNestedDeps(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.tools]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[providers.direct-helper]
+command = "direct-provider"
+
+[global]
+session_live = ["echo direct-global"]
+
+[[agent]]
+name = "direct"
+scope = "rig"
+
+[[named_session]]
+template = "direct"
+scope = "rig"
+mode = "always"
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "doctor/direct-check/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, filepath.Join(dir, "b"), "formulas/direct.md", "direct")
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[providers.nested-helper]
+command = "nested-provider"
+
+[global]
+session_live = ["echo nested-global"]
+
+[[pack.requires]]
+scope = "rig"
+agent = "missing-nested"
+
+[[agent]]
+name = "nested"
+scope = "rig"
+
+[[named_session]]
+template = "nested"
+scope = "rig"
+mode = "always"
+
+[[service]]
+name = "nested-webhook"
+kind = "workflow"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "doctor/nested-check/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, filepath.Join(dir, "c"), "formulas/nested.md", "nested")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	foundAgents := map[string]bool{}
+	for _, agent := range cfg.Agents {
+		foundAgents[agent.QualifiedName()] = true
+	}
+	if !foundAgents["proj/tools.direct"] {
+		t.Fatalf("expected direct rig agent from b; got %v", foundAgents)
+	}
+	for qn := range foundAgents {
+		if strings.Contains(qn, "nested") {
+			t.Fatalf("transitive=false should block nested rig agents; got %v", foundAgents)
+		}
+	}
+
+	foundSessions := map[string]bool{}
+	for _, named := range cfg.NamedSessions {
+		foundSessions[named.QualifiedName()] = true
+	}
+	if !foundSessions["proj/tools.direct"] {
+		t.Fatalf("expected direct rig named session from b; got %v", foundSessions)
+	}
+	for qn := range foundSessions {
+		if strings.Contains(qn, "nested") {
+			t.Fatalf("transitive=false should block nested rig named sessions; got %v", foundSessions)
+		}
+	}
+
+	foundDoctors := map[string]bool{}
+	for _, doctor := range cfg.PackDoctors {
+		foundDoctors[doctor.Name] = true
+	}
+	if !foundDoctors["direct-check"] {
+		t.Fatalf("expected direct rig import doctor from b; got %v", foundDoctors)
+	}
+	if foundDoctors["nested-check"] {
+		t.Fatalf("transitive=false should block nested rig import doctors; got %v", foundDoctors)
+	}
+
+	if _, ok := cfg.Providers["direct-helper"]; !ok {
+		t.Fatalf("expected direct provider from rig import; got %v", cfg.Providers)
+	}
+	if _, ok := cfg.Providers["nested-helper"]; ok {
+		t.Fatalf("transitive=false should block nested rig import providers; got %v", cfg.Providers)
+	}
+
+	var directAgent *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/tools.direct" {
+			directAgent = &cfg.Agents[i]
+			break
+		}
+	}
+	if directAgent == nil {
+		t.Fatalf("expected direct rig agent proj/tools.direct; got %v", cfg.Agents)
+	}
+	if !slices.Contains(directAgent.SessionLive, "echo direct-global") {
+		t.Fatalf("expected direct rig global on proj/tools.direct; got %v", directAgent.SessionLive)
+	}
+	if slices.Contains(directAgent.SessionLive, "echo nested-global") {
+		t.Fatalf("transitive=false should block nested rig globals; got %v", directAgent.SessionLive)
+	}
+
+	directFormulaDir := filepath.Join(dir, "b", "formulas")
+	nestedFormulaDir := filepath.Join(dir, "c", "formulas")
+	rigFormulas := cfg.FormulaLayers.SearchPaths("proj")
+	if !slices.Contains(rigFormulas, directFormulaDir) {
+		t.Fatalf("expected direct rig formula layer %q; got %v", directFormulaDir, rigFormulas)
+	}
+	if slices.Contains(rigFormulas, nestedFormulaDir) {
+		t.Fatalf("transitive=false should block nested rig formula layers; got %v", rigFormulas)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // Options configures the migration run.
@@ -91,6 +92,7 @@ type agentFile struct {
 	SessionLive            []string          `toml:"session_live,omitempty"`
 	DefaultSlingFormula    *string           `toml:"default_sling_formula,omitempty"`
 	InjectFragments        []string          `toml:"inject_fragments,omitempty"`
+	AppendFragments        []string          `toml:"append_fragments,omitempty"`
 	Attach                 *bool             `toml:"attach,omitempty"`
 	DependsOn              []string          `toml:"depends_on,omitempty"`
 	ResumeCommand          string            `toml:"resume_command,omitempty"`
@@ -163,7 +165,7 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	if len(selectedAgents) > 0 || len(cityCfg.Workspace.Includes) > 0 {
+	if len(selectedAgents) > 0 || len(cityCfg.Workspace.Includes) > 0 || len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
 		if ensurePackMeta(&packCfg, cityCfg, cityPath) {
 			packChanged = true
 		}
@@ -173,9 +175,27 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		if packCfg.Imports == nil {
 			packCfg.Imports = make(map[string]config.Import)
 		}
-		addImports(packCfg.Imports, cityCfg.Workspace.Includes, cityCfg.Packs)
+		if addImports(packCfg.Imports, cityCfg.Workspace.Includes, cityCfg.Packs) {
+			packChanged = true
+		}
 		cityCfg.Workspace.Includes = nil
-		packChanged = true
+	}
+
+	if len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
+		if packCfg.Defaults.Rig.Imports == nil {
+			packCfg.Defaults.Rig.Imports = make(map[string]config.Import)
+		}
+		var changed bool
+		packCfg.defaultRigImportOrder, changed = addOrderedImports(
+			packCfg.Defaults.Rig.Imports,
+			packCfg.defaultRigImportOrder,
+			cityCfg.Workspace.DefaultRigIncludes,
+			cityCfg.Packs,
+		)
+		if changed {
+			packChanged = true
+		}
+		cityCfg.Workspace.DefaultRigIncludes = nil
 	}
 
 	cityContent, err := cityCfg.Marshal()
@@ -207,6 +227,9 @@ func loadCityFile(path string) (*config.City, error) {
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return nil, fmt.Errorf("migrate %q: %w", path, err)
+	}
+	if err := config.ResolveWorkspaceIdentity(fsys.OSFS{}, filepath.Dir(path), cfg); err != nil {
+		return nil, fmt.Errorf("migrate %q: resolve workspace identity: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -400,10 +423,7 @@ func migrateAgentAssets(cityPath string, entry agentEntry, usage usageCounts, re
 func ensurePackMeta(packCfg *packFile, cityCfg *config.City, cityPath string) bool {
 	changed := false
 	if packCfg.Pack.Name == "" {
-		packCfg.Pack.Name = strings.TrimSpace(cityCfg.Workspace.Name)
-		if packCfg.Pack.Name == "" {
-			packCfg.Pack.Name = filepath.Base(cityPath)
-		}
+		packCfg.Pack.Name = strings.TrimSpace(config.EffectiveCityName(cityCfg, filepath.Base(cityPath)))
 		changed = true
 	}
 	if packCfg.Pack.Schema == 0 {
@@ -413,12 +433,65 @@ func ensurePackMeta(packCfg *packFile, cityCfg *config.City, cityPath string) bo
 	return changed
 }
 
-func addImports(target map[string]config.Import, includes []string, packs map[string]config.PackSource) {
+func addImports(target map[string]config.Import, includes []string, packs map[string]config.PackSource) bool {
+	changed := false
 	for _, include := range includes {
 		source := importSourceFor(include, packs)
+		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
+			continue
+		}
 		binding := uniqueBinding(target, deriveBindingName(include, source, packs))
 		target[binding] = config.Import{Source: source}
+		changed = true
 	}
+	return changed
+}
+
+func addOrderedImports(target map[string]config.Import, order []string, includes []string, packs map[string]config.PackSource) ([]string, bool) {
+	changed := false
+	for _, include := range includes {
+		source := importSourceFor(include, packs)
+		binding, exists := existingDefaultImportBindingForSource(target, source)
+		if !exists {
+			binding = uniqueBinding(target, deriveBindingName(include, source, packs))
+			target[binding] = config.Import{Source: source}
+			changed = true
+		}
+		if !stringSliceContains(order, binding) {
+			order = append(order, binding)
+			changed = true
+		}
+	}
+	return order, changed
+}
+
+func existingDefaultImportBindingForSource(target map[string]config.Import, source string) (string, bool) {
+	for binding, imp := range target {
+		if imp.Source == source && importMatchesLegacyDefault(imp) {
+			return binding, true
+		}
+	}
+	return "", false
+}
+
+func importMatchesLegacyDefault(imp config.Import) bool {
+	if strings.TrimSpace(imp.Version) != "" || imp.Export {
+		return false
+	}
+	if imp.Transitive != nil && !*imp.Transitive {
+		return false
+	}
+	shadow := strings.TrimSpace(imp.Shadow)
+	return shadow == "" || shadow == "warn"
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func importSourceFor(include string, packs map[string]config.PackSource) string {
@@ -763,6 +836,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		SessionLive:            agent.SessionLive,
 		DefaultSlingFormula:    agent.DefaultSlingFormula,
 		InjectFragments:        agent.InjectFragments,
+		AppendFragments:        agent.AppendFragments,
 		Attach:                 agent.Attach,
 		DependsOn:              agent.DependsOn,
 		ResumeCommand:          agent.ResumeCommand,
@@ -808,6 +882,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		len(cfg.SessionLive) == 0 &&
 		cfg.DefaultSlingFormula == nil &&
 		len(cfg.InjectFragments) == 0 &&
+		len(cfg.AppendFragments) == 0 &&
 		cfg.Attach == nil &&
 		len(cfg.DependsOn) == 0 &&
 		cfg.ResumeCommand == "" &&

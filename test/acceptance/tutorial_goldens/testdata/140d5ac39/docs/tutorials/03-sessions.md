@@ -11,28 +11,29 @@ each other. You'll also learn the difference between "polecats" (agents spun up
 on demand to handle work) and "crew" (persistent agents with named sessions),
 
 To continue with this tutorial, you'll want to start from where the last
-tutorial left off, with a `city.toml` that looks like the following and the
-appropriate agent prompts and rig folders in place to match:
+tutorial left off, with `pack.toml` and `city.toml` that look like the
+following and the appropriate agent prompts and rig folders in place to match:
 
 ```shell
 ~/my-city
-$ cat city.toml
-[workspace]
+$ cat pack.toml
+[pack]
 name = "my-city"
-provider = "claude"
+schema = 2
 
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
 mode = "always"
 
-[[agent]]
-name = "reviewer"
-prompt_template = "prompts/reviewer.md"
-provider = "codex"
+~/my-city
+$ cat city.toml
+[workspace]
+name = "my-city"
+provider = "claude"
 
 [[rigs]]
 name = "my-project"
@@ -41,6 +42,11 @@ path = "/Users/csells/my-project"
 [[rigs]]
 name = "my-api"
 path = "/Users/csells/my-api"
+
+~/my-city
+$ cat agents/reviewer/agent.toml
+dir = "my-project"
+provider = "codex"
 ```
 
 ## Looking in on Polecats
@@ -152,13 +158,13 @@ City is up and idle. No pending work, no agents running besides me. What would
 ```
 
 So the mayor is clearly idle, but has not been shutdown. Why not? If you take a
-look again at your `city.toml` file, you'll see why:
+look again at your `pack.toml` file, you'll see why:
 
 ```toml
 ...
 [[agent]]
 name = "mayor"
-prompt_template = "prompts/mayor.md"
+prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -225,7 +231,7 @@ conversation history:
 
 ```shell
 ~/my-city
-$ gc session logs mayor --tail 1
+$ gc session logs mayor --tail 2
 07:22:29 [USER] [my-city] mayor • 2026-04-08T00:22:24
 Check the status of mc-wisp-8t8
 
@@ -234,9 +240,13 @@ mc-wisp-8t8 is a review request for the auth module. I've routed it to
 my-project/reviewer.
 ```
 
-Note that `--tail` here counts compaction _segments_, not lines — `--tail 1`
-shows the most recent segment, `--tail 0` shows all of them. Follow live output
-with `-f`:
+`--tail N` prints the last N transcript entries (same convention as `tail -n`),
+so `--tail 2` above shows the most recent user prompt and the mayor's reply.
+Compact-boundary dividers count as entries if one lands inside that final
+window. Use `--tail 0` to print the whole conversation. Compatibility note:
+before 1.0, `--tail` counted compaction segments; as of 1.0 it counts
+displayed transcript entries instead. The HTTP API's `tail` query parameter
+still counts compaction segments. Follow live output with `-f`:
 
 ```shell
 ~/my-city

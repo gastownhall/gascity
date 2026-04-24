@@ -12,7 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -183,6 +183,28 @@ func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), template) {
 		t.Fatalf("stderr should redact raw template, got %q", buf.String())
+	}
+}
+
+func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigPath := filepath.Join(cityPath, "frontend")
+	a := config.Agent{Name: "worker", Dir: "frontend"}
+	rigs := []config.Rig{{Name: "frontend", Path: rigPath}}
+
+	got := BuildSlingCommandForAgent(
+		"sling_query",
+		"custom {} --route={{.CityName}}/{{.Rig}}/{{.AgentBase}}",
+		"BL-42",
+		cityPath,
+		"",
+		a,
+		rigs,
+		nil,
+	)
+
+	if want := "custom 'BL-42' --route=demo-city/frontend/worker"; got != want {
+		t.Fatalf("BuildSlingCommandForAgent() = %q, want %q", got, want)
 	}
 }
 
@@ -716,6 +738,7 @@ func TestSlingAttachGraphFormulaRejectsExistingLiveRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -731,9 +754,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -775,6 +796,7 @@ func TestSlingAttachGraphFormulaRejectsExistingLiveRootAcrossStores(t *testing.T
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -790,9 +812,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -847,6 +867,7 @@ func TestSlingAttachGraphFormulaForceReplacesExistingLiveRootAcrossStores(t *tes
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -862,9 +883,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -939,6 +958,7 @@ func TestSlingAttachGraphFormulaForceRestoresCrossStoreRootWhenFinalizeFails(t *
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -954,9 +974,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -1034,6 +1052,7 @@ func TestSlingAttachGraphFormulaForceAllowsExistingLiveRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1049,9 +1068,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open", Assignee: "mayor"})
@@ -1117,6 +1134,7 @@ func TestSlingAttachGraphFormulaForceRollsBackNewRootWhenSupersededCloseFails(t 
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1132,9 +1150,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open", Assignee: "mayor"})
@@ -1218,6 +1234,7 @@ func TestSlingAttachGraphFormulaForceRestoresSupersededRootWhenFinalizeFails(t *
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1233,9 +1250,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open", Assignee: "mayor"})
@@ -1313,6 +1328,7 @@ func TestSlingAttachGraphFormulaConcurrentLaunchCreatesSingleRoot(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1328,9 +1344,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -1394,6 +1408,7 @@ func TestDoSlingBatchGraphFormulaForceAllowsAttachedWorkflow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1409,9 +1424,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store
@@ -1490,6 +1503,7 @@ func TestDoSlingBatchPropagatesConflictErrorToCaller(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1505,9 +1519,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store
@@ -1581,6 +1593,7 @@ func TestDoSlingBatchPreflightEmitsConflictErrorForWorkflowAttachment(t *testing
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1596,9 +1609,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store
@@ -1669,6 +1680,7 @@ func TestDoSlingBatchPreflightEmitsPerChildConflictErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1684,9 +1696,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store

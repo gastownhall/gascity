@@ -26,7 +26,13 @@ type DesiredStateResult struct {
 	State             map[string]TemplateParams
 	BaseState         map[string]TemplateParams
 	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
-	AssignedWorkBeads []beads.Bead   // actionable assigned work: in_progress or ready+assigned
+	PoolDesiredCounts map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
+	WorkSet           map[string]bool
+	AssignedWorkBeads []beads.Bead // actionable assigned work: in_progress or ready+assigned
+	// AssignedWorkStores is aligned by index with AssignedWorkBeads, so later
+	// mutation paths update rig-owned work in the right store even when
+	// independent stores produce overlapping bead IDs.
+	AssignedWorkStores []beads.Store
 	// NamedSessionDemand records which named-session identities have active
 	// demand — either direct assignee demand (Assignee == identity) or
 	// work_query-detected ready work. The reconciler merges this into
@@ -197,10 +203,8 @@ func buildDesiredStateWithSessionBeads(
 		}
 
 		sp := scaleParamsFor(&cfg.Agents[i])
-		// Expand {{.Rig}}/{{.AgentBase}} in scale_check here — before the
-		// command reaches the semaphored scale_check goroutine pool — so
-		// rig-scoped pool agents probe their own rig instead of the literal
-		// template string. #793.
+		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
+		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
 
 		if !cfg.Agents[i].SupportsGenericEphemeralSessions() {
@@ -215,12 +219,7 @@ func buildDesiredStateWithSessionBeads(
 			// but generic scale_check/min demand for the backing template still
 			// creates ephemeral capacity through the pool pipeline.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-			pendingPools = append(pendingPools, poolEvalWork{
-				agentIdx: i,
-				sp:       sp,
-				poolDir:  poolDir,
-				env:      controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i]),
-			})
+			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
 			continue
 		}
 
@@ -243,9 +242,10 @@ func buildDesiredStateWithSessionBeads(
 	// named session on_demand wake. Hoisted out of the store block so
 	// the named session section can also use it.
 	var assignedWorkBeads []beads.Bead
+	var assignedWorkStores []beads.Store
 	var storePartial bool
 	if store != nil {
-		assignedWorkBeads, storePartial = collectAssignedWorkBeads(cfg, store, rigStores, suspendedRigPaths)
+		assignedWorkBeads, assignedWorkStores, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -348,8 +348,6 @@ func buildDesiredStateWithSessionBeads(
 		if wq == "" {
 			continue
 		}
-		// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped named sessions probe
-		// with rig-specific metadata. #793.
 		wq = expandAgentCommandTemplate(cityPath, cityName, spec.Agent, cfg.Rigs, "work_query", wq, stderr)
 		dir := agentCommandDir(cityPath, spec.Agent, cfg.Rigs)
 		probeEnv := controllerQueryRuntimeEnv(cityPath, cfg, spec.Agent)
@@ -405,6 +403,7 @@ func buildDesiredStateWithSessionBeads(
 		BaseState:          baseDesired,
 		ScaleCheckCounts:   scaleCheckCounts,
 		AssignedWorkBeads:  assignedWorkBeads,
+		AssignedWorkStores: assignedWorkStores,
 		NamedSessionDemand: namedWorkReady,
 		StoreQueryPartial:  storePartial,
 		BeaconTime:         beaconTime,
@@ -484,9 +483,17 @@ func refreshDesiredStateWithSessionBeads(
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
+) ([]beads.Bead, bool) {
+	result, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil)
+	return result, partial
+}
+
+func collectAssignedWorkBeadsWithStores(
+	cfg *config.City,
+	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-) ([]beads.Bead, bool) {
+) ([]beads.Bead, []beads.Store, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
 	stores := []beads.Store{cityStore}
@@ -500,26 +507,28 @@ func collectAssignedWorkBeads(
 	}
 
 	var result []beads.Bead
+	var resultStores []beads.Store
 	var partial bool
-	seen := make(map[string]struct{})
 	for _, s := range stores {
+		seen := make(map[string]struct{})
 		// In-progress beads with an assignee (active work).
-		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress"}); err == nil {
-			appendAssignedUnique(&result, inProgress, seen)
+		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress", Live: true}); err == nil {
+			appendAssignedUnique(&result, &resultStores, inProgress, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
 		}
 		// Ready beads with an assignee (queued direct handoff work that is
-		// actually runnable, not merely open).
-		if ready, err := s.Ready(); err == nil {
-			appendAssignedUnique(&result, ready, seen)
+		// actually runnable, not merely open). This is a lifecycle gate, so
+		// bypass the cache when a CachingStore wrapper is present.
+		if ready, err := beads.ReadyLive(s); err == nil {
+			appendAssignedUnique(&result, &resultStores, ready, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
 			partial = true
 		}
 	}
-	return result, partial
+	return result, resultStores, partial
 }
 
 // mergeNamedSessionDemand ensures that named-session assignee demand is
@@ -547,7 +556,7 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, beadList []beads.Bead, seen map[string]struct{}, store beads.Store) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
@@ -565,6 +574,9 @@ func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[str
 		}
 		seen[b.ID] = struct{}{}
 		*dst = append(*dst, b)
+		if stores != nil {
+			*stores = append(*stores, store)
+		}
 	}
 }
 
@@ -652,6 +664,12 @@ func discoverSessionBeadsWithRoots(
 			continue
 		}
 		roots[template] = true
+		if !isManualSessionBead(b) && !isNamedSessionBead(b) && !isPoolManagedSessionBead(b) && desiredHasConfiguredNamedTemplate(desired, template) {
+			// A configured named session already owns this backing template in
+			// desired state. Treat any extra plain open bead as leaked state so
+			// the reconciler can close it as orphaned instead of reviving it.
+			continue
+		}
 		// Pool agents: respect the pool's scaling decision. If the main
 		// config iteration (which ran evaluatePool / scale_check) did not
 		// produce any desired entries for this template, the pool wants 0
@@ -852,6 +870,15 @@ func ensureDependencyOnlyTemplate(
 func desiredHasTemplate(desired map[string]TemplateParams, template string) bool {
 	for _, existing := range desired {
 		if existing.TemplateName == template {
+			return true
+		}
+	}
+	return false
+}
+
+func desiredHasConfiguredNamedTemplate(desired map[string]TemplateParams, template string) bool {
+	for _, existing := range desired {
+		if existing.TemplateName == template && strings.TrimSpace(existing.ConfiguredNamedIdentity) != "" {
 			return true
 		}
 	}
@@ -1207,7 +1234,8 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck
 			return
 		}
-		if hErr := hooks.Install(bp.fs, bp.cityPath, workDir, ih); hErr != nil {
+		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
 		}
 	}
@@ -1218,18 +1246,65 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
 }
 
-// installAgentSideEffects performs post-resolution side effects that depend on
-// the fully resolved template. Called from buildDesiredState on every tick;
-// safe to repeat.
+// installAgentSideEffects performs idempotent side effects for a resolved
+// agent: hook installation and ACP route registration. Called from
+// buildDesiredState on every tick; safe to repeat.
+//
+// When the resolved provider is Claude, resolveTemplate has already projected
+// managed Claude settings via ensureClaudeSettingsArgs (required so the
+// --settings path exists before runtime fingerprinting). In that case the
+// "claude" entry in install_agent_hooks is filtered out here to avoid
+// duplicating filesystem I/O for every pool instance on every tick. Agents
+// whose resolved provider is not Claude but which opt in explicitly via
+// install_agent_hooks = ["claude"] still flow through hooks.Install here.
 func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	_ = cfgAgent
-	_ = stderr
+	// Install provider hooks (idempotent filesystem side effect). Route
+	// through the family resolver so wrapped custom aliases (e.g.
+	// [providers.my-fast-claude] base = "builtin:claude") install their
+	// ancestor's hook format rather than erroring with
+	// "unsupported hook provider". Keep the "claude" dedup from main: if
+	// the resolved provider family IS claude, ensureClaudeSettingsArgs
+	// already projected the settings upstream in resolveTemplate, so
+	// drop the explicit "claude" entry here to avoid duplicating the
+	// filesystem write on every reconciler tick.
+	ih := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	if tp.ResolvedProvider != nil {
+		family := resolvedProviderLaunchFamily(tp.ResolvedProvider)
+		if family == "claude" || tp.ResolvedProvider.Name == "claude" {
+			ih = hooksWithoutClaude(ih)
+		}
+	}
+	if len(ih) > 0 {
+		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, tp.WorkDir, ih, resolver); hErr != nil {
+			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
+		}
+	}
 	// Register ACP route on the auto provider for dynamic sessions.
 	if tp.IsACP {
 		if autoSP, ok := bp.sp.(*sessionauto.Provider); ok {
 			autoSP.RouteACP(tp.SessionName)
 		}
 	}
+}
+
+// hooksWithoutClaude returns ih with any "claude" entries filtered out.
+// Used by installAgentSideEffects when the resolved provider is Claude —
+// in that case resolveTemplate → ensureClaudeSettingsArgs already projected
+// the settings, and running hooks.Install("claude") again would duplicate
+// filesystem I/O on every reconciler tick.
+func hooksWithoutClaude(ih []string) []string {
+	if len(ih) == 0 {
+		return ih
+	}
+	out := make([]string, 0, len(ih))
+	for _, p := range ih {
+		if p == "claude" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // poolInstanceName returns the name for pool slot N.

@@ -661,9 +661,13 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
 	}
 	compileStart := time.Now()
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
+		return nil, err
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))

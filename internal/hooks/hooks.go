@@ -1,7 +1,7 @@
-// Package hooks installs provider hook files needed before runtime startup.
-// Claude still uses a city-level settings file, while the other providers use
-// files sourced from the embedded core pack overlay/per-provider tree and
-// materialized into the session workdir.
+// Package hooks installs provider-specific agent hook files into working
+// directories. Each provider (Claude, Codex, Gemini, OpenCode, Copilot, etc.)
+// has its own file format and install location. Hook files are embedded at build time
+// and written idempotently — existing files are never overwritten.
 package hooks
 
 import (
@@ -21,38 +21,58 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 )
 
-//go:embed config/claude.json
+//go:embed config/*
 var configFS embed.FS
 
-// supported lists provider names that Install recognizes.
-var supported = []string{"claude"}
-
-// overlayManaged lists provider names whose hooks ship via the core pack
-// overlay instead of this package. Included in Validate's accept set so
-// existing install_agent_hooks entries stay valid without extra config churn.
-var overlayManaged = []string{"codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
+// supported lists provider names that have hook support.
+var supported = []string{"claude", "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
 
 // unsupported lists provider names that have no hook mechanism.
 var unsupported = []string{"amp", "auggie"}
 
-// SupportedProviders returns the list of provider names with hook support —
-// including the overlay-managed ones so callers can surface them in docs.
+// SupportedProviders returns the list of provider names with hook support.
 func SupportedProviders() []string {
-	out := make([]string, 0, len(supported)+len(overlayManaged))
-	out = append(out, supported...)
-	out = append(out, overlayManaged...)
+	out := make([]string, len(supported))
+	copy(out, supported)
 	return out
+}
+
+// FamilyResolver maps a raw provider name (which may be a custom wrapper
+// alias like "my-fast-claude") to its built-in family name (e.g. "claude").
+// A nil resolver (or one that returns "") is treated as identity: the raw
+// name is used verbatim for the switch lookup. Provided so callers holding
+// a city-providers map can route wrapped aliases to their ancestor's hook
+// format without pulling the config package into hooks.
+type FamilyResolver func(name string) string
+
+// resolveFamily applies fn to name, falling back to name itself when fn
+// is nil or returns "". The identity fallback preserves Install/Validate's
+// existing contract for callers that pass raw built-in names directly.
+func resolveFamily(fn FamilyResolver, name string) string {
+	if fn == nil {
+		return name
+	}
+	if family := fn(name); family != "" {
+		return family
+	}
+	return name
 }
 
 // Validate checks that all provider names are supported for hook installation.
 // Returns an error listing any unsupported names.
 func Validate(providers []string) error {
-	accept := make(map[string]bool, len(supported)+len(overlayManaged))
+	return ValidateWithResolver(providers, nil)
+}
+
+// ValidateWithResolver is Validate with a FamilyResolver so callers that
+// hold city-provider inheritance context can validate wrapped custom
+// aliases against the resolved built-in family (e.g. a custom
+// "my-fast-claude" with base = "builtin:claude" validates as claude-
+// family). Passing a nil resolver is equivalent to Validate.
+func ValidateWithResolver(providers []string, resolve FamilyResolver) error {
+	sup := make(map[string]bool, len(supported))
 	for _, s := range supported {
-		accept[s] = true
-	}
-	for _, s := range overlayManaged {
-		accept[s] = true
+		sup[s] = true
 	}
 	noHook := make(map[string]bool, len(unsupported))
 	for _, u := range unsupported {
@@ -60,39 +80,50 @@ func Validate(providers []string) error {
 	}
 	var bad []string
 	for _, p := range providers {
-		if !accept[p] {
-			if noHook[p] {
-				bad = append(bad, fmt.Sprintf("%s (no hook mechanism)", p))
-			} else {
-				bad = append(bad, fmt.Sprintf("%s (unknown)", p))
-			}
+		family := resolveFamily(resolve, p)
+		if sup[family] {
+			continue
+		}
+		if noHook[family] {
+			bad = append(bad, fmt.Sprintf("%s (no hook mechanism)", p))
+		} else {
+			bad = append(bad, fmt.Sprintf("%s (unknown)", p))
 		}
 	}
 	if len(bad) > 0 {
-		all := append(append([]string{}, supported...), overlayManaged...)
 		return fmt.Errorf("unsupported install_agent_hooks: %s; supported: %s",
-			strings.Join(bad, ", "), strings.Join(all, ", "))
+			strings.Join(bad, ", "), strings.Join(supported, ", "))
 	}
 	return nil
 }
 
-// Install writes hook files for the requested providers. Claude still uses a
-// city-level file; the overlay-managed providers are copied from the embedded
-// core pack overlay into the target workdir so desired-state fingerprinting
-// and direct runtimes see the same files before startup.
+// Install writes hook files for the given providers. cityDir is the city root
+// (used for city-wide files like Claude settings). workDir is the agent's
+// working directory (used for per-project files like Gemini, OpenCode, Copilot).
+// Idempotent — existing files are not overwritten.
 func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
+	return InstallWithResolver(fs, cityDir, workDir, providers, nil)
+}
+
+// InstallWithResolver is Install with a FamilyResolver so callers that
+// hold city-provider inheritance context can route wrapped custom
+// aliases to their resolved built-in hook handler (e.g. "my-fast-claude"
+// with base = "builtin:claude" installs claude-style hooks). Passing a
+// nil resolver is equivalent to Install.
+func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string, resolve FamilyResolver) error {
 	for _, p := range providers {
-		switch p {
+		family := resolveFamily(resolve, p)
+		var err error
+		switch family {
 		case "claude":
-			if err := installClaude(fs, cityDir); err != nil {
-				return fmt.Errorf("installing %s hooks: %w", p, err)
-			}
+			err = installClaude(fs, cityDir)
 		case "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp":
-			if err := installOverlayManaged(fs, workDir, p); err != nil {
-				return fmt.Errorf("installing %s hooks: %w", p, err)
-			}
+			err = installOverlayManaged(fs, workDir, family)
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)
+		}
+		if err != nil {
+			return fmt.Errorf("installing %s hooks: %w", p, err)
 		}
 	}
 	return nil
@@ -123,20 +154,17 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 	})
 }
 
-// installClaude writes both the source hook file (hooks/claude.json) and the
-// runtime settings file (.gc/settings.json) in the city directory. The
-// runtime file is the path gc passes to Claude via --settings, while the
-// legacy hooks/claude.json file remains user-owned unless gc can prove it is
-// safe to seed or rewrite during migration/upgrade.
+// installClaude writes the runtime settings file (.gc/settings.json) in the
+// city directory. The legacy hooks/claude.json file remains user-owned unless
+// gc can prove it is safe to update a stale generated copy.
 //
 // Source precedence for user-authored Claude settings:
 //  1. <city>/.claude/settings.json
 //  2. <city>/hooks/claude.json
 //  3. <city>/.gc/settings.json
 //
-// The selected source (or embedded defaults, if no override exists) is merged
-// onto the embedded default Claude settings so new default hooks added in
-// future releases land for users on every source, not just .claude/settings.json.
+// The selected source is merged over embedded defaults so new default hooks
+// still land for users with custom settings.
 func installClaude(fs fsys.FS, cityDir string) error {
 	hookDst := filepath.Join(cityDir, citylayout.ClaudeHookFile)
 	runtimeDst := filepath.Join(cityDir, ".gc", "settings.json")
@@ -145,52 +173,21 @@ func installClaude(fs fsys.FS, cityDir string) error {
 		return err
 	}
 
-	// Write hooks/claude.json when:
-	//  (a) it's the explicitly selected source (claudeSettingsSourceLegacyHook),
-	//      so the user's merged settings land back in the file they own; or
-	//  (b) the existing hook file is a known-stale gc-generated pattern and
-	//      needs the in-place upgrade (old embedded bytes → new embedded bytes).
-	//
-	// Previous revisions also seeded the hook file on FRESH installs
-	// whenever it was absent — that behavior created a stale-mirror bug:
-	// a user who started with .claude/settings.json got a mirrored
-	// hooks/claude.json written on first install, then if they later
-	// removed .claude/settings.json desiredClaudeSettings would fall
-	// back to the mirror as "legacy hook source" and ship the previous
-	// generation's settings instead of the current embedded defaults.
-	// Fresh installs now leave hooks/claude.json untouched; the
-	// gc-managed .gc/settings.json is what gc passes to Claude via
-	// --settings.
 	if sourceKind == claudeSettingsSourceLegacyHook || isStaleHookFile(fs, hookDst) {
 		if err := writeManagedFile(fs, hookDst, data, preserveUnreadable); err != nil {
 			return err
 		}
 	}
-	// The runtime file is gc-owned: if existing content is unreadable (bad
-	// perms, i/o error), force an overwrite rather than silently preserving
-	// a stale blob Claude can't parse. If the write itself fails, surface
-	// the error so the caller can fail agent creation loudly instead of
-	// launching with a broken --settings path.
 	return writeManagedFile(fs, runtimeDst, data, forceOverwrite)
 }
 
 type writeManagedFilePolicy int
 
 const (
-	// preserveUnreadable leaves a stat-ok-but-read-fails file in place.
-	// Used for user-owned paths (hooks/claude.json) where clobbering an
-	// unreadable file could lose user-authored content.
 	preserveUnreadable writeManagedFilePolicy = iota
-	// forceOverwrite attempts to write the new content even when the
-	// existing file is unreadable. Used for gc-managed paths (.gc/settings.json)
-	// where the file's content is gc's responsibility.
 	forceOverwrite
 )
 
-// isStaleHookFile reports whether hooks/claude.json exists AND matches a
-// known stale gc-generated pattern. Only true for files we can prove gc
-// wrote: user-authored content and the current-embedded-defaults case
-// both return false so they are preserved in place.
 func isStaleHookFile(fs fsys.FS, hookDst string) bool {
 	data, err := fs.ReadFile(hookDst)
 	if err != nil {
@@ -199,15 +196,14 @@ func isStaleHookFile(fs fsys.FS, hookDst string) bool {
 	return claudeFileNeedsUpgrade(data)
 }
 
-// readEmbedded returns the embedded Claude defaults (config/claude.json).
-// The path is fixed — the embed directive only captures that one file —
-// so the parameter would be dead weight (and tripped up the unparam
-// linter). All callers read the same file.
-func readEmbedded() ([]byte, error) {
-	const embedPath = "config/claude.json"
-	data, err := configFS.ReadFile(embedPath)
+func readEmbedded(embedPath ...string) ([]byte, error) {
+	path := "config/claude.json"
+	if len(embedPath) > 0 && embedPath[0] != "" {
+		path = embedPath[0]
+	}
+	data, err := configFS.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading embedded %s: %w", embedPath, err)
+		return nil, fmt.Errorf("reading embedded %s: %w", path, err)
 	}
 	return data, nil
 }
@@ -242,18 +238,8 @@ const (
 	claudeSettingsSourceLegacyRuntime
 )
 
-// desiredClaudeSettings returns the bytes that should land in the managed
-// runtime file (.gc/settings.json) and the source kind that was chosen.
-//
-// All override sources — including legacy ones — are merged against the
-// embedded base. The hooks array in overlay.MergeSettingsJSON uses
-// union-by-identity semantics (duplicate entries collapse), so merging is
-// safe and gives legacy users the future-base-hook-additions path back: any
-// new default hook added to config/claude.json in a future release lands
-// for users whose source is hooks/claude.json or .gc/settings.json, not
-// just users on .claude/settings.json.
 func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSourceKind, error) {
-	base, err := readEmbedded()
+	base, err := readEmbedded("config/claude.json")
 	if err != nil {
 		return nil, claudeSettingsSourceNone, err
 	}
@@ -262,18 +248,10 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 	if err != nil {
 		return nil, claudeSettingsSourceNone, err
 	}
-
 	if sourceKind == claudeSettingsSourceNone {
-		// No override found. Return embedded base as-is.
 		return base, claudeSettingsSourceNone, nil
 	}
 	if len(overrideData) == 0 {
-		// An override source was located but its content is empty. For the
-		// preferred source (.claude/settings.json), that contradicts the
-		// strict contract — an intentionally-empty file is indistinguishable
-		// from a truncated write and must not silently degrade to defaults.
-		// For legacy sources, an empty file is unusual but not worth failing
-		// the entire agent over; fall back to embedded base.
 		if sourceKind == claudeSettingsSourceCityDotClaude {
 			return nil, claudeSettingsSourceNone, fmt.Errorf("empty Claude settings from %s (file present but zero bytes)", overridePath)
 		}
@@ -288,9 +266,6 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 }
 
 func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string, []byte, claudeSettingsSourceKind, error) {
-	// Preferred source (.claude/settings.json): a present-but-unreadable
-	// file is a hard error. Falling back silently to a legacy source the
-	// user did not intend would ship the wrong --settings.
 	preferredPath := citylayout.ClaudeSettingsPath(cityDir)
 	preferredState, preferredData, preferredErr := readClaudeSettingsCandidate(fs, preferredPath)
 	switch preferredState {
@@ -300,16 +275,6 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 		return "", nil, claudeSettingsSourceNone, fmt.Errorf("reading %s: %w", preferredPath, preferredErr)
 	}
 
-	// Legacy candidates. A genuinely missing file is fine — fall through.
-	// An exists-but-unreadable hooks/claude.json must NOT silently demote
-	// to .gc/settings.json, or a stale runtime file could override a
-	// user-owned hook file that gc simply couldn't read this tick. Fall
-	// back to embedded base defaults instead.
-	//
-	// An unreadable .gc/settings.json does NOT block hook precedence —
-	// the runtime file is gc-managed, not user-owned, so treating it as
-	// "missing" when unreadable is equivalent to "gc will overwrite
-	// whatever's there." A valid hooks/claude.json should still win.
 	hookPath := citylayout.ClaudeHookFilePath(cityDir)
 	runtimePath := filepath.Join(cityDir, ".gc", "settings.json")
 	hookState, hookData, _ := readClaudeSettingsCandidate(fs, hookPath)
@@ -319,14 +284,6 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 		return "", nil, claudeSettingsSourceNone, nil
 	}
 
-	// hooks/claude.json is authoritative when it exists, is not a known
-	// stale auto-generated file, and differs from the managed runtime file
-	// (the redundant-mirror case). We deliberately do NOT disqualify a
-	// hook file whose bytes equal the embedded base: a user may pin
-	// hooks/claude.json to exactly the embedded defaults as their
-	// authoritative source and still expect it to outrank .gc/settings.json
-	// per the documented precedence. Stale-pattern detection alone
-	// distinguishes gc-generated from user-authored.
 	hookExists := hookState == candidateFound
 	runtimeExists := runtimeState == candidateFound
 	if hookExists &&
@@ -350,14 +307,6 @@ const (
 	candidateUnreadable
 )
 
-// readClaudeSettingsCandidate reads a candidate settings file and reports
-// one of three states. Callers decide strictness: the preferred source
-// surfaces candidateUnreadable as a hard error; legacy sources use it to
-// block silent fallback to a lower-priority source.
-//
-// A read error that wraps os.ErrNotExist reports candidateMissing (matches
-// both real OS filesystems and the test Fake). Any other read error
-// reports candidateUnreadable with the original error returned.
 func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState, []byte, error) {
 	data, err := fs.ReadFile(path)
 	if err == nil {
@@ -376,9 +325,6 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	}
 	if readErr != nil {
 		if _, statErr := fs.Stat(dst); statErr == nil && policy == preserveUnreadable {
-			// File exists but isn't readable. For user-owned paths, preserve
-			// rather than clobbering. gc-owned paths fall through and attempt
-			// the write (a write failure surfaces an error to the caller).
 			return nil
 		}
 	}
@@ -387,16 +333,10 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	if err := fs.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-
 	if err := fs.WriteFile(dst, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", dst, err)
 	}
 
-	// If we just force-overwrote a previously-unreadable gc-owned file,
-	// os.WriteFile preserved its restrictive mode and Claude still can't
-	// open --settings. Add ONLY the owner-read bit to the existing mode,
-	// preserving any user-tightened permissions (e.g. 0o600 for privacy)
-	// and leaving fresh-install files at whatever perm-&-umask produced.
 	if policy == forceOverwrite && readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		info, err := fs.Stat(dst)
 		if err != nil {
@@ -413,15 +353,37 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 }
 
 func claudeFileNeedsUpgrade(existing []byte) bool {
-	current, err := readEmbedded()
+	current, err := readEmbedded("config/claude.json")
 	if err != nil {
 		return false
 	}
-	// The pattern uses JSON-escaped quotes to match how the string appears
-	// in the embedded file bytes. Without the escapes, strings.Replace
-	// finds nothing and stale == current — which silently flags every
-	// base-equal file as "needs upgrade" and masks any precedence logic
-	// that depends on this predicate.
-	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
-	return string(existing) == stale
+	transforms := []func(string) string{
+		func(s string) string {
+			return strings.Replace(s, `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+		},
+		func(s string) string {
+			return strings.Replace(s, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, `gc prime --hook`, 1)
+		},
+		func(s string) string {
+			return strings.Replace(s, `"matcher": "startup"`, `"matcher": ""`, 1)
+		},
+	}
+
+	known := make(map[string]struct{})
+	var enumerate func(int, string, bool)
+	enumerate = func(idx int, candidate string, changed bool) {
+		if idx == len(transforms) {
+			if changed {
+				known[candidate] = struct{}{}
+			}
+			return
+		}
+		enumerate(idx+1, candidate, changed)
+		next := transforms[idx](candidate)
+		enumerate(idx+1, next, changed || next != candidate)
+	}
+	enumerate(0, string(current), false)
+
+	_, ok := known[string(existing)]
+	return ok
 }

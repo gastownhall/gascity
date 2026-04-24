@@ -133,6 +133,24 @@ func TestApplyGraphRouting_LegacyNilAgent(t *testing.T) {
 	}
 }
 
+func TestApplyGraphRouting_LegacyAttachmentKeepsRoutingOnSourceBeadOnly(t *testing.T) {
+	r := &formula.Recipe{
+		Name: "mol-legacy",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-legacy", IsRoot: true, Metadata: map[string]string{}},
+			{ID: "mol-legacy.step1", Metadata: map[string]string{}},
+		},
+	}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	err := ApplyGraphRouting(r, &a, "worker", nil, "source-1", "", "", "", nil, "city", &config.City{}, Deps{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := r.Steps[1].Metadata["gc.routed_to"]; ok {
+		t.Errorf("attached legacy step gc.routed_to was stamped; attached demand should stay on the routed source bead")
+	}
+}
+
 func TestApplyGraphRouting_LegacyNilCfg(t *testing.T) {
 	// ApplyGraphRouting is a no-op whenever cfg is nil.
 	r := &formula.Recipe{

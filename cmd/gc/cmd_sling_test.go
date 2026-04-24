@@ -1790,6 +1790,7 @@ func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1910,6 +1911,7 @@ func TestDoSlingGraphWorkflowConflictReturnsExit3(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -1967,6 +1969,7 @@ func TestBatchOnGraphWorkflowStartsWorkflowWithoutRoutingChild(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -2027,6 +2030,7 @@ func TestBatchOnGraphWorkflowConflictLeavesExistingRootInPlace(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -2239,6 +2243,7 @@ func TestOnFormulaGraphWorkflowPokesOnce(t *testing.T) {
 	graphFormula := `
 formula = "graph-work"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "step"
@@ -2440,6 +2445,102 @@ func TestOnFormulaCookMissingFormula(t *testing.T) {
 	}
 }
 
+func TestFormulaSlingReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "repro-required-vars"
+version = 1
+
+[vars.target_id]
+description = "Bead being worked on"
+required = true
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Do work for {{target_id}}"
+description = "Target: {{target_id}}, workspace: {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "repro.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "repro")
+	opts.IsFormula = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSling returned %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("stderr = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("stderr = %q, want consolidated required-var validation instead of title-only failure", errText)
+	}
+}
+
+func TestFormulaSlingReportsRequiredAndResidualTitleVarsWhenSomeVarsProvided(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "repro-mixed-vars"
+version = 1
+
+[vars.target_id]
+description = "Bead being worked on"
+required = true
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Do work for {{title}}"
+description = "Target: {{target_id}}, workspace: {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "repro-mixed-vars.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "repro-mixed-vars")
+	opts.IsFormula = true
+	opts.Vars = []string{"target_id=BL-42"}
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSling returned %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if !strings.Contains(errText, `step "repro-mixed-vars.do-work": bead title contains unresolved variable(s) title`) {
+		t.Fatalf("stderr = %q, want unresolved title variable reported", errText)
+	}
+}
+
 func TestOnFormulaExistingMoleculeErrors(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -2467,6 +2568,53 @@ func TestOnFormulaExistingMoleculeErrors(t *testing.T) {
 	// No runner calls — should fail before routing.
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
+	}
+}
+
+func TestOnFormulaMissingRequiredVarsBeforeExistingMolecule(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "agent-one", MaxActiveSessions: intPtr(1)}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "requires-workspace"
+version = 1
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Work in {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "requires-workspace.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open", Assignee: "other-agent"}
+	q.childrenOf["BL-42"] = []beads.Bead{
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "requires-workspace"
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSling returned %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "already has attached molecule") {
+		t.Fatalf("stderr = %q, missing required vars should not be masked by attachment conflict", errText)
 	}
 }
 
@@ -2666,6 +2814,46 @@ func TestOnFormulaOutput(t *testing.T) {
 	}
 }
 
+func TestOnFormulaTitleOverrideBypassesRootTitlePlaceholder(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "agent-one", MaxActiveSessions: intPtr(1)}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "root-title-placeholder"
+version = 1
+
+[vars.title]
+description = "Root title"
+
+[[steps]]
+id = "work"
+title = "Work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "root-title-placeholder.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "root-title-placeholder"
+	opts.Title = "Reviewed work"
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "bead title contains unresolved variable") {
+		t.Fatalf("stderr = %q, title override should satisfy root placeholder", stderr.String())
+	}
+}
+
 func TestBatchOnConvoy(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -2713,6 +2901,100 @@ func TestBatchOnConvoy(t *testing.T) {
 	}
 	if !strings.Contains(out, "Slung 3/3 children") {
 		t.Errorf("stdout = %q, want summary", out)
+	}
+}
+
+func TestBatchOnFormulaRequiredIssueVarsUseChildID(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "agent-one", MaxActiveSessions: intPtr(1)}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "requires-issue"
+version = 1
+
+[vars.issue]
+description = "Source bead ID"
+required = true
+
+[[steps]]
+id = "work"
+title = "Work {{issue}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "requires-issue.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Type: "task", Status: "open"},
+		{ID: "BL-2", Type: "task", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "requires-issue"
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), `variable "issue" is required`) {
+		t.Fatalf("stderr = %q, batch graph classification should not validate before child vars are available", stderr.String())
+	}
+}
+
+func TestBatchOnFormulaMissingRequiredVarsBeforeExistingMolecule(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "agent-one", MaxActiveSessions: intPtr(1)}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "batch-requires-workspace"
+version = 1
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "work"
+title = "Work {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "batch-requires-workspace.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Type: "task", Status: "open"},
+	}
+	q.childrenOf["BL-1"] = []beads.Bead{
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "batch-requires-workspace"
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSlingBatch returned %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "already has attached molecule") || strings.Contains(errText, "cannot use --on") {
+		t.Fatalf("stderr = %q, missing required vars should not be masked by attachment conflict", errText)
 	}
 }
 
@@ -2818,7 +3100,7 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
 }
 
-func TestOnFormulaPoolAttachmentRoutesLegacyStepsToTarget(t *testing.T) {
+func TestOnFormulaPoolAttachmentKeepsLegacyStepsPrivate(t *testing.T) {
 	dir := testFormulaDir(t)
 	content := `
 formula = "multi-step"
@@ -2891,17 +3173,14 @@ needs = ["prep"]
 		if bead.ParentID == "BL-42" {
 			t.Fatalf("internal bead %s ParentID = %q, want not outer bead", bead.ID, bead.ParentID)
 		}
-		// Regression for #796: legacy [[steps]] formulas must stamp
-		// gc.routed_to on every internal step bead so EffectiveWorkQuery
-		// tier-3 and pool scale_check see the work. The sling target is
-		// "repo/polecat".
 		if bead.Ref == "" {
 			continue
 		}
-		if got := bead.Metadata["gc.routed_to"]; got != a.QualifiedName() {
-			t.Fatalf("internal bead %s gc.routed_to = %q, want %q", bead.ID, got, a.QualifiedName())
+		if got := bead.Metadata["gc.routed_to"]; got != "" {
+			t.Fatalf("internal legacy bead %s gc.routed_to = %q, want empty; attached v1 formulas should route only the source bead", bead.ID, got)
 		}
 	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", a.QualifiedName())
 }
 
 func TestBatchSkipsClosedMolecules(t *testing.T) {
@@ -4241,6 +4520,44 @@ func TestDefaultFormulaApplied(t *testing.T) {
 	}
 }
 
+func TestDefaultFormulaAppliedFromInheritedPackDefault(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "polecat", Dir: "hw", InheritedDefaultSlingFormula: strPtr("mol-polecat-work")}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{{ID: "HW-42", Title: "Work", Type: "task", Status: "open"}}, nil)
+	opts := testOpts(a, "HW-42")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
+	}
+	assertStoreRoutedTo(t, deps.Store, "HW-42", "hw/polecat")
+	source, err := deps.Store.Get("HW-42")
+	if err != nil {
+		t.Fatalf("store.Get(HW-42): %v", err)
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+	b, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", rootID, err)
+	}
+	if b.Ref != "mol-polecat-work" {
+		t.Errorf("bead Ref = %q, want %q", b.Ref, "mol-polecat-work")
+	}
+	if !strings.Contains(stdout.String(), "default formula") {
+		t.Errorf("stdout = %q, want mention of default formula", stdout.String())
+	}
+}
+
 func TestDefaultFormulaNoFormulaOverride(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -4259,6 +4576,52 @@ func TestDefaultFormulaNoFormulaOverride(t *testing.T) {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
 	}
 	assertStoreRoutedTo(t, deps.Store, "HW-42", "hw/polecat")
+}
+
+func TestDefaultFormulaMissingRequiredVarsBeforeExistingMolecule(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	formulaBody := `
+formula = "default-requires-workspace"
+version = 1
+
+[vars.workspace]
+description = "Workspace path"
+required = true
+
+[[steps]]
+id = "do-work"
+title = "Work in {{workspace}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "default-requires-workspace.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "agent-two", Dir: "hw", DefaultSlingFormula: strPtr("default-requires-workspace")}
+	q := newFakeChildQuerier()
+	q.beadsByID["HW-42"] = beads.Bead{ID: "HW-42", Type: "task", Status: "open", Assignee: "hw/agent-two"}
+	q.childrenOf["HW-42"] = []beads.Bead{
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "HW-42")
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSling returned %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("stderr = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "already has attached molecule") {
+		t.Fatalf("stderr = %q, missing required vars should not be masked by attachment conflict", errText)
+	}
 }
 
 func TestDefaultFormulaExplicitOnOverrides(t *testing.T) {

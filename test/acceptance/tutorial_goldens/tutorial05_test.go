@@ -41,6 +41,10 @@ func TestTutorial06Beads(t *testing.T) {
 	writeFile(t, filepath.Join(myCity, "agents", "worker", "prompt.template.md"), "# Worker Agent\nHandle general work.\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer Agent\nReview code.\n", 0o644)
+	ws.noteDiagnostic("tutorial 06 continuity setup: replaying tutorial 05's documented pancakes formula command before exercising the next page's bead examples")
+	if out, err := ws.runShell(tutorialPancakesFormulaShellCommand(t), ""); err != nil {
+		t.Fatalf("seed tutorial 05 pancakes formula: %v\n%s", err, out)
+	}
 
 	updateAPIOut, err := ws.runShell(`bd create "Update API docs"`, "")
 	if err != nil {
@@ -69,14 +73,15 @@ func TestTutorial06Beads(t *testing.T) {
 			t.Fatalf("cat city.toml: %v\n%s", err, out)
 		}
 		for _, want := range []string{
-			`name = "my-city"`,
-			`name = "mayor"`,
-			`prompt_template = "agents/mayor/prompt.template.md"`,
+			`provider = "claude"`,
 			`name = "my-project"`,
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("city.toml missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, myProject) {
+			t.Fatalf("city.toml should not contain machine-local rig path %q:\n%s", myProject, out)
 		}
 	})
 

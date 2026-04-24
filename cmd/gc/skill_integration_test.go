@@ -120,7 +120,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 	t.Run("claude eligible shared catalog", func(t *testing.T) {
 		t.Parallel()
 		a := &config.Agent{Provider: "claude"}
-		desired := effectiveSkillsForAgent(&shared, a, "", nil)
+		desired := effectiveSkillsForAgent(&shared, a, "", nil, nil)
 		if len(desired) != 1 || desired[0].Name != "plan" {
 			t.Fatalf("desired = %+v", desired)
 		}
@@ -130,7 +130,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 	t.Run("copilot provider has no sink", func(t *testing.T) {
 		t.Parallel()
 		a := &config.Agent{Provider: "copilot"}
-		desired := effectiveSkillsForAgent(&shared, a, "", nil)
+		desired := effectiveSkillsForAgent(&shared, a, "", nil, nil)
 		if desired != nil {
 			t.Fatalf("want nil, got %+v", desired)
 		}
@@ -142,7 +142,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 		agentDir := filepath.Join(tmp, "agents", "mayor", "skills")
 		mustCreateSkill(t, filepath.Join(agentDir, "private"))
 		a := &config.Agent{Provider: "codex", SkillsDir: agentDir}
-		desired := effectiveSkillsForAgent(&shared, a, "", nil)
+		desired := effectiveSkillsForAgent(&shared, a, "", nil, nil)
 		names := namesOf(desired)
 		if !reflect.DeepEqual(names, []string{"plan", "private"}) {
 			t.Fatalf("names = %v", names)
@@ -155,7 +155,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 		agentDir := filepath.Join(tmp, "agents", "solo", "skills")
 		mustCreateSkill(t, filepath.Join(agentDir, "only"))
 		a := &config.Agent{Provider: "gemini", SkillsDir: agentDir}
-		desired := effectiveSkillsForAgent(nil, a, "", nil)
+		desired := effectiveSkillsForAgent(nil, a, "", nil, nil)
 		if len(desired) != 1 || desired[0].Name != "only" {
 			t.Fatalf("desired = %+v", desired)
 		}
@@ -166,7 +166,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 		t.Parallel()
 		a := &config.Agent{Provider: "claude"}
 		empty := materialize.CityCatalog{}
-		desired := effectiveSkillsForAgent(&empty, a, "", nil)
+		desired := effectiveSkillsForAgent(&empty, a, "", nil, nil)
 		if desired != nil {
 			t.Fatalf("want nil, got %+v", desired)
 		}
@@ -178,7 +178,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 	t.Run("agent inherits workspace provider", func(t *testing.T) {
 		t.Parallel()
 		a := &config.Agent{Name: "mayor"} // Provider="" — inherits.
-		desired := effectiveSkillsForAgent(&shared, a, "claude", nil)
+		desired := effectiveSkillsForAgent(&shared, a, "claude", nil, nil)
 		if len(desired) != 1 || desired[0].Name != "plan" {
 			t.Fatalf("desired = %+v (workspace-provider fallback broken)", desired)
 		}
@@ -205,7 +205,7 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 
 		a := &config.Agent{Name: "mayor", Provider: "claude", SkillsDir: unreadable}
 		var buf strings.Builder
-		_ = effectiveSkillsForAgent(&shared, a, "", &buf)
+		_ = effectiveSkillsForAgent(&shared, a, "", nil, &buf)
 		if !strings.Contains(buf.String(), "LoadAgentCatalog") {
 			t.Errorf("expected stderr to mention LoadAgentCatalog, got %q", buf.String())
 		}
@@ -249,6 +249,82 @@ func TestSharedSkillCatalogForAgentDoesNotFallBackWhenRigCatalogFails(t *testing
 	}
 	if !strings.Contains(stderr.String(), `LoadCityCatalog rig "fe"`) {
 		t.Fatalf("stderr = %q, want rig catalog load error", stderr.String())
+	}
+}
+
+func TestSharedSkillCatalogForAgentUsesCachedRigCatalogAfterFailure(t *testing.T) {
+	resetSkillCatalogCache()
+
+	cityPath := t.TempDir()
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "city-shared"))
+	realRigCatalog := filepath.Join(cityPath, "real-rig-skills")
+	rigCatalog := filepath.Join(cityPath, "rig-skills-link")
+	writeSkillSource(t, filepath.Join(realRigCatalog, "ops"))
+	symlinkOrSkip(t, realRigCatalog, rigCatalog)
+
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Rigs:          []config.Rig{{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   rigCatalog,
+				BindingName: "ops",
+				PackName:    "helper",
+			}},
+		},
+	}
+	agent := &config.Agent{Name: "rig-agent", Scope: "rig", Dir: "fe"}
+
+	params := newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, nil)
+	if got := params.sharedSkillCatalogForAgent(agent); got == nil || len(got.Entries) == 0 {
+		t.Fatalf("baseline sharedSkillCatalogForAgent() = %+v, want non-empty rig catalog", got)
+	}
+
+	replaceWithSelfSymlink(t, rigCatalog)
+	var stderr strings.Builder
+	params = newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, &stderr)
+	got := params.sharedSkillCatalogForAgent(agent)
+	if got == nil || len(got.Entries) == 0 {
+		t.Fatalf("sharedSkillCatalogForAgent() = %+v, want cached rig catalog after transient failure", got)
+	}
+	if !strings.Contains(stderr.String(), `LoadCityCatalog rig "fe"`) {
+		t.Errorf("stderr = %q, want rig catalog load error", stderr.String())
+	}
+}
+
+func TestNewAgentBuildParams_EmptyRigCatalogClearsLastGoodCatalog(t *testing.T) {
+	resetSkillCatalogCache()
+
+	cityPath := t.TempDir()
+	realRigCatalog := filepath.Join(cityPath, "rig-skills")
+	writeSkillSource(t, filepath.Join(realRigCatalog, "ops"))
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   realRigCatalog,
+				BindingName: "ops",
+				PackName:    "helper",
+			}},
+		},
+	}
+	agent := &config.Agent{Name: "rig-agent", Scope: "rig", Dir: "fe"}
+
+	params := newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, nil)
+	if got := params.sharedSkillCatalogForAgent(agent); got == nil || len(got.Entries) == 0 {
+		t.Fatalf("baseline sharedSkillCatalogForAgent() = %+v, want non-empty rig catalog", got)
+	}
+
+	if err := os.RemoveAll(filepath.Join(realRigCatalog, "ops")); err != nil {
+		t.Fatal(err)
+	}
+	params = newAgentBuildParams("test-city", cityPath, cfg, nil, time.Now(), nil, nil)
+	got := params.sharedSkillCatalogForAgent(agent)
+	if got == nil {
+		t.Fatal("empty successful rig catalog should be represented as an empty catalog, not nil")
+	}
+	if len(got.Entries) != 0 {
+		t.Fatalf("empty successful rig catalog reused stale cache with %d entries", len(got.Entries))
 	}
 }
 
@@ -463,10 +539,22 @@ func TestAppendMaterializeSkillsPreStart(t *testing.T) {
 	if !strings.Contains(last, "--workdir") || !strings.Contains(last, "/worktrees/polecat-1") {
 		t.Errorf("--workdir flag missing: %q", last)
 	}
+	if strings.Contains(last, "--shared-catalog-snapshot") {
+		t.Errorf("materialize-skills command should not carry snapshot flags: %q", last)
+	}
 	// gc binary reference must go through ${GC_BIN:-gc} so the runtime
 	// env provides the authoritative binary path.
 	if !strings.Contains(last, "${GC_BIN:-gc}") {
 		t.Errorf("GC_BIN reference missing: %q", last)
+	}
+}
+
+func TestSkillSnapshotFilePath(t *testing.T) {
+	t.Parallel()
+	got := skillSnapshotFilePath("/tmp/worktree", "repo/polecat")
+	want := filepath.Join("/tmp/worktree", ".gc", "tmp", "skill-catalog-repo_polecat.b64")
+	if got != want {
+		t.Fatalf("skillSnapshotFilePath() = %q, want %q", got, want)
 	}
 }
 

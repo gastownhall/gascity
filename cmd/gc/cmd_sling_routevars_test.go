@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -135,6 +136,7 @@ func TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo(t *testing.T) {
 	formulaContent := `
 formula = "wf-test"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "work"
@@ -146,12 +148,10 @@ type = "task"
 	}
 
 	// Enable graph workflow features.
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	formulatest.EnableV2ForTest(t)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
-	formula.SetFormulaV2Enabled(true)
 	molecule.SetGraphApplyEnabled(true)
 	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(prevFormulaV2)
 		molecule.SetGraphApplyEnabled(prevGraphApply)
 	})
 

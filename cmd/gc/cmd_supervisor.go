@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -1079,31 +1080,19 @@ func reconcileCities(
 			})
 		}
 
-		// Quick-parse city.toml for pre-load tasks (same as doStart).
-		quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath)
-
-		// Materialize gastown packs before full config load if needed.
-		if qErr == nil && usesGastownPack(quickCfg) {
-			if err := MaterializeGastownPacks(path); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gastown packs: %v\n", name, err) //nolint:errcheck
-			}
-		}
-
-		// Auto-fetch remote packs before full config load (same as doStart).
-		if qErr == nil && len(quickCfg.Packs) > 0 {
-			if fErr := config.FetchPacks(quickCfg.Packs, path); fErr != nil {
-				recordInitFailure(name, fmt.Sprintf("fetching packs: %v", fErr))
-				continue
-			}
+		if err := ensureLegacyNamedPacksCached(path); err != nil {
+			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
+			continue
 		}
 
 		// Load city config with provenance so WatchTargets covers included files.
 		// System packs are appended as extra includes for normal pack expansion.
-		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, builtinPackIncludes(path)...)
+		cfg, prov, loadErr := loadSupervisorCityConfig(path)
 		if loadErr != nil {
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
+		emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
 
 		// Use registered name as authoritative identity. city.toml may keep a
 		// different workspace.name because registration aliases are machine-local.
@@ -1112,6 +1101,7 @@ func reconcileCities(
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
 				cityName, liveName)
 		}
+		applyRuntimeCityIdentity(cfg, cityName)
 
 		// Track initialization progress for the API.
 		cr.BatchUpdate(func(
@@ -1516,55 +1506,28 @@ func reconcileCities(
 		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 	}
-
-	// Reconcile the global rig index from all registered cities.
-	reconcileRigIndex(reg, stderr)
 }
 
-// reconcileRigIndex rebuilds the [[rigs]] section of cities.toml from the
-// rig definitions in each registered city's city.toml.
-func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
-	cities, err := reg.List()
-	if err != nil {
+var supervisorLoadWarningSeen sync.Map
+
+func emitSupervisorLoadCityConfigWarnings(w io.Writer, cityPath string, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
 		return
 	}
-
-	var mappings []supervisor.RigCityMapping
-	var loadFailed bool
-	for _, c := range cities {
-		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path)
-		if err != nil {
-			// Abort reconciliation if any city can't be loaded — a partial
-			// snapshot would cause ReconcileRigs to drop rigs from the
-			// errored city.
-			fmt.Fprintf(stderr, "gc supervisor: skipping rig reconcile: city %q config error: %v\n", c.EffectiveName(), err) //nolint:errcheck
-			loadFailed = true
-			break
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !shouldEmitLoadCityConfigWarning(warning) {
+			continue
 		}
-		for _, rig := range cfg.Rigs {
-			// Skip unbound rigs; their empty path would map to the
-			// city root and shadow real rigs in the supervisor index.
-			if strings.TrimSpace(rig.Path) == "" {
-				continue
-			}
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(c.Path, rigPath)
-			}
-			rigPath = filepath.Clean(rigPath)
-			mappings = append(mappings, supervisor.RigCityMapping{
-				RigPath:  rigPath,
-				RigName:  rig.Name,
-				CityPath: c.Path,
-			})
+		if _, dup := seen[warning]; dup {
+			continue
 		}
-	}
-
-	if loadFailed {
-		return
-	}
-	if err := reg.ReconcileRigs(mappings); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: reconciling rig index: %v\n", err) //nolint:errcheck
+		seen[warning] = struct{}{}
+		key := filepath.Clean(cityPath) + "\x00" + warning
+		if _, loaded := supervisorLoadWarningSeen.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
 	}
 }
 
@@ -1594,6 +1557,10 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 	return alreadyRunning
 }
 
+func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath)
+}
+
 // prepareCityForSupervisor runs the critical city initialization steps
 // that cmd_start.go performs before runController. Without these, cities
 // would have no formulas, no bead stores, and no resolved rig paths.
@@ -1621,7 +1588,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return fmt.Errorf("validate services: %w", err)
 	}
 
-	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
+	// Refresh builtin packs after config validation so commands and managed
+	// provider assets are present before the bead lifecycle starts.
 	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
 	// materialized alongside the rest of the pack content.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
@@ -1629,8 +1597,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Built-in prompts and formulas now arrive via the core bootstrap pack.
-	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
+	// Install local agent hooks after builtin packs are refreshed.
+	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -1676,6 +1644,14 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 			}
 		}
 	}
+
+	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
+	if progress != nil {
+		progress("pruning_legacy_scripts")
+	}
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': pruning legacy %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
+	})
 
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {

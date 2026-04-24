@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -52,6 +54,42 @@ func TestDiscoverFallbackPathUsesClaudeLatestSession(t *testing.T) {
 	got := DiscoverFallbackPath([]string{base}, "claude/tmux-cli", workDir, "gc-123")
 	if got != fallback {
 		t.Fatalf("DiscoverFallbackPath() = %q, want %q", got, fallback)
+	}
+}
+
+func TestDiscoverFallbackPathUsesNewestClaudeLatestSessionAcrossAliases(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only /tmp <-> /private/tmp Claude project path alias")
+	}
+
+	base := t.TempDir()
+	storedWorkDir := "/tmp/gcac/gctutenv-123/home/my-city"
+	providerWorkDir := "/private/tmp/gcac/gctutenv-123/home/my-city"
+	rawSlugDir := filepath.Join(base, sessionlog.ProjectSlug(storedWorkDir))
+	aliasSlugDir := filepath.Join(base, sessionlog.ProjectSlug(providerWorkDir))
+	for _, dir := range []string{rawSlugDir, aliasSlugDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	storedFallback := filepath.Join(rawSlugDir, "latest-session.jsonl")
+	if err := os.WriteFile(storedFallback, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(storedFallback, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(aliasSlugDir, "latest-session.jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverFallbackPath([]string{base}, "claude/tmux-cli", storedWorkDir, "gc-123")
+	if got != want {
+		t.Fatalf("DiscoverFallbackPath() = %q, want newest fallback %q", got, want)
 	}
 }
 

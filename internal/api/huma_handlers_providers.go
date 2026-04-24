@@ -137,13 +137,20 @@ func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCrea
 	}
 
 	spec := config.ProviderSpec{
-		DisplayName:  input.Body.DisplayName,
-		Command:      input.Body.Command,
-		Args:         input.Body.Args,
-		PromptMode:   input.Body.PromptMode,
-		PromptFlag:   input.Body.PromptFlag,
-		ReadyDelayMs: input.Body.ReadyDelayMs,
-		Env:          input.Body.Env,
+		DisplayName: input.Body.DisplayName,
+		Base:        input.Body.Base,
+		Command:     input.Body.Command,
+		Args:        input.Body.Args,
+		ArgsAppend:  input.Body.ArgsAppend,
+		PromptMode:  input.Body.PromptMode,
+		PromptFlag:  input.Body.PromptFlag,
+		Env:         input.Body.Env,
+	}
+	if input.Body.ReadyDelayMs != 0 {
+		spec.ReadyDelayMs = input.Body.ReadyDelayMs
+	}
+	if input.Body.OptionsSchemaMerge != nil {
+		spec.OptionsSchemaMerge = *input.Body.OptionsSchemaMerge
 	}
 
 	if err := sm.CreateProvider(input.Body.Name, spec); err != nil {
@@ -163,13 +170,18 @@ func (s *Server) humaHandleProviderUpdate(_ context.Context, input *ProviderUpda
 	}
 
 	patch := ProviderUpdate{
-		DisplayName:  input.Body.DisplayName,
-		Command:      input.Body.Command,
-		Args:         input.Body.Args,
-		PromptMode:   input.Body.PromptMode,
-		PromptFlag:   input.Body.PromptFlag,
-		ReadyDelayMs: input.Body.ReadyDelayMs,
-		Env:          input.Body.Env,
+		DisplayName:        input.Body.DisplayName,
+		Command:            input.Body.Command,
+		Args:               input.Body.Args,
+		ArgsAppend:         input.Body.ArgsAppend,
+		PromptMode:         input.Body.PromptMode,
+		PromptFlag:         input.Body.PromptFlag,
+		ReadyDelayMs:       input.Body.ReadyDelayMs,
+		Env:                input.Body.Env,
+		OptionsSchemaMerge: input.Body.OptionsSchemaMerge,
+	}
+	if input.Body.Base != nil {
+		patch.Base = &input.Body.Base
 	}
 
 	if err := sm.UpdateProvider(input.Name, patch); err != nil {

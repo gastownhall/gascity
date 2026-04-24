@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,8 +26,8 @@ func TestDefaultCity(t *testing.T) {
 	if c.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", c.Agents[0].Name, "mayor")
 	}
-	if c.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
 	}
 }
 
@@ -83,7 +82,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"agents/mayor/prompt.template.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -116,6 +115,31 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 }
 
+func TestParseAgentSkillsAndMCP(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "bright-lights"
+
+[[agent]]
+name = "mayor"
+skills = ["code-review", "incident-response"]
+mcp = ["beads-health", "sentry"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if got := cfg.Agents[0].Skills; !reflect.DeepEqual(got, []string{"code-review", "incident-response"}) {
+		t.Fatalf("Agents[0].Skills = %v, want [code-review incident-response]", got)
+	}
+	if got := cfg.Agents[0].MCP; !reflect.DeepEqual(got, []string{"beads-health", "sentry"}) {
+		t.Fatalf("Agents[0].MCP = %v, want [beads-health sentry]", got)
+	}
+}
+
 func TestParseAgentsNoStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -144,6 +168,8 @@ name = "test-city"
 [agents]
 default_sling_formula = "mol-focus-review"
 append_fragments = ["command-glossary"]
+skills = ["skill-a", "skill-b"]
+mcp = ["mcp-a"]
 `)
 	cfg, err := Parse(data)
 	if err != nil {
@@ -154,6 +180,12 @@ append_fragments = ["command-glossary"]
 	}
 	if !reflect.DeepEqual(cfg.AgentDefaults.AppendFragments, []string{"command-glossary"}) {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want %v", cfg.AgentDefaults.AppendFragments, []string{"command-glossary"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"mcp-a"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"mcp-a"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -182,6 +214,8 @@ append_fragments = ["legacy-fragment"]
 [agent_defaults]
 default_sling_formula = "mol-canonical"
 append_fragments = []
+skills = ["city-skill"]
+mcp = ["city-mcp"]
 `)
 	cfg, err := Parse(data)
 	if err != nil {
@@ -192,6 +226,12 @@ append_fragments = []
 	}
 	if len(cfg.AgentDefaults.AppendFragments) != 0 {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want empty canonical override", cfg.AgentDefaults.AppendFragments)
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"city-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"city-skill"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"city-mcp"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"city-mcp"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -680,8 +720,8 @@ func TestWizardCity(t *testing.T) {
 	if c.Agents[0].Name != "mayor" {
 		t.Errorf("Agents[0].Name = %q, want %q", c.Agents[0].Name, "mayor")
 	}
-	if c.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
+		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
 	}
 }
 
@@ -768,11 +808,11 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Workspace.Includes) != 1 || c.Workspace.Includes[0] != ".gc/system/packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [.gc/system/packs/gastown]", c.Workspace.Includes)
+	if len(c.Imports) != 1 || c.Imports["gastown"].Source != ".gc/system/packs/gastown" {
+		t.Errorf("Imports = %v, want gastown=.gc/system/packs/gastown", c.Imports)
 	}
-	if len(c.Workspace.DefaultRigIncludes) != 1 || c.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
-		t.Errorf("Workspace.DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", c.Workspace.DefaultRigIncludes)
+	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != ".gc/system/packs/gastown" {
+		t.Errorf("DefaultRigImports = %v, want gastown=.gc/system/packs/gastown", c.DefaultRigImports)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -820,11 +860,8 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Workspace.Includes) != 1 || got.Workspace.Includes[0] != ".gc/system/packs/gastown" {
-		t.Errorf("round-trip Includes = %v, want [.gc/system/packs/gastown]", got.Workspace.Includes)
-	}
-	if len(got.Workspace.DefaultRigIncludes) != 1 || got.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
-		t.Errorf("round-trip DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", got.Workspace.DefaultRigIncludes)
+	if len(got.Imports) != 1 || got.Imports["gastown"].Source != ".gc/system/packs/gastown" {
+		t.Errorf("round-trip Imports = %v, want gastown=.gc/system/packs/gastown", got.Imports)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")
@@ -1628,30 +1665,17 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 }
 
-func TestAgentSessionCapacityHelpers(t *testing.T) {
-	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(0)}).SupportsGenericEphemeralSessions(); got {
-		t.Fatal("max=0 agent should not support generic ephemeral sessions")
+func TestIsMultiSession(t *testing.T) {
+	a := Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}
+	maxSess := a.EffectiveMaxActiveSessions()
+	if maxSess == nil || *maxSess == 1 {
+		t.Error("agent with max=5 should be multi-session")
 	}
-	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}).SupportsGenericEphemeralSessions(); !got {
-		t.Fatal("max=1 agent should still support generic ephemeral sessions")
-	}
-	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}).SupportsInstanceExpansion(); got {
-		t.Fatal("max=1 agent should not require instance expansion")
-	}
-	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(5)}).SupportsInstanceExpansion(); !got {
-		t.Fatal("max=5 agent should support instance expansion")
-	}
-	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(-1)}).SupportsInstanceExpansion(); !got {
-		t.Fatal("max=-1 agent should support instance expansion")
-	}
-	if got := (&Agent{Name: "worker"}).SupportsInstanceExpansion(); !got {
-		t.Fatal("unbounded agent should support instance expansion")
-	}
-	if got := (&Agent{Name: "worker"}).HasUnlimitedSessionCapacity(); !got {
-		t.Fatal("agent without explicit max should report unlimited capacity")
-	}
-	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(5)}).HasUnlimitedSessionCapacity(); got {
-		t.Fatal("bounded agent should not report unlimited capacity")
+
+	b := Agent{Name: "mayor"}
+	maxB := b.EffectiveMaxActiveSessions()
+	if maxB != nil {
+		t.Errorf("agent without scaling should have nil max, got %v", maxB)
 	}
 }
 
@@ -2262,59 +2286,6 @@ name = "mayor"
 	}
 }
 
-// --- MaxWakesPerTick tests ---
-
-func TestDaemonConfig_MaxWakesPerTickOrDefault(t *testing.T) {
-	zero := 0
-	neg := -3
-	pos := 20
-	cases := []struct {
-		name  string
-		field *int
-		want  int
-	}{
-		{"nil returns default", nil, DefaultMaxWakesPerTick},
-		{"zero returns default", &zero, DefaultMaxWakesPerTick},
-		{"negative returns default", &neg, DefaultMaxWakesPerTick},
-		{"positive returns value", &pos, 20},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			d := DaemonConfig{MaxWakesPerTick: tc.field}
-			got := d.MaxWakesPerTickOrDefault()
-			if got != tc.want {
-				t.Errorf("MaxWakesPerTickOrDefault() = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseMaxWakesPerTick(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "test"
-
-[daemon]
-max_wakes_per_tick = 15
-
-[[agent]]
-name = "mayor"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cfg.Daemon.MaxWakesPerTick == nil {
-		t.Fatal("Daemon.MaxWakesPerTick is nil, want 15")
-	}
-	if *cfg.Daemon.MaxWakesPerTick != 15 {
-		t.Errorf("Daemon.MaxWakesPerTick = %d, want 15", *cfg.Daemon.MaxWakesPerTick)
-	}
-	if got := cfg.Daemon.MaxWakesPerTickOrDefault(); got != 15 {
-		t.Errorf("MaxWakesPerTickOrDefault() = %d, want 15", got)
-	}
-}
-
 // --- DrainTimeout tests ---
 
 func TestDrainTimeoutDefault(t *testing.T) {
@@ -2577,11 +2548,14 @@ func TestValidateRigs_MissingName(t *testing.T) {
 	}
 }
 
-func TestValidateRigs_MissingPathAllowed(t *testing.T) {
+func TestValidateRigs_MissingPath(t *testing.T) {
 	rigs := []Rig{{Name: "frontend"}}
 	err := ValidateRigs(rigs, "ci")
-	if err != nil {
-		t.Fatalf("ValidateRigs: unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for missing path")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Errorf("error = %q, want 'path is required'", err)
 	}
 }
 
@@ -2674,6 +2648,17 @@ func TestEffectiveHQPrefix_ExplicitPrefixOverridesAll(t *testing.T) {
 	}
 	if got := EffectiveHQPrefix(cfg); got != "custom" {
 		t.Errorf("EffectiveHQPrefix() = %q, want %q", got, "custom")
+	}
+}
+
+func TestEffectiveHQPrefix_ResolvedPrefixOverridesDeclaredPrefix(t *testing.T) {
+	cfg := &City{
+		Workspace:               Workspace{Name: "declared-city", Prefix: "declared"},
+		ResolvedWorkspaceName:   "site-city",
+		ResolvedWorkspacePrefix: "sc",
+	}
+	if got := EffectiveHQPrefix(cfg); got != "sc" {
+		t.Errorf("EffectiveHQPrefix() = %q, want %q", got, "sc")
 	}
 }
 
@@ -3137,7 +3122,9 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 			if tt.agent.Dir == "" {
 				t.Skip("test only applies to rig-scoped agents")
 			}
-			if !tt.agent.SupportsInstanceExpansion() {
+			maxSess := tt.agent.EffectiveMaxActiveSessions()
+			isMulti := maxSess == nil || *maxSess != 1
+			if !isMulti {
 				t.Skip("fixed agents use env vars, not qualified names")
 			}
 
@@ -4118,6 +4105,61 @@ func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
 	t.Fatal("explicit agent 'worker' not found")
 }
 
+func TestAgentDefaultsSlingFormula_InheritedPackDefaultBeatsCityDefault(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{
+				Name:                         "worker",
+				InheritedDefaultSlingFormula: strPtr("mol-pack-default"),
+			},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-city-default",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+		t.Fatalf("EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+	}
+	if cfg.Agents[0].DefaultSlingFormula != nil {
+		t.Fatalf("DefaultSlingFormula = %q, want nil when inherited pack default wins", *cfg.Agents[0].DefaultSlingFormula)
+	}
+}
+
+func TestAgentDefaultsSharedAttachments_InheritAndPreserveExplicitLists(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{
+				Name:         "worker",
+				Skills:       []string{"agent-skill"},
+				MCP:          []string{"agent-mcp"},
+				SharedSkills: []string{"pack-skill"},
+				SharedMCP:    []string{"pack-mcp"},
+			},
+		},
+		AgentDefaults: AgentDefaults{
+			Skills: []string{"city-skill", "pack-skill"},
+			MCP:    []string{"city-mcp", "pack-mcp"},
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	got := cfg.Agents[0]
+	if want := []string{"pack-skill", "city-skill"}; !reflect.DeepEqual(got.SharedSkills, want) {
+		t.Fatalf("SharedSkills = %v, want %v", got.SharedSkills, want)
+	}
+	if want := []string{"pack-mcp", "city-mcp"}; !reflect.DeepEqual(got.SharedMCP, want) {
+		t.Fatalf("SharedMCP = %v, want %v", got.SharedMCP, want)
+	}
+	if want := []string{"agent-skill"}; !reflect.DeepEqual(got.Skills, want) {
+		t.Fatalf("Skills = %v, want %v", got.Skills, want)
+	}
+	if want := []string{"agent-mcp"}; !reflect.DeepEqual(got.MCP, want) {
+		t.Fatalf("MCP = %v, want %v", got.MCP, want)
+	}
+}
+
 func TestAgentDefaultsSlingFormula_ExplicitOverrideWins(t *testing.T) {
 	// Explicit agents with their own default_sling_formula should NOT be
 	// overridden by agent_defaults.
@@ -4229,6 +4271,29 @@ func TestAgentDefaultsSlingFormula_ExplicitEmptyClearSurvives(t *testing.T) {
 	if *cfg.Agents[0].DefaultSlingFormula != "" {
 		t.Errorf("DefaultSlingFormula = %q, want %q (explicit clear should survive)",
 			*cfg.Agents[0].DefaultSlingFormula, "")
+	}
+}
+
+func TestAgentDefaultsSlingFormula_InheritedPackDefaultFallback(t *testing.T) {
+	a := Agent{
+		Name:                         "worker",
+		InheritedDefaultSlingFormula: strPtr("mol-pack-default"),
+	}
+
+	if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+		t.Fatalf("EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
+	}
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitValueBeatsInheritedPackDefault(t *testing.T) {
+	a := Agent{
+		Name:                         "worker",
+		DefaultSlingFormula:          strPtr(""),
+		InheritedDefaultSlingFormula: strPtr("mol-pack-default"),
+	}
+
+	if got := a.EffectiveDefaultSlingFormula(); got != "" {
+		t.Fatalf("EffectiveDefaultSlingFormula() = %q, want explicit empty-string override", got)
 	}
 }
 
@@ -4442,24 +4507,10 @@ scale_check = "echo 5"
 	}
 }
 
-// withDeprecationWarningSink swaps the package-level sink for a capturing
-// buffer and returns a restore function. Tests should defer restore() so
-// the sink is restored even if the test fails.
-func withDeprecationWarningSink(t *testing.T) (*bytes.Buffer, func()) {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := deprecationWarningSink
-	deprecationWarningSink = &buf
-	return &buf, func() { deprecationWarningSink = prev }
-}
-
 // TestLoadWithIncludes_DeprecatedAttachmentWarning confirms that a config
 // containing the v0.15.0 attachment-list tombstone fields still parses,
-// and that a single deprecation warning is emitted to the sink.
+// and that a single deprecation warning is surfaced through provenance.
 func TestLoadWithIncludes_DeprecatedAttachmentWarning(t *testing.T) {
-	buf, restore := withDeprecationWarningSink(t)
-	defer restore()
-
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -4471,7 +4522,7 @@ skills = ["code-review", "incident-response"]
 mcp = ["beads-health"]
 `)
 
-	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
@@ -4495,13 +4546,13 @@ mcp = ["beads-health"]
 		t.Errorf("mayor.MCP = %v, want tombstone parse-through", mayor.MCP)
 	}
 
-	got := buf.String()
+	got := strings.Join(prov.Warnings, "\n")
 	if !strings.Contains(got, "deprecated as of v0.15.1 and ignored") {
-		t.Fatalf("deprecation warning not emitted, got:\n%s", got)
+		t.Fatalf("deprecation warning not surfaced, got:\n%s", got)
 	}
-	// Exactly one warning line — the emission is one-per-load.
+	// Exactly one warning line — the warning is one-per-load.
 	if n := strings.Count(got, "gc: warning:"); n != 1 {
-		t.Errorf("emitted %d warnings, want exactly 1\nstderr:\n%s", n, got)
+		t.Errorf("emitted %d warnings, want exactly 1\nwarnings:\n%s", n, got)
 	}
 }
 
@@ -4511,9 +4562,6 @@ mcp = ["beads-health"]
 // [[rigs.overrides]]. Prior to this test, the scan only covered
 // rig.Overrides and would silently miss the rig.RigPatches surface.
 func TestLoadWithIncludes_DeprecatedAttachmentWarning_RigPatches(t *testing.T) {
-	buf, restore := withDeprecationWarningSink(t)
-	defer restore()
-
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -4528,25 +4576,23 @@ name = "polecat"
 skills_append = ["incident-response"]
 `)
 
-	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	got := buf.String()
+	got := strings.Join(prov.Warnings, "\n")
 	if !strings.Contains(got, "deprecated as of v0.15.1 and ignored") {
 		t.Fatalf("rig.patches attachment fields should trigger deprecation warning, got:\n%s", got)
 	}
 	if n := strings.Count(got, "gc: warning:"); n != 1 {
-		t.Errorf("emitted %d warnings, want exactly 1\nstderr:\n%s", n, got)
+		t.Errorf("emitted %d warnings, want exactly 1\nwarnings:\n%s", n, got)
 	}
 }
 
 // TestLoadWithIncludes_NoAttachmentsSilent confirms that a clean config
 // (no attachment-list tombstone fields) emits no deprecation warning.
 func TestLoadWithIncludes_NoAttachmentsSilent(t *testing.T) {
-	buf, restore := withDeprecationWarningSink(t)
-	defer restore()
-
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -4556,11 +4602,82 @@ name = "clean-city"
 name = "mayor"
 `)
 
-	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err != nil {
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if got := buf.String(); got != "" {
-		t.Errorf("expected no warning, got:\n%s", got)
+	if len(prov.Warnings) != 0 {
+		t.Errorf("expected no warning, got:\n%s", strings.Join(prov.Warnings, "\n"))
+	}
+}
+
+func TestParseOrderOverrideTriggerKey(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+trigger = "cooldown"
+interval = "24h"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cooldown" {
+		t.Fatalf("Trigger = %#v, want cooldown", cfg.Orders.Overrides[0].Trigger)
+	}
+}
+
+func TestParseOrderOverrideLegacyGateAlias(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+gate = "cooldown"
+interval = "24h"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cooldown" {
+		t.Fatalf("Trigger = %#v, want cooldown", cfg.Orders.Overrides[0].Trigger)
+	}
+}
+
+func TestParseOrderOverrideTriggerWinsOverLegacyGate(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+trigger = "cron"
+gate = "cooldown"
+schedule = "0 3 * * *"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cron" {
+		t.Fatalf("Trigger = %#v, want cron", cfg.Orders.Overrides[0].Trigger)
 	}
 }

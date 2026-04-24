@@ -1,6 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +31,10 @@ var (
 	supervisorAliveHook         = supervisorAlive
 	supervisorReadyTimeout      = 15 * time.Second
 	supervisorReadyPollInterval = 100 * time.Millisecond
-	supervisorSystemctlRun      = func(args ...string) error {
+	supervisorLaunchctlRun      = func(args ...string) error {
+		return exec.Command("launchctl", args...).Run()
+	}
+	supervisorSystemctlRun = func(args ...string) error {
 		return exec.Command("systemctl", args...).Run()
 	}
 	supervisorSystemctlActive = func(service string) bool {
@@ -188,15 +196,16 @@ func unloadSupervisorService() {
 	switch goruntime.GOOS {
 	case "darwin":
 		path := supervisorLaunchdPlistPath()
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			return
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			_ = supervisorLaunchctlRun("unload", path)
 		}
-		exec.Command("launchctl", "unload", path).Run() //nolint:errcheck // best-effort
+		_ = unloadLegacySupervisorLaunchd(false)
 	case "linux":
-		if _, err := os.Stat(supervisorSystemdServicePath()); errors.Is(err, os.ErrNotExist) {
-			return
+		service := supervisorSystemdServiceName()
+		if _, err := os.Stat(supervisorSystemdServicePath()); !errors.Is(err, os.ErrNotExist) {
+			_ = supervisorSystemctlRun("--user", "stop", service)
 		}
-		exec.Command("systemctl", "--user", "stop", "gascity-supervisor.service").Run() //nolint:errcheck // best-effort
+		_ = unloadLegacySupervisorSystemd(false)
 	}
 }
 
@@ -325,6 +334,7 @@ type supervisorServiceData struct {
 	LogPath       string
 	GCHome        string
 	XDGRuntimeDir string
+	LaunchdLabel  string
 	SafeName      string
 	Path          string
 }
@@ -345,6 +355,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		LogPath:       supervisorLogPath(),
 		GCHome:        home,
 		XDGRuntimeDir: xdgRuntimeDir,
+		LaunchdLabel:  supervisorLaunchdLabel(),
 		SafeName:      sanitizeServiceName(filepath.Base(home)),
 		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 	}, nil
@@ -357,12 +368,45 @@ func sanitizeServiceName(name string) string {
 	return strings.Trim(name, "-")
 }
 
+const (
+	defaultSupervisorLaunchdLabel = "com.gascity.supervisor"
+	defaultSupervisorSystemdUnit  = "gascity-supervisor.service"
+)
+
+func supervisorServiceSuffix() string {
+	if !supervisor.UsesIsolatedGCHomeOverride() {
+		return ""
+	}
+	gcHome := isolatedSupervisorHome()
+	base := sanitizeServiceName(filepath.Base(gcHome))
+	sum := sha1.Sum([]byte(gcHome))
+	hash := hex.EncodeToString(sum[:])[:8]
+	if base == "" {
+		return "isolated-" + hash
+	}
+	return base + "-" + hash
+}
+
+func supervisorLaunchdLabel() string {
+	if suffix := supervisorServiceSuffix(); suffix != "" {
+		return defaultSupervisorLaunchdLabel + "." + suffix
+	}
+	return defaultSupervisorLaunchdLabel
+}
+
+func supervisorSystemdServiceName() string {
+	if suffix := supervisorServiceSuffix(); suffix != "" {
+		return "gascity-supervisor-" + suffix + ".service"
+	}
+	return defaultSupervisorSystemdUnit
+}
+
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.gascity.supervisor</string>
+    <string>{{xmlesc .LaunchdLabel}}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{xmlesc .GCPath}}</string>
@@ -435,12 +479,268 @@ func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (stri
 
 func supervisorLaunchdPlistPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", "com.gascity.supervisor.plist")
+	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+}
+
+func legacySupervisorLaunchdPlistPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", defaultSupervisorLaunchdLabel+".plist")
 }
 
 func supervisorSystemdServicePath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "systemd", "user", "gascity-supervisor.service")
+	return filepath.Join(home, ".local", "share", "systemd", "user", supervisorSystemdServiceName())
+}
+
+func legacySupervisorSystemdServicePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "systemd", "user", defaultSupervisorSystemdUnit)
+}
+
+func isolatedSupervisorHome() string {
+	return normalizePathForCompare(strings.TrimSpace(os.Getenv("GC_HOME")))
+}
+
+func legacySupervisorTargetsCurrentHome(path string) bool {
+	if !supervisor.UsesIsolatedGCHomeOverride() {
+		return false
+	}
+	gcHome := isolatedSupervisorHome()
+	if gcHome == "" {
+		return false
+	}
+	legacyHome, ok := legacySupervisorHome(path)
+	return ok && samePath(legacyHome, gcHome)
+}
+
+func legacySupervisorHome(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	switch filepath.Ext(path) {
+	case ".plist":
+		return launchdSupervisorHome(data)
+	case ".service":
+		return systemdSupervisorHome(data)
+	default:
+		return "", false
+	}
+}
+
+type plistValue struct {
+	text string
+	dict map[string]plistValue
+}
+
+func launchdSupervisorHome(data []byte) (string, bool) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return "", false
+		}
+		if err != nil {
+			return "", false
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok || start.Name.Local != "dict" {
+			continue
+		}
+		root, err := parsePlistDict(dec)
+		if err != nil {
+			return "", false
+		}
+		env, ok := root["EnvironmentVariables"]
+		if !ok || env.dict == nil {
+			return "", false
+		}
+		gcHome, ok := env.dict["GC_HOME"]
+		if !ok || gcHome.text == "" {
+			return "", false
+		}
+		return filepath.Clean(gcHome.text), true
+	}
+}
+
+func parsePlistDict(dec *xml.Decoder) (map[string]plistValue, error) {
+	dict := make(map[string]plistValue)
+	currentKey := ""
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch tok := tok.(type) {
+		case xml.StartElement:
+			switch tok.Name.Local {
+			case "key":
+				var key string
+				if err := dec.DecodeElement(&key, &tok); err != nil {
+					return nil, err
+				}
+				currentKey = key
+			case "string":
+				var value string
+				if err := dec.DecodeElement(&value, &tok); err != nil {
+					return nil, err
+				}
+				if currentKey != "" {
+					dict[currentKey] = plistValue{text: value}
+					currentKey = ""
+				}
+			case "dict":
+				nested, err := parsePlistDict(dec)
+				if err != nil {
+					return nil, err
+				}
+				if currentKey != "" {
+					dict[currentKey] = plistValue{dict: nested}
+					currentKey = ""
+				}
+			default:
+				if err := skipXMLElement(dec); err != nil {
+					return nil, err
+				}
+				if currentKey != "" {
+					dict[currentKey] = plistValue{}
+					currentKey = ""
+				}
+			}
+		case xml.EndElement:
+			if tok.Name.Local == "dict" {
+				return dict, nil
+			}
+		}
+	}
+}
+
+func skipXMLElement(dec *xml.Decoder) error {
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return nil
+}
+
+func systemdSupervisorHome(data []byte) (string, bool) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "Environment=GC_HOME=") {
+			continue
+		}
+		value := strings.TrimPrefix(line, "Environment=GC_HOME=")
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			return filepath.Clean(unquoted), true
+		}
+		return filepath.Clean(value), true
+	}
+	return "", false
+}
+
+func unloadLegacySupervisorLaunchd(remove bool) error {
+	path := legacySupervisorLaunchdPlistPath()
+	if samePath(path, supervisorLaunchdPlistPath()) || !legacySupervisorTargetsCurrentHome(path) {
+		return nil
+	}
+	_ = supervisorLaunchctlRun("unload", path)
+	if remove {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing legacy plist %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func unloadLegacySupervisorSystemd(remove bool) error {
+	path := legacySupervisorSystemdServicePath()
+	if samePath(path, supervisorSystemdServicePath()) || !legacySupervisorTargetsCurrentHome(path) {
+		return nil
+	}
+	_ = supervisorSystemctlRun("--user", "stop", defaultSupervisorSystemdUnit)
+	if remove {
+		_ = supervisorSystemctlRun("--user", "disable", defaultSupervisorSystemdUnit)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing legacy unit %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func rollbackNewSupervisorLaunchdInstall(path string, restoreLegacy bool) error {
+	var errs []error
+	_ = supervisorLaunchctlRun("unload", path)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("removing failed plist %s during rollback: %w", path, err))
+	}
+	if restoreLegacy {
+		if err := supervisorLaunchctlRun("load", legacySupervisorLaunchdPlistPath()); err != nil {
+			errs = append(errs, fmt.Errorf("restoring legacy plist %s: %w", legacySupervisorLaunchdPlistPath(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func restorePreviousSupervisorLaunchdInstall(path string, previousContent []byte) error {
+	var errs []error
+	_ = supervisorLaunchctlRun("unload", path)
+	if err := os.WriteFile(path, previousContent, 0o644); err != nil {
+		errs = append(errs, fmt.Errorf("restoring previous plist %s: %w", path, err))
+	} else if err := supervisorLaunchctlRun("load", path); err != nil {
+		errs = append(errs, fmt.Errorf("reloading previous plist %s: %w", path, err))
+	}
+	return errors.Join(errs...)
+}
+
+func rollbackNewSupervisorSystemdInstall(path, service string, restoreLegacy bool) error {
+	var errs []error
+	_ = supervisorSystemctlRun("--user", "stop", service)
+	_ = supervisorSystemctlRun("--user", "disable", service)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("removing failed unit %s during rollback: %w", path, err))
+	}
+	if err := supervisorSystemctlRun("--user", "daemon-reload"); err != nil {
+		errs = append(errs, fmt.Errorf("systemctl --user daemon-reload during rollback: %w", err))
+	}
+	if restoreLegacy {
+		if err := supervisorSystemctlRun("--user", "start", defaultSupervisorSystemdUnit); err != nil {
+			errs = append(errs, fmt.Errorf("restoring legacy unit %s: %w", defaultSupervisorSystemdUnit, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func restorePreviousSupervisorSystemdInstall(path, service string, previousContent []byte, restart bool) error {
+	var errs []error
+	if restart {
+		_ = supervisorSystemctlRun("--user", "stop", service)
+	}
+	if err := os.WriteFile(path, previousContent, 0o644); err != nil {
+		errs = append(errs, fmt.Errorf("restoring previous unit %s: %w", path, err))
+		return errors.Join(errs...)
+	}
+	if err := supervisorSystemctlRun("--user", "daemon-reload"); err != nil {
+		errs = append(errs, fmt.Errorf("systemctl --user daemon-reload during rollback: %w", err))
+	}
+	if restart {
+		if err := supervisorSystemctlRun("--user", "enable", service); err != nil {
+			errs = append(errs, fmt.Errorf("restoring previous unit enable %s: %w", service, err))
+		}
+		if err := supervisorSystemctlRun("--user", "start", service); err != nil {
+			errs = append(errs, fmt.Errorf("restoring previous unit start %s: %w", service, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
@@ -451,6 +751,13 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 	}
 
 	path := supervisorLaunchdPlistPath()
+	legacyPresent := legacySupervisorTargetsCurrentHome(legacySupervisorLaunchdPlistPath())
+	existing, err := os.ReadFile(path)
+	hadCurrent := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -459,11 +766,27 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: writing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := unloadLegacySupervisorLaunchd(false); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	exec.Command("launchctl", "unload", path).Run() //nolint:errcheck // best-effort cleanup
-	if err := exec.Command("launchctl", "load", path).Run(); err != nil {
+	_ = supervisorLaunchctlRun("unload", path)
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		var rollbackErr error
+		if hadCurrent {
+			rollbackErr = restorePreviousSupervisorLaunchdInstall(path, existing)
+		} else {
+			rollbackErr = rollbackNewSupervisorLaunchdInstall(path, legacyPresent)
+		}
+		if rollbackErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor install: rollback after launchctl load failure: %v\n", rollbackErr) //nolint:errcheck // best-effort stderr
+		}
 		fmt.Fprintf(stderr, "gc supervisor install: launchctl load: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if err := unloadLegacySupervisorLaunchd(true); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
 	fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -472,9 +795,13 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorLaunchdPlistPath()
-	exec.Command("launchctl", "unload", path).Run() //nolint:errcheck // best-effort cleanup
+	_ = supervisorLaunchctlRun("unload", path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "gc supervisor uninstall: removing plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := unloadLegacySupervisorLaunchd(true); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	fmt.Fprintf(stdout, "Uninstalled launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -489,11 +816,18 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	}
 
 	path := supervisorSystemdServicePath()
+	service := supervisorSystemdServiceName()
+	legacyPresent := legacySupervisorTargetsCurrentHome(legacySupervisorSystemdServicePath())
+	existing, err := os.ReadFile(path)
+	hadCurrent := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	existing, _ := os.ReadFile(path)
 	contentChanged := string(existing) != content
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: writing unit: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -502,27 +836,62 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 
 	for _, args := range [][]string{
 		{"--user", "daemon-reload"},
-		{"--user", "enable", "gascity-supervisor.service"},
+		{"--user", "enable", service},
 	} {
 		if err := supervisorSystemctlRun(args...); err != nil {
+			var rollbackErr error
+			if hadCurrent {
+				rollbackErr = restorePreviousSupervisorSystemdInstall(path, service, existing, false)
+			} else {
+				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, false)
+			}
+			if rollbackErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+			}
 			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
+	if err := unloadLegacySupervisorSystemd(false); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	service := "gascity-supervisor.service"
 	if contentChanged && supervisorSystemctlActive(service) {
 		args := []string{"--user", "restart", service}
 		if err := supervisorSystemctlRun(args...); err != nil {
+			var rollbackErr error
+			if hadCurrent {
+				rollbackErr = restorePreviousSupervisorSystemdInstall(path, service, existing, true)
+			} else {
+				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
+			}
+			if rollbackErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+			}
 			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else if !supervisorSystemctlActive(service) {
 		args := []string{"--user", "start", service}
 		if err := supervisorSystemctlRun(args...); err != nil {
+			var rollbackErr error
+			if hadCurrent {
+				rollbackErr = restorePreviousSupervisorSystemdInstall(path, service, existing, true)
+			} else {
+				rollbackErr = rollbackNewSupervisorSystemdInstall(path, service, legacyPresent)
+			}
+			if rollbackErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor install: rollback after systemctl %s failure: %v\n", strings.Join(args, " "), rollbackErr) //nolint:errcheck // best-effort stderr
+			}
 			fmt.Fprintf(stderr, "gc supervisor install: systemctl %s: %v\n", strings.Join(args, " "), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+	}
+	if err := unloadLegacySupervisorSystemd(true); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: warning: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else {
+		_ = supervisorSystemctlRun("--user", "daemon-reload")
 	}
 
 	fmt.Fprintf(stdout, "Installed systemd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -531,13 +900,18 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorSystemdServicePath()
-	exec.Command("systemctl", "--user", "stop", "gascity-supervisor.service").Run()    //nolint:errcheck // best-effort cleanup
-	exec.Command("systemctl", "--user", "disable", "gascity-supervisor.service").Run() //nolint:errcheck // best-effort cleanup
+	service := supervisorSystemdServiceName()
+	_ = supervisorSystemctlRun("--user", "stop", service)
+	_ = supervisorSystemctlRun("--user", "disable", service)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "gc supervisor uninstall: removing unit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	exec.Command("systemctl", "--user", "daemon-reload").Run()     //nolint:errcheck // best-effort cleanup
+	if err := unloadLegacySupervisorSystemd(true); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	_ = supervisorSystemctlRun("--user", "daemon-reload")
 	fmt.Fprintf(stdout, "Uninstalled systemd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
 }

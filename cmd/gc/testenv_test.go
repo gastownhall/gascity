@@ -14,6 +14,7 @@ var gcEnvVars = []string{
 	"GC_AGENT",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
+	"GC_SHARED_SKILL_CATALOG_SNAPSHOT",
 	"GC_TMUX_SESSION",
 	"GC_CITY",
 }

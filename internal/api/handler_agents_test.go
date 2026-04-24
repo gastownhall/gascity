@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,33 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+type partialAgentSessionLister struct {
+	running []string
+	err     error
+}
+
+func (p partialAgentSessionLister) ListRunning(prefix string) ([]string, error) {
+	var filtered []string
+	for _, name := range p.running {
+		if len(prefix) == 0 || strings.HasPrefix(name, prefix) {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered, p.err
+}
+
+type activeBeadQueryStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Assignee != "" && query.Status == "in_progress" {
+		s.queries = append(s.queries, query)
+	}
+	return s.Store.List(query)
+}
 
 func TestAgentList(t *testing.T) {
 	state := newFakeState(t)
@@ -30,7 +59,10 @@ func TestAgentList(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var resp listResponse
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -126,6 +158,24 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 		if !item.Running {
 			t.Errorf("Items[%d].Running = false, want true", i)
 		}
+	}
+}
+
+func TestDiscoverUnlimitedPoolFailsClosedOnPartialListResults(t *testing.T) {
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "myrig",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(-1),
+	}
+	sp := partialAgentSessionLister{
+		running: []string{"myrig--polecat-1", "myrig--polecat-2"},
+		err:     &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+
+	got := discoverUnlimitedPool(a, "myrig/polecat", "test-city", "", sp)
+	if len(got) != 0 {
+		t.Fatalf("len = %d, want fail-closed empty result on partial list", len(got))
 	}
 }
 
@@ -317,6 +367,109 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	}
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want %q", got, work.ID)
+	}
+}
+
+func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	store := &activeBeadQueryStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	work, err := store.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0].ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want %q", got, work.ID)
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("active-bead queries = %d, want 1", len(store.queries))
+	}
+	if store.queries[0].Live {
+		t.Fatal("agent list active-bead lookup should stay cached")
+	}
+}
+
+func TestAgentGetActiveBeadUsesLiveLookup(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := backing.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	state.stores["myrig"] = cache
+
+	reassigned := "other-session"
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &reassigned}); err != nil {
+		t.Fatalf("reassign backing work: %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp.ActiveBead; got != "" {
+		t.Fatalf("active_bead = %q, want empty after external reassignment", got)
 	}
 }
 
@@ -759,5 +912,114 @@ func TestComputeAgentState(t *testing.T) {
 				t.Errorf("computeAgentState() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAgentList_BaseOnlyDescendantUsesResolvedCache covers the
+// base-only descendant contract: a [providers.codex-max] declared
+// with `base = "builtin:codex"` and no explicit command must still
+// report `display_name` + `available=true` in /v0/agents, because
+// the resolved-provider cache carries the inherited Command and the
+// display name comes from the builtin ancestor.
+func TestAgentList_BaseOnlyDescendantUsesResolvedCache(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		// MaxActiveSessions=1 keeps this a non-pool agent so expansion
+		// yields a single entry — SupportsInstanceExpansion returns
+		// true when the field is unset (unlimited pool by default).
+		{Name: "mayor", Dir: "myrig", Provider: "codex-max", MaxActiveSessions: intPtr(1)},
+	}
+	baseCodex := "builtin:codex"
+	state.cfg.Providers = map[string]config.ProviderSpec{
+		// Base-only descendant: no Command, no DisplayName.
+		"codex-max": {Base: &baseCodex},
+	}
+	state.cfg.ResolvedProviders = map[string]config.ResolvedProvider{
+		"codex-max": {
+			Name:            "codex-max",
+			BuiltinAncestor: "codex",
+			Command:         "codex", // inherited from builtin:codex
+			Chain: []config.HopIdentity{
+				{Kind: "custom", Name: "codex-max"},
+				{Kind: "builtin", Name: "codex"},
+			},
+		},
+	}
+	srv := New(state)
+	// Simulate the binary being installed by overriding LookPath.
+	srv.LookPathFunc = func(bin string) (string, error) {
+		if bin == "codex" {
+			return "/usr/local/bin/codex", nil
+		}
+		return "", os.ErrNotExist
+	}
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(resp.Items))
+	}
+	agent := resp.Items[0]
+	if agent.Provider != "codex-max" {
+		t.Errorf("provider = %q, want codex-max", agent.Provider)
+	}
+	// DisplayName must come from the builtin ancestor (Codex CLI),
+	// since the leaf provider did not declare one.
+	if agent.DisplayName != "Codex CLI" {
+		t.Errorf("display_name = %q, want %q (inherited from builtin:codex)", agent.DisplayName, "Codex CLI")
+	}
+	// The binary "codex" is stubbed as available, so the agent must
+	// be reported available.
+	if !agent.Available {
+		t.Errorf("available = false (reason: %q); want true — resolved cache should surface inherited command", agent.UnavailableReason)
+	}
+}
+
+// TestProviderPathCheck_BaseOnlyDescendant ensures the PATH probe uses
+// the inherited command from the resolved cache rather than the empty
+// Command on the raw spec.
+func TestProviderPathCheck_BaseOnlyDescendant(t *testing.T) {
+	baseCodex := "builtin:codex"
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"codex-max": {Base: &baseCodex},
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"codex-max": {
+				Name:            "codex-max",
+				BuiltinAncestor: "codex",
+				Command:         "codex",
+			},
+		},
+	}
+	got := providerPathCheck("codex-max", cfg)
+	if got != "codex" {
+		t.Errorf("providerPathCheck = %q, want %q", got, "codex")
+	}
+}
+
+// TestProviderPathCheck_FallsBackToRawWhenNoCache keeps Phase A configs
+// working: when the resolved cache is empty, we still read raw
+// Command/PathCheck for the provider.
+func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "custom-cli"},
+		},
+	}
+	if got := providerPathCheck("custom", cfg); got != "custom-cli" {
+		t.Errorf("providerPathCheck = %q, want custom-cli", got)
 	}
 }

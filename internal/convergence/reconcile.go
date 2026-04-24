@@ -467,34 +467,45 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 	nextIter := closedIter + 1
 	nextKey := IdempotencyKey(beadID, nextIter)
 
-	// Check if a wisp for the next iteration already exists.
-	existingID, found, err := r.Handler.Store.FindByIdempotencyKey(nextKey)
-	if err != nil {
-		return ReconcileDetail{
-			BeadID: beadID, Action: "no_action",
-			Error: fmt.Errorf("looking up next wisp: %w", err),
-		}
-	}
-
 	var wispID string
 	action := "adopted_wisp"
 
-	if found {
-		wispID = existingID
+	if pendingID := r.Handler.validPendingNextWisp(beadID, nextKey, meta[FieldPendingNextWisp]); pendingID != "" {
+		wispID = pendingID
 	} else {
-		// Pour the next wisp.
-		formula := meta[FieldFormula]
-		vars := ExtractVars(meta)
-		evaluatePrompt := meta[FieldEvaluatePrompt]
-
-		wispID, err = r.Handler.Store.PourWisp(beadID, formula, nextKey, vars, evaluatePrompt)
+		// Check if a wisp for the next iteration already exists.
+		existingID, found, err := r.Handler.Store.FindByIdempotencyKey(nextKey)
 		if err != nil {
 			return ReconcileDetail{
-				BeadID: beadID, Action: "poured_wisp",
-				Error: fmt.Errorf("pouring wisp for iter %d: %w", nextIter, err),
+				BeadID: beadID, Action: "no_action",
+				Error: fmt.Errorf("looking up next wisp: %w", err),
 			}
 		}
-		action = "poured_wisp"
+
+		if found {
+			wispID = existingID
+		} else {
+			// Pour the next wisp.
+			formula := meta[FieldFormula]
+			vars := ExtractVars(meta)
+			evaluatePrompt := meta[FieldEvaluatePrompt]
+
+			wispID, err = r.Handler.Store.PourWisp(beadID, formula, nextKey, vars, evaluatePrompt)
+			if err != nil {
+				return ReconcileDetail{
+					BeadID: beadID, Action: "poured_wisp",
+					Error: fmt.Errorf("pouring wisp for iter %d: %w", nextIter, err),
+				}
+			}
+			action = "poured_wisp"
+		}
+	}
+
+	if err := r.Handler.Store.ActivateWisp(wispID); err != nil {
+		return ReconcileDetail{
+			BeadID: beadID, Action: action,
+			Error: fmt.Errorf("activating wisp %q: %w", wispID, err),
+		}
 	}
 
 	if err := r.Handler.Store.SetMetadata(beadID, FieldActiveWisp, wispID); err != nil {
@@ -503,6 +514,7 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 			Error: fmt.Errorf("setting active_wisp: %w", err),
 		}
 	}
+	_ = r.Handler.Store.SetMetadata(beadID, FieldPendingNextWisp, "")
 
 	return ReconcileDetail{BeadID: beadID, Action: action}
 }

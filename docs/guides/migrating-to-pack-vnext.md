@@ -3,6 +3,11 @@ title: "PackV2: The New Package System for Gas City"
 description: How to move an existing Gas City 0.14.0 city or pack to the PackV2 schema and directory conventions.
 ---
 
+> [!IMPORTANT]
+> This document describes the pre-release Gas City v0.15.0 rollout.
+> Some PackV2 surfaces are still under active development; release-gated
+> caveats below use the form "As of release v0.15.0, ...".
+
 This guide is the practical migration companion for moving from the
 0.14.0 PackV1 world into the PackV2 model that first landed in 0.14.1
 and is being finished in the 0.15.0 wave.
@@ -34,7 +39,7 @@ pack directory tree.
 The target public migration flow is `gc doctor`, then
 `gc doctor --fix` for the safe mechanical rewrites, then `gc doctor`
 again to confirm the result. Some old cities may hard-break until
-migrated; that is intentional in this wave.
+migrated; that is intentional as of release v0.15.0.
 
 > **Current rollout note:** The doctor-first remediation slice lands
 > separately from the Skills/MCP, infix, and rig-path slices. Until that
@@ -167,6 +172,12 @@ source = "../shared/gastown"
 
 Use the city pack's `pack.toml` for city-wide imports. Use rig-scoped
 imports in `city.toml` when a pack should compose only into one rig.
+
+For remote imports, run `gc import install` after the import declarations
+are in place. That writes or repairs `packs.lock` and materializes the
+cache. Use `gc import check` when you want a read-only validation pass:
+it reports missing or stale lock/cache state and points back to
+`gc import install` for repair.
 
 Rigs are the main thing that remain in `city.toml`. As you migrate, the
 usual pattern is:
@@ -460,9 +471,9 @@ template inclusion.
 | `inject_fragments_append` on patches | Gone — same approach |
 | All `.md` files run through Go templates | Only `.template.md` files run through Go templates |
 
-For migration convenience, `append_fragments` in `agent.toml` or
-`[agent_defaults]` auto-appends named fragments to `.template.md`
-prompts without editing each prompt file:
+For migration convenience, `[agent_defaults].append_fragments`
+auto-appends named fragments to `.template.md` prompts without editing
+each prompt file:
 
 ```toml
 # pack.toml or city.toml
@@ -473,7 +484,7 @@ append_fragments = ["operational-awareness", "command-glossary"]
 Plain `.md` prompts are inert — no fragments attach, no template engine
 runs.
 
-> **NYI in this wave:** `[agent_defaults].append_fragments` is the
+> **As of release v0.15.0:** `[agent_defaults].append_fragments` is the
 > proven migration bridge in the current release. Agent-local
 > `append_fragments` is still tracked as a spec/runtime parity gap in
 > [#671](https://github.com/gastownhall/gascity/issues/671).
@@ -599,18 +610,24 @@ schema, plus the qualified rows that matter most during migration.
 
 > **Current rollout note:** Some rows below describe the target PackV2
 > destination rather than the exact state of every in-flight branch. In
-> the current 15.0 wave, `workspace.name` still lives in `city.toml`.
-> Phase A rig-binding work removes machine-local `rigs.path` from newly
-> written city configs, but `rigs.prefix` and `rigs.suspended` remain in
+> the current 15.0 wave, machine-local workspace identity (`workspace.name`,
+> `workspace.prefix`) and `rigs.path` now live in `.gc/site.toml` for newly
+> written or migrated cities. `rigs.prefix` and `rigs.suspended` remain in
 > `city.toml` in this release.
 
 | 0.14.0 element | What it did | New home or action |
 |---|---|---|
 | `include` | Merged extra config fragments into `city.toml` before load | Remove as part of migration. Move real composition to imports and move remaining config to `pack.toml`, `city.toml`, or discovered directories. |
 | `[workspace]` | Held city metadata and pack composition in one place | Split across the root `pack.toml`, `city.toml`, and `.gc/`. |
-| `workspace.name` | Workspace identity | Transitional in this wave. Keep it in `city.toml` for the current 0.15.0 migration slice. Fresh `gc init` keeps it aligned with `pack.name`; `gc register` uses it when present, otherwise falls back to `pack.name`, and stores the selected registration name in the machine-local supervisor registry without backfilling `city.toml`. Full removal from `city.toml` still waits for the broader site-binding cutover; track [#602](https://github.com/gastownhall/gascity/issues/602). |
+| `workspace.name` | Workspace identity | Move to `.gc/site.toml` as `workspace_name`. Runtime identity resolves from registered alias (supervisor-managed flows), then site binding / legacy config, then directory basename. `pack.name` remains the portable definition identity and init-time default only. |
+| `workspace.prefix` | Workspace bead prefix | Move to `.gc/site.toml` as `workspace_prefix`. Runtime/API surfaces use the effective site-bound prefix when present and otherwise derive from the effective city name. |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
-| `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move to `[defaults.rig.imports]` in the root city `pack.toml`. This is the target shape, but loader-backed support is still tracked in [#360](https://github.com/gastownhall/gascity/issues/360). |
+
+This rollout also changes the generated schema contract: checked-in
+`city.toml` files and downstream validators must no longer require
+`[workspace].name` once workspace identity has moved to `.gc/site.toml`.
+
+| `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move each default include to `[defaults.rig.imports.<binding>]` entries in the root city `pack.toml`. |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
 | `[packs.*]` | Named remote pack sources used by includes | Collapse into `[imports.*]` entries. There should no longer be a separate `[packs.*]` registry in `city.toml`. |
 | `[[agent]]` | Inline agent definitions | Move to `agents/<name>/`, with optional `agent.toml`. |
@@ -640,7 +657,7 @@ schema, plus the qualified rows that matter most during migration.
 | `[session_sleep]` | Sleep policy defaults | Keep in `city.toml`. |
 | `[convergence]` | Convergence limits | Keep in `city.toml`. |
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
-| `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. |
+| `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. As of release v0.15.0, the actively-applied defaults are still narrow: `default_sling_formula` plus `[agent_defaults].append_fragments`. |
 
 ## Reference: Gas City 0.14.0 `pack.toml` elements to PackV2
 

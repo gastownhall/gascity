@@ -1,6 +1,6 @@
 [order]
 description = "Detect and clean orphan Dolt databases"
 formula = "mol-dog-stale-db"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "15m"
 pool = "dog"

@@ -64,6 +64,316 @@ func TestApplyLoops_FixedCount(t *testing.T) {
 	}
 }
 
+func TestApplyLoopsPreservesRalphTimeout(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "loop",
+			Title: "Loop",
+			Loop: &LoopSpec{
+				Count: 1,
+				Body: []*Step{
+					{
+						ID:      "check",
+						Title:   "Check",
+						Timeout: "10m",
+						Ralph: &RalphSpec{
+							MaxAttempts: 2,
+							Check: &RalphCheckSpec{
+								Mode: "exec",
+								Path: "checks/pass.sh",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Timeout != "10m" {
+		t.Fatalf("Timeout = %q, want 10m", got[0].Timeout)
+	}
+	if got[0].Ralph == nil {
+		t.Fatal("Ralph was dropped during loop expansion")
+	}
+	if got[0].Ralph.Check == nil || got[0].Ralph.Check.Path != "checks/pass.sh" {
+		t.Fatalf("Ralph.Check = %+v, want path checks/pass.sh", got[0].Ralph.Check)
+	}
+}
+
+func TestApplyLoopsPreservesBodyStepFields(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "loop",
+			Title: "Loop",
+			Loop: &LoopSpec{
+				Count: 1,
+				Body: []*Step{
+					{
+						ID:              "check",
+						Title:           "Check",
+						DescriptionFile: "docs/check.md",
+						Notes:           "operator note",
+						Metadata: map[string]string{
+							"gc.step_timeout": "10m",
+							"custom":          "value",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].DescriptionFile != "docs/check.md" {
+		t.Fatalf("DescriptionFile = %q, want docs/check.md", got[0].DescriptionFile)
+	}
+	if got[0].Notes != "operator note" {
+		t.Fatalf("Notes = %q, want operator note", got[0].Notes)
+	}
+	if got[0].Metadata["gc.step_timeout"] != "10m" {
+		t.Fatalf("gc.step_timeout metadata = %q, want 10m", got[0].Metadata["gc.step_timeout"])
+	}
+	if got[0].Metadata["custom"] != "value" {
+		t.Fatalf("custom metadata = %q, want value", got[0].Metadata["custom"])
+	}
+}
+
+func TestApplyControlFlowRejectsInvalidMaterializedLoopTimeout(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "loop",
+			Title: "Loop",
+			Loop: &LoopSpec{
+				Range: "1..1",
+				Var:   "seconds",
+				Body: []*Step{
+					{
+						ID:      "check",
+						Title:   "Check",
+						Timeout: "{seconds}",
+						Ralph: &RalphSpec{
+							MaxAttempts: 1,
+							Check: &RalphCheckSpec{
+								Mode: "exec",
+								Path: "checks/pass.sh",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := ApplyControlFlow(steps, nil)
+	if err == nil {
+		t.Fatal("ApplyControlFlow should reject materialized timeout without a duration unit")
+	}
+	if !strings.Contains(err.Error(), "invalid timeout") {
+		t.Fatalf("ApplyControlFlow error = %v, want invalid timeout", err)
+	}
+}
+
+func TestApplyControlFlowSubstitutesLoopVarInChildTimeout(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "loop",
+			Title: "Loop",
+			Loop: &LoopSpec{
+				Range: "2..2",
+				Var:   "seconds",
+				Body: []*Step{
+					{
+						ID:    "parent",
+						Title: "Parent",
+						Children: []*Step{
+							{
+								ID:      "check",
+								Title:   "Check",
+								Timeout: "{seconds}s",
+								Ralph: &RalphSpec{
+									MaxAttempts: 1,
+									Check: &RalphCheckSpec{
+										Mode: "exec",
+										Path: "checks/pass.sh",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ApplyControlFlow(steps, nil)
+	if err != nil {
+		t.Fatalf("ApplyControlFlow failed: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Children) != 1 {
+		t.Fatalf("expanded loop shape = %#v, want one parent with one child", got)
+	}
+	if got[0].Children[0].Timeout != "2s" {
+		t.Fatalf("child Timeout = %q, want 2s", got[0].Children[0].Timeout)
+	}
+}
+
+func TestApplyControlFlowSubstitutesChildRalphTimeoutPerIteration(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "loop",
+			Title: "Loop",
+			Loop: &LoopSpec{
+				Range: "2..3",
+				Var:   "seconds",
+				Body: []*Step{
+					{
+						ID:    "parent",
+						Title: "Parent",
+						Children: []*Step{
+							{
+								ID:    "check",
+								Title: "Check",
+								Ralph: &RalphSpec{
+									MaxAttempts: 1,
+									Check: &RalphCheckSpec{
+										Mode:    "exec",
+										Path:    "checks/pass.sh",
+										Timeout: "{seconds}s",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ApplyControlFlow(steps, nil)
+	if err != nil {
+		t.Fatalf("ApplyControlFlow failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	first := got[0].Children[0].Ralph.Check.Timeout
+	second := got[1].Children[0].Ralph.Check.Timeout
+	if first != "2s" {
+		t.Fatalf("first child check timeout = %q, want 2s", first)
+	}
+	if second != "3s" {
+		t.Fatalf("second child check timeout = %q, want 3s", second)
+	}
+}
+
+func TestApplyControlFlowSubstitutesOuterLoopVarInNestedLoopBodyTimeout(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer",
+			Loop: &LoopSpec{
+				Range: "2..2",
+				Var:   "seconds",
+				Body: []*Step{
+					{
+						ID:    "inner",
+						Title: "Inner",
+						Loop: &LoopSpec{
+							Count: 1,
+							Body: []*Step{
+								{
+									ID:      "check",
+									Title:   "Check",
+									Timeout: "{seconds}s",
+									Ralph: &RalphSpec{
+										MaxAttempts: 1,
+										Check: &RalphCheckSpec{
+											Mode: "exec",
+											Path: "checks/pass.sh",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ApplyControlFlow(steps, nil)
+	if err != nil {
+		t.Fatalf("ApplyControlFlow failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Timeout != "2s" {
+		t.Fatalf("Timeout = %q, want 2s", got[0].Timeout)
+	}
+}
+
+func TestApplyControlFlowNestedLoopVarShadowsOuterTimeout(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer",
+			Loop: &LoopSpec{
+				Range: "1..1",
+				Var:   "seconds",
+				Body: []*Step{
+					{
+						ID:    "inner",
+						Title: "Inner",
+						Loop: &LoopSpec{
+							Range: "5..5",
+							Var:   "seconds",
+							Body: []*Step{
+								{
+									ID:      "check",
+									Title:   "Check",
+									Timeout: "{seconds}s",
+									Ralph: &RalphSpec{
+										MaxAttempts: 1,
+										Check: &RalphCheckSpec{
+											Mode: "exec",
+											Path: "checks/pass.sh",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ApplyControlFlow(steps, nil)
+	if err != nil {
+		t.Fatalf("ApplyControlFlow failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Timeout != "5s" {
+		t.Fatalf("Timeout = %q, want 5s", got[0].Timeout)
+	}
+}
+
 func TestApplyLoops_Conditional(t *testing.T) {
 	steps := []*Step{
 		{

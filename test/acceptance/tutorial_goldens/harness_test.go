@@ -131,6 +131,7 @@ func (w *tutorialWorkspace) runShell(command, stdin string) (string, error) {
 func (w *tutorialWorkspace) runShellWithTimeout(timeout time.Duration, command, stdin string) (string, error) {
 	w.t.Helper()
 	trimmed := strings.TrimSpace(command)
+	command = tutorialShellCommand(command, w.env.Home)
 	for attempt := 1; attempt <= gcInitTransientRetryLimit; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		cmd := exec.CommandContext(ctx, "bash", "-c", command)
@@ -274,6 +275,7 @@ func (w *tutorialWorkspace) startShell(command, stdin string) (*runningShell, er
 	w.t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	command = tutorialShellCommand(command, w.env.Home)
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = w.cwd
 	cmd.Env = w.env.Env.List()
@@ -354,6 +356,14 @@ func expandHome(home, path string) string {
 		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 	}
 	return path
+}
+
+func tutorialShellCommand(command, home string) string {
+	if home == "" || !strings.Contains(command, "~/") {
+		return command
+	}
+	rewritten := strings.ReplaceAll(command, "~/", "${GC_TUTORIAL_HOME}/")
+	return fmt.Sprintf("GC_TUTORIAL_HOME=%s; %s", shellQuote(home), rewritten)
 }
 
 func (w *tutorialWorkspace) configureInitializedCities() error {
@@ -515,6 +525,15 @@ func TestRunEnvCommandWithTimeoutUsesAcceptanceGCBinary(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out); got != "tutorial-env-gc" {
 		t.Fatalf("expected acceptance gc binary output, got %q", got)
+	}
+}
+
+func TestTutorialShellCommandRehomesTildePaths(t *testing.T) {
+	home := "/tmp/tutorial-home"
+	got := tutorialShellCommand("cd ~/my-city && gc rig add ~/my-project", home)
+	want := "GC_TUTORIAL_HOME='/tmp/tutorial-home'; cd ${GC_TUTORIAL_HOME}/my-city && gc rig add ${GC_TUTORIAL_HOME}/my-project"
+	if got != want {
+		t.Fatalf("tutorialShellCommand() = %q, want %q", got, want)
 	}
 }
 

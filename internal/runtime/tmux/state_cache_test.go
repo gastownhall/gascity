@@ -330,3 +330,9 @@ func TestStateCache_RefreshLogIsOptInViaEnvVar(t *testing.T) {
 		}
 	})
 }
+
+func TestIsNoServerErrorRecognizesSentinel(t *testing.T) {
+	if !isNoServerError(ErrNoServer) {
+		t.Fatal("isNoServerError(ErrNoServer) = false, want true")
+	}
+}

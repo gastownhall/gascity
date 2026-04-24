@@ -67,13 +67,17 @@ func runAdoptionBarrier(
 
 	// Step 1: List all running sessions.
 	running, err := sp.ListRunning("")
-	if err != nil {
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "adoption barrier: listing running sessions: %v\n", err) //nolint:errcheck
 		return result, false
 	}
+	if partialList {
+		fmt.Fprintf(stderr, "adoption barrier: listing running sessions partially failed: %v\n", err) //nolint:errcheck
+	}
 	result.Total = len(running)
 	if len(running) == 0 {
-		return result, true // nothing to adopt
+		return result, !partialList // nothing visible to adopt
 	}
 
 	// Step 2: Load existing open session beads, indexed by session_name.
@@ -216,7 +220,7 @@ func runAdoptionBarrier(
 	}
 
 	// Step 4: Barrier gate — all running sessions must have beads.
-	passed := result.Skipped == 0
+	passed := result.Skipped == 0 && !partialList
 	return result, passed
 }
 

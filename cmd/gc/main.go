@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -141,7 +143,6 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
-	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
@@ -192,6 +193,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newBdStoreBridgeCmd(stdout, stderr),
 		newDoltConfigCmd(stdout, stderr),
 		newDoltStateCmd(stdout, stderr),
+		newShellCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -313,12 +315,12 @@ func resolveCommandCity(args []string) (string, error) {
 // following priority chain:
 //  1. --city + --rig flags (explicit both, validated)
 //  2. --city only (explicit city, rig from cwd if applicable)
-//  3. --rig only (rig from cities.toml, city from default_city)
+//  3. --rig only (rig from registered city site bindings)
 //  4. Explicit city env (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) + GC_RIG
 //  5. Explicit city env only (city set, rig from GC_DIR/cwd if applicable)
-//  6. GC_RIG only (rig from cities.toml, city from default_city)
+//  6. GC_RIG only (rig from registered city site bindings)
 //  7. GC_DIR-derived city path
-//  8. Rig index lookup (cwd prefix match in cities.toml)
+//  8. Registered rig binding lookup (cwd prefix match)
 //  9. Walk up from cwd looking for city.toml
 //  10. Fail
 func resolveContext() (resolvedContext, error) {
@@ -368,9 +370,10 @@ func resolveContext() (resolvedContext, error) {
 	// Step 6: GC_RIG only
 	if gcRig != "" {
 		ctx, err := resolveRigToContext(gcRig)
-		if err == nil {
-			return ctx, nil
+		if err != nil {
+			return resolvedContext{}, err
 		}
+		return ctx, nil
 	}
 
 	// Step 7: GC_DIR-derived city path.
@@ -379,7 +382,7 @@ func resolveContext() (resolvedContext, error) {
 		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
 	}
 
-	// Step 8: Rig index lookup (cwd prefix match in cities.toml).
+	// Step 8: Registered rig binding lookup (cwd prefix match).
 	cwd, err := os.Getwd()
 	if err != nil {
 		return resolvedContext{}, err
@@ -408,10 +411,11 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
-	if ctx, ok, err := resolveRigPathToContext(abs); ok {
-		if err != nil {
-			return resolvedContext{}, err
-		}
+	ctx, ok, err := resolveRigPathToContext(abs)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ok {
 		return ctx, nil
 	}
 	if cityPath, err := validateCityPath(abs); err == nil {
@@ -442,82 +446,51 @@ func validateCityPath(p string) (string, error) {
 	return "", fmt.Errorf("not a city directory: %s (no city.toml or .gc/ found)", abs)
 }
 
-// resolveRigToContext resolves a rig name or path to a full context via
-// the global registry in cities.toml.
+// resolveRigToContext resolves a rig name or path to a full context by scanning
+// registered cities and their machine-local .gc/site.toml rig bindings.
 func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-
-	// Try by name first.
-	if entry, ok := reg.LookupRigByName(nameOrPath); ok {
-		ctx, err := resolveRigEntryCity(reg, entry)
-		if err != nil {
-			return resolvedContext{}, err
-		}
-		return ctx, nil
+	if matches, err := registeredRigBindingsByName(nameOrPath, true); err != nil {
+		return resolvedContext{}, err
+	} else if len(matches) > 0 {
+		return resolveRigBindingMatches(nameOrPath, matches)
 	}
 
-	// Try by path.
 	abs, err := filepath.Abs(nameOrPath)
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	if entry, ok := reg.LookupRigByPath(abs); ok {
-		ctx, err := resolveRigEntryCity(reg, entry)
-		if err != nil {
-			return resolvedContext{}, err
-		}
-		return ctx, nil
+	if matches, err := registeredRigBindingsByPath(abs, true); err != nil {
+		return resolvedContext{}, err
+	} else if len(matches) > 0 {
+		return resolveRigBindingMatches(abs, matches)
 	}
 
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
 }
 
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	entry, ok := reg.LookupRigByPath(dir)
-	if !ok {
+	matches, err := registeredRigBindingsByPath(dir, true)
+	if err != nil {
+		return resolvedContext{}, false, err
+	}
+	if len(matches) == 0 {
 		return resolvedContext{}, false, nil
 	}
-	ctx, err := resolveRigEntryCity(reg, entry)
+	ctx, err := resolveRigBindingMatches(dir, matches)
 	if err != nil {
 		return resolvedContext{}, true, err
 	}
 	return ctx, true, nil
 }
 
-// resolveRigEntryCity resolves a rig entry to a city. Uses default_city if
-// set, otherwise auto-resolves if exactly one city contains the rig.
-func resolveRigEntryCity(reg *supervisor.Registry, entry supervisor.RigEntry) (resolvedContext, error) {
-	if entry.DefaultCity != "" {
-		return resolvedContext{CityPath: entry.DefaultCity, RigName: entry.Name}, nil
-	}
-	// No default — check how many cities actually contain this rig.
-	paths := rigCityPaths(reg, entry.Path)
-	switch len(paths) {
-	case 1:
-		return resolvedContext{CityPath: paths[0], RigName: entry.Name}, nil
-	case 0:
-		return resolvedContext{}, fmt.Errorf("rig %q is registered but not found in any city", entry.Name)
-	default:
-		cities := rigCityList(reg, entry.Path)
-		return resolvedContext{}, fmt.Errorf(
-			"rig %q is registered in multiple cities: %s\n  Set a default:  gc rig default %s --city <name>\n  Or specify now:  gc --city <name> <command>",
-			entry.Name, strings.Join(cities, ", "), entry.Name)
-	}
-}
-
-// lookupRigFromCwd checks the global registry for a rig matching the cwd.
+// lookupRigFromCwd checks registered city site bindings for a rig matching cwd.
+// Ambiguous bindings deliberately fall through to the city walk-up fallback.
 func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	entry, ok := reg.LookupRigByPath(cwd)
-	if !ok {
+	matches, err := registeredRigBindingsByPath(cwd, false)
+	if err != nil || len(matches) != 1 {
 		return resolvedContext{}, false
 	}
-	if entry.DefaultCity == "" {
-		// Ambiguous — can't auto-resolve. Fall through to walk-up.
-		return resolvedContext{}, false
-	}
-	return resolvedContext{CityPath: entry.DefaultCity, RigName: entry.Name}, true
+	return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, true
 }
 
 // rigFromCwd attempts to derive a rig name from cwd when the city is known.
@@ -531,7 +504,7 @@ func rigFromCwd(cityPath string) string {
 
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
 func rigFromCwdDir(cityPath, cwd string) string {
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return ""
 	}
@@ -542,52 +515,133 @@ func rigFromCwdDir(cityPath, cwd string) string {
 	return rig.Name
 }
 
-// rigCityList scans all registered cities to find which ones contain a rig.
-// Returns display names for error messages.
-func rigCityList(reg *supervisor.Registry, rigPath string) []string {
-	var names []string
-	for _, c := range rigCityEntries(reg, rigPath) {
-		name := c.EffectiveName()
-		if name == "" {
-			name = c.Path
+type registeredRigBinding struct {
+	City supervisor.CityEntry
+	Rig  config.Rig
+	Path string
+}
+
+func registeredRigBindingsByName(name string, failOnLoadError bool) ([]registeredRigBinding, error) {
+	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+		return binding.Rig.Name == name
+	})
+}
+
+func registeredRigBindingsByPath(dir string, failOnLoadError bool) ([]registeredRigBinding, error) {
+	dir = normalizePathForCompare(dir)
+	matches, err := registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+		rigPath := normalizePathForCompare(binding.Path)
+		return pathWithinScope(dir, rigPath)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keepDeepestRigBindings(matches), nil
+}
+
+func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) ([]registeredRigBinding, error) {
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	cities, err := reg.List()
+	if err != nil {
+		return nil, err
+	}
+	var matched []registeredRigBinding
+	var loadErrors []string
+	for _, c := range cities {
+		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, io.Discard)
+		if err != nil {
+			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
+			continue
 		}
+		siteBinding, err := config.LoadSiteBinding(fsys.OSFS{}, c.Path)
+		if err != nil {
+			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
+			continue
+		}
+		siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
+		for _, siteRig := range siteBinding.Rigs {
+			name := strings.TrimSpace(siteRig.Name)
+			path := strings.TrimSpace(siteRig.Path)
+			if name == "" || path == "" {
+				continue
+			}
+			siteRigPaths[name] = path
+		}
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Name) == "" {
+				continue
+			}
+			sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
+			if sitePath == "" {
+				continue
+			}
+			rig.Path = sitePath
+			binding := registeredRigBinding{
+				City: c,
+				Rig:  rig,
+				Path: resolveStoreScopeRoot(c.Path, sitePath),
+			}
+			if match(binding) {
+				matched = append(matched, binding)
+			}
+		}
+	}
+	if len(loadErrors) > 0 && (failOnLoadError || len(matched) > 0) {
+		return nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+	}
+	return matched, nil
+}
+
+func keepDeepestRigBindings(matches []registeredRigBinding) []registeredRigBinding {
+	var bestLen int
+	for _, binding := range matches {
+		if l := len(normalizePathForCompare(binding.Path)); l > bestLen {
+			bestLen = l
+		}
+	}
+	if bestLen == 0 {
+		return matches
+	}
+	filtered := matches[:0]
+	for _, binding := range matches {
+		if len(normalizePathForCompare(binding.Path)) == bestLen {
+			filtered = append(filtered, binding)
+		}
+	}
+	return filtered
+}
+
+func resolveRigBindingMatches(value string, matches []registeredRigBinding) (resolvedContext, error) {
+	if len(matches) == 1 {
+		return resolvedContext{CityPath: matches[0].City.Path, RigName: matches[0].Rig.Name}, nil
+	}
+	return resolvedContext{}, fmt.Errorf(
+		"rig %q is registered in multiple cities: %s\n  Specify now:  gc --city <name> <command>",
+		value,
+		strings.Join(registeredRigBindingCityNames(matches), ", "))
+}
+
+func registeredRigBindingCityNames(matches []registeredRigBinding) []string {
+	seen := make(map[string]struct{}, len(matches))
+	var names []string
+	for _, binding := range matches {
+		name := registeredCityLabel(binding.City)
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
-// rigCityPaths returns the paths of cities that contain the given rig.
-func rigCityPaths(reg *supervisor.Registry, rigPath string) []string {
-	var paths []string
-	for _, c := range rigCityEntries(reg, rigPath) {
-		paths = append(paths, c.Path)
+func registeredCityLabel(city supervisor.CityEntry) string {
+	name := strings.TrimSpace(city.EffectiveName())
+	if name == "" {
+		name = city.Path
 	}
-	return paths
-}
-
-// rigCityEntries returns CityEntry values for all cities that contain the given rig.
-func rigCityEntries(reg *supervisor.Registry, rigPath string) []supervisor.CityEntry {
-	cities, err := reg.List()
-	if err != nil {
-		return nil
-	}
-	var matched []supervisor.CityEntry
-	for _, c := range cities {
-		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path)
-		if err != nil {
-			continue
-		}
-		for _, rig := range cfg.Rigs {
-			rp := rig.Path
-			if !filepath.IsAbs(rp) {
-				rp = filepath.Join(c.Path, rp)
-			}
-			if samePath(rp, rigPath) {
-				matched = append(matched, c)
-			}
-		}
-	}
-	return matched
+	return name
 }
 
 // openCityRecorder returns a Recorder that appends to .gc/events.jsonl in the
@@ -729,7 +783,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 		env := gcExecStoreEnv(runtimeCityPath, target, provider)
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
 			if target.ScopeKind == "rig" {
-				cfg, err := loadCityConfig(runtimeCityPath)
+				cfg, err := loadCityConfig(runtimeCityPath, io.Discard)
 				if err != nil {
 					return nil, err
 				}
@@ -775,7 +829,7 @@ func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		return bdStoreForCity(storePath, cityPath), nil
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}

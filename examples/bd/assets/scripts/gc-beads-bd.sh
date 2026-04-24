@@ -16,6 +16,7 @@
 #   GC_DOLT_PORT  — dolt server port fallback when city.toml [dolt].port is unset
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in milliseconds (default: 45000)
 
 set -e
 
@@ -30,6 +31,8 @@ DOLT_HOST="${GC_DOLT_HOST:-0.0.0.0}"
 DOLT_USER="${GC_DOLT_USER:-root}"
 DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
+LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
+CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-45000}"
 
 # Derived paths (set after GC_CITY_PATH validation).
 GC_DIR=""
@@ -97,6 +100,39 @@ tcp_check_port() {
 # tcp_check returns 0 if the dolt port is reachable.
 tcp_check() {
     tcp_check_port "$DOLT_PORT"
+}
+
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    "$@" &
+    local cmd_pid=$!
+    (
+        sleep "$timeout_seconds" 2>/dev/null || sleep 1
+        kill "$cmd_pid" 2>/dev/null || true
+    ) &
+    local watchdog_pid=$!
+    local status=0
+    wait "$cmd_pid" || status=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_lsof() {
+    command -v lsof >/dev/null 2>&1 || return 127
+    run_with_timeout "$LSOF_TIMEOUT_SECONDS" lsof "$@"
+}
+
+lsof_reports_open() {
+    local status
+    run_lsof "$@" >/dev/null 2>&1
+    status=$?
+    case "$status" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
 }
 
 # do_query_probe runs a SELECT active_branch() query against the dolt server.
@@ -409,7 +445,15 @@ EOF
 }
 
 load_existing_managed_from_gc() {
-    local gc_bin host output key value status parsed=false
+    local gc_bin host output key value status parsed=false timeout_ms="${1:-30000}"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=30000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 1 ]; then
+        timeout_ms=1
+    fi
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     GC_EXISTING_USED="false"
@@ -421,7 +465,7 @@ load_existing_managed_from_gc() {
     GC_EXISTING_REUSABLE="false"
     [ -n "$gc_bin" ] || return 1
     GC_EXISTING_USED="true"
-    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms 30000 </dev/null 2>/dev/null)
+    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms "$timeout_ms" </dev/null 2>/dev/null)
     status=$?
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
@@ -460,6 +504,30 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+current_time_ms() {
+    local gc_bin now
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        now=$("$gc_bin" dolt-state now-ms </dev/null 2>/dev/null) || now=""
+        case "$now" in
+            ''|*[!0-9]*)
+                now=""
+                ;;
+        esac
+        if [ -n "$now" ]; then
+            printf '%s\n' "$now"
+            return 0
+        fi
+    fi
+    now=$(date +%s 2>/dev/null) || return 1
+    case "$now" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s000\n' "$now"
+}
+
 run_preflight_cleanup() {
     local gc_bin
     gc_bin=$(resolve_gc_helper_bin)
@@ -476,7 +544,7 @@ run_preflight_cleanup() {
 # find_port_holder returns the PID of the process listening on DOLT_PORT.
 
 find_port_holder() {
-    lsof -i :"$DOLT_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1
+    run_lsof -nP -t -iTCP:"$DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1
 }
 
 # verify_our_server checks if a PID belongs to our server (matching data-dir).
@@ -541,7 +609,9 @@ has_deleted_data_inodes() {
     local pid="$1"
     [ -n "$pid" ] || return 1
 
+    local checked_proc=false
     if [ -d "/proc/$pid" ]; then
+        checked_proc=true
         local cwd
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || true
         case "$cwd" in
@@ -552,6 +622,7 @@ has_deleted_data_inodes() {
     fi
 
     if [ -d "/proc/$pid/fd" ]; then
+        checked_proc=true
         local fd target
         for fd in /proc/"$pid"/fd/*; do
             [ -e "$fd" ] || [ -L "$fd" ] || continue
@@ -568,8 +639,12 @@ has_deleted_data_inodes() {
         done
     fi
 
+    if [ "$checked_proc" = "true" ]; then
+        return 1
+    fi
+
     if command -v lsof >/dev/null 2>&1; then
-        if lsof -p "$pid" 2>/dev/null | grep ' (deleted)' | grep -F -- "$DATA_DIR" >/dev/null 2>&1; then
+        if run_lsof -p "$pid" 2>/dev/null | grep ' (deleted)' | grep -F -- "$DATA_DIR" >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -640,11 +715,22 @@ cleanup_stale_locks() {
         [ -d "$dir" ] || continue
         local lock_file="$dir/.dolt/noms/LOCK"
         if [ -f "$lock_file" ]; then
-            # Check if any process holds the lock file.
-            if ! lsof "$lock_file" >/dev/null 2>&1; then
-                echo "removing stale LOCK: $lock_file" >&2
-                rm -f "$lock_file"
-            fi
+            local open_status
+            set +e
+            lsof_reports_open "$lock_file"
+            open_status=$?
+            set -e
+            case "$open_status" in
+                0)
+                    ;;
+                1)
+                    echo "removing stale LOCK: $lock_file" >&2
+                    rm -f "$lock_file"
+                    ;;
+                *)
+                    echo "preserving LOCK with unknown open-file state: $lock_file" >&2
+                    ;;
+            esac
         fi
     done
 }
@@ -678,6 +764,8 @@ listener:
   port: $DOLT_PORT
   host: $DOLT_HOST
   max_connections: 1000
+  back_log: 50
+  max_connections_timeout_millis: 5000
   read_timeout_millis: 300000
   write_timeout_millis: 300000
 
@@ -716,7 +804,9 @@ check_read_only() {
         esac
     fi
     local output
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;" 2>&1) || true
+    # Keep __gc_probe stable. Dropping Dolt databases leaves
+    # .dolt_dropped_databases backups behind.
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);" 2>&1) || true
     case "$output" in
         *"read only"*|*"READ ONLY"*|*"Read-only"*)
             return 0  # Is read-only.
@@ -802,6 +892,7 @@ wait_for_managed_pid_ready() {
     local attempt=0 max_attempts=1
     [ -n "$pid" ] || return 1
     [ -n "$port" ] || port="$DOLT_PORT"
+    DOLT_PORT="$port"
 
     if load_wait_ready_from_gc "$pid" "$timeout_ms" "$check_deleted"; then
         [ "$GC_WAIT_READY" = "true" ] || return 1
@@ -854,7 +945,7 @@ load_start_managed_from_gc() {
     GC_START_ADDRESS_IN_USE="false"
     [ -n "$gc_bin" ] || return 1
     GC_START_MANAGED_USED="true"
-    output=$("$gc_bin" dolt-state start-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
+    output=$("$gc_bin" dolt-state start-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 9>&- </dev/null 2>/dev/null)
     status=$?
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
@@ -886,9 +977,25 @@ EOF
 }
 
 wait_for_concurrent_start_ready() {
-    local existing_pid="" existing_port="" holder="" waited=0
-    while [ "$waited" -lt 20 ]; do
-        if load_existing_managed_from_gc; then
+    local existing_pid="" existing_port="" holder="" timeout_ms deadline_ms now_ms remaining_ms sleep_ms
+    timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=45000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 500 ]; then
+        timeout_ms=500
+    fi
+    now_ms=$(current_time_ms) || return 1
+    deadline_ms=$((now_ms + timeout_ms))
+    while :; do
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
+            return 1
+        fi
+        if load_existing_managed_from_gc "$remaining_ms"; then
             existing_pid="$GC_EXISTING_MANAGED_PID"
             if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
                 DOLT_PORT="$GC_EXISTING_STATE_PORT"
@@ -908,21 +1015,37 @@ wait_for_concurrent_start_ready() {
             fi
         fi
         if [ "$GC_EXISTING_USED" != "true" ] && [ "$GC_PROBE_USED" != "true" ]; then
-            existing_pid=$(find_dolt_pid)
             existing_port=$(load_state_field port)
-            if [ -n "$existing_pid" ] && [ -n "$existing_port" ] && verify_our_server "$existing_pid"; then
-                DOLT_PORT="$existing_port"
-                if tcp_check_port "$existing_port" && do_query_probe; then
-                    echo "$existing_pid" > "$PID_FILE"
-                    save_state "$existing_pid" true
-                    return 0
+            if [ -n "$existing_port" ]; then
+                existing_pid=$(find_dolt_pid)
+                if [ -n "$existing_pid" ] && verify_our_server "$existing_pid"; then
+                    DOLT_PORT="$existing_port"
+                    if tcp_check_port "$existing_port" && do_query_probe; then
+                        echo "$existing_pid" > "$PID_FILE"
+                        save_state "$existing_pid" true
+                        return 0
+                    fi
                 fi
             fi
         fi
-        sleep 0.5 2>/dev/null || sleep 1
-        waited=$((waited + 1))
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
+            return 1
+        fi
+        sleep_ms=500
+        if [ "$remaining_ms" -lt "$sleep_ms" ]; then
+            sleep_ms="$remaining_ms"
+        fi
+        if [ "$sleep_ms" -le 0 ]; then
+            return 1
+        fi
+        if [ "$sleep_ms" -lt 500 ]; then
+            sleep "0.$(printf '%03d' "$sleep_ms")" 2>/dev/null || sleep 1
+        else
+            sleep 0.5 2>/dev/null || sleep 1
+        fi
     done
-    return 1
 }
 
 load_stop_managed_from_gc() {
@@ -1153,7 +1276,7 @@ allocate_port() {
     local port="$hash_val"
     local attempts=0
     while [ "$attempts" -lt 100 ]; do
-        if ! lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! run_lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$port"
             return
         fi
@@ -1175,7 +1298,7 @@ next_available_port() {
         if [ "$port" -gt 60000 ]; then
             port=10000
         fi
-        if ! lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! run_lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$port"
             return
         fi
@@ -1232,6 +1355,13 @@ valid_sql_name() {
     return 0
 }
 
+is_reserved_dolt_database_name() {
+    case "$(printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in
+        __gc_probe) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # clean_stale_sockets removes stale Unix domain sockets left by a crashed
 # dolt server. Without cleanup, "unix socket set up failed: file already in
 # use" prevents clean restarts (upstream 2e058fa1).
@@ -1239,11 +1369,22 @@ clean_stale_sockets() {
     local sock
     for sock in /tmp/dolt*.sock; do
         [ -S "$sock" ] || continue
-        # Check if any process holds the socket open.
-        if ! lsof "$sock" >/dev/null 2>&1; then
-            echo "removing stale socket: $sock" >&2
-            rm -f "$sock"
-        fi
+        local open_status
+        set +e
+        lsof_reports_open "$sock"
+        open_status=$?
+        set -e
+        case "$open_status" in
+            0)
+                ;;
+            1)
+                echo "removing stale socket: $sock" >&2
+                rm -f "$sock"
+                ;;
+            *)
+                echo "preserving socket with unknown open-file state: $sock" >&2
+                ;;
+        esac
     done
 }
 
@@ -1612,16 +1753,35 @@ op_init() {
     local dir="$1"
     local prefix="$2"
     local dolt_database="${3:-}"
+    local metadata_path="$dir/.beads/metadata.json"
+    local existing_db=""
+    local allow_reserved_existing=false
     if [ -z "$dir" ] || [ -z "$prefix" ]; then
         die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
+    fi
+
+    if [ -f "$metadata_path" ]; then
+        existing_db=$(read_existing_dolt_database "$metadata_path")
+        if [ -n "$existing_db" ] && is_reserved_dolt_database_name "$existing_db"; then
+            allow_reserved_existing=true
+        fi
     fi
 
     # Validate prefix before SQL interpolation (upstream 38f7b380).
     if ! valid_sql_name "$prefix"; then
         die "invalid beads prefix: $prefix (must be alphanumeric, hyphens, underscores)"
     fi
-    if [ -n "$dolt_database" ] && ! valid_sql_name "$dolt_database"; then
-        die "invalid dolt database name: $dolt_database (must be alphanumeric, hyphens, underscores)"
+    if [ -n "$dolt_database" ]; then
+        if is_reserved_dolt_database_name "$dolt_database"; then
+            if [ "$allow_reserved_existing" = true ]; then
+                dolt_database="$existing_db"
+            else
+                die "reserved dolt database name: $dolt_database (used internally by gc)"
+            fi
+        fi
+        if ! valid_sql_name "$dolt_database"; then
+            die "invalid dolt database name: $dolt_database (must be alphanumeric, hyphens, underscores)"
+        fi
     fi
     # Filter BEADS_DIR from inherited environment to prevent bd from
     # finding a parent directory's .beads/ database (upstream parity).
@@ -1633,13 +1793,27 @@ op_init() {
     if [ -z "$dolt_database" ]; then
         # Compatibility fallback for direct gc-beads-bd invocations.
         # GC's canonical path passes dolt_database explicitly.
-        local existing_db
-        existing_db=$(read_existing_dolt_database "$dir/.beads/metadata.json")
-        if [ -n "$existing_db" ] && valid_sql_name "$existing_db"; then
-            dolt_database="$existing_db"
+        if [ -n "$existing_db" ]; then
+            if is_reserved_dolt_database_name "$existing_db"; then
+                if [ "$allow_reserved_existing" = true ]; then
+                    # Preserve legacy probe metadata for already-initialized
+                    # scopes so startup can recover them into the canonical
+                    # migration flow. Fresh init still rejects this name.
+                    dolt_database="$existing_db"
+                else
+                    die "reserved dolt database name: $existing_db (used internally by gc)"
+                fi
+            elif ! valid_sql_name "$existing_db"; then
+                die "invalid existing dolt database name: $existing_db"
+            else
+                dolt_database="$existing_db"
+            fi
         else
             dolt_database="$prefix"
         fi
+    fi
+    if is_reserved_dolt_database_name "$dolt_database" && [ "$allow_reserved_existing" != true ]; then
+        die "reserved dolt database name: $dolt_database (used internally by gc)"
     fi
 
     # Custom bead types for bd (extracted from beads core in v0.46.0).

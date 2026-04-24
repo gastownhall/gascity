@@ -63,7 +63,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	cityRoot := filepath.Dir(path)
 	prov := newProvenance(path)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
-	root.ResolvedWorkspaceName = filepath.Base(cityRoot)
 	cityAgentsForProvenance := root.Agents
 
 	// V2: if a pack.toml exists alongside city.toml, it is the city's
@@ -79,14 +78,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	packPath := filepath.Join(cityRoot, packFile)
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
-		var pc packConfig
-		md, decErr := toml.Decode(string(packData), &pc)
+		pc, md, packWarnings, decErr := parsePackConfigWithMetadata(packData, packPath)
 		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
 		}
-		if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
-			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
+		if fatalWarnings := fatalUndecodedWarnings(md, packPath); len(fatalWarnings) > 0 {
+			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(fatalWarnings, "; "))
 		}
+		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
@@ -191,7 +190,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
-		packDoctors = append(packDoctors, legacyPackDoctors(pc.Doctor, cityRoot, pc.Pack.Name)...)
+		legacyDoctors, err := legacyPackDoctors(fs, pc.Doctor, cityRoot, pc.Pack.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		packDoctors = append(packDoctors, legacyDoctors...)
 		if len(packDoctors) > 0 {
 			root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
 		}
@@ -285,6 +288,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// Adjust fragment agent paths to be city-root-relative.
 		fragDir := filepath.Dir(fragPath)
 		adjustAgentPaths(frag.Agents, fragDir, cityRoot)
+		adjustPatchPaths(&frag.Patches, fragDir, cityRoot)
+		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
@@ -306,6 +311,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		root.Workspace.Includes = append(root.Workspace.Includes, inc)
 	}
+
+	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)
+	adjustRigOverridePaths(root.Rigs, cityRoot, cityRoot)
 
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
@@ -346,6 +354,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			bootstrapSet[name] = true
 		}
 		for name, imp := range implicitImports {
+			if !bootstrapSet[name] {
+				continue
+			}
 			if _, exists := root.Imports[name]; exists {
 				continue
 			}
@@ -369,6 +380,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	cityReqs = append(cityReqs, rootPackRequires...)
 	prov.Warnings = append(prov.Warnings, shadowWarnings...)
+	if len(root.LoadWarnings) > 0 {
+		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
+	}
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
@@ -388,6 +402,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if HasPackRigs(root.Rigs) {
 		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, opts); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
+		}
+		if len(root.LoadWarnings) > 0 {
+			prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 		}
 		// Track pack-expanded agents in provenance.
 		for _, r := range root.Rigs {
@@ -428,8 +445,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	cityLocalFormulas := citylayout.ResolveFormulasDir(cityRoot, root.FormulasDir())
 	root.FormulaLayers = ComputeFormulaLayers(
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
-	root.ScriptLayers = ComputeScriptLayers(
-		root.PackScriptDirs, root.RigScriptDirs, root.Rigs)
 
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
@@ -439,14 +454,28 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
+	if root.AgentDefaults.DefaultSlingFormula != "" {
+		for i := range root.Agents {
+			if root.Agents[i].BindingName == "" {
+				root.Agents[i].InheritedDefaultSlingFormula = nil
+			}
+		}
+	}
 	ApplyAgentDefaults(root)
 
 	// Canonicalize duration-or-"off" session sleep fields after all config
 	// layers have been applied so runtime consumers can trust the values.
 	NormalizeSessionSleepFields(root)
 
-	// Validate named session declarations after pack expansion so stamped
-	// identities and referenced templates are final.
+	siteBindingWarnings, err := ApplySiteBindings(fs, cityRoot, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
+
+	// Validate named session declarations after pack expansion and site
+	// binding resolution so stamped identities and deterministic runtime
+	// names reflect the effective workspace identity.
 	if err := ValidateNamedSessions(root); err != nil {
 		return nil, nil, err
 	}
@@ -456,6 +485,19 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Validate cross-entity semantic constraints.
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
+	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
+
+	// Build the resolved provider cache now that compose + patch have
+	// populated the full provider table. Chain resolution errors
+	// (cycles, unknown base, wrapper-resume missing) surface here so
+	// they fail at config load rather than at session spawn. If the
+	// cache cannot be built, emit a warning and leave the cache nil —
+	// callers can still fall back to ResolveProvider per lookup.
+	if err := BuildResolvedProviderCache(root); err != nil {
+		return nil, nil, fmt.Errorf("%s: provider cache build failed: %w", path, err)
+	}
+
+	populateAgentLocalAssetDirs(fs, root, cityRoot)
 
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
@@ -469,13 +511,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// still populates the v0.15.0 attachment-list tombstone fields. The
 	// fields still parse (TOML won't error) but are ignored by the new
 	// materializer.
-	WarnDeprecatedAttachmentFields(root)
-
-	siteBindingWarnings, err := ApplySiteBindings(fs, cityRoot, root)
-	if err != nil {
-		return nil, nil, err
+	if warning := WarnDeprecatedAttachmentFields(root); warning != "" {
+		prov.Warnings = append(prov.Warnings, warning)
 	}
-	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
 
 	// v0.15.1: enrich every agent with its convention-discovered
 	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
@@ -487,9 +525,45 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// SkillsDir, so that gap silently loses agent-local skills for every
 	// explicitly-declared agent. Populate the fields here so the
 	// convention works uniformly.
-	populateAgentLocalAssetDirs(fs, root, cityRoot)
-
 	return root, prov, nil
+}
+
+// adjustPatchPaths resolves patch session_setup_script values to absolute
+// paths rooted at the declaring config directory. Patches do not retain
+// independent source provenance after merge, so runtime cannot otherwise
+// distinguish whether a relative override came from the target agent's source
+// or from the patch file itself.
+func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
+	for i := range patches.Agents {
+		p := &patches.Agents[i]
+		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
+			continue
+		}
+		v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
+		p.SessionSetupScript = &v
+	}
+}
+
+// adjustRigOverridePaths resolves rig override session_setup_script values to
+// absolute paths rooted at the declaring config directory. Once overrides are
+// applied to pack-stamped agents, runtime only sees the target agent's
+// SourceDir, so relative override paths must be normalized during composition.
+func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
+	for i := range rigs {
+		adjustAgentOverridePaths(rigs[i].Overrides, declDir, cityRoot)
+		adjustAgentOverridePaths(rigs[i].RigPatches, declDir, cityRoot)
+	}
+}
+
+func adjustAgentOverridePaths(overrides []AgentOverride, declDir, cityRoot string) {
+	for i := range overrides {
+		ov := &overrides[i]
+		if ov.SessionSetupScript == nil || *ov.SessionSetupScript == "" {
+			continue
+		}
+		v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
+		ov.SessionSetupScript = &v
+	}
 }
 
 // populateAgentLocalAssetDirs fills Agent.SkillsDir and Agent.MCPDir for
@@ -509,6 +583,7 @@ func populateAgentLocalAssetDirs(fs fsys.FS, root *City, cityRoot string) {
 		if base == "" {
 			base = cityRoot
 		}
+		applyAgentConventionDefaults(fs, base, a)
 		if a.SkillsDir == "" {
 			skillsDir := filepath.Join(base, "agents", a.Name, "skills")
 			if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
@@ -581,6 +656,16 @@ var bootstrapManagedImportNames = []string{"registry", "core"}
 func BootstrapManagedImportNames() []string {
 	out := make([]string, len(bootstrapManagedImportNames))
 	copy(out, bootstrapManagedImportNames)
+	return out
+}
+
+func resolveImplicitImport(imp ImplicitImport) Import {
+	out := Import{Source: strings.TrimSpace(imp.Source)}
+	if version := strings.TrimSpace(imp.Version); version != "" {
+		out.Version = version
+	} else if commit := strings.TrimSpace(imp.Commit); commit != "" {
+		out.Version = "sha:" + commit
+	}
 	return out
 }
 
@@ -815,7 +900,7 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 		},
 		{
 			"emits_permission_warning",
-			func() bool { return base.EmitsPermissionWarning },
+			func() bool { return base.EmitsPermissionWarning != nil },
 			func() { result.EmitsPermissionWarning = frag.EmitsPermissionWarning },
 		},
 	}
@@ -950,20 +1035,18 @@ func resolveConfigPath(p, declDir, cityRoot string) string {
 	return filepath.Join(declDir, p)
 }
 
-// adjustAgentPaths converts relative prompt_template and session_setup_script
-// paths in fragment agents to be city-root-relative, based on the fragment's
-// directory. Also sets SourceDir so session_setup templates can reference
-// scripts relative to their source directory.
+// adjustAgentPaths converts relative prompt_template, overlay_dir, and
+// namepool paths in fragment agents to be city-root-relative, based on the
+// fragment's directory. session_setup_script is left as-authored so runtime
+// resolution can interpret it relative to SourceDir. SourceDir is always set
+// so session_setup templates and runtime path resolution know the declaring
+// config directory.
 func adjustAgentPaths(agents []Agent, fragDir, cityRoot string) {
 	for i := range agents {
 		agents[i].SourceDir = fragDir
 		if agents[i].PromptTemplate != "" {
 			agents[i].PromptTemplate = adjustFragmentPath(
 				agents[i].PromptTemplate, fragDir, cityRoot)
-		}
-		if agents[i].SessionSetupScript != "" {
-			agents[i].SessionSetupScript = adjustFragmentPath(
-				agents[i].SessionSetupScript, fragDir, cityRoot)
 		}
 		if agents[i].OverlayDir != "" {
 			agents[i].OverlayDir = adjustFragmentPath(
@@ -1025,14 +1108,15 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
-	warnings := CheckUndecodedKeys(md, source)
+	warnings := agentDefaultsCompatibilityWarnings(md, source)
+	normalizeLegacyOrderOverrideAliases(&cfg)
+	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return &cfg, md, warnings, nil
 }
 
-// LoadRootPackDefaultRigIncludes loads default rig includes from the root
-// city pack without expanding the full config. Edit paths use this to honor
-// pack v2 defaults while still writing only city.toml.
-func LoadRootPackDefaultRigIncludes(fs fsys.FS, cityRoot string) ([]string, error) {
+// LoadRootPackDefaultRigImports loads the canonical [defaults.rig.imports]
+// entries from the root pack without expanding the full config.
+func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, error) {
 	packPath := filepath.Join(cityRoot, packFile)
 	packData, err := fs.ReadFile(packPath)
 	if err != nil {
@@ -1046,25 +1130,37 @@ func LoadRootPackDefaultRigIncludes(fs fsys.FS, cityRoot string) ([]string, erro
 	if err != nil {
 		return nil, fmt.Errorf("parsing city pack.toml: %w", err)
 	}
-	if warnings := CheckUndecodedKeys(md, packPath); len(warnings) > 0 {
+	if warnings := fatalUndecodedWarnings(md, packPath); len(warnings) > 0 {
 		return nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
 	}
-	return defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+	return defaultRigImportsFromPackDefaults(pc.Defaults, md)
 }
 
-func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
+func defaultRigImportsFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]BoundImport, error) {
 	if len(defaults.Rig.Imports) == 0 {
 		return nil, nil
 	}
-	names := orderedDefaultRigImportNames(defaults.Rig.Imports, md)
 
-	includes := make([]string, 0, len(names))
+	names := orderedDefaultRigImportNames(defaults.Rig.Imports, md)
+	imports := make([]BoundImport, 0, len(names))
 	for _, name := range names {
 		imp := defaults.Rig.Imports[name]
 		if strings.TrimSpace(imp.Source) == "" {
 			return nil, fmt.Errorf("defaults.rig.imports.%s.source is required", name)
 		}
-		includes = append(includes, imp.Source)
+		imports = append(imports, BoundImport{Binding: name, Import: imp})
+	}
+	return imports, nil
+}
+
+func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
+	imports, err := defaultRigImportsFromPackDefaults(defaults, md)
+	if err != nil {
+		return nil, err
+	}
+	includes := make([]string, 0, len(imports))
+	for _, bound := range imports {
+		includes = append(includes, bound.Import.Source)
 	}
 	return includes, nil
 }

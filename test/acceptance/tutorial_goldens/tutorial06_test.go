@@ -31,8 +31,8 @@ func TestTutorial07Orders(t *testing.T) {
 	replaceInFile(
 		t,
 		cityToml,
-		fmt.Sprintf("name = %q\npath = %q\n", "my-api", myAPI),
-		fmt.Sprintf("name = %q\npath = %q\n\n[rigs.imports.dev_ops]\nsource = \"./packs/dev-ops\"\n", "my-api", myAPI),
+		fmt.Sprintf("name = %q\n", "my-api"),
+		fmt.Sprintf("name = %q\n\n[rigs.imports.dev_ops]\nsource = \"./packs/dev-ops\"\n", "my-api"),
 	)
 
 	writeFile(t, filepath.Join(myCity, "formulas", "review.toml"), `formula = "review"
@@ -71,28 +71,28 @@ title = "Run the test suite"
 	reviewOrder := `[order]
 description = "Check for PRs that need review"
 formula = "review"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "worker"
 `
 	depUpdateOrder := `[order]
 description = "Check dependency updates"
 formula = "review"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1h"
 pool = "worker"
 `
 	releaseNotesOrder := `[order]
 description = "Generate release notes"
 formula = "release-notes"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "worker"
 `
 	testSuiteOrder := `[order]
 description = "Run the test suite"
 formula = "test-suite"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "worker"
 `

@@ -56,10 +56,17 @@ type primeHookInput struct {
 	Source    string `json:"source"`
 }
 
+type primeHookContext struct {
+	SessionID     string
+	Source        string
+	HookEventName string
+}
+
 // newPrimeCmd creates the "gc prime [agent-name]" command.
 func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
 	var hookFormat string
+	var strictMode bool
 	cmd := &cobra.Command{
 		Use:   "prime [agent-name]",
 		Short: "Output the behavioral prompt for an agent",
@@ -73,32 +80,60 @@ Runtime hook profiles may call ` + "`gc prime --hook`" + `.
 When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`GC_AGENT`" + `).
 
 If agent-name matches a configured agent with a prompt_template,
-that template is output. Otherwise outputs a default worker prompt.`,
+that template is output. Otherwise outputs a default worker prompt.
+
+Pass --strict to fail on debugging mistakes instead of silently falling
+back to the default prompt. Strict errors on:
+
+  - no city config found
+  - city config fails to load
+  - no agent name given (from args, GC_ALIAS, or GC_AGENT)
+  - agent name not in city config (typo detection — the main use case)
+  - agent's prompt_template points at a file that cannot be read
+
+Strict does NOT error on agents whose config intentionally lacks a
+prompt_template (a supported minimal config), on templates that render
+to empty output from valid conditional logic, or on suspended states
+(city or agent) — those are legitimate quiet states, not mistakes.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
-		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat) != 0 {
+		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat, strictMode) != 0 {
 			return errExit
 		}
 		return nil
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
 	return cmd
 }
 
-// doPrime is the pure logic for "gc prime". Looks up the agent name in
-// city.toml and outputs the corresponding prompt template. Falls back to
-// the default run-once prompt if no match is found or no city exists.
-func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // always returns 0 by design (graceful fallback)
-	return doPrimeWithMode(args, stdout, stderr, false)
+// doPrime exists as the public non-strict entry point so callers don't
+// need to know about the strict flag; its return type stays int because
+// the caller shape matches other cmd/gc entry points.
+func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // strictMode=false means always returns 0
+	return doPrimeWithMode(args, stdout, stderr, false, false)
 }
 
-func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int { //nolint:unparam // always returns 0 by design (graceful fallback)
-	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "")
+// doPrimeWithMode's strict-mode contract: only states that would indicate
+// a user mistake (missing city config, no agent name, unknown agent name,
+// unreadable prompt_template file) error out. Supported minimal configs
+// (agent with no prompt_template at all, or a template that legitimately
+// renders to empty output via conditional logic) and intentional quiet
+// states (suspended city/agent) remain silent even under --strict —
+// strict is a debugging aid, not a stricter mode for the whole command.
+//
+// Hook-mode side effects under --strict are deferred until we know the
+// invocation is not a strict failure, so a failing --strict cannot leave
+// session-id state behind for an agent that doesn't exist. Suspended
+// paths still run side effects because suspension is a legitimate quiet
+// state, not a failure.
+func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
+	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "", strictMode)
 }
 
-func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string) int { //nolint:unparam // always returns 0 by design (graceful fallback)
+func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -116,34 +151,61 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	if len(args) > 0 {
 		agentName = args[0]
 	}
+
+	hookContext := primeHookContext{}
+	suppressHookPrompt := false
 	if hookMode {
-		if sessionID, _ := readPrimeHookContext(); sessionID != "" {
+		hookContext = readPrimeHookContext()
+		suppressHookPrompt = managedSessionHookPromptAlreadyDelivered(hookContext)
+	}
+	// In non-strict mode, hook side effects fire eagerly (existing behavior).
+	// In strict mode, we defer them until after strict checks pass so that a
+	// failing --strict invocation does not persist a session-id for failed
+	// agent resolution or template validation.
+	runHookSideEffects := func() {
+		if !hookMode {
+			return
+		}
+		if sessionID := hookContext.SessionID; sessionID != "" {
 			persistPrimeHookSessionID(sessionID)
 		}
 		persistPrimeHookProviderSessionKey()
 	}
+	if !strictMode {
+		runHookSideEffects()
+	}
 
-	// Try to find city and load config.
 	cityPath, err := resolveCity()
 	if err != nil {
+		if strictMode {
+			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
+		if strictMode {
+			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {
-		return 0 // empty output; hooks call this
+		// Suspended is a legitimate quiet state, not a strict failure —
+		// keep hook behavior consistent with non-strict (which already
+		// ran side effects eagerly above).
+		if strictMode {
+			runHookSideEffects()
+		}
+		return 0
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
+	cityName := loadedCityName(cfg, cityPath)
 
 	// Look up agent in config. First try qualified identity resolution
 	// (handles "rig/agent" and rig-context matching), then fall back to
@@ -152,45 +214,88 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// sessions may have GC_ALIAS set to a user-facing alias that is not an
 	// agent name, so also try GC_TEMPLATE before falling back to the generic
 	// run-once prompt.
+	var resolvedAgents []config.Agent
 	agentCandidates := primeAgentCandidates(agentName, hookMode, cityPath)
 	for _, candidate := range agentCandidates {
 		a, ok := resolveAgentIdentity(cfg, candidate, currentRigContext(cfg))
 		if !ok {
 			a, ok = findAgentByName(cfg, candidate)
 		}
-		if ok && isAgentEffectivelySuspended(cfg, &a) {
-			return 0 // suspended agent gets no prompt
-		}
 		if ok {
-			if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {
-				sessionName := os.Getenv("GC_SESSION_NAME")
-				if sessionName == "" {
-					sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-				}
-				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
-					cityPath:          cityPath,
-					cityName:          cityName,
-					cfg:               cfg,
-					agent:             a,
-					resolved:          resolved,
-					sessionID:         os.Getenv("GC_SESSION_ID"),
-					continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
-					sessionName:       sessionName,
-				}))
+			resolvedAgents = append(resolvedAgents, a)
+		}
+	}
+
+	// Strict preconditions: fail now, before any hook side effects or the
+	// nudge poller start, so a failing --strict leaves no partial state.
+	if strictMode {
+		switch {
+		case agentName == "":
+			fmt.Fprintf(stderr, "gc prime: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
+			return 1
+		case len(resolvedAgents) == 0:
+			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
+			return 1
+		}
+		// renderPrompt returns "" both when the template file cannot be read
+		// and when a valid template legitimately renders empty. Readability is
+		// the strict precondition, so check it before hook side effects.
+		for _, a := range resolvedAgents {
+			if isAgentEffectivelySuspended(cfg, &a) {
+				continue
+			}
+			if a.PromptTemplate == "" {
+				continue
+			}
+			if _, fErr := os.ReadFile(promptTemplateSourcePath(cityPath, a.PromptTemplate)); fErr != nil {
+				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
+				return 1
 			}
 		}
+		// Strict preconditions passed; now it's safe to persist session-id.
+		runHookSideEffects()
+	}
+
+	for _, a := range resolvedAgents {
+		if isAgentEffectivelySuspended(cfg, &a) {
+			return 0
+		}
+		if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {
+			sessionName := os.Getenv("GC_SESSION_NAME")
+			if sessionName == "" {
+				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+			}
+			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
+				cityPath:          cityPath,
+				cityName:          cityName,
+				cfg:               cfg,
+				agent:             a,
+				resolved:          resolved,
+				sessionID:         os.Getenv("GC_SESSION_ID"),
+				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+				sessionName:       sessionName,
+			}))
+		}
 		var ctx PromptContext
-		if ok && (a.PromptTemplate != "" || hookMode || sessionTemplateContext) {
+		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
 			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
 		}
-		if ok && a.PromptTemplate != "" {
-			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
+		if a.PromptTemplate != "" {
+			fragments := effectivePromptFragments(
+				cfg.Workspace.GlobalFragments,
+				a.InjectFragments,
+				a.AppendFragments,
+				a.InheritedAppendFragments,
+				cfg.AgentDefaults.AppendFragments,
+			)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {
-				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat)
+				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
 				return 0
 			}
+			// File is present but rendered empty. Treat as a legitimate
+			// (if unusual) minimal config — emit the default fallback.
 		}
 		// Agents without a prompt_template: read a builtin prompt shipped by
 		// the core bootstrap pack, materialized under .gc/system/packs/core/.
@@ -198,7 +303,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		// Otherwise pool agents use pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
-		if ok && a.PromptTemplate == "" {
+		if a.PromptTemplate == "" {
 			promptFile := ""
 			if cfg.Daemon.FormulaV2 {
 				promptFile = citylayout.SystemPacksRoot + "/core/assets/prompts/graph-worker.md"
@@ -207,14 +312,17 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt)
 					return 0
 				}
 			}
 		}
 	}
 
-	// Fallback: default run-once prompt.
+	// Fallback: default run-once prompt. Under strict, this is only reached
+	// when the agent has no prompt_template and doesn't match a builtin
+	// worker prompt — a supported config shape, so the default prompt is
+	// the correct output even under --strict.
 	fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -274,7 +382,22 @@ func prependHookBeacon(cityName, agentName, prompt string) string {
 	return beacon + "\n\n" + prompt
 }
 
-func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string) {
+func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
+	if strings.TrimSpace(os.Getenv(startupPromptDeliveredEnv)) != "1" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv(managedSessionHookEnv)) != "1" {
+		return false
+	}
+	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
+}
+
+func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool) {
+	if hookMode && suppressPrompt {
+		// Managed sessions receive the rendered startup prompt through the
+		// launch payload or nudge path. SessionStart hooks add context only.
+		prompt = ""
+	}
 	if hookMode {
 		prompt = prependHookBeacon(cityName, agentName, prompt)
 	}
@@ -285,23 +408,31 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 }
 
-func readPrimeHookContext() (sessionID, source string) {
-	source = os.Getenv("GC_HOOK_SOURCE")
-	if id := os.Getenv("GC_SESSION_ID"); id != "" {
-		return id, source
+func readPrimeHookContext() primeHookContext {
+	ctx := primeHookContext{
+		Source:        strings.TrimSpace(os.Getenv("GC_HOOK_SOURCE")),
+		HookEventName: strings.TrimSpace(os.Getenv("GC_HOOK_EVENT_NAME")),
 	}
-	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		return id, source
-	}
-	if input := readPrimeHookStdin(); input != nil {
-		if input.Source != "" {
-			source = input.Source
-		}
-		if input.SessionID != "" {
-			return input.SessionID, source
+	if shouldReadPrimeHookStdin() {
+		if input := readPrimeHookStdin(); input != nil {
+			if source := strings.TrimSpace(input.Source); source != "" {
+				ctx.Source = source
+			}
+			ctx.SessionID = strings.TrimSpace(input.SessionID)
 		}
 	}
-	return "", source
+	if id := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); id != "" {
+		ctx.SessionID = id
+	} else if id := strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")); id != "" {
+		ctx.SessionID = id
+	}
+	return ctx
+}
+
+func shouldReadPrimeHookStdin() bool {
+	hasEnvSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != "" ||
+		strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")) != ""
+	return !hasEnvSessionID
 }
 
 func readPrimeHookStdin() *primeHookInput {

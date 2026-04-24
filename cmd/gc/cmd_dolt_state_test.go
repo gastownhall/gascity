@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 func parseDoltStateOutput(t *testing.T, out string) map[string]string {
@@ -59,18 +60,38 @@ func requireDeletedPathHeld(t *testing.T, pid int, targetPath string) {
 	}
 }
 
+func symlinkedCityPaths(t *testing.T) (aliasCity, realCity string) {
+	t.Helper()
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(root, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	aliasCity = filepath.Join(aliasParent, "bright-lights")
+	realCity = filepath.Join(realParent, "bright-lights")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return aliasCity, realCity
+}
+
 func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 	cityPath := t.TempDir()
+	wantCityPath := normalizePathForCompare(cityPath)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"dolt-state", "runtime-layout", "--city", cityPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
 	got := parseDoltRuntimeLayoutOutput(t, stdout.String())
-	wantPack := citylayout.PackStateDir(cityPath, "dolt")
+	wantPack := citylayout.PackStateDir(wantCityPath, "dolt")
 	want := map[string]string{
 		"GC_PACK_STATE_DIR":   wantPack,
-		"GC_DOLT_DATA_DIR":    filepath.Join(cityPath, ".beads", "dolt"),
+		"GC_DOLT_DATA_DIR":    filepath.Join(wantCityPath, ".beads", "dolt"),
 		"GC_DOLT_LOG_FILE":    filepath.Join(wantPack, "dolt.log"),
 		"GC_DOLT_STATE_FILE":  filepath.Join(wantPack, "dolt-provider-state.json"),
 		"GC_DOLT_PID_FILE":    filepath.Join(wantPack, "dolt.pid"),
@@ -81,6 +102,133 @@ func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 		if got[key] != wantValue {
 			t.Fatalf("%s = %q, want %q; output=%q", key, got[key], wantValue, stdout.String())
 		}
+	}
+}
+
+func TestResolveManagedDoltRuntimeLayoutCanonicalizesSymlinkedCityPath(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+	wantCityPath := normalizePathForCompare(realCity)
+
+	layout, err := resolveManagedDoltRuntimeLayout(aliasCity)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	packStateDir := citylayout.PackStateDir(wantCityPath, "dolt")
+	want := managedDoltRuntimeLayout{
+		PackStateDir: packStateDir,
+		DataDir:      filepath.Join(wantCityPath, ".beads", "dolt"),
+		LogFile:      filepath.Join(packStateDir, "dolt.log"),
+		StateFile:    filepath.Join(packStateDir, "dolt-provider-state.json"),
+		PIDFile:      filepath.Join(packStateDir, "dolt.pid"),
+		LockFile:     filepath.Join(packStateDir, "dolt.lock"),
+		ConfigFile:   filepath.Join(packStateDir, "dolt-config.yaml"),
+	}
+	if layout != want {
+		t.Fatalf("resolveManagedDoltRuntimeLayout() = %+v, want %+v", layout, want)
+	}
+}
+
+func TestValidDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+	layout, err := resolveManagedDoltRuntimeLayout(realCity)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	cases := []struct {
+		name     string
+		cityPath string
+		dataDir  string
+	}{
+		{
+			name:     "real state data dir against aliased city path",
+			cityPath: aliasCity,
+			dataDir:  layout.DataDir,
+		},
+		{
+			name:     "aliased state data dir against real city path",
+			cityPath: realCity,
+			dataDir:  filepath.Join(aliasCity, ".beads", "dolt"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      port,
+				DataDir:   tc.dataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			if !validDoltRuntimeState(state, tc.cityPath) {
+				t.Fatalf("validDoltRuntimeState(%q, %q) = false, want true", tc.dataDir, tc.cityPath)
+			}
+		})
+	}
+}
+
+func TestRepairedManagedDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+	layout, err := resolveManagedDoltRuntimeLayout(realCity)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	cases := []struct {
+		name    string
+		dataDir string
+	}{
+		{
+			name:    "real data dir",
+			dataDir: layout.DataDir,
+		},
+		{
+			name:    "aliased data dir",
+			dataDir: filepath.Join(aliasCity, ".beads", "dolt"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repaired, ok := repairedManagedDoltRuntimeState(aliasCity, layout, doltRuntimeState{
+				Port:    port,
+				DataDir: tc.dataDir,
+			})
+			if !ok {
+				t.Fatalf("repairedManagedDoltRuntimeState(%q) = not ok, want ok", tc.dataDir)
+			}
+			if !repaired.Running {
+				t.Fatal("repaired state Running = false, want true")
+			}
+			if repaired.PID != listener.Process.Pid {
+				t.Fatalf("repaired state PID = %d, want %d", repaired.PID, listener.Process.Pid)
+			}
+			if repaired.Port != port {
+				t.Fatalf("repaired state Port = %d, want %d", repaired.Port, port)
+			}
+			if repaired.DataDir != layout.DataDir {
+				t.Fatalf("repaired state DataDir = %q, want %q", repaired.DataDir, layout.DataDir)
+			}
+			if strings.TrimSpace(repaired.StartedAt) == "" {
+				t.Fatal("repaired state StartedAt is empty")
+			}
+		})
 	}
 }
 
@@ -130,6 +278,26 @@ func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 	}
 }
 
+func TestChooseManagedDoltPortUsesCanonicalSeedForSymlinkedCityPath(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+
+	if got, want := deterministicManagedDoltPortSeed(aliasCity), deterministicManagedDoltPortSeed(realCity); got != want {
+		t.Fatalf("deterministicManagedDoltPortSeed(alias) = %d, want %d", got, want)
+	}
+
+	aliasPort, err := chooseManagedDoltPort(aliasCity, "")
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort(alias): %v", err)
+	}
+	realPort, err := chooseManagedDoltPort(realCity, "")
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort(real): %v", err)
+	}
+	if aliasPort != realPort {
+		t.Fatalf("chooseManagedDoltPort(alias) = %q, want %q", aliasPort, realPort)
+	}
+}
+
 func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
@@ -156,6 +324,31 @@ func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != strconv.Itoa(port) {
 		t.Fatalf("allocate-port = %q, want %d", got, port)
+	}
+}
+
+func TestStartTCPListenerProcessInDirRegistersCleanup(t *testing.T) {
+	port := reserveRandomTCPPort(t)
+	dir := t.TempDir()
+	var proc *exec.Cmd
+
+	t.Run("listener", func(t *testing.T) {
+		proc = startTCPListenerProcessInDir(t, port, dir)
+		if !pidutil.Alive(proc.Process.Pid) {
+			t.Fatalf("listener pid %d is not alive after start", proc.Process.Pid)
+		}
+	})
+
+	if proc == nil {
+		t.Fatal("listener process handle was not captured")
+	}
+	if proc.ProcessState == nil {
+		t.Fatal("listener cleanup did not wait for process exit")
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("listener port is still reachable after cleanup")
 	}
 }
 
@@ -1081,6 +1274,12 @@ while True:
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start listener process in %s: %v", dir, err)
 	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
@@ -1279,15 +1478,19 @@ while True:
 func processHoldsDeletedPath(pid int, targetPath string) bool {
 	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
 	entries, err := os.ReadDir(fdDir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		target, readErr := os.Readlink(filepath.Join(fdDir, entry.Name()))
-		if readErr != nil || !strings.Contains(target, " (deleted)") {
-			continue
+	if err == nil {
+		for _, entry := range entries {
+			target, readErr := os.Readlink(filepath.Join(fdDir, entry.Name()))
+			if readErr != nil || !strings.Contains(target, " (deleted)") {
+				continue
+			}
+			if samePath(strings.TrimSuffix(target, " (deleted)"), targetPath) {
+				return true
+			}
 		}
-		if samePath(strings.TrimSuffix(target, " (deleted)"), targetPath) {
+	}
+	for _, target := range deletedDataInodeTargetsFromLsof(pid) {
+		if samePath(target, targetPath) {
 			return true
 		}
 	}
@@ -1374,6 +1577,12 @@ exit 1
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", string(invocation))
+	assertManagedDoltProbeWrites(t, "read-only-check invocation", string(invocation))
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
@@ -1394,6 +1603,82 @@ exit 0
 	}
 }
 
+func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+exit 0
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	text := string(invocation)
+	if !strings.Contains(text, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase) {
+		t.Fatalf("reset-probe invocation = %s, want managed probe drop", text)
+	}
+}
+
+func TestDoltStateResetProbeCmdRequiresForce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to drop "+managedDoltProbeDatabase+" without --force") ||
+		!strings.Contains(stderr.String(), "legacy bead store") {
+		t.Fatalf("stderr = %q, want force warning with legacy bead store context", stderr.String())
+	}
+}
+
+func TestDoltStateResetProbeCmdUsesDirectConnectionWithPassword(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+exit 42
+`)
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldResetDirect := managedDoltResetProbeDirectFn
+	called := false
+	managedDoltResetProbeDirectFn = func(host, port, user string) error {
+		called = true
+		if host != "127.0.0.1" || port != "3311" || user != "root" {
+			t.Fatalf("managedDoltResetProbeDirectFn(%q, %q, %q), want requested connection", host, port, user)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		managedDoltResetProbeDirectFn = oldResetDirect
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if !called {
+		t.Fatalf("managedDoltResetProbeDirectFn was not called")
+	}
+	if _, err := os.Stat(invocationFile); !os.IsNotExist(err) {
+		t.Fatalf("dolt CLI invocation file exists after password reset path: err=%v", err)
+	}
+}
+
 func TestDoltStateHealthCheckCmdReportsReadOnlyAndConnectionCount(t *testing.T) {
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
@@ -1404,7 +1689,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
     echo 'database is read only' >&2
     exit 1
     ;;
@@ -1441,6 +1726,8 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
+	assertNoManagedDoltProbeDrop(t, "health-check read-only probe", text)
+	assertManagedDoltProbeWrites(t, "health-check read-only probe", text)
 	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
@@ -1526,7 +1813,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
     echo 'probe exploded' >&2
     exit 1
     ;;

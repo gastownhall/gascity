@@ -24,6 +24,7 @@ var tutorialPageManifests = []pageManifest{
 			"cd ~/my-city",
 			"ls",
 			"cat city.toml",
+			"cat pack.toml",
 			"gc status",
 			"gc rig add ~/my-project",
 			"cat city.toml",
@@ -61,7 +62,7 @@ var tutorialPageManifests = []pageManifest{
 			"gc session attach mayor",
 			`gc session nudge mayor "What's the current city status?"`,
 			"gc session list",
-			"gc session logs mayor --tail 1",
+			"gc session logs mayor --tail 2",
 			"gc session logs mayor -f",
 			`gc session nudge mayor "What's the current city status?"`,
 		},
@@ -79,6 +80,7 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/05-formulas.md",
 		commands: []string{
+			"cat > formulas/pancakes.toml << 'EOF'",
 			"gc formula list",
 			"gc formula show pancakes",
 			"gc agent add --name worker",
@@ -100,6 +102,7 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/06-beads.md",
 		commands: []string{
+			"cat pack.toml",
 			"cat city.toml",
 			"cat agents/reviewer/agent.toml",
 			"bd list",

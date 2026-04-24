@@ -1,11 +1,13 @@
 package acp
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -392,6 +394,62 @@ func TestMetaPath_HashesUntrustedNameAndKey(t *testing.T) {
 	}
 }
 
+func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	p := newTestProvider(t)
+	name := testName()
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command:   fakeACPShellCommand(),
+		WorkDir:   workDir,
+		CopyFiles: []runtime.CopyEntry{{Src: src}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	data, err := os.ReadFile(filepath.Join(workDir, "seed.txt"))
+	if err != nil {
+		t.Fatalf("read staged file: %v", err)
+	}
+	if string(data) != "seed data" {
+		t.Fatalf("staged file = %q, want %q", string(data), "seed data")
+	}
+}
+
+func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	blocker := filepath.Join(workDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	p := newTestProvider(t)
+	name := testName()
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command: fakeACPShellCommand(),
+		WorkDir: workDir,
+		CopyFiles: []runtime.CopyEntry{{
+			Src:    src,
+			RelDst: filepath.Join("blocked", "seed.txt"),
+		}},
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging a copy file fails")
+	}
+}
+
 func TestAttach_ReturnsError(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Attach("any"); err == nil {
@@ -430,14 +488,35 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.mu.Lock()
-	id := int64(42)
-	sc.activePromptID = 0 // as dispatch would do
-	_ = id
-	sc.mu.Unlock()
+	sc.clearActivePrompt(42)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
+	}
+}
+
+func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
+	sc := &sessionConn{
+		outputBufMax: 100,
+		pending:      make(map[int64]chan JSONRPCMessage),
+	}
+	sc.setActivePrompt(42)
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sc.waitIdle(2 * time.Second)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sc.clearActivePrompt(42)
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("waitIdle returned false, want true after busy state clears")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("waitIdle did not unblock promptly after busy state cleared")
 	}
 }
 
@@ -655,6 +734,148 @@ func TestSendKeysAndRunLive_NoOp(t *testing.T) {
 	}
 }
 
+func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	gotCommand := make(chan string, 1)
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotCommand <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.stopBySocket(name)
+	if err == nil {
+		t.Fatal("stopBySocket succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("stopBySocket error = %v, want unexpected response", err)
+	}
+	if got := <-gotCommand; got != "stop" {
+		t.Fatalf("socket command = %q, want stop", got)
+	}
+	if _, statErr := os.Stat(p.sockPath(name)); statErr != nil {
+		t.Fatalf("socket path err = %v, want socket preserved after failed stop", statErr)
+	}
+	if _, statErr := os.Stat(p.sockNamePath(name)); statErr != nil {
+		t.Fatalf("socket name path err = %v, want socket name preserved after failed stop", statErr)
+	}
+}
+
+func TestStopBySocket_FallsBackToLegacySocketWhenCanonicalRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	canonical, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen canonical: %v", err)
+	}
+	t.Cleanup(func() { _ = canonical.Close() })
+
+	legacy, err := net.Listen("unix", p.legacySockPath(name))
+	if err != nil {
+		t.Fatalf("Listen legacy: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+
+	go func() {
+		conn, acceptErr := canonical.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	gotLegacy := make(chan string, 1)
+	go func() {
+		conn, acceptErr := legacy.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotLegacy <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("ok\n"))
+	}()
+
+	if err := p.stopBySocket(name); err != nil {
+		t.Fatalf("stopBySocket error = %v, want legacy fallback success", err)
+	}
+	if got := <-gotLegacy; got != "stop" {
+		t.Fatalf("legacy socket command = %q, want stop", got)
+	}
+}
+
+func TestStop_PreservesMetadataWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	if err := p.SetMeta(name, "key1", "val1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.Stop(name)
+	if err == nil {
+		t.Fatal("Stop succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("Stop error = %v, want unexpected response", err)
+	}
+
+	val, err := p.GetMeta(name, "key1")
+	if err != nil {
+		t.Fatalf("GetMeta after failed stop: %v", err)
+	}
+	if val != "val1" {
+		t.Fatalf("GetMeta after failed stop = %q, want val1", val)
+	}
+}
+
 func TestPendingAndRespondUnsupported(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -803,7 +1024,7 @@ func TestNudge_ReturnsNilWhenAgentExitsDuringSend(t *testing.T) {
 	name := testName()
 
 	stdin := &closedPipeStdin{writeCalled: make(chan struct{})}
-	sc := newSessionConn(nil, stdin, nil, 100)
+	sc := newSessionConn(nil, stdin, nil, 100, nil)
 	sc.sessionID = "session-1"
 
 	p.mu.Lock()
@@ -841,7 +1062,7 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 	name := testName()
 
 	stubErr := errors.New("disk quota exceeded")
-	sc := newSessionConn(nil, &erroringStdin{err: stubErr}, nil, 100)
+	sc := newSessionConn(nil, &erroringStdin{err: stubErr}, nil, 100, nil)
 	sc.sessionID = "session-1"
 
 	p.mu.Lock()

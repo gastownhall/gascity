@@ -19,6 +19,9 @@ type configResponse struct {
 
 type workspaceResponse struct {
 	Name            string `json:"name"`
+	Prefix          string `json:"prefix,omitempty"`
+	DeclaredName    string `json:"declared_name,omitempty"`
+	DeclaredPrefix  string `json:"declared_prefix,omitempty"`
 	Provider        string `json:"provider,omitempty"`
 	Suspended       bool   `json:"suspended"`
 	SessionTemplate string `json:"session_template,omitempty"`

@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
@@ -48,6 +47,72 @@ prefix = "fe"
 
 	if doctorSkipsDoltChecks(cityDir) {
 		t.Fatal("doctorSkipsDoltChecks() = true, want false for bd-backed rig")
+	}
+}
+
+func TestManagedDoltOpsCheckSkipKeepsCityManagedWorkspaceEnabled(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Rigs: nil}
+	if managedDoltOpsCheckSkip(cityDir, cfg, nil) {
+		t.Fatal("managedDoltOpsCheckSkip() = true, want false for city-managed workspace without rigs")
+	}
+}
+
+func TestManagedDoltOpsCheckSkipOnConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !managedDoltOpsCheckSkip(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("managedDoltOpsCheckSkip() = false, want true when city config failed to load")
+	}
+}
+
+func TestManagedDoltOpsCheckUsesDoctorApplicabilityOnConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if managedDoltOpsCheckSkip(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("managedDoltOpsCheckSkip() = true, want false when broken city still has managed bd metadata")
+	}
+	if !doctor.ManagedLocalDoltChecksApplicableForConfig(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("doctor applicability = false, want true for same broken managed city")
+	}
+}
+
+func TestManagedDoltOpsCheckDiscoversRigMetadataOnConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if managedDoltOpsCheckSkip(cityDir, nil, os.ErrInvalid) {
+		t.Fatal("managedDoltOpsCheckSkip() = true, want false when broken city still has managed rig metadata")
 	}
 }
 
@@ -351,51 +416,6 @@ name = "demo"
 	}
 	if _, err := os.Stat(filepath.Join(rigDir, ".gc")); !os.IsNotExist(err) {
 		t.Fatalf("doctor store factory should not create rig .gc state, stat err = %v", err)
-	}
-}
-
-func TestBackfillRigIndexResolvesRelativeRigPaths(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(cityDir, "rigs", "frontend")
-	if err := os.MkdirAll(rigDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "demo"
-
-[[rigs]]
-name = "frontend"
-path = "rigs/frontend"
-prefix = "fe"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_HOME", t.TempDir())
-
-	if err := backfillRigIndex(cityDir); err != nil {
-		t.Fatalf("backfillRigIndex: %v", err)
-	}
-
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	rigs, err := reg.ListRigs()
-	if err != nil {
-		t.Fatalf("ListRigs: %v", err)
-	}
-	if len(rigs) != 1 {
-		t.Fatalf("len(rigs) = %d, want 1", len(rigs))
-	}
-	if rigs[0].Path != rigDir {
-		t.Fatalf("rig path = %q, want %q", rigs[0].Path, rigDir)
-	}
-	if rigs[0].DefaultCity != cityDir {
-		t.Fatalf("default city = %q, want %q", rigs[0].DefaultCity, cityDir)
-	}
-	envData, err := os.ReadFile(filepath.Join(rigDir, ".beads", ".env"))
-	if err != nil {
-		t.Fatalf("ReadFile(.env): %v", err)
-	}
-	if got := string(envData); !strings.Contains(got, "GT_ROOT="+cityDir+"\n") {
-		t.Fatalf(".env = %q, want GT_ROOT", got)
 	}
 }
 

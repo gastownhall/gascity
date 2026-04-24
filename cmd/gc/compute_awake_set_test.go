@@ -58,6 +58,24 @@ func TestNamedAlways_AsleepWakes(t *testing.T) {
 	assertAwake(t, result, "deacon")
 }
 
+func TestNamedAlways_DrainedCompatibilityStateStillWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "deacon",
+			Template:      "deacon",
+			State:         "asleep",
+			NamedIdentity: "deacon",
+			Drained:       true,
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "deacon")
+	assertReason(t, result, "deacon", "named-always")
+}
+
 func TestNamedAlways_ActiveStaysAwake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:          []AwakeAgent{{QualifiedName: "deacon"}},
@@ -483,6 +501,30 @@ func TestDrained_ManualNotWoken(t *testing.T) {
 		Now:          now,
 	})
 	assertAsleep(t, result, "s-mc-1")
+}
+
+func TestDrained_WithAssignedWork_Wakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep", Drained: true},
+		},
+		WorkBeads: []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-1", Status: "in_progress"}},
+		Now:       now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "assigned-work")
+}
+
+func TestDrained_PinnedStaysAsleepUntilUndrained(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep", Drained: true, Pinned: true},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
 }
 
 // ---------------------------------------------------------------------------

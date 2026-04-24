@@ -91,7 +91,10 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		Short:              entry.Description,
 		Long:               readDiscoveredHelp(entry),
 		DisableFlagParsing: true,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if discoveredHelpRequested(args) {
+				return cmd.Help()
+			}
 			code := runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
 			if code != 0 {
 				os.Exit(code)
@@ -120,6 +123,18 @@ func readDiscoveredHelp(entry config.DiscoveredCommand) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func discoveredHelpRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
 }
 
 func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName string, args []string, stdinR io.Reader, stdout, stderr io.Writer) int {
@@ -178,7 +193,7 @@ func tryDiscoveredCommandFallback(args []string, cfg *config.City, cityPath stri
 		return true
 	}
 
-	cityName := cfg.Workspace.Name
+	cityName := loadedCityName(cfg, cityPath)
 	sort.SliceStable(matching, func(i, j int) bool {
 		return len(matching[i].Command) > len(matching[j].Command)
 	})

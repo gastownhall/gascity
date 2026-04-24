@@ -141,6 +141,15 @@
       "AgentPatch": {
         "additionalProperties": false,
         "properties": {
+          "AppendFragments": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Attach": {
             "type": [
               "boolean",
@@ -465,6 +474,7 @@
           "OverlayDir",
           "DefaultSlingFormula",
           "InjectFragments",
+          "AppendFragments",
           "Attach",
           "DependsOn",
           "ResumeCommand",
@@ -3716,6 +3726,9 @@
           "status": {
             "type": "string"
           },
+          "store_ref": {
+            "type": "string"
+          },
           "target": {
             "type": "string"
           },
@@ -3805,7 +3818,7 @@
         "additionalProperties": false,
         "properties": {
           "checks": {
-            "description": "Order gate evaluations.",
+            "description": "Order trigger evaluations.",
             "items": {
               "$ref": "#/components/schemas/OrderCheckResponse"
             },
@@ -3873,10 +3886,14 @@
           },
           "output": {
             "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
           }
         },
         "required": [
           "bead_id",
+          "store_ref",
           "created_at",
           "labels",
           "output"
@@ -3928,12 +3945,16 @@
           "signal": {
             "type": "string"
           },
+          "store_ref": {
+            "type": "string"
+          },
           "wisp_root_id": {
             "type": "string"
           }
         },
         "required": [
           "bead_id",
+          "store_ref",
           "name",
           "scoped_name",
           "created_at",
@@ -4003,6 +4024,7 @@
             "type": "string"
           },
           "gate": {
+            "deprecated": true,
             "type": "string"
           },
           "interval": {
@@ -4033,6 +4055,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "trigger": {
+            "type": "string"
+          },
           "type": {
             "type": "string"
           }
@@ -4041,7 +4066,6 @@
           "name",
           "scoped_name",
           "type",
-          "gate",
           "timeout_ms",
           "enabled",
           "capture_output"
@@ -4367,9 +4391,22 @@
               "null"
             ]
           },
+          "args_append": {
+            "description": "Arguments appended after inherited/base args.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "base": {
+            "description": "Optional provider base for inheritance.",
+            "type": "string"
+          },
           "command": {
-            "description": "Provider command binary.",
-            "minLength": 1,
+            "description": "Provider command binary. Omit for base-only descendants.",
             "type": "string"
           },
           "display_name": {
@@ -4388,6 +4425,10 @@
             "minLength": 1,
             "type": "string"
           },
+          "options_schema_merge": {
+            "description": "Options schema merge mode across inheritance chain.",
+            "type": "string"
+          },
           "prompt_flag": {
             "description": "Flag for prompt delivery.",
             "type": "string"
@@ -4403,8 +4444,7 @@
           }
         },
         "required": [
-          "name",
-          "command"
+          "name"
         ],
         "type": "object"
       },
@@ -4475,6 +4515,21 @@
               "null"
             ]
           },
+          "ArgsAppend": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Base": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Command": {
             "type": [
               "string",
@@ -4498,6 +4553,12 @@
           },
           "Name": {
             "type": "string"
+          },
+          "OptionsSchemaMerge": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "PromptFlag": {
             "type": [
@@ -4524,8 +4585,11 @@
         },
         "required": [
           "Name",
+          "Base",
           "Command",
           "Args",
+          "ArgsAppend",
+          "OptionsSchemaMerge",
           "PromptMode",
           "PromptFlag",
           "ReadyDelayMs",
@@ -4649,6 +4713,9 @@
       "ProviderReadiness": {
         "additionalProperties": false,
         "properties": {
+          "detail": {
+            "type": "string"
+          },
           "display_name": {
             "type": "string"
           },
@@ -4778,6 +4845,20 @@
               "null"
             ]
           },
+          "args_append": {
+            "description": "Arguments appended after inherited/base args.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "base": {
+            "description": "Provider base for inheritance.",
+            "type": "string"
+          },
           "command": {
             "description": "Provider command binary.",
             "type": "string"
@@ -4792,6 +4873,10 @@
             },
             "description": "Environment variables.",
             "type": "object"
+          },
+          "options_schema_merge": {
+            "description": "Options schema merge mode across inheritance chain.",
+            "type": "string"
           },
           "prompt_flag": {
             "description": "Flag for prompt delivery.",
@@ -4848,6 +4933,9 @@
       "ReadinessItem": {
         "additionalProperties": false,
         "properties": {
+          "detail": {
+            "type": "string"
+          },
           "display_name": {
             "type": "string"
           },
@@ -6716,7 +6804,16 @@
       "WorkspaceResponse": {
         "additionalProperties": false,
         "properties": {
+          "declared_name": {
+            "type": "string"
+          },
+          "declared_prefix": {
+            "type": "string"
+          },
           "name": {
+            "type": "string"
+          },
+          "prefix": {
             "type": "string"
           },
           "provider": {
@@ -7118,12 +7215,12 @@
             }
           },
           {
-            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
               "type": "string"
             }
           },
@@ -7569,12 +7666,12 @@
             }
           },
           {
-            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
               "type": "string"
             }
           },
@@ -11837,6 +11934,16 @@
               "description": "Bead ID for the order run.",
               "type": "string"
             }
+          },
+          {
+            "description": "Store reference for disambiguating store-local bead IDs.",
+            "explode": false,
+            "in": "query",
+            "name": "store_ref",
+            "schema": {
+              "description": "Store reference for disambiguating store-local bead IDs.",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -15091,12 +15198,12 @@
             }
           },
           {
-            "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+            "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
             "explode": false,
             "in": "query",
             "name": "tail",
             "schema": {
-              "description": "Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
+              "description": "Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N\u003e0 returns the last N.",
               "type": "string"
             }
           },

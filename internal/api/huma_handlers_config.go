@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -14,6 +15,11 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 	for _, ns := range cfg.NamedSessions {
 		namedSessionModes[ns.QualifiedName()] = ns.ModeOrDefault()
 	}
+	name := strings.TrimSpace(s.state.CityName())
+	if name == "" {
+		name = config.EffectiveCityName(cfg, "")
+	}
+	prefix := effectiveWorkspacePrefix(cfg, name)
 
 	agents := make([]configAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
@@ -53,7 +59,10 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 
 	resp := configResponse{
 		Workspace: workspaceResponse{
-			Name:            cfg.Workspace.Name,
+			Name:            name,
+			Prefix:          prefix,
+			DeclaredName:    strings.TrimSpace(cfg.Workspace.Name),
+			DeclaredPrefix:  strings.TrimSpace(cfg.Workspace.Prefix),
 			Provider:        cfg.Workspace.Provider,
 			Suspended:       cfg.Workspace.Suspended,
 			SessionTemplate: cfg.Workspace.SessionTemplate,
@@ -76,6 +85,19 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 		Index: s.latestIndex(),
 		Body:  resp,
 	}, nil
+}
+
+func effectiveWorkspacePrefix(cfg *config.City, name string) string {
+	if cfg == nil {
+		return config.DeriveBeadsPrefix(name)
+	}
+	if prefix := strings.TrimSpace(cfg.ResolvedWorkspacePrefix); prefix != "" {
+		return prefix
+	}
+	if prefix := strings.TrimSpace(cfg.Workspace.Prefix); prefix != "" {
+		return prefix
+	}
+	return config.DeriveBeadsPrefix(name)
 }
 
 // humaHandleConfigExplain is the Huma-typed handler for GET /v0/config/explain.

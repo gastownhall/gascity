@@ -146,6 +146,12 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 	if err != nil {
 		return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
 	}
+	if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
+		Title: opts.Title,
+		Vars:  formulaVars,
+	}); err != nil {
+		return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
+	}
 	checkAttachments := CheckNoMoleculeChildren
 	if isGraph && opts.Force {
 		checkAttachments = CheckNoMoleculeChildrenAllowLiveWorkflow
@@ -202,6 +208,12 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	isGraph, err := isGraphSlingFormula(context.Background(), defaultFormula, searchPaths, defaultVars)
 	if err != nil {
+		return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
+	}
+	if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
+		Title: opts.Title,
+		Vars:  defaultVars,
+	}); err != nil {
 		return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
 	}
 	checkAttachments := CheckNoMoleculeChildren
@@ -682,11 +694,32 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 }
 
 func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []string, vars map[string]string) (bool, error) {
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, vars)
 	if err != nil {
 		return false, err
 	}
 	return IsCompiledGraphWorkflow(recipe), nil
+}
+
+func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options) error {
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
+	if err != nil {
+		return err
+	}
+	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
+}
+
+func validateBatchSlingFormulaRuntimeVars(ctx context.Context, formulaName string, searchPaths []string, opts SlingOpts, open []beads.Bead, a config.Agent, deps SlingDeps) error {
+	for _, child := range open {
+		childVars := BuildSlingFormulaVars(formulaName, child.ID, opts.Vars, a, deps)
+		if err := validateSlingFormulaRuntimeVars(ctx, formulaName, searchPaths, molecule.Options{
+			Title: opts.Title,
+			Vars:  childVars,
+		}); err != nil {
+			return fmt.Errorf("child %s: %w", child.ID, err)
+		}
+	}
+	return nil
 }
 
 func sourceWorkflowLockScope(deps SlingDeps) string {
@@ -804,6 +837,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		var err error
 		isGraph, err = isGraphSlingFormula(context.Background(), useFormula, searchPaths, formulaVars)
 		if err != nil {
+			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
+		}
+		if err := validateBatchSlingFormulaRuntimeVars(context.Background(), useFormula, searchPaths, opts, open, a, deps); err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
 		}
 		checkAttachments := CheckBatchNoMoleculeChildren

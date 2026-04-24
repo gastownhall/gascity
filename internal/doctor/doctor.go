@@ -42,7 +42,12 @@ func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
 				result = c.Run(ctx)
 				if result.Status == StatusOK {
 					result.Fixed = true
+				} else {
+					result.FixAttempted = true
 				}
+			} else {
+				result.FixError = err.Error()
+				result.FixAttempted = true
 			}
 		}
 
@@ -86,6 +91,11 @@ func printResult(w io.Writer, r *CheckResult, verbose bool) {
 		for _, d := range r.Details {
 			fmt.Fprintf(w, "      %s\n", d) //nolint:errcheck // best-effort output
 		}
+	}
+	if r.FixError != "" && r.Status != StatusOK && !r.Fixed {
+		fmt.Fprintf(w, "      fix failed: %s\n", r.FixError) //nolint:errcheck // best-effort output
+	} else if r.FixAttempted && r.Status != StatusOK && !r.Fixed {
+		fmt.Fprintf(w, "      fix attempted; check still failing\n") //nolint:errcheck // best-effort output
 	}
 	if r.FixHint != "" && r.Status != StatusOK && !r.Fixed {
 		fmt.Fprintf(w, "      hint: %s\n", r.FixHint) //nolint:errcheck // best-effort output

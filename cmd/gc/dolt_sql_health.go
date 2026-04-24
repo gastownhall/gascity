@@ -19,12 +19,26 @@ type managedDoltSQLHealthReport struct {
 	ConnectionCount string
 }
 
+const managedDoltProbeDatabase = "__gc_probe"
+
 var (
 	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
 	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
 	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
+	managedDoltResetProbeDirectFn      = managedDoltResetProbeDirect
 	managedDoltSQLCommandTimeout       = 5 * time.Second
 )
+
+// The probe database is intentionally persistent. Dropping Dolt databases leaves
+// .dolt_dropped_databases backups, so the health check keeps a stable table and
+// rewrites a single row to test writability.
+var managedDoltReadOnlyProbeStatements = [...]string{
+	"CREATE DATABASE IF NOT EXISTS " + managedDoltProbeDatabase,
+	"CREATE TABLE IF NOT EXISTS " + managedDoltProbeDatabase + ".__probe (k INT PRIMARY KEY)",
+	"REPLACE INTO " + managedDoltProbeDatabase + ".__probe VALUES (1)",
+}
+
+var managedDoltReadOnlyProbeSQL = strings.Join(managedDoltReadOnlyProbeStatements[:], "; ") + ";"
 
 func managedDoltQueryProbe(host, port, user string) error {
 	if managedDoltPassword() != "" {
@@ -44,7 +58,7 @@ func managedDoltReadOnlyState(host, port, user string) (string, error) {
 	if managedDoltPassword() != "" {
 		return managedDoltReadOnlyStateDirectFn(host, port, user)
 	}
-	_, err := runManagedDoltSQL(host, port, user, "-q", "CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;")
+	_, err := runManagedDoltSQL(host, port, user, "-q", managedDoltReadOnlyProbeSQL)
 	if err == nil {
 		return "false", nil
 	}
@@ -173,14 +187,7 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	queries := []string{
-		"CREATE DATABASE IF NOT EXISTS __gc_probe",
-		"CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY)",
-		"REPLACE INTO __gc_probe.__probe VALUES (1)",
-		"DROP TABLE __gc_probe.__probe",
-		"DROP DATABASE __gc_probe",
-	}
-	for _, query := range queries {
+	for _, query := range managedDoltReadOnlyProbeStatements {
 		if _, err := conn.ExecContext(ctx, query); err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "read only") || strings.Contains(msg, "read-only") {
@@ -209,6 +216,30 @@ func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
 		return "", err
 	}
 	return strconv.Itoa(count), nil
+}
+
+func managedDoltResetProbe(host, port, user string) error {
+	if managedDoltPassword() != "" {
+		return managedDoltResetProbeDirectFn(host, port, user)
+	}
+	_, err := runManagedDoltSQL(host, port, user, "-q", "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase)
+	return err
+}
+
+func managedDoltResetProbeDirect(host, port, user string) error {
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase)
+	return err
 }
 
 func runManagedDoltSQL(host, port, user string, args ...string) (string, error) {

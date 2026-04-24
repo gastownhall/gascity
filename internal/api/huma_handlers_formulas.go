@@ -102,7 +102,7 @@ func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDeta
 	Body formulaDetailResponse
 }, error,
 ) {
-	return s.formulaDetail(ctx, input.Name, input.ScopeKind, input.ScopeRef, input.Target, nil)
+	return s.formulaDetail(ctx, input.Name, input.ScopeKind, input.ScopeRef, input.Target, nil, false)
 }
 
 // humaHandleFormulaPreview is the Huma-typed handler for
@@ -113,14 +113,14 @@ func (s *Server) humaHandleFormulaPreview(ctx context.Context, input *FormulaPre
 	Body formulaDetailResponse
 }, error,
 ) {
-	return s.formulaDetail(ctx, input.Name, input.Body.ScopeKind, input.Body.ScopeRef, input.Body.Target, input.Body.Vars)
+	return s.formulaDetail(ctx, input.Name, input.Body.ScopeKind, input.Body.ScopeRef, input.Body.Target, input.Body.Vars, true)
 }
 
 // formulaDetail is the shared backing implementation for the GET detail
 // and POST preview endpoints. The two endpoints differ only in how they
 // receive the variable dictionary: GET compiles with defaults, POST
 // accepts a caller-supplied map.
-func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawScopeRef, rawTarget string, vars map[string]string) (*struct {
+func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawScopeRef, rawTarget string, vars map[string]string, validateRuntimeVars bool) (*struct {
 	Body formulaDetailResponse
 }, error,
 ) {
@@ -149,7 +149,7 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 		return nil, huma.Error400BadRequest(msg)
 	}
 
-	detail, err := buildFormulaDetail(ctx, name, paths, target, vars)
+	detail, err := buildFormulaDetail(ctx, name, paths, target, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, huma.Error404NotFound(err.Error())

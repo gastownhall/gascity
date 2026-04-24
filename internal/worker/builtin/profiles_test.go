@@ -1,6 +1,8 @@
 package builtin
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestBuiltinProvidersAndOrder(t *testing.T) {
 	providers := BuiltinProviders()

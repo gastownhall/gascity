@@ -3,12 +3,24 @@ package auto
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var _ runtime.Provider = (*Provider)(nil)
+
+type falseNegativeStopProvider struct {
+	*runtime.Fake
+	stopErr error
+}
+
+func (p *falseNegativeStopProvider) Stop(string) error { return p.stopErr }
+
+func (p *falseNegativeStopProvider) IsRunning(string) bool { return false }
 
 func TestRouteDefaultAndACP(t *testing.T) {
 	defaultSP := runtime.NewFake()
@@ -109,6 +121,163 @@ func TestStopPreservesRouteOnBothFail(t *testing.T) {
 	}
 }
 
+func TestStopReturnsJoinedErrorsFromBothBackends(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	defaultSP.StopErrors["agent-fail"] = errors.New("default stop failed")
+	acpSP.StopErrors["agent-fail"] = errors.New("acp stop failed")
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return error when both backends fail")
+	}
+	for _, want := range []string{
+		"acp backend: acp stop failed",
+		"default backend: default stop failed",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Stop error = %v, want to contain %q", err, want)
+		}
+	}
+}
+
+func TestStopPreservesRouteWhenFallbackBackendDidNotOwnSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	acpSP.StopErrors["agent-fail"] = errors.New("acp stop failed")
+	if err := acpSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return error when the routed backend fails and fallback has no session")
+	}
+	if !strings.Contains(err.Error(), "acp backend: acp stop failed") {
+		t.Fatalf("Stop error = %v, want primary backend failure", err)
+	}
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when fallback backend did not own the session")
+	}
+	if !acpSP.IsRunning("agent-fail") {
+		t.Fatal("session should still be running on ACP after failed stop")
+	}
+}
+
+func TestStopTreatsSessionGoneOnBothBackendsAsIdempotent(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	defaultSP.StopErrors["ghost-agent"] = fmt.Errorf("%w: default missing", runtime.ErrSessionNotFound)
+	acpSP.StopErrors["ghost-agent"] = fmt.Errorf("%w: acp missing", runtime.ErrSessionNotFound)
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("ghost-agent")
+	if err := p.Stop("ghost-agent"); err != nil {
+		t.Fatalf("Stop error = %v, want nil when both backends report session gone", err)
+	}
+}
+
+func TestStopFallsThroughWhenPrimaryMissingSessionReturnsNil(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+
+	if err := acpSP.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+
+	if err := p.Stop("orphan"); err != nil {
+		t.Fatalf("Stop should fall through to ACP when default backend reports missing session as nil: %v", err)
+	}
+	if acpSP.IsRunning("orphan") {
+		t.Fatal("session should be stopped on ACP backend after stale-route fallthrough")
+	}
+}
+
+func TestStopReturnsPrimaryFailureWhenFallbackStopsSameNamedSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	acpSP.StopErrors["agent-fail"] = errors.New("acp stop failed")
+	if err := acpSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+	if err := defaultSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return the routed backend failure even when fallback stops a same-named session")
+	}
+	if !strings.Contains(err.Error(), "acp backend: acp stop failed") {
+		t.Fatalf("Stop error = %v, want primary backend failure", err)
+	}
+	if !acpSP.IsRunning("agent-fail") {
+		t.Fatal("routed ACP session should remain running after primary stop failure")
+	}
+	if defaultSP.IsRunning("agent-fail") {
+		t.Fatal("fallback default session should be stopped during stale-route recovery")
+	}
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when the routed backend stop failed")
+	}
+}
+
+func TestStopReturnsPrimaryFailureWhenPrimaryCannotConfirmLiveness(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	acpSP.StopErrors["agent-fail"] = errors.New("acp unavailable")
+	if err := defaultSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return the routed backend failure even when primary IsRunning is false")
+	}
+	if !strings.Contains(err.Error(), "acp backend: acp unavailable") {
+		t.Fatalf("Stop error = %v, want primary backend failure", err)
+	}
+	if defaultSP.IsRunning("agent-fail") {
+		t.Fatal("fallback default session should still be stopped during stale-route recovery")
+	}
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when the routed backend stop failed")
+	}
+}
+
+func TestStopReturnsErrorWhenExplicitRouteOwnershipIsAmbiguous(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	if err := defaultSP.Start(context.Background(), "agent-fail", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	acpSP := &falseNegativeStopProvider{Fake: runtime.NewFake()}
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("agent-fail")
+	err := p.Stop("agent-fail")
+	if err == nil {
+		t.Fatal("Stop should return an error when the explicit route cannot confirm ownership and fallback is running")
+	}
+	if !strings.Contains(err.Error(), "acp backend: stop succeeded without liveness confirmation") {
+		t.Fatalf("Stop error = %v, want explicit-route ambiguity error", err)
+	}
+	if !defaultSP.IsRunning("agent-fail") {
+		t.Fatal("same-named fallback session should remain running when ownership is ambiguous")
+	}
+	if got := p.route("agent-fail"); got != acpSP {
+		t.Fatal("route should be preserved when explicit-route ownership is ambiguous")
+	}
+}
+
 func TestListRunningPartialError(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFailFake() // ListRunning returns error
@@ -117,8 +286,8 @@ func TestListRunningPartialError(t *testing.T) {
 	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
 
 	names, err := p.ListRunning("")
-	if err == nil {
-		t.Fatal("ListRunning should return error when one backend fails")
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning error = %v, want partial list error", err)
 	}
 	// Should still return partial results from the working backend.
 	if len(names) != 1 || names[0] != "default-1" {
@@ -137,6 +306,22 @@ func TestListRunningBothFail(t *testing.T) {
 	}
 	if names != nil {
 		t.Errorf("ListRunning both fail = %v, want nil", names)
+	}
+}
+
+func TestListRunningPartialErrorIncludesBackendContext(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFailFake()
+	p := New(defaultSP, acpSP)
+
+	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
+
+	names, err := p.ListRunning("")
+	if len(names) != 1 || names[0] != "default-1" {
+		t.Fatalf("ListRunning partial = %v, want [default-1]", names)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning error = %v, want partial list error", err)
 	}
 }
 
@@ -235,4 +420,23 @@ func TestPendingUnsupportedWhenBackendLacksInteractionSupport(t *testing.T) {
 
 type runtimeNoInteractionProvider struct {
 	runtime.Provider
+}
+
+func TestWaitForInterruptBoundaryDelegatesToRoutedBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+
+	p.RouteACP("interactive-agent")
+	since := time.Unix(1700000000, 123).UTC()
+	if err := p.WaitForInterruptBoundary(context.Background(), "interactive-agent", since, 2*time.Second); err != nil {
+		t.Fatalf("WaitForInterruptBoundary: %v", err)
+	}
+	if len(acpSP.Calls) == 0 {
+		t.Fatal("expected routed backend to record WaitForInterruptBoundary")
+	}
+	last := acpSP.Calls[len(acpSP.Calls)-1]
+	if last.Method != "WaitForInterruptBoundary" || last.Name != "interactive-agent" {
+		t.Fatalf("last call = %#v, want WaitForInterruptBoundary for interactive-agent", last)
+	}
 }

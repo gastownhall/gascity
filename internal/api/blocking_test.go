@@ -45,6 +45,21 @@ func TestParseBlockingParamsMaxWait(t *testing.T) {
 	}
 }
 
+func TestParseBlockingParamsInvalidIndexDoesNotBlock(t *testing.T) {
+	req := httptest.NewRequest("GET", "/v0/city/test-city/agents?index=not-a-number", nil)
+	bp := parseBlockingParams(req)
+
+	if bp.HasIndex {
+		t.Error("HasIndex = true, want false for malformed index")
+	}
+	if bp.isBlocking() {
+		t.Error("isBlocking() = true, want false for malformed index")
+	}
+	if bp.Index != 0 {
+		t.Errorf("Index = %d, want 0 for malformed index", bp.Index)
+	}
+}
+
 func TestWaitForChangeImmediate(t *testing.T) {
 	ep := events.NewFake()
 	// Record an event so LatestSeq > 0.

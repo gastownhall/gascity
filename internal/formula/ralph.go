@@ -66,7 +66,7 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// Runtime control metadata keeps legacy ralph keys so existing controller
 	// and dispatch paths remain stable while the public formula surface uses
 	// the canonical "check" spelling.
-	control.Metadata = withMetadata(control.Metadata, map[string]string{
+	controlMeta := map[string]string{
 		"gc.kind":          "ralph",
 		"gc.step_id":       step.ID,
 		"gc.max_attempts":  strconv.Itoa(step.Ralph.MaxAttempts),
@@ -74,7 +74,11 @@ func expandRalph(step *Step) ([]*Step, error) {
 		"gc.check_path":    step.Ralph.Check.Path,
 		"gc.check_timeout": step.Ralph.Check.Timeout,
 		"gc.control_epoch": "1",
-	})
+	}
+	if step.Timeout != "" {
+		controlMeta["gc.step_timeout"] = step.Timeout
+	}
+	control.Metadata = withMetadata(control.Metadata, controlMeta)
 	control.Needs = appendUniqueCopy(control.Needs, iterationID)
 	control.WaitsFor = ""
 

@@ -52,6 +52,33 @@ func TestPersistRigSiteBindings(t *testing.T) {
 	}
 }
 
+func TestPersistRigSiteBindings_PreservesWorkspaceIdentity(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+workspace_name = "site-city"
+workspace_prefix = "sc"
+`)
+	cfg := []Rig{{Name: "frontend", Path: "/tmp/frontend"}}
+
+	if err := PersistRigSiteBindings(fs, "/city", cfg); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+
+	binding, err := LoadSiteBinding(fs, "/city")
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if binding.WorkspaceName != "site-city" {
+		t.Fatalf("WorkspaceName = %q, want %q", binding.WorkspaceName, "site-city")
+	}
+	if binding.WorkspacePrefix != "sc" {
+		t.Fatalf("WorkspacePrefix = %q, want %q", binding.WorkspacePrefix, "sc")
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" {
+		t.Fatalf("binding.Rigs = %+v, want preserved workspace identity plus frontend rig", binding.Rigs)
+	}
+}
+
 func TestApplySiteBindingsForEdit_KeepsLegacyPath(t *testing.T) {
 	fs := fsys.NewFake()
 	cfg := &City{
@@ -93,6 +120,45 @@ path = "/site/frontend"
 	}
 	if cfg.Rigs[0].Path != "/site/frontend" {
 		t.Fatalf("Path = %q, want site binding path", cfg.Rigs[0].Path)
+	}
+	if len(prov.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_AppliesWorkspaceIdentitySiteBinding(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "declared-city"
+prefix = "declared"
+`)
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+workspace_name = "site-city"
+workspace_prefix = "sc"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Workspace.Name != "declared-city" {
+		t.Fatalf("Workspace.Name = %q, want raw declared value preserved", cfg.Workspace.Name)
+	}
+	if cfg.Workspace.Prefix != "declared" {
+		t.Fatalf("Workspace.Prefix = %q, want raw declared value preserved", cfg.Workspace.Prefix)
+	}
+	if cfg.ResolvedWorkspaceName != "site-city" {
+		t.Fatalf("ResolvedWorkspaceName = %q, want %q", cfg.ResolvedWorkspaceName, "site-city")
+	}
+	if cfg.ResolvedWorkspacePrefix != "sc" {
+		t.Fatalf("ResolvedWorkspacePrefix = %q, want %q", cfg.ResolvedWorkspacePrefix, "sc")
+	}
+	if got := cfg.EffectiveCityName(); got != "site-city" {
+		t.Fatalf("EffectiveCityName() = %q, want %q", got, "site-city")
+	}
+	if got := EffectiveHQPrefix(cfg); got != "sc" {
+		t.Fatalf("EffectiveHQPrefix() = %q, want %q", got, "sc")
 	}
 	if len(prov.Warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", prov.Warnings)
@@ -165,5 +231,31 @@ path = "/legacy/frontend"
 	}
 	if len(prov.Warnings) != 1 || !strings.Contains(prov.Warnings[0], ".gc/site.toml") {
 		t.Fatalf("warnings = %v, want legacy site binding guidance", prov.Warnings)
+	}
+}
+
+func TestLoad_AppliesWorkspaceIdentitySiteBinding(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "declared-city"
+`)
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+workspace_name = "site-city"
+workspace_prefix = "sc"
+`)
+
+	cfg, err := Load(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResolvedWorkspaceName != "site-city" {
+		t.Fatalf("ResolvedWorkspaceName = %q, want %q", cfg.ResolvedWorkspaceName, "site-city")
+	}
+	if cfg.ResolvedWorkspacePrefix != "sc" {
+		t.Fatalf("ResolvedWorkspacePrefix = %q, want %q", cfg.ResolvedWorkspacePrefix, "sc")
+	}
+	if got := cfg.EffectiveCityName(); got != "site-city" {
+		t.Fatalf("EffectiveCityName() = %q, want %q", got, "site-city")
 	}
 }

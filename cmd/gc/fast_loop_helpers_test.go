@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,6 +17,25 @@ func skipSlowCmdGCTest(t *testing.T, reason string) {
 	if os.Getenv("GC_FAST_UNIT") == "1" || testing.Short() {
 		t.Skip(reason)
 	}
+}
+
+// sanitizedBaseEnv returns os.Environ() with every GC_*/BEADS_* entry
+// filtered out, followed by the given extras. Use this to build the
+// `Env` for any exec.Cmd that runs the real gc-beads-bd lifecycle script
+// or gc subcommands — inheriting os.Environ() raw lets GC_CITY_RUNTIME_DIR,
+// GC_PACK_STATE_DIR, GC_DOLT_STATE_FILE, and friends point the child at
+// the user's real registered city instead of the test's t.TempDir(),
+// which silently overwrites user state on every run.
+// Regression for gastownhall/gascity#938.
+func sanitizedBaseEnv(extra ...string) []string {
+	filtered := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GC_") || strings.HasPrefix(kv, "BEADS_") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return append(filtered, extra...)
 }
 
 // writeTestScript creates a shell script that exits with the given code.

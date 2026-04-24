@@ -151,15 +151,15 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	return p.route(name).Peek(name, lines)
 }
 
-// ListRunning queries both backends and merges results. If one backend
-// errors, results from the other are still returned (best-effort).
+// ListRunning queries both backends and returns best-effort results plus a
+// partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	local, lErr := p.local.ListRunning(prefix)
 	remote, rErr := p.remote.ListRunning(prefix)
-	if lErr != nil && rErr != nil {
-		return nil, lErr
-	}
-	return append(local, remote...), nil
+	return runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "local", Names: local, Err: lErr},
+		runtime.BackendListResult{Label: "remote", Names: remote, Err: rErr},
+	)
 }
 
 // GetLastActivity delegates to the routed backend.

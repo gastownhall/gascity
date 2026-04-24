@@ -42,14 +42,14 @@ func TestHandleOrderList(t *testing.T) {
 			Name:        "dolt-health",
 			Description: "Check dolt status",
 			Exec:        "dolt status",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "5m",
 			Enabled:     &enabled,
 		},
 		{
 			Name:    "deploy",
 			Formula: "deploy-steps",
-			Gate:    "manual",
+			Trigger: "manual",
 			Pool:    "workers",
 			Rig:     "myrig",
 		},
@@ -81,8 +81,8 @@ func TestHandleOrderList(t *testing.T) {
 	if a0.Type != "exec" {
 		t.Errorf("type = %q, want %q", a0.Type, "exec")
 	}
-	if a0.Gate != "cooldown" {
-		t.Errorf("gate = %q, want %q", a0.Gate, "cooldown")
+	if a0.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", a0.Trigger, "cooldown")
 	}
 	if a0.Interval != "5m" {
 		t.Errorf("interval = %q, want %q", a0.Interval, "5m")
@@ -113,7 +113,7 @@ func TestHandleOrderGet(t *testing.T) {
 			Name:        "dolt-health",
 			Description: "Check dolt status",
 			Exec:        "dolt status",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "5m",
 		},
 	}
@@ -139,14 +139,46 @@ func TestHandleOrderGet(t *testing.T) {
 	}
 }
 
+func TestHandleOrderGet_ExposesTriggerAndLegacyGateAlias(t *testing.T) {
+	fs := newFakeState(t)
+	fs.autos = []orders.Order{
+		{
+			Name:     "dolt-health",
+			Exec:     "dolt status",
+			Trigger:  "cooldown",
+			Interval: "5m",
+		},
+	}
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/dolt-health"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["trigger"] != "cooldown" {
+		t.Fatalf("trigger = %#v, want %q", resp["trigger"], "cooldown")
+	}
+	if resp["gate"] != "cooldown" {
+		t.Fatalf("gate = %#v, want %q", resp["gate"], "cooldown")
+	}
+}
+
 func TestHandleOrderGet_ScopedName(t *testing.T) {
 	fs := newFakeState(t)
 	fs.autos = []orders.Order{
 		{
-			Name: "health",
-			Exec: "echo ok",
-			Gate: "cooldown",
-			Rig:  "myrig",
+			Name:    "health",
+			Exec:    "echo ok",
+			Trigger: "cooldown",
+			Rig:     "myrig",
 		},
 	}
 	h := newTestCityHandler(t, fs)
@@ -188,7 +220,7 @@ func TestHandleOrderGet_NotFound(t *testing.T) {
 func TestHandleOrderDisable(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -216,7 +248,7 @@ func TestHandleOrderDisable(t *testing.T) {
 func TestHandleOrderEnable(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -241,7 +273,7 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
 	fs.autos = []orders.Order{
-		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Gate: "cron", Pool: "reviewers", Rig: "myrig"},
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Pool: "reviewers", Rig: "myrig"},
 	}
 
 	rigStore := fs.stores["myrig"]
@@ -335,7 +367,7 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
 	fs.autos = []orders.Order{
-		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Gate: "cooldown", Interval: "1h", Rig: "myrig"},
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cooldown", Interval: "1h", Rig: "myrig"},
 	}
 
 	_, err := fs.cityBeadStore.Create(beads.Bead{
@@ -553,11 +585,611 @@ func TestHandleOrdersFeedCityScopeReportsPartialRigFailures(t *testing.T) {
 	}
 }
 
+func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Interval: "24h", Pool: "reviewers", Rig: "myrig"},
+	}
+
+	tracking, err := rigStore.Create(beads.Bead{
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create tracking bead: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	_, err = rigStore.Create(beads.Bead{
+		Title:  "nightly-review wisp",
+		Type:   "wisp",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create wisp bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	}
+	item := resp.Items[0]
+	if item.BeadID != tracking.ID {
+		t.Fatalf("bead_id = %q, want %q", item.BeadID, tracking.ID)
+	}
+	if item.StoreRef != "rig:myrig" {
+		t.Fatalf("store_ref = %q, want rig:myrig", item.StoreRef)
+	}
+	if item.ID != "order:rig:myrig:"+tracking.ID {
+		t.Fatalf("id = %q, want store-qualified order id", item.ID)
+	}
+	if item.ScopeKind != "rig" || item.ScopeRef != "myrig" {
+		t.Fatalf("scope = %s/%s, want rig/myrig", item.ScopeKind, item.ScopeRef)
+	}
+	if item.Target != "myrig/reviewers" {
+		t.Fatalf("target = %q, want myrig/reviewers", item.Target)
+	}
+	if item.UpdatedAt == item.StartedAt {
+		t.Fatalf("updated_at = %q, started_at = %q, want updated_at to reflect newer run activity", item.UpdatedAt, item.StartedAt)
+	}
+}
+
+func TestHandleOrdersFeedRigScopeReturnsRequestedStoreFailure(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.stores["myrig"] = failListStore{Store: fs.stores["myrig"]}
+
+	if _, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "legacy rig tracking",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+	}); err != nil {
+		t.Fatalf("create legacy tracking bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+}
+
+func TestHandleOrderCheckUsesRigStoreLastRunState(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cooldown", Interval: "24h", Rig: "myrig"},
+	}
+
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "nightly-review wisp",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	}); err != nil {
+		t.Fatalf("create rig run: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Checks []struct {
+			Name           string  `json:"name"`
+			ScopedName     string  `json:"scoped_name"`
+			Due            bool    `json:"due"`
+			LastRunOutcome *string `json:"last_run_outcome"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Checks) != 1 {
+		t.Fatalf("len(checks) = %d, want 1", len(resp.Checks))
+	}
+	check := resp.Checks[0]
+	if check.ScopedName != "nightly-review:rig:myrig" {
+		t.Fatalf("scoped_name = %q, want nightly-review:rig:myrig", check.ScopedName)
+	}
+	if check.Due {
+		t.Fatalf("due = true, want false when rig store has a recent run")
+	}
+	if check.LastRunOutcome == nil || *check.LastRunOutcome != "success" {
+		t.Fatalf("last_run_outcome = %v, want success", check.LastRunOutcome)
+	}
+}
+
+func TestHandleOrderCheckSkipsUnavailableRigStore(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	delete(fs.stores, "missing")
+	fs.autos = []orders.Order{
+		{Name: "city-review", Formula: "mol-adopt-pr-v2", Trigger: "manual"},
+		{Name: "rig-review", Formula: "mol-adopt-pr-v2", Trigger: "manual", Rig: "missing"},
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Checks []orderCheckResponse `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Checks) != 2 {
+		t.Fatalf("len(checks) = %d, want 2", len(resp.Checks))
+	}
+}
+
+func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Rig: "myrig"},
+	}
+
+	run, err := rigStore.Create(beads.Bead{
+		Title:  "nightly-review wisp",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create rig history bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID     string `json:"bead_id"`
+			ScopedName string `json:"scoped_name"`
+			Rig        string `json:"rig"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(resp.Entries))
+	}
+	if resp.Entries[0].BeadID != run.ID {
+		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
+	}
+	if resp.Entries[0].ScopedName != "nightly-review:rig:myrig" {
+		t.Fatalf("scoped_name = %q, want nightly-review:rig:myrig", resp.Entries[0].ScopedName)
+	}
+	if resp.Entries[0].Rig != "myrig" {
+		t.Fatalf("rig = %q, want myrig", resp.Entries[0].Rig)
+	}
+}
+
+func TestHandleOrderHistoryIncludesStoreRefForCollidingIDs(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Rig: "myrig"},
+	}
+
+	cityRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "legacy city nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create city history bead: %v", err)
+	}
+	rigRun, err := rigStore.Create(beads.Bead{
+		Title:  "rig nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create rig history bead: %v", err)
+	}
+	if cityRun.ID != rigRun.ID {
+		t.Fatalf("test requires colliding IDs, got city=%q rig=%q", cityRun.ID, rigRun.ID)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID   string `json:"bead_id"`
+			StoreRef string `json:"store_ref"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2: %+v", len(resp.Entries), resp.Entries)
+	}
+	got := map[string]bool{}
+	for _, entry := range resp.Entries {
+		if entry.BeadID != cityRun.ID {
+			t.Fatalf("bead_id = %q, want colliding id %q", entry.BeadID, cityRun.ID)
+		}
+		got[entry.StoreRef] = true
+	}
+	for _, want := range []string{"city:test-city", "rig:myrig"} {
+		if !got[want] {
+			t.Fatalf("entries missing store_ref %q: %+v", want, resp.Entries)
+		}
+	}
+}
+
+func TestHandleOrderHistoryBeforeUsesBufferedBoundedFetch(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2"},
+	}
+
+	oldRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "old nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create old run: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	midRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "middle nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create middle run: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "new nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	}); err != nil {
+		t.Fatalf("create new run: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	before := midRun.CreatedAt.Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID string `json:"bead_id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1: %+v", len(resp.Entries), resp.Entries)
+	}
+	if resp.Entries[0].BeadID != oldRun.ID {
+		t.Fatalf("bead_id = %q, want older run %q", resp.Entries[0].BeadID, oldRun.ID)
+	}
+}
+
+func TestHandleOrderHistoryBeforeFiltersBeforeStoreLimit(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2"},
+	}
+
+	oldRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "old nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create old run: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	cursorRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "cursor nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create cursor run: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	for i := 0; i < 4; i++ {
+		if _, err := fs.cityBeadStore.Create(beads.Bead{
+			Title:  "newer nightly-review",
+			Status: "closed",
+			Labels: []string{"order-run:nightly-review", "wisp"},
+		}); err != nil {
+			t.Fatalf("create newer run %d: %v", i, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	h := newTestCityHandler(t, fs)
+	before := cursorRun.CreatedAt.Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID string `json:"bead_id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1: %+v", len(resp.Entries), resp.Entries)
+	}
+	if resp.Entries[0].BeadID != oldRun.ID {
+		t.Fatalf("bead_id = %q, want older run %q", resp.Entries[0].BeadID, oldRun.ID)
+	}
+}
+
+func TestHandleOrderHistoryBeforeFiltersBeforeMergedLimit(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Rig: "myrig"},
+	}
+
+	oldRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "legacy older nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create old city run: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	cursorRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "cursor nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create cursor run: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	for i := 0; i < 3; i++ {
+		if _, err := rigStore.Create(beads.Bead{
+			Title:  "newer rig nightly-review",
+			Status: "closed",
+			Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+		}); err != nil {
+			t.Fatalf("create newer rig run %d: %v", i, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	h := newTestCityHandler(t, fs)
+	before := cursorRun.CreatedAt.Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig&limit=1&before="+before), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID   string `json:"bead_id"`
+			StoreRef string `json:"store_ref"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1: %+v", len(resp.Entries), resp.Entries)
+	}
+	if resp.Entries[0].BeadID != oldRun.ID || resp.Entries[0].StoreRef != "city:test-city" {
+		t.Fatalf("entry = %+v, want old city run %q", resp.Entries[0], oldRun.ID)
+	}
+}
+
+func TestHandleOrderHistoryDetailUsesRigStore(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+
+	run, err := rigStore.Create(beads.Bead{
+		Title:  "nightly-review wisp",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+		Metadata: map[string]string{
+			"convergence.gate_stdout": "done",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create rig history bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/"+run.ID), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		BeadID string `json:"bead_id"`
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.BeadID != run.ID {
+		t.Fatalf("bead_id = %q, want %q", resp.BeadID, run.ID)
+	}
+	if resp.Output != "done" {
+		t.Fatalf("output = %q, want done", resp.Output)
+	}
+}
+
+func TestHandleOrderHistoryDetailUsesStoreRefForCollidingIDs(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+
+	cityRun, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "legacy city nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+		Metadata: map[string]string{
+			"convergence.gate_stdout": "city output",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create city history bead: %v", err)
+	}
+	rigRun, err := rigStore.Create(beads.Bead{
+		Title:  "rig nightly-review",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+		Metadata: map[string]string{
+			"convergence.gate_stdout": "rig output",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create rig history bead: %v", err)
+	}
+	if cityRun.ID != rigRun.ID {
+		t.Fatalf("test requires colliding IDs, got city=%q rig=%q", cityRun.ID, rigRun.ID)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/"+rigRun.ID+"?store_ref=rig:myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		BeadID   string `json:"bead_id"`
+		StoreRef string `json:"store_ref"`
+		Output   string `json:"output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.StoreRef != "rig:myrig" {
+		t.Fatalf("store_ref = %q, want rig:myrig", resp.StoreRef)
+	}
+	if resp.Output != "rig output" {
+		t.Fatalf("output = %q, want rig output", resp.Output)
+	}
+}
+
+func TestHandleOrderHistoryNoStoresReturnsServiceUnavailable(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = nil
+	fs.stores = map[string]beads.Store{}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+}
+
 func TestHandleOrderGet_Ambiguous(t *testing.T) {
 	fs := newFakeState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-a"},
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-b"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-a"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-b"},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -590,8 +1222,8 @@ func TestHandleOrderGet_Ambiguous(t *testing.T) {
 func TestHandleOrderDisable_Ambiguous(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	fs.autos = []orders.Order{
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-a"},
-		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-b"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-a"},
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-b"},
 	}
 	h := newTestCityHandler(t, fs)
 

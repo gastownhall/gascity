@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -119,7 +120,7 @@ type SupervisorEventStreamInput struct {
 // cityInitExitAlreadyInitialized mirrors initExitAlreadyInitialized in
 // cmd/gc/cmd_init.go. Duplicated here because the CLI's exit-code
 // constant is declared in the main package and not importable; the two
-// must stay in sync. TestCityInitExitCodeInSync enforces that.
+// must stay in sync.
 const cityInitExitAlreadyInitialized = 2
 
 // --- Huma API setup ---
@@ -267,6 +268,7 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 		providerResp.Providers[provider] = providerReadiness{
 			DisplayName: item.DisplayName,
 			Status:      item.Status,
+			Detail:      item.Detail,
 		}
 	}
 	out := &SupervisorProviderReadinessOutput{}
@@ -296,6 +298,9 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, huma.Error500InternalServerError(fmt.Sprintf("internal: creating directory: %v", err))
+	}
+	if cityDirAlreadyInitialized(dir) {
+		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 	}
 
 	gcBin, err := os.Executable()
@@ -332,6 +337,23 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	out := &SupervisorCityCreateOutput{}
 	out.Body = cityCreateResponse{OK: true, Path: dir}
 	return out, nil
+}
+
+func cityDirAlreadyInitialized(dir string) bool {
+	requiredDirs := []string{
+		filepath.Join(dir, citylayout.RuntimeRoot),
+		filepath.Join(dir, citylayout.RuntimeRoot, "cache"),
+		filepath.Join(dir, citylayout.RuntimeRoot, "runtime"),
+		filepath.Join(dir, citylayout.RuntimeRoot, "system"),
+	}
+	for _, path := range requiredDirs {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	info, err := os.Stat(filepath.Join(dir, citylayout.RuntimeRoot, "events.jsonl"))
+	return err == nil && !info.IsDir()
 }
 
 func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *SupervisorEventListInput) (*SupervisorEventListOutput, error) {

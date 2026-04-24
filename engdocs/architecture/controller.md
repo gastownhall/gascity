@@ -119,9 +119,9 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    `wisp_ttl` both set), queries closed molecules via `bd list` and
    deletes those older than the TTL cutoff.
 
-5. **Order dispatch** (`ad.dispatch()`): Evaluates gate conditions
+5. **Order dispatch** (`ad.dispatch()`): Evaluates trigger conditions
    for all non-manual orders. See
-   [Health Patrol](health-patrol.md) for gate evaluation and dispatch
+   [Health Patrol](health-patrol.md) for trigger evaluation and dispatch
    details.
 
 ### Key Types
@@ -208,9 +208,9 @@ indicate bugs.
 | `internal/config` | `LoadWithIncludes()` for config parsing, `DaemonConfig` for loop timing, `Revision()` for reload detection, `WatchDirs()` for fsnotify targets, `ValidateAgents()`/`ValidateRigs()` for validation, `ResolveProvider()` for agent commands. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/Interrupt/Peek/SetMeta/GetMeta/ClearScrollback. `ConfigFingerprint()` drives drift detection. |
 | `internal/agent` | `SessionNameFor()` computes session names and `StartupHints` feeds runtime config assembly. |
-| `internal/events` | `Recorder` for emitting lifecycle events. `Provider` for event gate queries in order dispatch. `NewFileRecorder()` for JSONL persistence. |
+| `internal/events` | `Recorder` for emitting lifecycle events. `Provider` for event trigger queries in order dispatch. `NewFileRecorder()` for JSONL persistence. |
 | `internal/beads` | `Store` for order tracking beads. `CommandRunner` for bd CLI invocation. `NewBdStore()` for rig-scoped stores. |
-| `internal/orders` | `Scan()` for order discovery. `CheckGate()` for gate evaluation. |
+| `internal/orders` | `Scan()` for order discovery. `CheckTrigger()` for trigger evaluation. |
 | `internal/hooks` | `Install()` for provider-specific agent hooks. `Validate()` for hook name validation. |
 | `cmd/gc/beads_provider_lifecycle.go` | Starts, initializes, health-checks, and shuts down the configured beads backend. |
 | `internal/fsys` | `OSFS{}` filesystem abstraction for testability. |
@@ -308,7 +308,7 @@ Controller tests use in-memory fakes and require no external infrastructure:
 | `cmd/gc/pool_test.go` | `evaluatePool()` (clamping, error handling), `poolAgents()` (naming, deep-copy), `expandSessionSetup()`, `expandDirTemplate()` |
 | `cmd/gc/formula_resolve_test.go` | Layer priority, symlink creation/update/cleanup, idempotence, real file preservation |
 | `cmd/gc/wisp_gc_test.go` | TTL-based purging, `shouldRun()` interval, empty list handling |
-| `cmd/gc/order_dispatch_test.go` | Gate evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle, timeout capping, rig-scoped orders |
+| `cmd/gc/order_dispatch_test.go` | Trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle, timeout capping, rig-scoped orders |
 | `cmd/gc/cmd_start_test.go` | Supervisor registration path, hidden foreground compatibility mode, existing-city validation, provider resolution |
 | `cmd/gc/cmd_supervisor_test.go` | Supervisor lifecycle, status reporting, service file generation |
 | `cmd/gc/cmd_suspend_test.go` | Suspend/resume TOML mutation, inheritance hierarchy |
@@ -360,7 +360,7 @@ testing philosophy and tier boundaries.
   `DaemonConfig`, `City`, `Agent`, `PoolConfig` struct fields and defaults
 - [Runtime Provider interface](https://github.com/gastownhall/gascity/blob/main/internal/runtime/runtime.go) --
   the provider interface that the controller uses for all session operations
-- [Orders architecture](orders.md) -- gate types, dispatch
+- [Orders architecture](orders.md) -- trigger types, dispatch
   model, and order configuration
 - [Formulas architecture](formulas.md) -- formula resolution, layering,
   and symlink materialization

@@ -179,14 +179,15 @@ func TestTutorial03Sessions(t *testing.T) {
 			t.Fatalf("cat city.toml: %v\n%s", err, out)
 		}
 		for _, want := range []string{
-			`name = "my-city"`,
-			`name = "mayor"`,
-			`prompt_template = "agents/mayor/prompt.template.md"`,
+			`provider = "claude"`,
 			`name = "my-project"`,
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("city.toml missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, myProject) {
+			t.Fatalf("city.toml should not contain machine-local rig path %q:\n%s", myProject, out)
 		}
 	})
 
@@ -288,7 +289,7 @@ func TestTutorial03Sessions(t *testing.T) {
 
 	ws.noteWarning("tutorial 03 runtime workaround: named mayor sessions can take a restart cycle before their alias-based transcript path becomes readable, so the page driver first waits for the visible log command as-is and only then nudges the runtime through supported session commands")
 	mayorLogsReadable := func() bool {
-		out, err := ws.runShell("gc session logs mayor --tail 1", "")
+		out, err := ws.runShell("gc session logs mayor --tail 2", "")
 		if err != nil || strings.TrimSpace(out) == "" {
 			return false
 		}
@@ -315,13 +316,13 @@ func TestTutorial03Sessions(t *testing.T) {
 		t.Fatalf("mayor transcript never became readable through alias mayor:\n%s", out)
 	}
 
-	t.Run("gc session logs mayor --tail 1", func(t *testing.T) {
-		out, err := ws.runShell("gc session logs mayor --tail 1", "")
+	t.Run("gc session logs mayor --tail 2", func(t *testing.T) {
+		out, err := ws.runShell("gc session logs mayor --tail 2", "")
 		if err != nil {
-			t.Fatalf("gc session logs mayor --tail 1: %v\n%s", err, out)
+			t.Fatalf("gc session logs mayor --tail 2: %v\n%s", err, out)
 		}
 		if strings.TrimSpace(out) == "" {
-			t.Fatal("session logs --tail 1 output is empty")
+			t.Fatal("session logs --tail 2 output is empty")
 		}
 	})
 

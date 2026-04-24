@@ -70,7 +70,7 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 
 	// Try to resolve rig from the first bead arg's prefix.
 	if len(args) > 0 {
-		cfg, cfgErr := loadCityConfig(cityPath)
+		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr == nil {
 			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
 				store, err := openStoreAtForCity(storeDir, cityPath)

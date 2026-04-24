@@ -73,7 +73,7 @@ func managedDoltExistingStateMatches(state doltRuntimeState, cityPath string, ma
 		return false
 	}
 	expectedDataDir := filepath.Join(cityPath, ".beads", "dolt")
-	if filepath.Clean(strings.TrimSpace(state.DataDir)) != filepath.Clean(expectedDataDir) {
+	if !samePath(strings.TrimSpace(state.DataDir), expectedDataDir) {
 		return false
 	}
 	return pidAlive(state.PID)

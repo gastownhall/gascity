@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +43,43 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 				reporter.Require(t, inputOverrideDefaultsResult(tc, prepared))
 			})
 		})
+	}
+}
+
+func TestPhase2HookEnabledClaudeFirstTurnStartupPayload(t *testing.T) {
+	tc := phase2ProviderCaseForFamily(t, "claude")
+	prepared := preparePhase2Start(t, tc, "", map[string]string{
+		"initial_message": "Do the first task.",
+	})
+
+	if !prepared.candidate.tp.HookEnabled {
+		t.Fatal("HookEnabled = false, want true for Claude phase2 profile")
+	}
+	if prepared.candidate.tp.ResolvedProvider == nil {
+		t.Fatal("ResolvedProvider = nil, want Claude provider metadata")
+	}
+	if !prepared.candidate.tp.ResolvedProvider.SupportsHooks {
+		t.Fatal("SupportsHooks = false, want true for Claude phase2 profile")
+	}
+	if prepared.cfg.PromptSuffix == "" {
+		t.Fatal("PromptSuffix = empty, want first-turn startup payload to stay on launch for hook-enabled Claude")
+	}
+	if got := prepared.cfg.Nudge; got != "nudge-claude" {
+		t.Fatalf("Nudge = %q, want existing worker nudge preserved separately", got)
+	}
+
+	payload, evidence, err := phase2PromptPayload(tc, prepared)
+	if err != nil {
+		t.Fatalf("phase2PromptPayload: %v (evidence=%v)", err, evidence)
+	}
+	if !strings.Contains(payload, "Base worker prompt") {
+		t.Fatalf("payload = %q, want base startup prompt", payload)
+	}
+	if !strings.Contains(payload, "User message:\nDo the first task.") {
+		t.Fatalf("payload = %q, want initial_message on first start", payload)
+	}
+	if strings.Count(payload, "Do the first task.") != 1 {
+		t.Fatalf("payload = %q, want initial_message exactly once", payload)
 	}
 }
 

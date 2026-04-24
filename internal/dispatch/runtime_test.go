@@ -13,7 +13,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -896,6 +898,33 @@ func TestAppendRalphRetryDefersAssigneesUntilDepsAreWired(t *testing.T) {
 	}
 }
 
+func TestAppendRalphRetryGraphEdgesSkipsParentChildDeps(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	parent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "parent", Type: "task"})
+	child := mustCreateWorkflowBead(t, store, beads.Bead{Title: "child", Type: "task", ParentID: parent.ID})
+	blocker := mustCreateWorkflowBead(t, store, beads.Bead{Title: "blocker", Type: "task"})
+	mustDepAdd(t, store, child.ID, parent.ID, "parent-child")
+	mustDepAdd(t, store, child.ID, blocker.ID, "blocks")
+
+	plan := &beads.GraphApplyPlan{}
+	if err := appendRalphRetryGraphEdges(plan, store, child.ID, map[string]bool{
+		parent.ID:  true,
+		blocker.ID: true,
+	}); err != nil {
+		t.Fatalf("appendRalphRetryGraphEdges: %v", err)
+	}
+
+	if len(plan.Edges) != 1 {
+		t.Fatalf("edges = %+v, want only the blocking edge", plan.Edges)
+	}
+	edge := plan.Edges[0]
+	if edge.Type != "blocks" || edge.FromKey != child.ID || edge.ToKey != blocker.ID {
+		t.Fatalf("edge = %+v, want blocks edge to blocker", edge)
+	}
+}
+
 func TestAppendRalphRetryClearsPoolAssignee(t *testing.T) {
 	t.Parallel()
 
@@ -1601,15 +1630,14 @@ func TestProcessRalphCheckRecoversRetryAttemptMissingFinalAssigneePass(t *testin
 }
 
 func TestProcessFanoutSpawnsFragmentsAndClosesOnSecondPass(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -1731,15 +1759,14 @@ needs = ["{target}.review"]
 }
 
 func TestProcessFanoutResumesExistingFragmentsWithoutDuplicates(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -1836,15 +1863,14 @@ needs = ["{target}.review"]
 }
 
 func TestProcessFanoutSequentialChainsFragments(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-seq"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -1941,15 +1967,14 @@ title = "Review {reviewer}"
 }
 
 func TestProcessFanoutSequentialResumeRestoresExternalDeps(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-seq"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2060,15 +2085,14 @@ title = "Review {reviewer}"
 }
 
 func TestProcessFanoutSequentialChainSurvivesEmptyMiddleFragment(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-seq-conditional"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2182,15 +2206,14 @@ title = "Review {reviewer}"
 }
 
 func TestProcessFanoutRecoversPartialFragmentInstance(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2283,15 +2306,14 @@ needs = ["{target}.review"]
 }
 
 func TestProcessFanoutRecoversIncompletelyWiredFragmentInstance(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2582,15 +2604,14 @@ func TestCanDiscardPartialFragmentBeadWaitsForDependents(t *testing.T) {
 }
 
 func TestProcessFanoutClosesScopeWhenLastMember(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	dir := t.TempDir()
 	expansion := `
 formula = "expansion-review"
 type = "expansion"
 version = 2
+contract = "graph.v2"
 
 [[template]]
 id = "{target}.review"
@@ -2933,6 +2954,85 @@ func TestRunRalphCheckResolvesRelativeWorkDirAgainstCityPath(t *testing.T) {
 	}
 	if result.ExitCode == nil || *result.ExitCode != 0 {
 		t.Fatalf("result.ExitCode = %+v, want 0", result.ExitCode)
+	}
+}
+
+func TestRunRalphCheckRejectsNonPositiveMetadataTimeouts(t *testing.T) {
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "pass.sh", "#!/usr/bin/env bash\nexit 0\n")
+
+	tests := []struct {
+		name string
+		key  string
+		raw  string
+	}{
+		{name: "step zero", key: "gc.step_timeout", raw: "0s"},
+		{name: "step negative", key: "gc.step_timeout", raw: "-1s"},
+		{name: "check zero", key: "gc.check_timeout", raw: "0s"},
+		{name: "check negative", key: "gc.check_timeout", raw: "-1s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			check := beads.Bead{
+				ID:   "check-1",
+				Type: "task",
+				Metadata: map[string]string{
+					"gc.check_path": checkPath,
+					tt.key:          tt.raw,
+				},
+			}
+			subject := beads.Bead{ID: "run-1", Type: "task"}
+
+			_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{CityPath: cityPath})
+			if err == nil {
+				t.Fatalf("runRalphCheck succeeded, want non-positive %s error", tt.key)
+			}
+			if !strings.Contains(err.Error(), "must be positive") {
+				t.Fatalf("runRalphCheck error = %v, want positive timeout error", err)
+			}
+		})
+	}
+}
+
+func TestRunRalphCheckTimeoutMetadataPrecedence(t *testing.T) {
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "sleep.sh", "#!/usr/bin/env bash\nsleep 0.05\nexit 0\n")
+	store := beads.NewMemStore()
+	subject := beads.Bead{ID: "run-1", Type: "task"}
+
+	stepOnly := beads.Bead{
+		ID:   "step-only",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":   checkPath,
+			"gc.step_timeout": "1ms",
+		},
+	}
+	stepResult, err := runRalphCheck(store, stepOnly, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck step-only: %v", err)
+	}
+	if stepResult.Outcome != convergence.GateTimeout {
+		t.Fatalf("step-only outcome = %q, want timeout", stepResult.Outcome)
+	}
+
+	checkOverrides := beads.Bead{
+		ID:   "check-overrides",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    checkPath,
+			"gc.step_timeout":  "1ms",
+			"gc.check_timeout": "30s",
+		},
+	}
+	checkResult, err := runRalphCheck(store, checkOverrides, subject, 1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("runRalphCheck check-overrides: %v", err)
+	}
+	if checkResult.Outcome != convergence.GatePass {
+		t.Fatalf("check-overrides outcome = %q, want pass", checkResult.Outcome)
 	}
 }
 

@@ -77,13 +77,24 @@ server_pid=0
 server_latency=0
 server_reachable=false
 
+# Portable millisecond timestamp. BSD date(1) on macOS treats %N as a
+# literal 'N' (exits 0, output like "1776740122N"), so the GNU-only
+# || fallback never triggers. Feature-test the output instead.
+now_ms() {
+  _raw=$(date +%s%N 2>/dev/null)
+  case "$_raw" in
+    ''|*[!0-9]*) printf '%s000' "$(date +%s 2>/dev/null)" ;;
+    *)        printf '%s' "$_raw" | cut -c1-13 ;;
+  esac
+}
+
 # Find dolt PID by port.
-pid=$(lsof -ti :"$GC_DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
-if [ -n "$pid" ]; then
+pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   server_running=true
-  server_pid="$pid"
+  [ -n "$pid" ] && server_pid="$pid"
   # Measure query latency.
-  start_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
+  start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
   # Always export DOLT_CLI_PASSWORD (even empty) so the client does not
   # prompt for a password on stdin. Without this, the SELECT 1 probe
@@ -96,7 +107,7 @@ if [ -n "$pid" ]; then
   # goroutine, saturated pool, migration lock) would otherwise hang.
   if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
     server_reachable=true
-    end_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
+    end_ms=$(now_ms)
     server_latency=$((end_ms - start_ms))
     [ "$server_latency" -lt 0 ] && server_latency=0
   fi
@@ -122,16 +133,21 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
-    case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
-    # Reject names with anything outside [A-Za-z0-9_] before interpolating
-    # into the SQL identifier. Dolt permits directory names that shell
+    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
+    # Reject names with anything outside [A-Za-z0-9_-] before interpolating
+    # into the SQL identifier. The first byte must still be alnum/underscore
+    # so the command-side contract matches gc-nudge and avoids option-shaped
+    # names. Dolt permits directory names that shell
     # basename happily returns (e.g. backticks, semicolons) but which
     # would break out of the identifier and execute attacker-chosen SQL
     # as the patrol user. Not an external-attack surface today — data
     # directories are server-controlled — but fragile enough under
     # config drift that it's worth skipping rather than probing.
     case "$name" in
-      *[!A-Za-z0-9_]*|'') continue ;;
+      [A-Za-z0-9_]*)
+        case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
+        ;;
+      *) continue ;;
     esac
     # Count commits via SQL (bounded). 0 on timeout or error — keep
     # going rather than hang the whole report. Extract the first
@@ -197,7 +213,7 @@ if [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
-    case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
+    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
     case "$referenced" in *" $name "*) continue ;; esac
     size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
     if [ "$size_bytes" -ge 1048576 ]; then

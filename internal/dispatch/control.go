@@ -433,6 +433,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 					childMeta["gc.check_mode"] = child.Ralph.Check.Mode
 					childMeta["gc.check_path"] = child.Ralph.Check.Path
 					childMeta["gc.check_timeout"] = child.Ralph.Check.Timeout
+					if child.Timeout != "" {
+						childMeta["gc.step_timeout"] = child.Timeout
+					}
 				}
 				if step := newSpecRecipeStep(childID, child); step != nil {
 					recipe.Steps = append(recipe.Steps, *step)

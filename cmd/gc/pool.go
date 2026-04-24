@@ -186,13 +186,44 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 	return result
 }
 
-// resolveSetupScript resolves a session_setup_script path relative to cityPath.
-// Returns the path unchanged if already absolute.
-func resolveSetupScript(script, cityPath string) string {
+// resolveSetupScript resolves a session_setup_script path for runtime use.
+// Absolute paths pass through unchanged. "//" paths resolve against cityPath.
+// Other relative paths resolve against sourceDir when present; otherwise they
+// resolve against cityPath. City-root-relative strings produced by older
+// composition code remain supported during the transition.
+func resolveSetupScript(script, sourceDir, cityPath string) string {
+	if strings.HasPrefix(script, "//") {
+		return filepath.Join(cityPath, strings.TrimPrefix(script, "//"))
+	}
 	if script == "" || filepath.IsAbs(script) {
 		return script
 	}
+	if sourceDir != "" {
+		relSource, err := filepath.Rel(cityPath, sourceDir)
+		if err == nil {
+			relSource = filepath.Clean(relSource)
+			cleanScript := filepath.Clean(script)
+			if relSource != "." && relSource != "" && !strings.HasPrefix(relSource, "..") &&
+				(cleanScript == relSource || strings.HasPrefix(cleanScript, relSource+string(os.PathSeparator))) {
+				return filepath.Join(cityPath, cleanScript)
+			}
+		}
+		sourceCandidate := filepath.Join(sourceDir, script)
+		cityCandidate := filepath.Join(cityPath, filepath.Clean(script))
+		if fileExists(cityCandidate) && !fileExists(sourceCandidate) {
+			return cityCandidate
+		}
+		return sourceCandidate
+	}
 	return filepath.Join(cityPath, script)
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
@@ -214,11 +245,12 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,
 		// DefaultSlingFormula: deep-copied below with other pointer fields.
-		WorkQuery:            src.WorkQuery,
-		SlingQuery:           src.SlingQuery,
-		SessionSetupScript:   src.SessionSetupScript,
-		OverlayDir:           src.OverlayDir,
-		SourceDir:            src.SourceDir,
+		WorkQuery:          src.WorkQuery,
+		SlingQuery:         src.SlingQuery,
+		SessionSetupScript: src.SessionSetupScript,
+		OverlayDir:         src.OverlayDir,
+		SourceDir:          src.SourceDir,
+		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
 		Fallback:             src.Fallback,
 		IdleTimeout:          src.IdleTimeout,
 		SleepAfterIdle:       src.SleepAfterIdle,
@@ -266,6 +298,14 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.InjectFragments = make([]string, len(src.InjectFragments))
 		copy(dst.InjectFragments, src.InjectFragments)
 	}
+	if len(src.AppendFragments) > 0 {
+		dst.AppendFragments = make([]string, len(src.AppendFragments))
+		copy(dst.AppendFragments, src.AppendFragments)
+	}
+	if len(src.InheritedAppendFragments) > 0 {
+		dst.InheritedAppendFragments = make([]string, len(src.InheritedAppendFragments))
+		copy(dst.InheritedAppendFragments, src.InheritedAppendFragments)
+	}
 	if len(src.InstallAgentHooks) > 0 {
 		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
@@ -305,6 +345,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	if src.DefaultSlingFormula != nil {
 		v := *src.DefaultSlingFormula
 		dst.DefaultSlingFormula = &v
+	}
+	if src.InheritedDefaultSlingFormula != nil {
+		v := *src.InheritedDefaultSlingFormula
+		dst.InheritedDefaultSlingFormula = &v
 	}
 	if src.Attach != nil {
 		v := *src.Attach

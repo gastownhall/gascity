@@ -20,8 +20,8 @@ for d in "$data_dir"/*/; do
   [ ! -d "$d/.dolt" ] && continue
   name="$(basename "$d")"
   # Skip system databases.
-  case "$name" in
-    information_schema|mysql|dolt_cluster) continue ;;
+  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
+    information_schema|mysql|dolt_cluster|__gc_probe) continue ;;
   esac
   printf "%s\t%s\n" "$name" "$d"
   found=$((found + 1))

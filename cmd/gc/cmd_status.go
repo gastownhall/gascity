@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -46,7 +45,7 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -75,11 +74,8 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
 	sp := newStatusSessionProvider()
+	cityName := loadedCityName(cfg, cityPath)
 	dops := newDrainOps(sp)
 	return doRigStatus(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
 }
@@ -115,13 +111,13 @@ func doRigStatus(
 		sp0 := scaleParamsFor(&a)
 		if !a.SupportsInstanceExpansion() {
 			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), sessionTemplate)
-			obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, nil, sn)
+			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, nil, sn, stderr)
 			status := agentStatusLine(obs.Running, dops, sn, a.Suspended || obs.Suspended)
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
 		} else {
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				sn := cliSessionName(cityPath, cityName, qualifiedInstance, sessionTemplate)
-				obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, nil, sn)
+				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, nil, sn, stderr)
 				status := agentStatusLine(obs.Running, dops, sn, a.Suspended || obs.Suspended)
 				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
 			}

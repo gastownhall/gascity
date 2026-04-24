@@ -10,9 +10,12 @@ stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
 stdout 'my-city'
 
-# Verify city.toml exists and name was updated to target dir.
+# Verify city.toml exists but machine-local identity moved to .gc/site.toml.
 exists $WORK/my-city/city.toml
-exec grep 'my-city' $WORK/my-city/city.toml
+! exec grep 'name = "my-city"' $WORK/my-city/city.toml
+exec grep 'workspace_name = "my-city"' $WORK/my-city/.gc/site.toml
+exec grep 'name = "my-city"' $WORK/my-city/pack.toml
+! exec grep 'name = "template"' $WORK/my-city/pack.toml
 
 # Verify prompts were copied.
 exists $WORK/my-city/prompts/mayor.md
@@ -30,7 +33,17 @@ exists $WORK/my-city/.gc
 exec gc init --from $WORK/template --name custom-name $WORK/named-city
 stdout 'custom-name'
 exists $WORK/named-city/city.toml
-exec grep 'custom-name' $WORK/named-city/city.toml
+! exec grep 'name = "custom-name"' $WORK/named-city/city.toml
+exec grep 'workspace_name = "custom-name"' $WORK/named-city/.gc/site.toml
+exec grep 'name = "custom-name"' $WORK/named-city/pack.toml
+
+# gc init --from uses the target dir basename unless --name overrides it,
+# even when the source template already has an explicit workspace.name.
+exec gc init --from $WORK/named-template $WORK/other-basename
+! exec grep 'name = "other-basename"' $WORK/other-basename/city.toml
+exec grep 'workspace_name = "other-basename"' $WORK/other-basename/.gc/site.toml
+exec grep 'name = "other-basename"' $WORK/other-basename/pack.toml
+! exec grep 'name = "mining"' $WORK/other-basename/pack.toml
 
 # gc init --from rejects already-initialized city.
 ! exec gc init --from $WORK/template $WORK/my-city
@@ -43,14 +56,30 @@ stderr 'no city.toml'
 # gc init --from and --file are mutually exclusive (exits non-zero).
 ! exec gc init --from $WORK/template --file $WORK/template/city.toml $WORK/other-city
 
+# PackV2 templates preserve real top-level scripts.
+exec gc init --from $WORK/v2-template $WORK/v2-city
+exists $WORK/v2-city/scripts/run.sh
+exists $WORK/v2-city/pack.toml
+
+# PackV2 templates should not copy the deprecated top-level scripts/ shim.
+exec mkdir -p $WORK/v2-shim-template/scripts
+exec ln -s $WORK/v2-shim-template/assets/scripts/run.sh $WORK/v2-shim-template/scripts/run.sh
+exec gc init --from $WORK/v2-shim-template $WORK/v2-shim-city
+! exists $WORK/v2-shim-city/scripts/run.sh
+exists $WORK/v2-shim-city/pack.toml
+
 -- template/city.toml --
 [workspace]
-name = "template"
 provider = "claude"
 
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
+
+-- template/pack.toml --
+[pack]
+name = "template"
+schema = 2
 
 -- template/prompts/mayor.md --
 You are the mayor.
@@ -60,5 +89,48 @@ package test
 
 -- template/.gc/old-state.json --
 {"stale": true}
+
+-- named-template/city.toml --
+[workspace]
+name = "mining"
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+-- named-template/pack.toml --
+[pack]
+name = "mining"
+schema = 2
+
+-- named-template/prompts/mayor.md --
+You are the mayor.
+
+-- v2-template/city.toml --
+[workspace]
+provider = "claude"
+
+-- v2-template/pack.toml --
+[pack]
+name = "v2-template"
+schema = 2
+
+-- v2-template/scripts/run.sh --
+#!/bin/sh
+echo real top-level script
+
+-- v2-shim-template/city.toml --
+[workspace]
+provider = "claude"
+
+-- v2-shim-template/pack.toml --
+[pack]
+name = "v2-shim-template"
+schema = 2
+
+-- v2-shim-template/assets/scripts/run.sh --
+#!/bin/sh
+echo compatibility shim
 
 -- no-city/.keep --

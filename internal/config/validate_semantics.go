@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ValidateSemantics checks cross-entity semantic constraints in the config
 // and returns warnings for issues that cannot be caught by individual struct
@@ -65,6 +68,55 @@ func ValidateSemantics(cfg *City, source string) []string {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: agent %q: idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence and sleep_after_idle only applies when the session survives the idle_timeout check",
 				source, a.QualifiedName()))
+		}
+	}
+
+	// Custom provider names must not contain the reserved ":" character
+	// (used by the base = "builtin:..." / "provider:..." namespace prefixes).
+	for name := range cfg.Providers {
+		if strings.Contains(name, ":") {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [providers.%s] custom provider name contains reserved character \":\" (used for \"builtin:\" / \"provider:\" namespace prefixes on base field)",
+				source, name))
+		}
+	}
+
+	// Validate base field grammar when set.
+	for name, spec := range cfg.Providers {
+		if spec.Base == nil {
+			continue
+		}
+		bv := *spec.Base
+		if bv == "" {
+			continue // explicit standalone opt-out is valid
+		}
+		switch {
+		case strings.HasPrefix(bv, BasePrefixBuiltin):
+			suffix := strings.TrimPrefix(bv, BasePrefixBuiltin)
+			if suffix == "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s: [providers.%s] base %q has empty suffix after %q prefix",
+					source, name, bv, BasePrefixBuiltin))
+			}
+		case strings.HasPrefix(bv, BasePrefixProvider):
+			suffix := strings.TrimPrefix(bv, BasePrefixProvider)
+			if suffix == "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s: [providers.%s] base %q has empty suffix after %q prefix",
+					source, name, bv, BasePrefixProvider))
+			}
+		}
+	}
+
+	// Validate options_schema_merge grammar.
+	for name, spec := range cfg.Providers {
+		switch spec.OptionsSchemaMerge {
+		case "", "replace", "by_key":
+			// valid
+		default:
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [providers.%s] options_schema_merge must be \"replace\" or \"by_key\", got %q",
+				source, name, spec.OptionsSchemaMerge))
 		}
 	}
 

@@ -3,6 +3,7 @@ package beads
 import (
 	"errors"
 	"sort"
+	"time"
 )
 
 // ErrQueryRequiresScan reports that a query would require an explicit scan.
@@ -31,10 +32,15 @@ type ListQuery struct {
 	Assignee      string
 	ParentID      string
 	Metadata      map[string]string
+	CreatedBefore time.Time
 	Limit         int
 	IncludeClosed bool
 	AllowScan     bool
-	Sort          SortOrder
+	// Live bypasses CachingStore and reads from the backing store. Other Store
+	// implementations ignore it. Use it only for lifecycle gates that must
+	// observe external mutations immediately.
+	Live bool
+	Sort SortOrder
 }
 
 // HasFilter reports whether the query includes at least one indexed selector.
@@ -44,7 +50,8 @@ func (q ListQuery) HasFilter() bool {
 		q.Label != "" ||
 		q.Assignee != "" ||
 		q.ParentID != "" ||
-		len(q.Metadata) > 0
+		len(q.Metadata) > 0 ||
+		!q.CreatedBefore.IsZero()
 }
 
 // IncludesClosed reports whether the query may return closed beads.
@@ -74,6 +81,9 @@ func (q ListQuery) Matches(b Bead) bool {
 		return false
 	}
 	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
+		return false
+	}
+	if !q.CreatedBefore.IsZero() && !b.CreatedAt.Before(q.CreatedBefore) {
 		return false
 	}
 	return true

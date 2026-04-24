@@ -221,7 +221,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
 		handle, err := s.workerHandleForSession(store, sess.ID)
 		if err == nil {
-			s.enrichSessionResponse(&items[i], sess, cfg, handle, wantPeek)
+			s.enrichSessionResponse(&items[i], sess, cfg, handle, wantPeek, false)
 		}
 	}
 
@@ -268,7 +268,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -449,7 +449,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, runtimeHandle any, wantPeek bool) {
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, runtimeHandle any, wantPeek, liveActiveBead bool) {
 	if info.State != session.StateActive {
 		return
 	}
@@ -493,12 +493,16 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 	// by alias (e.g., mayor, sky, wolf) until all assigners migrate to the
 	// concrete session ID.
 	//
-	// Signature is findActiveBeadForAssignees(rig string, assignees ...string);
-	// pass "" for rig (search all rigs) and put info.Alias in the variadic.
+	// Search all rig stores for concrete session ownership first, then fall
+	// back to alias/runtime/session names for older assigners.
 	// A previous fix accidentally passed info.Alias as the first positional
 	// (rig) argument, which silently narrowed the search to a rig named after
 	// the alias — so alias-assigned work still disappeared from ActiveBead.
-	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
+	if liveActiveBead {
+		resp.ActiveBead = s.findLiveActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
+	} else {
+		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
+	}
 
 	// Peek preview (opt-in, only when running).
 	if wantPeek && resp.Running && peekHandle != nil {

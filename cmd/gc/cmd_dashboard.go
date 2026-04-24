@@ -67,7 +67,7 @@ func bindDashboardServeFlags(cmd *cobra.Command, port *int, apiURL *string) {
 }
 
 func runDashboardServe(commandName string, port int, apiURLOverride string, stderr io.Writer) error {
-	cityPath, cfg, err := resolveDashboardContext()
+	cityPath, cfg, err := resolveDashboardContext(stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
@@ -86,7 +86,7 @@ func runDashboardServe(commandName string, port int, apiURLOverride string, stde
 	return nil
 }
 
-func resolveDashboardContext() (cityPath string, cfg *config.City, err error) {
+func resolveDashboardContext(warningWriter ...io.Writer) (cityPath string, cfg *config.City, err error) {
 	cityPath, err = resolveCity()
 	if err != nil {
 		if strings.TrimSpace(cityFlag) == "" && strings.Contains(err.Error(), "not in a city directory") {
@@ -94,7 +94,7 @@ func resolveDashboardContext() (cityPath string, cfg *config.City, err error) {
 		}
 		return "", nil, err
 	}
-	cfg, err = loadCityConfig(cityPath)
+	cfg, err = loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
 		return "", nil, err
 	}

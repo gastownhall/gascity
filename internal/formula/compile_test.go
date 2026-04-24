@@ -2,6 +2,7 @@ package formula
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,131 @@ condition = "{{mode}} == slow"
 
 	if len(recipe2.Steps) != 3 {
 		t.Errorf("len(Steps) = %d, want 3 (all included)", len(recipe2.Steps))
+	}
+}
+
+func TestCompileWithoutRuntimeVarValidationReportsMissingCompileTimeRangeVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "range-demo"
+version = 1
+
+[vars.n]
+description = "Loop count"
+required = true
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+range = "1..{n}"
+
+[[steps.loop.body]]
+id = "work"
+title = "Work {i}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "range-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("CompileWithoutRuntimeVarValidation should reject missing compile-time range var")
+	}
+	if !strings.Contains(err.Error(), `variable "n" is required`) {
+		t.Fatalf("error = %v, want required n", err)
+	}
+
+	recipe, err := CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, map[string]string{"n": "2"})
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation with n: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(recipe.Steps) = %d, want root plus two loop iterations", len(recipe.Steps))
+	}
+}
+
+func TestCompileWithoutRuntimeVarValidationValidatesCompileTimeRangeVarDefs(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "range-demo"
+version = 1
+
+[vars.n]
+description = "Loop count"
+default = "2"
+enum = ["1", "2", "3"]
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+range = "1..{n}"
+
+[[steps.loop.body]]
+id = "work"
+title = "Work {i}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "range-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation with default n: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(recipe.Steps) = %d, want root plus two loop iterations", len(recipe.Steps))
+	}
+
+	_, err = CompileWithoutRuntimeVarValidation(context.Background(), "range-demo", []string{dir}, map[string]string{"n": "4"})
+	if err == nil {
+		t.Fatal("CompileWithoutRuntimeVarValidation should reject invalid compile-time range var")
+	}
+	if !strings.Contains(err.Error(), `variable "n": value "4" not in allowed values`) {
+		t.Fatalf("error = %v, want enum validation for n", err)
+	}
+}
+
+func TestCompileWithoutRuntimeVarValidationReportsMissingCompileTimeConditionVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "condition-demo"
+version = 1
+
+[vars.mode]
+description = "Build mode"
+required = true
+
+[[steps]]
+id = "always"
+title = "Always"
+
+[[steps]]
+id = "slow"
+title = "Slow path"
+condition = "{{mode}} == slow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "condition-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := CompileWithoutRuntimeVarValidation(context.Background(), "condition-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("CompileWithoutRuntimeVarValidation should reject missing compile-time condition var")
+	}
+	if !strings.Contains(err.Error(), `variable "mode" is required`) {
+		t.Fatalf("error = %v, want required mode", err)
+	}
+
+	recipe, err := CompileWithoutRuntimeVarValidation(context.Background(), "condition-demo", []string{dir}, map[string]string{"mode": "slow"})
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation with mode: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(recipe.Steps) = %d, want root plus two included steps", len(recipe.Steps))
 	}
 }
 
@@ -267,10 +393,259 @@ title = "Scan"
 	}
 }
 
-func TestCompileCheckSyntaxMarksWorkflowRootAndBlocksOnTopLevelSteps(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+// TestCompileExtendsPhasePour regresses the merge bug where the 'extends'
+// resolver dropped Phase and Pour from the merged formula, silently coercing
+// vapor formulas to persistent and pour formulas back to root-only.
+func TestCompileExtendsPhasePour(t *testing.T) {
+	cases := []struct {
+		name         string
+		parent       string
+		child        string
+		wantPhase    string
+		wantPour     bool
+		wantRootOnly bool
+	}{
+		{
+			name: "parent_sets_phase_child_inherits",
+			parent: `
+formula = "base"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "scan"
+title = "Scan"
+`,
+			child: `
+formula = "derived"
+version = 1
+extends = ["base"]
+`,
+			wantPhase:    "vapor",
+			wantPour:     false,
+			wantRootOnly: true,
+		},
+		{
+			name: "child_sets_phase_overrides_parent",
+			parent: `
+formula = "base"
+version = 1
+phase = "liquid"
+
+[[steps]]
+id = "scan"
+title = "Scan"
+`,
+			child: `
+formula = "derived"
+version = 1
+extends = ["base"]
+phase = "vapor"
+`,
+			wantPhase:    "vapor",
+			wantPour:     false,
+			wantRootOnly: true,
+		},
+		{
+			name: "parent_sets_pour_child_inherits",
+			parent: `
+formula = "base"
+version = 1
+pour = true
+
+[[steps]]
+id = "scan"
+title = "Scan"
+`,
+			child: `
+formula = "derived"
+version = 1
+extends = ["base"]
+`,
+			wantPhase:    "",
+			wantPour:     true,
+			wantRootOnly: false,
+		},
+		{
+			name: "parent_sets_both_child_inherits",
+			parent: `
+formula = "base"
+version = 1
+phase = "vapor"
+pour = true
+
+[[steps]]
+id = "scan"
+title = "Scan"
+`,
+			child: `
+formula = "derived"
+version = 1
+extends = ["base"]
+`,
+			wantPhase: "vapor",
+			wantPour:  true,
+			// RootOnly is gated on !Pour && Phase=="vapor"; Pour=true overrides.
+			wantRootOnly: false,
+		},
+		{
+			// Guards against a future refactor that stops seeding merged
+			// from the child: without seeding, a child-only Pour=true would
+			// be dropped because the parent loop only propagates true values.
+			name: "child_sets_pour_parent_unset",
+			parent: `
+formula = "base"
+version = 1
+
+[[steps]]
+id = "scan"
+title = "Scan"
+`,
+			child: `
+formula = "derived"
+version = 1
+extends = ["base"]
+pour = true
+`,
+			wantPhase:    "",
+			wantPour:     true,
+			wantRootOnly: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "base.toml"), []byte(tc.parent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "derived.toml"), []byte(tc.child), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			recipe, err := Compile(context.Background(), "derived", []string{dir}, nil)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+
+			if recipe.Phase != tc.wantPhase {
+				t.Errorf("Phase = %q, want %q", recipe.Phase, tc.wantPhase)
+			}
+			if recipe.Pour != tc.wantPour {
+				t.Errorf("Pour = %v, want %v", recipe.Pour, tc.wantPour)
+			}
+			if recipe.RootOnly != tc.wantRootOnly {
+				t.Errorf("RootOnly = %v, want %v", recipe.RootOnly, tc.wantRootOnly)
+			}
+		})
+	}
+}
+
+// TestCompileExtendsMultiParentPhaseFirstWins verifies that when multiple
+// parents declare Phase, the first non-empty parent wins — matching the
+// inheritance semantics already used for Vars and Contract.
+func TestCompileExtendsMultiParentPhaseFirstWins(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"parentA.toml": `
+formula = "parentA"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "a"
+title = "A"
+`,
+		"parentB.toml": `
+formula = "parentB"
+version = 1
+phase = "liquid"
+
+[[steps]]
+id = "b"
+title = "B"
+`,
+		"child.toml": `
+formula = "child"
+version = 1
+extends = ["parentA", "parentB"]
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recipe, err := Compile(context.Background(), "child", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if recipe.Phase != "vapor" {
+		t.Errorf("Phase = %q, want %q (first non-empty parent wins)", recipe.Phase, "vapor")
+	}
+}
+
+// TestCompileExtendsMultiParentPourAnyParentWins verifies OR semantics for
+// Pour across multiple parents — unlike Phase (first-non-empty-wins), any
+// parent declaring pour=true promotes the merged formula regardless of
+// parent order. Pins the Phase-vs-Pour semantic asymmetry so future
+// refactors don't silently align them.
+func TestCompileExtendsMultiParentPourAnyParentWins(t *testing.T) {
+	cases := []struct {
+		name    string
+		extends string
+	}{
+		{name: "pour_first", extends: `["pourParent", "plainParent"]`},
+		{name: "pour_second", extends: `["plainParent", "pourParent"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string]string{
+				"pourParent.toml": `
+formula = "pourParent"
+version = 1
+pour = true
+
+[[steps]]
+id = "a"
+title = "A"
+`,
+				"plainParent.toml": `
+formula = "plainParent"
+version = 1
+
+[[steps]]
+id = "b"
+title = "B"
+`,
+				"child.toml": `
+formula = "child"
+version = 1
+extends = ` + tc.extends + `
+`,
+			}
+			for name, content := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			recipe, err := Compile(context.Background(), "child", []string{dir}, nil)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if !recipe.Pour {
+				t.Errorf("Pour = false, want true (any parent with pour=true promotes)")
+			}
+		})
+	}
+}
+
+func TestCompileCheckSyntaxWithoutGraphContractKeepsMoleculeRoot(t *testing.T) {
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 	formulaContent := `
@@ -307,8 +682,61 @@ timeout = "30s"
 	if root == nil {
 		t.Fatal("root step missing")
 	}
+	if got := root.Metadata["gc.kind"]; got != "" {
+		t.Fatalf("root gc.kind = %q, want empty", got)
+	}
+	if got := root.Metadata["gc.formula_contract"]; got != "" {
+		t.Fatalf("root gc.formula_contract = %q, want empty", got)
+	}
+	if root.Type != "molecule" {
+		t.Fatalf("root type = %q, want molecule", root.Type)
+	}
+}
+
+func TestCompileCheckSyntaxWithGraphContractMarksWorkflowRoot(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	formulaContent := `
+formula = "ralph-demo"
+version = 1
+contract = "graph.v2"
+
+[[steps]]
+id = "design"
+title = "Design"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+needs = ["design"]
+
+[steps.check]
+max_attempts = 2
+
+[steps.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+timeout = "30s"
+`
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "ralph-demo", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	root := recipe.RootStep()
+	if root == nil {
+		t.Fatal("root step missing")
+	}
 	if got := root.Metadata["gc.kind"]; got != "workflow" {
 		t.Fatalf("root gc.kind = %q, want workflow", got)
+	}
+	if got := root.Metadata["gc.formula_contract"]; got != "graph.v2" {
+		t.Fatalf("root gc.formula_contract = %q, want graph.v2", got)
 	}
 	if root.Type != "task" {
 		t.Fatalf("root type = %q, want task", root.Type)
@@ -332,21 +760,127 @@ timeout = "30s"
 		}
 	}
 
-	assertHasDep("ralph-demo", "ralph-demo.design", "blocks")
-	assertHasDep("ralph-demo", "ralph-demo.implement", "blocks")
+	if finalizer := recipe.StepByID("ralph-demo.workflow-finalize"); finalizer == nil {
+		t.Fatal("missing workflow finalizer")
+	}
+
+	assertHasDep("ralph-demo", "ralph-demo.workflow-finalize", "blocks")
+	assertLacksDep("ralph-demo", "ralph-demo.design", "blocks")
+	assertLacksDep("ralph-demo", "ralph-demo.implement", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.implement.run.1", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.implement.check.1", "blocks")
 }
 
+func TestCompileExpansionFormulaSubstitutesTimeoutsFromFile(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	formulaContent := `
+formula = "exp-timeout"
+version = 1
+type = "expansion"
+
+[vars.step_timeout]
+default = "10m"
+
+[vars.check_timeout]
+default = "30s"
+
+[[template]]
+id = "{target}.check"
+title = "Check"
+timeout = "{step_timeout}"
+
+[template.check]
+max_attempts = 1
+
+[template.check.check]
+mode = "exec"
+path = "checks/pass.sh"
+timeout = "{check_timeout}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "exp-timeout.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "exp-timeout", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if step.Metadata["gc.kind"] != "ralph" {
+			continue
+		}
+		if got := step.Metadata["gc.step_timeout"]; got != "10m" {
+			t.Fatalf("gc.step_timeout = %q, want 10m", got)
+		}
+		if got := step.Metadata["gc.check_timeout"]; got != "30s" {
+			t.Fatalf("gc.check_timeout = %q, want 30s", got)
+		}
+		return
+	}
+	t.Fatal("ralph control step not found")
+}
+
+func TestCompileExpansionFormulaAllowsUnresolvedTimeoutVars(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	formulaContent := `
+formula = "exp-timeout"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.check"
+title = "Check"
+timeout = "{step_timeout}"
+
+[template.check]
+max_attempts = 1
+
+[template.check.check]
+mode = "exec"
+path = "checks/pass.sh"
+timeout = "{check_timeout}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "exp-timeout.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, vars := range []map[string]string{nil, {}} {
+		recipe, err := Compile(context.Background(), "exp-timeout", []string{dir}, vars)
+		if err != nil {
+			t.Fatalf("Compile with vars %#v: %v", vars, err)
+		}
+		found := false
+		for _, step := range recipe.Steps {
+			if step.Metadata["gc.kind"] != "ralph" {
+				continue
+			}
+			found = true
+			if got := step.Metadata["gc.step_timeout"]; got != "{step_timeout}" {
+				t.Fatalf("gc.step_timeout = %q, want unresolved placeholder", got)
+			}
+			if got := step.Metadata["gc.check_timeout"]; got != "{check_timeout}" {
+				t.Fatalf("gc.check_timeout = %q, want unresolved placeholder", got)
+			}
+		}
+		if !found {
+			t.Fatal("ralph control step not found")
+		}
+	}
+}
+
 func TestCompileVersion2UsesGraphWorkflowRootAndNoParentChild(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 	formulaContent := `
 formula = "graph-demo"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "setup"
@@ -411,10 +945,41 @@ needs = ["setup"]
 	}
 }
 
+func TestCompileLegacyFormulaRevisionDoesNotUseGraphWorkflow(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	formulaContent := `
+formula = "legacy-revision"
+version = 8
+
+[[steps]]
+id = "work"
+title = "Work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "legacy-revision.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "legacy-revision", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	root := recipe.RootStep()
+	if root == nil {
+		t.Fatal("root step missing")
+	}
+	if root.Type != "molecule" {
+		t.Fatalf("root type = %q, want molecule", root.Type)
+	}
+	if got := root.Metadata["gc.formula_contract"]; got != "" {
+		t.Fatalf("root gc.formula_contract = %q, want empty", got)
+	}
+}
+
 func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -516,18 +1081,548 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.body")
 	assertBefore("mol-scoped-work.body", "mol-scoped-work.cleanup-worktree")
 	assertBefore("mol-scoped-work.cleanup-worktree", "mol-scoped-work.workflow-finalize")
+
+	// The teardown retry control must block on its own attempt.1, matching
+	// the invariant in processRetryControl: a retry-manager is only ever
+	// processed after its latest attempt has closed. Without this edge,
+	// the control bead becomes ready as soon as the body scope closes,
+	// and the dispatcher crash-loops with "latest attempt ... is open,
+	// not closed (invariant violation)".
+	cleanupAttempt := recipe.StepByID("mol-scoped-work.cleanup-worktree.attempt.1")
+	if cleanupAttempt == nil {
+		t.Fatal("cleanup-worktree.attempt.1 step missing")
+	}
+	foundAttemptDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == cleanup.ID && dep.DependsOnID == cleanupAttempt.ID && dep.Type == "blocks" {
+			foundAttemptDep = true
+			break
+		}
+	}
+	if !foundAttemptDep {
+		t.Fatalf("teardown retry %s missing blocks dep on its attempt %s", cleanup.ID, cleanupAttempt.ID)
+	}
 }
 
-func TestCompileGraphWorkflowRejectsCycles(t *testing.T) {
+// TestCompileBugReportFlowV2 is an integration-style check that loads
+// the real tooling formula used by the bugflow workflow and asserts
+// the teardown retry control carries a blocks dep on its attempt.
+func TestCompileBugReportFlowV2(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	const toolingPath = "/home/ubuntu/tooling/formulas"
+	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
+		t.Skipf("tooling formula not present: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-bug-report-flow-v2", []string{toolingPath}, map[string]string{
+		"report_ref": "https://example.com/issues/1",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	cleanup := recipe.StepByID("mol-bug-report-flow-v2.cleanup-run-state")
+	cleanupAttempt := recipe.StepByID("mol-bug-report-flow-v2.cleanup-run-state.attempt.1")
+	if cleanup == nil {
+		t.Fatal("cleanup-run-state step missing")
+	}
+	if cleanupAttempt == nil {
+		t.Fatal("cleanup-run-state.attempt.1 step missing")
+	}
+
+	foundAttemptDep := false
+	var relevant []string
+	for _, dep := range recipe.Deps {
+		if dep.StepID == cleanup.ID {
+			relevant = append(relevant, fmt.Sprintf("  %s -> %s (%s)", dep.StepID, dep.DependsOnID, dep.Type))
+		}
+		if dep.StepID == cleanup.ID && dep.DependsOnID == cleanupAttempt.ID && dep.Type == "blocks" {
+			foundAttemptDep = true
+		}
+	}
+	if !foundAttemptDep {
+		t.Fatalf("teardown retry %s missing blocks dep on attempt %s\ncleanup's deps:\n%s",
+			cleanup.ID, cleanupAttempt.ID, strings.Join(relevant, "\n"))
+	}
+
+	// Also verify a peer body-step retry has its attempt dep, to confirm
+	// the check is real and not just passing because no retries work.
+	peer := recipe.StepByID("mol-bug-report-flow-v2.verify-run-state")
+	peerAttempt := recipe.StepByID("mol-bug-report-flow-v2.verify-run-state.attempt.1")
+	if peer == nil || peerAttempt == nil {
+		t.Fatalf("verify-run-state or its attempt missing")
+	}
+	foundPeer := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == peer.ID && dep.DependsOnID == peerAttempt.ID && dep.Type == "blocks" {
+			foundPeer = true
+		}
+	}
+	if !foundPeer {
+		t.Fatalf("peer retry %s missing blocks dep on attempt %s", peer.ID, peerAttempt.ID)
+	}
+}
+
+// TestCompileTeardownRetryWithDownstreamSibling reproduces the
+// mol-bug-report-flow-v2 shape: a teardown-scoped retry step that
+// another (later) step `needs = [...]`. A later rewrite step should
+// not strip the retry→attempt.1 edge on the teardown control.
+func TestCompileTeardownRetryWithDownstreamSibling(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaText := `
+formula = "mol-teardown-sibling"
+phase = "liquid"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Body scope"
+needs = ["work"]
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "bugflow", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "work"
+title = "Do the work"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 3
+
+[[steps]]
+id = "verify-run-state"
+title = "Verify terminal run state"
+needs = ["cleanup-run-state"]
+metadata = { "gc.continuation_group" = "main" }
+
+[steps.retry]
+max_attempts = 3
+
+[[steps]]
+id = "cleanup-run-state"
+title = "Cleanup run state"
+needs = ["body"]
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-teardown-sibling.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-teardown-sibling", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	cleanup := recipe.StepByID("mol-teardown-sibling.cleanup-run-state")
+	cleanupAttempt := recipe.StepByID("mol-teardown-sibling.cleanup-run-state.attempt.1")
+	if cleanup == nil {
+		t.Fatal("cleanup-run-state step missing")
+	}
+	if cleanupAttempt == nil {
+		t.Fatal("cleanup-run-state.attempt.1 step missing")
+	}
+	if got := cleanup.Metadata["gc.scope_role"]; got != "teardown" {
+		t.Fatalf("cleanup gc.scope_role = %q, want teardown", got)
+	}
+	if got := cleanup.Metadata["gc.kind"]; got != "retry" {
+		t.Fatalf("cleanup gc.kind = %q, want retry", got)
+	}
+
+	foundAttemptDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == cleanup.ID && dep.DependsOnID == cleanupAttempt.ID && dep.Type == "blocks" {
+			foundAttemptDep = true
+			break
+		}
+	}
+	if !foundAttemptDep {
+		t.Fatalf("teardown retry %s missing blocks dep on its attempt %s\nall deps referencing %s:\n%s",
+			cleanup.ID, cleanupAttempt.ID, cleanup.ID, formatDepsForCleanup(recipe.Deps, cleanup.ID))
+	}
+}
+
+func TestCompileGraphRetryWorkflowRequiresExplicitGraphContract(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "implicit-v2"
+phase = "liquid"
+version = 2
+
+[[steps]]
+id = "work"
+title = "Do the work"
+
+[steps.retry]
+max_attempts = 2
+`
+	if err := os.WriteFile(filepath.Join(dir, "implicit-v2.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	_, err := Compile(context.Background(), "implicit-v2", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want explicit contract error")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
+	}
+}
+
+func TestCompileVersion1DetachedGraphMetadataRequiresExplicitGraphContract(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "implicit-v1-detached"
+phase = "liquid"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do the work"
+metadata = { "gc.kind" = "retry" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "implicit-v1-detached.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	_, err := Compile(context.Background(), "implicit-v1-detached", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want explicit contract error")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
+	}
+}
+
+func TestCompileGraphOnCompleteWorkflowRequiresExplicitGraphContract(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "implicit-v2-fanout"
+phase = "liquid"
+version = 2
+
+[[steps]]
+id = "survey"
+title = "Survey"
+
+[steps.on_complete]
+for_each = "output.items"
+bond = "mol-item"
+`
+	if err := os.WriteFile(filepath.Join(dir, "implicit-v2-fanout.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	_, err := Compile(context.Background(), "implicit-v2-fanout", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want explicit contract error")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
+	}
+}
+
+func TestCompileStandaloneExpansionRejectsDuplicateParentTemplateIDs(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	parentA := `
+formula = "standalone-parent-a"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.attempt"
+title = "Attempt A"
+`
+	if err := os.WriteFile(filepath.Join(dir, "standalone-parent-a.toml"), []byte(parentA), 0o644); err != nil {
+		t.Fatalf("write parentA: %v", err)
+	}
+
+	parentB := `
+formula = "standalone-parent-b"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.attempt"
+title = "Attempt B"
+`
+	if err := os.WriteFile(filepath.Join(dir, "standalone-parent-b.toml"), []byte(parentB), 0o644); err != nil {
+		t.Fatalf("write parentB: %v", err)
+	}
+
+	child := `
+formula = "standalone-expansion-conflict"
+type = "expansion"
+version = 2
+extends = ["standalone-parent-a", "standalone-parent-b"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "standalone-expansion-conflict.toml"), []byte(child), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	_, err := Compile(context.Background(), "standalone-expansion-conflict", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want duplicate step ID error")
+	}
+	if !strings.Contains(err.Error(), "duplicate step IDs after expansion") {
+		t.Fatalf("Compile error = %v, want duplicate step ID error", err)
+	}
+}
+
+func TestCompileStandaloneExpansionAllowsConditionallyExclusiveDuplicateTemplateIDs(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "standalone-expansion-conditional"
+type = "expansion"
+version = 2
+
+[[template]]
+id = "{target}.attempt"
+title = "Fast attempt"
+condition = "{{mode}} == fast"
+
+[[template]]
+id = "{target}.attempt"
+title = "Slow attempt"
+condition = "{{mode}} == slow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "standalone-expansion-conditional.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "standalone-expansion-conditional", []string{dir}, map[string]string{"mode": "fast"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 2 {
+		t.Fatalf("len(recipe.Steps) = %d, want 2", len(recipe.Steps))
+	}
+	if got := recipe.Steps[1].ID; got != "standalone-expansion-conditional.main.attempt" {
+		t.Fatalf("recipe.Steps[1].ID = %q, want standalone-expansion-conditional.main.attempt", got)
+	}
+}
+
+func TestCompileAllowsConditionallyExclusiveDuplicateComposeExpansionTemplateIDs(t *testing.T) {
+	dir := t.TempDir()
+
+	expansion := `{
+		"formula": "compose-conditional-duplicate",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "compose-conditional-duplicate.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	formulaText := `{
+		"formula": "compose-conditional-parent",
+		"version": 1,
+		"steps": [
+			{"id": "release", "title": "Release"}
+		],
+		"compose": {
+			"expand": [
+				{"target": "release", "with": "compose-conditional-duplicate"}
+			]
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "compose-conditional-parent.formula.json"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "compose-conditional-parent", []string{dir}, map[string]string{"mode": "fast"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 2 {
+		t.Fatalf("len(recipe.Steps) = %d, want 2", len(recipe.Steps))
+	}
+	if got := recipe.Steps[1].ID; got != "compose-conditional-parent.release.attempt" {
+		t.Fatalf("recipe.Steps[1].ID = %q, want compose-conditional-parent.release.attempt", got)
+	}
+}
+
+func TestCompileComposeExpansionUsesRuleVarsForConditionalTemplateSelection(t *testing.T) {
+	dir := t.TempDir()
+
+	expansion := `{
+		"formula": "compose-override-conditional",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"mode": {"default": "slow"}
+		},
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "compose-override-conditional.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	formulaText := `{
+		"formula": "compose-override-parent",
+		"version": 1,
+		"steps": [
+			{"id": "release", "title": "Release"}
+		],
+		"compose": {
+			"expand": [
+				{"target": "release", "with": "compose-override-conditional", "vars": {"mode": "fast"}}
+			]
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "compose-override-parent.formula.json"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "compose-override-parent", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 2 {
+		t.Fatalf("len(recipe.Steps) = %d, want 2", len(recipe.Steps))
+	}
+	if got := recipe.Steps[1].ID; got != "compose-override-parent.release.attempt" {
+		t.Fatalf("recipe.Steps[1].ID = %q, want compose-override-parent.release.attempt", got)
+	}
+}
+
+func TestCompileAllowsConditionallyExclusiveDuplicateInlineExpansionTemplateIDs(t *testing.T) {
+	dir := t.TempDir()
+
+	expansion := `{
+		"formula": "inline-conditional-duplicate",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "inline-conditional-duplicate.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	formulaText := `{
+		"formula": "inline-conditional-parent",
+		"version": 1,
+		"steps": [
+			{"id": "work", "title": "Work", "expand": "inline-conditional-duplicate"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "inline-conditional-parent.formula.json"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "inline-conditional-parent", []string{dir}, map[string]string{"mode": "fast"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 2 {
+		t.Fatalf("len(recipe.Steps) = %d, want 2", len(recipe.Steps))
+	}
+	if got := recipe.Steps[1].ID; got != "inline-conditional-parent.work.attempt" {
+		t.Fatalf("recipe.Steps[1].ID = %q, want inline-conditional-parent.work.attempt", got)
+	}
+}
+
+func TestCompileInlineExpansionUsesExpandVarsForConditionalTemplateSelection(t *testing.T) {
+	dir := t.TempDir()
+
+	expansion := `{
+		"formula": "inline-override-conditional",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"mode": {"default": "slow"}
+		},
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "inline-override-conditional.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	formulaText := `{
+		"formula": "inline-override-parent",
+		"version": 1,
+		"steps": [
+			{"id": "work", "title": "Work", "expand": "inline-override-conditional", "expand_vars": {"mode": "fast"}}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "inline-override-parent.formula.json"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	recipe, err := Compile(context.Background(), "inline-override-parent", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 2 {
+		t.Fatalf("len(recipe.Steps) = %d, want 2", len(recipe.Steps))
+	}
+	if got := recipe.Steps[1].ID; got != "inline-override-parent.work.attempt" {
+		t.Fatalf("recipe.Steps[1].ID = %q, want inline-override-parent.work.attempt", got)
+	}
+}
+
+func formatDepsForCleanup(deps []RecipeDep, stepID string) string {
+	var lines []string
+	for _, d := range deps {
+		if d.StepID == stepID {
+			lines = append(lines, fmt.Sprintf("  %s -> %s (%s)", d.StepID, d.DependsOnID, d.Type))
+		}
+	}
+	if len(lines) == 0 {
+		return "  (none)"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestCompileGraphWorkflowRejectsCycles(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	formulaText := `
 formula = "graph-cycle"
 phase = "liquid"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "a"
@@ -550,9 +1645,7 @@ needs = ["a"]
 }
 
 func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 	writeReviewWorkflowFixtures(t, dir)
@@ -590,9 +1683,7 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 }
 
 func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 	writeReviewWorkflowFixtures(t, dir)
@@ -661,6 +1752,7 @@ func TestCompileV2FormulaFailsWhenFormulaV2Disabled(t *testing.T) {
 		formulaContent := `
 formula = "needs-v2"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "work"
@@ -679,25 +1771,25 @@ title = "Do work"
 		}
 	})
 
-	t.Run("version 8 formula errors", func(t *testing.T) {
+	t.Run("legacy revision formula stays on molecule contract", func(t *testing.T) {
 		formulaContent := `
-formula = "needs-v8"
+formula = "legacy-v8"
 version = 8
 
 [[steps]]
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "needs-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		_, err := Compile(context.Background(), "needs-v8", []string{dir}, nil)
-		if err == nil {
-			t.Fatal("Compile(needs-v8) succeeded, want error for v8 formula with FormulaV2Enabled=false")
+		recipe, err := Compile(context.Background(), "legacy-v8", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("Compile(legacy-v8): %v", err)
 		}
-		if !strings.Contains(err.Error(), "formula_v2") {
-			t.Fatalf("error = %v, want message mentioning formula_v2", err)
+		if recipe.RootStep().Type != "molecule" {
+			t.Fatalf("root type = %q, want molecule", recipe.RootStep().Type)
 		}
 	})
 
@@ -717,6 +1809,39 @@ title = "Do work"
 		_, err := Compile(context.Background(), "still-v1", []string{dir}, nil)
 		if err != nil {
 			t.Fatalf("Compile(still-v1) = %v, want nil for v1 formula", err)
+		}
+	})
+
+	t.Run("check syntax without graph contract stays on molecule contract", func(t *testing.T) {
+		formulaContent := `
+formula = "legacy-check"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "check.sh"
+`
+		if err := os.WriteFile(filepath.Join(dir, "legacy-check.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		recipe, err := Compile(context.Background(), "legacy-check", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("Compile(legacy-check): %v", err)
+		}
+		root := recipe.RootStep()
+		if root == nil {
+			t.Fatal("root step missing")
+		}
+		if root.Type != "molecule" || root.Metadata["gc.kind"] != "" {
+			t.Fatalf("root = %+v, want legacy molecule root", root)
 		}
 	})
 }

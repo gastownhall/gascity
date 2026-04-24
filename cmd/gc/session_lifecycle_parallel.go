@@ -345,6 +345,16 @@ func buildPreparedStart(
 		forceFresh := session.Metadata["wake_mode"] == "fresh"
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart, forceFresh)
 	}
+	firstStart := session.Metadata["started_config_hash"] == ""
+	forceFresh := session.Metadata["wake_mode"] == "fresh"
+	if !firstStart && !forceFresh {
+		agentCfg.PromptSuffix = ""
+		agentCfg.PromptFlag = ""
+		agentCfg.Nudge = tp.Hints.Nudge
+		if agentCfg.Env != nil {
+			delete(agentCfg.Env, startupPromptDeliveredEnv)
+		}
+	}
 	// Initial message: append to prompt on first start only.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
@@ -416,12 +426,8 @@ func buildPreparedStart(
 		delete(runtimeEnv, "GC_ALIAS")
 	}
 	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
-	if strings.TrimSpace(agentCfg.Env["GC_PROVIDER"]) == "" {
-		if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
-			agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-		} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
-			agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-		}
+	if gcProvider := sessionProviderFamily(*session); gcProvider != "" {
+		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
@@ -644,8 +650,11 @@ func commitStartResultTraced(
 			return false
 		}
 		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-		_ = store.SetMetadata(session.ID, "last_woke_at", "")
-		session.Metadata["last_woke_at"] = ""
+		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+		} else {
+			session.Metadata["last_woke_at"] = ""
+		}
 		recordWakeFailure(session, store, clk)
 		if trace != nil {
 			trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{

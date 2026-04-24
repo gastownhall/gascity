@@ -32,8 +32,8 @@ patrol_interval = "30s"
 max_restarts = 5
 restart_window = "1h"
 shutdown_timeout = "5s"
-# Gastown formulas declare version >= 2 (e.g. mol-deacon-patrol at v12,
-# mol-polecat-work at v7). formula_v2 must be enabled to compile them.
+# Enable graph.v2 formulas from imported packs. Legacy molecule formulas keep
+# molecule_id attachment semantics even when their own revision is version >= 2.
 formula_v2 = true
 
 # Register a rig to activate per-rig agents (witness, refinery, polecat):

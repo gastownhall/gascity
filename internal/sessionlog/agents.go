@@ -13,6 +13,8 @@ import (
 // ErrAgentNotFound is returned when a subagent file does not exist.
 var ErrAgentNotFound = errors.New("agent not found")
 
+const agentMappingScannerMaxTokenSize = 8 * 1024 * 1024
+
 // AgentMapping links a subagent to the parent Task tool_use that spawned it.
 type AgentMapping struct {
 	AgentID         string `json:"agent_id"`
@@ -106,7 +108,9 @@ func FindAgentFiles(parentLogPath string) ([]string, error) {
 }
 
 // FindAgentMappings scans agent-*.jsonl files alongside the parent session
-// and extracts the parent_tool_use_id from each agent's first entry.
+// and extracts the parent_tool_use_id from each agent's first entry. It
+// returns an error without partial mappings if any agent transcript cannot be
+// read.
 func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 	agentPaths, err := FindAgentFiles(parentLogPath)
 	if err != nil {
@@ -119,9 +123,12 @@ func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 	var mappings []AgentMapping
 	for _, path := range agentPaths {
 		agentID := agentIDFromPath(path)
-		toolUseID := extractParentToolUseID(path)
 		if agentID == "" {
 			continue
+		}
+		toolUseID, err := extractParentToolUseID(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading agent %q mapping: %w", agentID, err)
 		}
 		mappings = append(mappings, AgentMapping{
 			AgentID:         agentID,
@@ -193,15 +200,17 @@ func agentIDFromPath(path string) string {
 // extractParentToolUseID reads the first few lines of an agent JSONL file
 // and looks for the parentToolUseId field. Claude Code writes this on
 // the first entry of every subagent session.
-func extractParentToolUseID(path string) string {
+func extractParentToolUseID(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("opening transcript: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// Claude Code transcript entries may contain large tool results, but the
+	// parentToolUseId is expected near the top of the file.
+	scanner.Buffer(make([]byte, 0, 256*1024), agentMappingScannerMaxTokenSize)
 
 	// Check first 5 lines — the field is usually on line 1.
 	for i := 0; i < 5 && scanner.Scan(); i++ {
@@ -216,10 +225,13 @@ func extractParentToolUseID(path string) string {
 			continue
 		}
 		if entry.ParentToolUseID != "" {
-			return entry.ParentToolUseID
+			return entry.ParentToolUseID, nil
 		}
 	}
-	return ""
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scanning transcript: %w", err)
+	}
+	return "", nil
 }
 
 // inferAgentStatus determines the agent's status from its message history.

@@ -4,7 +4,7 @@ import "encoding/json"
 
 // ApplyGraphControls applies graph control metadata to steps in the formula.
 func ApplyGraphControls(f *Formula) {
-	if f == nil || f.Version < 2 {
+	if f == nil {
 		return
 	}
 	applyGraphControls(f, true)
@@ -12,7 +12,7 @@ func ApplyGraphControls(f *Formula) {
 
 // ApplyFragmentGraphControls applies graph control metadata to fragment steps in the formula.
 func ApplyFragmentGraphControls(f *Formula) {
-	if f == nil || f.Version < 2 {
+	if f == nil {
 		return
 	}
 	applyGraphControls(f, false)

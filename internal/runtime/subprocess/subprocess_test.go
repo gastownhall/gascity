@@ -1,7 +1,9 @@
 package subprocess
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -327,6 +329,124 @@ func TestWorkDirSet(t *testing.T) {
 	t.Fatal("timed out waiting for workdir marker file")
 }
 
+func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "copy-root", runtime.Config{
+		Command:   "sleep 3600",
+		WorkDir:   workDir,
+		CopyFiles: []runtime.CopyEntry{{Src: src}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("copy-root") //nolint:errcheck
+
+	data, err := os.ReadFile(filepath.Join(workDir, "seed.txt"))
+	if err != nil {
+		t.Fatalf("read staged file: %v", err)
+	}
+	if string(data) != "seed data" {
+		t.Fatalf("staged file = %q, want %q", string(data), "seed data")
+	}
+}
+
+func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	blocker := filepath.Join(workDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "copy-error", runtime.Config{
+		Command: "sleep 3600",
+		WorkDir: workDir,
+		CopyFiles: []runtime.CopyEntry{{
+			Src:    src,
+			RelDst: filepath.Join("blocked", "seed.txt"),
+		}},
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging a copy file fails")
+	}
+}
+
+func TestStartFailsWhenOverlayCannotBeStaged(t *testing.T) {
+	workDir := t.TempDir()
+	overlayDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(overlayDir, "ok.txt"), []byte("copied"), 0o644); err != nil {
+		t.Fatalf("write ok overlay file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(overlayDir, "blocked"), 0o755); err != nil {
+		t.Fatalf("mkdir blocked src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "blocked", "nested.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("write blocked overlay file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "blocked"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocked dst file: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "overlay-error", runtime.Config{
+		Command:    "sleep 3600",
+		WorkDir:    workDir,
+		OverlayDir: overlayDir,
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging an overlay warns")
+	}
+}
+
+func TestStartFailedStagingDoesNotRetainWorkDirForCopyTo(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	blocker := filepath.Join(workDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "copy-error", runtime.Config{
+		Command: "sleep 3600",
+		WorkDir: workDir,
+		CopyFiles: []runtime.CopyEntry{{
+			Src:    src,
+			RelDst: filepath.Join("blocked", "seed.txt"),
+		}},
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging a copy file fails")
+	}
+
+	lateSrc := filepath.Join(srcDir, "late.txt")
+	if err := os.WriteFile(lateSrc, []byte("late data"), 0o644); err != nil {
+		t.Fatalf("write late src: %v", err)
+	}
+	if err := p.CopyTo("copy-error", lateSrc, "late.txt"); err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "late.txt")); !os.IsNotExist(err) {
+		t.Fatalf("late copy err = %v, want no copy into failed session workdir", err)
+	}
+}
+
 func TestSocketCreated(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Start(context.Background(), "sock-check", runtime.Config{Command: "sleep 3600"}); err != nil {
@@ -357,6 +477,103 @@ func TestSocketRemovedAfterStop(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Error("socket file should be removed after Stop")
+}
+
+func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := "reject-stop"
+
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	gotCommand := make(chan string, 1)
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotCommand <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.stopBySocket(name)
+	if err == nil {
+		t.Fatal("stopBySocket succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("stopBySocket error = %v, want unexpected response", err)
+	}
+	if got := <-gotCommand; got != "stop" {
+		t.Fatalf("socket command = %q, want stop", got)
+	}
+	if _, statErr := os.Stat(p.sockPath(name)); statErr != nil {
+		t.Fatalf("socket path err = %v, want socket preserved after failed stop", statErr)
+	}
+	if _, statErr := os.Stat(p.sockNamePath(name)); statErr != nil {
+		t.Fatalf("socket name path err = %v, want socket name preserved after failed stop", statErr)
+	}
+}
+
+func TestStopBySocket_FallsBackToLegacySocketWhenCanonicalRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := "legacy-fallback"
+
+	canonical, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen canonical: %v", err)
+	}
+	t.Cleanup(func() { _ = canonical.Close() })
+
+	legacy, err := net.Listen("unix", p.legacySockPath(name))
+	if err != nil {
+		t.Fatalf("Listen legacy: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+
+	go func() {
+		conn, acceptErr := canonical.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	gotLegacy := make(chan string, 1)
+	go func() {
+		conn, acceptErr := legacy.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotLegacy <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("ok\n"))
+	}()
+
+	if err := p.stopBySocket(name); err != nil {
+		t.Fatalf("stopBySocket error = %v, want legacy fallback success", err)
+	}
+	if got := <-gotLegacy; got != "stop" {
+		t.Fatalf("legacy socket command = %q, want stop", got)
+	}
 }
 
 func TestSocketGoneAfterProcessDeath(t *testing.T) {

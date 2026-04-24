@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -327,6 +330,87 @@ func TestConvergence_EnqueueTimeout(t *testing.T) {
 	// Drain the channel.
 	for len(cr.convergenceReqCh) > 0 {
 		<-cr.convergenceReqCh
+	}
+}
+
+func TestConvergenceStore_PourSpeculativeWispDefersAssignmentsUntilActivation(t *testing.T) {
+	dir := t.TempDir()
+	formulaText := `formula = "assigned-flow"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+assignee = "worker"
+metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/worker" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "assigned-flow.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, []string{dir})
+	parent, err := store.Create(beads.Bead{Title: "root", Type: "convergence"})
+	if err != nil {
+		t.Fatalf("creating parent: %v", err)
+	}
+
+	wispID, err := adapter.PourSpeculativeWisp(parent.ID, "assigned-flow",
+		convergence.IdempotencyKey(parent.ID, 1), nil, "")
+	if err != nil {
+		t.Fatalf("PourSpeculativeWisp: %v", err)
+	}
+
+	children, err := store.Children(wispID)
+	if err != nil {
+		t.Fatalf("Children: %v", err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("children = %d, want 1", len(children))
+	}
+	if children[0].Assignee != "" {
+		t.Fatalf("speculative child assignee = %q, want empty", children[0].Assignee)
+	}
+	if children[0].Type != "gate" {
+		t.Fatalf("speculative child type = %q, want gate", children[0].Type)
+	}
+	if got := children[0].Metadata[molecule.DeferredAssigneeMetadataKey]; got != "worker" {
+		t.Fatalf("deferred assignee metadata = %q, want worker", got)
+	}
+	if got := children[0].Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("speculative child gc.routed_to = %q, want empty", got)
+	}
+	if got := children[0].Metadata[molecule.DeferredRoutedToMetadataKey]; got != "pool/worker" {
+		t.Fatalf("deferred gc.routed_to metadata = %q, want pool/worker", got)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == children[0].ID {
+			t.Fatalf("speculative child %s appeared in Ready before activation", bead.ID)
+		}
+	}
+
+	if err := adapter.ActivateWisp(wispID); err != nil {
+		t.Fatalf("ActivateWisp: %v", err)
+	}
+	activated, err := store.Get(children[0].ID)
+	if err != nil {
+		t.Fatalf("Get child: %v", err)
+	}
+	if activated.Assignee != "worker" {
+		t.Fatalf("activated child assignee = %q, want worker", activated.Assignee)
+	}
+	if activated.Type != "task" {
+		t.Fatalf("activated child type = %q, want task", activated.Type)
+	}
+	if activated.Metadata["gc.routed_to"] != "pool/worker" {
+		t.Fatalf("activated child gc.routed_to = %q, want pool/worker", activated.Metadata["gc.routed_to"])
+	}
+	if activated.Metadata["gc.execution_routed_to"] != "pool/worker" {
+		t.Fatalf("activated child gc.execution_routed_to = %q, want pool/worker", activated.Metadata["gc.execution_routed_to"])
 	}
 }
 

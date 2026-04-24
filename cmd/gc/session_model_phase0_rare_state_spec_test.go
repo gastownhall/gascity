@@ -4,11 +4,27 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type capabilityOverrideProvider struct {
+	runtime.Provider
+	caps     runtime.ProviderCapabilities
+	sleepCap runtime.SessionSleepCapability
+}
+
+func (p capabilityOverrideProvider) Capabilities() runtime.ProviderCapabilities {
+	return p.caps
+}
+
+func (p capabilityOverrideProvider) SleepCapability(string) runtime.SessionSleepCapability {
+	return p.sleepCap
+}
 
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
 // - Resume vs fresh rematerialization
@@ -17,7 +33,9 @@ import (
 // - Close/Wake Race Semantics
 // - Status and Diagnostics / degraded health rule
 
-func TestPhase0ConfigDrift_ActiveNamedSessionRestartsInPlaceWithoutCapVacancy(t *testing.T) {
+func TestPhase0ConfigDrift_ActiveNamedSessionDefersWhenAttached(t *testing.T) {
+	// When a named session is attached (actively in use), config-drift
+	// should be deferred -- not immediately restarted. See #119.
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -61,6 +79,70 @@ func TestPhase0ConfigDrift_ActiveNamedSessionRestartsInPlaceWithoutCapVacancy(t 
 
 	env.reconcile([]beads.Bead{session})
 
+	// Session should still be running -- config-drift deferred while attached.
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("attached named session was stopped during config-drift; want deferred")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	// State should NOT be "creating" — config-drift was deferred.
+	if got.Metadata["state"] == "creating" {
+		t.Fatal("state = creating; config-drift should have been deferred for attached session")
+	}
+	// started_config_hash should NOT have been cleared.
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash was cleared during deferred config-drift; want preserved")
+	}
+}
+
+func TestPhase0ConfigDrift_IdleNamedSessionRestartsInPlaceWithoutCapVacancy(t *testing.T) {
+	// When a named session is idle (detached, no recent activity),
+	// config-drift should proceed with restart-in-place.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		Command:                 "new-cmd",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	// NOT attached, no recent activity -- session is idle.
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"session_key":                "old-provider-conversation",
+		"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
 	all, err := env.store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
 		t.Fatalf("ListByLabel(session): %v", err)
@@ -75,13 +157,356 @@ func TestPhase0ConfigDrift_ActiveNamedSessionRestartsInPlaceWithoutCapVacancy(t 
 		t.Fatalf("status = %q, want open while live restart is in progress", all[0].Status)
 	}
 	if got := all[0].Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating for active config-drift restart without cap vacancy", got)
+		t.Fatalf("state = %q, want creating for idle config-drift restart without cap vacancy", got)
 	}
 	if got := all[0].Metadata["started_config_hash"]; got != "" {
 		t.Fatalf("started_config_hash = %q, want cleared so next start uses fresh config", got)
 	}
 	if got := all[0].Metadata["continuation_reset_pending"]; got != "true" {
 		t.Fatalf("continuation_reset_pending = %q, want true for unified restart path", got)
+	}
+}
+
+func TestPhase0ConfigDrift_NamedSessionBoundsRecentActivityDeferral(t *testing.T) {
+	// Recent activity is a headless-use signal, but it must not let a live
+	// process loop hide one fixed config-drift episode forever.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "new-cmd",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		Command:                 "new-cmd",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	// NOT attached, but has recent activity (30 seconds ago).
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-30*time.Second))
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	// Session should still be running -- deferred due to recent activity.
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("named session with recent activity was stopped during config-drift; want deferred")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] == "creating" {
+		t.Fatal("state = creating; config-drift should have been deferred for session with recent activity")
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" {
+		t.Fatal("recent-activity config-drift deferral timestamp was not recorded")
+	}
+
+	env.clk.Time = env.clk.Now().Add(namedSessionRecentActivityConfigDriftDeferralLimit + time.Second)
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-time.Second))
+	env.reconcile([]beads.Bead{got})
+
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after deferral limit: %v", session.ID, err)
+	}
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating after bounded recent-activity deferral", got.Metadata["state"])
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredAtMetadata] != "" {
+		t.Fatalf("deferred timestamp = %q, want cleared after restart", got.Metadata[namedSessionConfigDriftDeferredAtMetadata])
+	}
+}
+
+func TestPhase0ConfigDrift_NamedSessionDrainsWhenStaleActivity(t *testing.T) {
+	// When a named session has stale activity (beyond threshold) and
+	// is not attached, config-drift should proceed.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "new-cmd",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		Command:                 "new-cmd",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	// NOT attached, activity is 5 minutes old (beyond 2-minute threshold).
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-5*time.Minute))
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	// Session should have been restarted in-place.
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating for stale-activity config-drift restart", got.Metadata["state"])
+	}
+}
+
+func TestNamedSessionActivelyInUse(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	name := "test-session"
+	_ = sp.Start(context.Background(), name, runtime.Config{Command: "test"})
+
+	session := beads.Bead{
+		Metadata: map[string]string{
+			"session_name": name,
+		},
+	}
+
+	// No attachment, no activity -> not active.
+	if namedSessionActivelyInUse(session, sp, name, clk) {
+		t.Error("expected not active with no attachment and no activity")
+	}
+
+	// Attached -> active.
+	sp.SetAttached(name, true)
+	if !namedSessionActivelyInUse(session, sp, name, clk) {
+		t.Error("expected active when attached")
+	}
+	sp.SetAttached(name, false)
+
+	// Recent activity -> active.
+	sp.SetActivity(name, clk.Now().Add(-30*time.Second))
+	if !namedSessionActivelyInUse(session, sp, name, clk) {
+		t.Error("expected active with recent activity (30s ago)")
+	}
+
+	// Stale activity -> not active.
+	sp.SetActivity(name, clk.Now().Add(-5*time.Minute))
+	if namedSessionActivelyInUse(session, sp, name, clk) {
+		t.Error("expected not active with stale activity (5m ago)")
+	}
+
+	// Unknown provider activity is conservative: an alive named session is
+	// treated as active because config-drift cannot prove it is idle.
+	unknownActivity := capabilityOverrideProvider{Provider: sp}
+	if !namedSessionActivelyInUse(session, unknownActivity, name, clk) {
+		t.Error("expected active when provider cannot report activity")
+	}
+
+	// Routed providers can have conservative global capabilities while the
+	// specific session backend still reports enough idle data. Honor the
+	// routed sleep capability rather than the global capability intersection.
+	routedActivity := capabilityOverrideProvider{
+		Provider: sp,
+		sleepCap: runtime.SessionSleepCapabilityFull,
+	}
+	sp.SetActivity(name, clk.Now().Add(-5*time.Minute))
+	if namedSessionActivelyInUse(session, routedActivity, name, clk) {
+		t.Error("expected not active when routed backend reports stale activity")
+	}
+
+	timedOnlyUnknownActivity := capabilityOverrideProvider{
+		Provider: sp,
+		sleepCap: runtime.SessionSleepCapabilityTimedOnly,
+	}
+	if !namedSessionActivelyInUse(session, timedOnlyUnknownActivity, name, clk) {
+		t.Error("expected active when timed-only backend cannot report activity")
+	}
+
+	// Nil provider -> not active.
+	if namedSessionActivelyInUse(session, nil, name, clk) {
+		t.Error("expected not active with nil provider")
+	}
+
+	// Empty name -> not active.
+	if namedSessionActivelyInUse(session, sp, "", clk) {
+		t.Error("expected not active with empty name")
+	}
+}
+
+func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	name := "test-session"
+	if err := sp.Start(context.Background(), name, runtime.Config{Command: "test"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := capabilityOverrideProvider{Provider: sp}
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title: name,
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": name,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-1")
+	if err != nil {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift: %v", err)
+	}
+	if !deferDrift {
+		t.Fatal("expected initial unknown-activity config drift to defer")
+	}
+	if reason != "activity_unknown" {
+		t.Fatalf("reason = %q, want activity_unknown", reason)
+	}
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredAtMetadata]; got == "" {
+		t.Fatal("config drift deferred timestamp was not recorded")
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredKeyMetadata]; got != "drift-1" {
+		t.Fatalf("config drift deferred key = %q, want drift-1", got)
+	}
+
+	clk.Time = clk.Now().Add(namedSessionActivityThreshold + time.Second)
+	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-1")
+	if err != nil {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift after threshold: %v", err)
+	}
+	if deferDrift {
+		t.Fatal("expected unknown-activity config drift to stop deferring after threshold")
+	}
+
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-2")
+	if err != nil {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift new drift: %v", err)
+	}
+	if !deferDrift {
+		t.Fatal("expected new config drift episode to get a fresh unknown-activity deferral")
+	}
+	if reason != "activity_unknown" {
+		t.Fatalf("new drift reason = %q, want activity_unknown", reason)
+	}
+
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after new drift: %v", err)
+	}
+	if err := clearNamedSessionConfigDriftDeferral(session, store); err != nil {
+		t.Fatalf("clearNamedSessionConfigDriftDeferral: %v", err)
+	}
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after clear: %v", err)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredAtMetadata]; got != "" {
+		t.Fatalf("deferred timestamp after clear = %q, want empty", got)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredKeyMetadata]; got != "" {
+		t.Fatalf("deferred key after clear = %q, want empty", got)
+	}
+}
+
+func TestShouldDeferNamedSessionConfigDriftDoesNotDeferWhenMarkerWriteFails(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	name := "test-session"
+	if err := sp.Start(context.Background(), name, runtime.Config{Command: "test"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := capabilityOverrideProvider{Provider: sp}
+	session := beads.Bead{
+		ID:    "missing",
+		Title: name,
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": name,
+		},
+	}
+
+	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, beads.NewMemStore(), provider, name, clk, "drift-1")
+	if err == nil {
+		t.Fatal("expected marker write error")
+	}
+	if deferDrift {
+		t.Fatal("expected config drift not to defer when marker write fails")
+	}
+}
+
+func TestPoolSessionConfigDriftNotAffectedByActiveGuard(t *testing.T) {
+	// Pool (non-named) sessions should still defer on config-drift
+	// via existing guards -- the new guard only applies to named sessions.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "new-cmd"}},
+	}
+	env.addRunningWorkerDesiredWithNewConfig()
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+	})
+	// Attach the session -- pool sessions should still defer via existing guard.
+	env.sp.SetAttached("worker", true)
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("pool session test setup did not start the runtime")
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	// Pool session with attachment defers via the existing IsAttached guard,
+	// not our new named-session guard. Verify the session is NOT drained
+	// (existing behavior for attached pool sessions).
+	ds := env.dt.get(session.ID)
+	if ds != nil {
+		t.Fatalf("attached pool session should defer config-drift via existing guard, got drain: %+v", ds)
 	}
 }
 

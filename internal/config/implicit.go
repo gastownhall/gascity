@@ -11,7 +11,9 @@ import (
 
 const implicitImportSchema = 1
 
-// ImplicitImport describes a user-global import spliced into every city.
+// ImplicitImport describes a legacy user-global import record retained for
+// compatibility tooling. Config composition no longer splices these imports
+// into every city.
 type ImplicitImport struct {
 	Source  string `toml:"source"`
 	Version string `toml:"version"`
@@ -65,11 +67,6 @@ func implicitImportPath() string {
 // Resolution order: GC_HOME env var → user home/.gc → tmp fallback.
 // Returns "" under `go test` to keep unit tests hermetic unless the
 // caller opts in by setting GC_HOME explicitly.
-//
-// Callers outside this package should treat the return value as
-// authoritative — every gc.tooling subsystem (bootstrap, materializer,
-// implicit imports) must agree on the same path or they will resolve
-// to different cache directories.
 func ImplicitGCHome() string {
 	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
 		return v
@@ -83,19 +80,6 @@ func ImplicitGCHome() string {
 		return filepath.Join(os.TempDir(), ".gc")
 	}
 	return filepath.Join(home, ".gc")
-}
-
-func resolveImplicitImport(imp ImplicitImport) Import {
-	source := imp.Source
-	if imp.Commit != "" {
-		if home := ImplicitGCHome(); home != "" {
-			source = GlobalRepoCachePath(home, imp.Source, imp.Commit)
-		}
-	}
-	return Import{
-		Source:  source,
-		Version: imp.Version,
-	}
 }
 
 // GlobalRepoCachePath returns the user-global cache path for a source+commit pair.

@@ -23,7 +23,7 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 	cityPath, _ := resolveCity()
 	var cfg *config.City
 	if cityPath != "" {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
 	if err != nil {

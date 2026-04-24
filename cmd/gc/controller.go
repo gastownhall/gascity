@@ -376,8 +376,12 @@ func sendControllerCommand(cityPath, command string) ([]byte, error) {
 }
 
 func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout time.Duration) ([]byte, error) {
+	return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 5*time.Second, readTimeout)
+}
+
+func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
 	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
 		return nil, controllerCommandError{
 			op:          "connecting to controller",
@@ -385,9 +389,9 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 			unavailable: true,
 		}
 	}
-	defer conn.Close()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(readTimeout))      //nolint:errcheck
+	defer conn.Close()                                  //nolint:errcheck
+	conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck
+	conn.SetReadDeadline(time.Now().Add(readTimeout))   //nolint:errcheck
 	if _, err := conn.Write([]byte(command + "\n")); err != nil {
 		return nil, fmt.Errorf("sending command: %w", err)
 	}
@@ -414,20 +418,11 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 // to the controller.sock and sending a "ping". Returns the PID if alive,
 // or 0 if not reachable.
 func controllerAlive(cityPath string) int {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	resp, err := sendControllerCommandWithTimeouts(cityPath, "ping", 500*time.Millisecond, 500*time.Millisecond, 2*time.Second)
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()                                    //nolint:errcheck // best-effort
-	conn.Write([]byte("ping\n"))                          //nolint:errcheck // best-effort
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck // best-effort
-	buf := make([]byte, 64)
-	n, err := conn.Read(buf)
-	if err != nil || n == 0 {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(resp)))
 	if err != nil {
 		return 0
 	}
@@ -767,17 +762,15 @@ func reloadWarningsFromError(err error) []string {
 }
 
 // tryReloadConfig attempts to reload city.toml with includes and patches.
-// Returns the new config, provenance, revision, and non-fatal warnings on
-// success, or an error on failure (parse error, validation error, workspace
-// name changed). Some failures after composition also return warning metadata
-// via the result and error; callers should report those details while keeping
-// the old config. Strict mode (default) makes composition warnings fatal.
+// Returns the new config, provenance, revision, and load warnings on success,
+// or an error on failure. Some failures after composition also return warning
+// metadata via the result and error. Alias-only, unsupported-key, and
+// deprecation warnings stay soft; composition collisions and mixed
+// canonical/compat default tables stay strict-fatal unless --no-strict
+// disables the gate.
 func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
-	// Auto-fetch remote packs before full config load (mirrors cmd_start).
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityRoot); fErr != nil {
-			return nil, fmt.Errorf("fetching packs: %w", fErr)
-		}
+	if err := ensureLegacyNamedPacksCached(cityRoot); err != nil {
+		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
 
 	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
@@ -802,11 +795,12 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 			warnings: reloadWarnings,
 		}
 	}
-	if strictMode && len(prov.Warnings) > 0 {
+	fatalWarnings, _ := splitStrictConfigWarnings(reloadWarnings)
+	if strictMode && len(fatalWarnings) > 0 {
 		warnings := append(append([]string(nil), reloadWarnings...), reloadStrictWarningHint)
 		result := resultWithWarnings(warnings)
 		return result, reloadWarningError{
-			err:      fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings)),
+			err:      fmt.Errorf("strict mode: %d collision warning(s)", len(fatalWarnings)),
 			warnings: warnings,
 		}
 	}
@@ -819,10 +813,7 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
-	newName := newCfg.Workspace.Name
-	if newName == "" {
-		newName = filepath.Base(filepath.Dir(tomlPath))
-	}
+	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
 	}
@@ -919,6 +910,9 @@ func gracefulStopAll(
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
 	running, err := sp.ListRunning("")
+	if runtime.IsPartialListError(err) {
+		return nil, false
+	}
 	if err != nil {
 		return nil, false
 	}
@@ -1106,10 +1100,7 @@ func runController(
 	}
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
+	cityName := loadedCityName(cfg, cityPath)
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout

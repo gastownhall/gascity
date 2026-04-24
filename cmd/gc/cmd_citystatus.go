@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -65,6 +65,13 @@ type StatusSummaryJSON struct {
 	SuspendedSessions int `json:"suspended_sessions,omitempty"`
 }
 
+var (
+	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
+	openCityStoreAtForStatus      = openCityStoreAt
+)
+
+var controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
+
 // newStatusCmd creates the "gc status [path]" command.
 func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonFlag bool
@@ -93,7 +100,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -107,166 +114,20 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	return doCityStatus(sp, dops, cfg, cityPath, stdout, stderr)
 }
 
-// doCityStatus prints the city-wide status overview. Accepts injected
-// runtime.Provider for testability.
-func doCityStatus(
-	sp runtime.Provider,
-	dops drainOps,
-	cfg *config.City,
+func observeSessionTargetWithWarning(
+	cmdName string,
 	cityPath string,
-	stdout, stderr io.Writer,
-) int {
-	_ = stderr // reserved for future error reporting
-	var store beads.Store
-	if cityPath != "" {
-		if opened, err := openCityStoreAt(cityPath); err == nil {
-			store = opened
-		}
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	target string,
+	stderr io.Writer,
+) worker.LiveObservation {
+	obs, err := observeSessionTargetForStatus(cityPath, store, sp, cfg, target)
+	if err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "%s: observing %q: %v\n", cmdName, target, err) //nolint:errcheck // best-effort stderr
 	}
-
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
-
-	// Header: city name and path.
-	fmt.Fprintf(stdout, "%s  %s\n", cityName, cityPath) //nolint:errcheck // best-effort stdout
-
-	ctrl := controllerStatusForCity(cityPath)
-	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(ctrl)) //nolint:errcheck // best-effort stdout
-	fmt.Fprint(stdout, effectiveAPIStatusLine(cityPath, cfg))             //nolint:errcheck // best-effort stdout
-	for _, line := range controllerStatusGuidance(ctrl, cityPath) {
-		fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
-	}
-
-	// Suspended status.
-	if citySuspended(cfg) {
-		fmt.Fprintf(stdout, "  Suspended:  yes\n") //nolint:errcheck // best-effort stdout
-	} else {
-		fmt.Fprintf(stdout, "  Suspended:  no\n") //nolint:errcheck // best-effort stdout
-	}
-
-	// Build set of suspended rig names.
-	suspendedRigs := make(map[string]bool)
-	for _, r := range cfg.Rigs {
-		if r.Suspended {
-			suspendedRigs[r.Name] = true
-		}
-	}
-
-	// Agents section.
-	if len(cfg.Agents) > 0 {
-		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-		fmt.Fprintln(stdout, "Agents:")
-
-		var totalAgents, runningAgents int
-
-		for _, a := range cfg.Agents {
-			// Effective suspended: agent-level or inherited from rig.
-			suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
-			sp0 := scaleParamsFor(&a)
-
-			if a.SupportsInstanceExpansion() {
-				// Instance-expanding template — show header then instances.
-				maxDisplay := fmt.Sprintf("max=%d", sp0.Max)
-				if sp0.Max < 0 {
-					maxDisplay = "max=unlimited"
-				}
-				fmt.Fprintf(stdout, "  %-24sscaled (min=%d, %s)\n", a.QualifiedName(), sp0.Min, maxDisplay) //nolint:errcheck // best-effort stdout
-				for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
-					sn := cliSessionName(cityPath, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-					obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, sn)
-					status := agentStatusLine(obs.Running, dops, sn, suspended || obs.Suspended)
-					fmt.Fprintf(stdout, "    %-22s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
-					totalAgents++
-					if obs.Running {
-						runningAgents++
-					}
-				}
-			} else {
-				// Non-expanding template.
-				sn := cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-				obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, sn)
-				status := agentStatusLine(obs.Running, dops, sn, suspended || obs.Suspended)
-				fmt.Fprintf(stdout, "  %-24s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
-				totalAgents++
-				if obs.Running {
-					runningAgents++
-				}
-			}
-		}
-
-		printNamedSessionStatus(stdout, cfg, cityName, cityPath, suspendedRigs)
-
-		// Summary line.
-		fmt.Fprintln(stdout)                                                      //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "%d/%d agents running\n", runningAgents, totalAgents) //nolint:errcheck // best-effort stdout
-	}
-
-	// Rigs section.
-	if len(cfg.Rigs) > 0 {
-		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-		fmt.Fprintln(stdout, "Rigs:")
-		for _, r := range cfg.Rigs {
-			annotation := ""
-			if cityStatusRigSuspended(cityPath, store, sp, cfg, cityName, r) {
-				annotation = "  (suspended)"
-			}
-			fmt.Fprintf(stdout, "  %-24s%s%s\n", r.Name, r.Path, annotation) //nolint:errcheck // best-effort stdout
-		}
-	}
-
-	// Chat sessions count (best-effort — skip if store unavailable).
-	if store != nil {
-		if catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg); err == nil {
-			if sessions, err := catalog.List("", ""); err == nil && len(sessions) > 0 {
-				var active, suspended int
-				for _, s := range sessions {
-					switch s.State {
-					case session.StateActive:
-						active++
-					case session.StateSuspended:
-						suspended++
-					}
-				}
-				fmt.Fprintln(stdout)                                                          //nolint:errcheck // best-effort stdout
-				fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", active, suspended) //nolint:errcheck // best-effort stdout
-			}
-		}
-	}
-
-	return 0
-}
-
-func printNamedSessionStatus(stdout io.Writer, cfg *config.City, cityName, cityPath string, suspendedRigs map[string]bool) {
-	if cfg == nil || len(cfg.NamedSessions) == 0 {
-		return
-	}
-	fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-	fmt.Fprintln(stdout, "Named sessions:")
-	for i := range cfg.NamedSessions {
-		ns := &cfg.NamedSessions[i]
-		identity := ns.QualifiedName()
-		mode := ns.ModeOrDefault()
-		status := "reserved-unmaterialized"
-		if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-			if mode == "always" && namedSessionBlockedBySuspension(cfg, spec.Agent, suspendedRigs) {
-				status = "degraded blocked"
-			}
-		}
-		if store, err := openCityStoreAt(cityPath); err == nil {
-			if id, err := resolveSessionIDWithConfig(cityPath, cfg, store, identity); err == nil {
-				if bead, getErr := store.Get(id); getErr == nil {
-					if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
-						status = state
-					} else {
-						status = "materialized"
-					}
-				}
-			}
-		}
-		fmt.Fprintf(stdout, "  %-24s%s (%s)\n", identity, status, mode) //nolint:errcheck // best-effort stdout
-	}
+	return obs
 }
 
 func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, suspendedRigs map[string]bool) bool {
@@ -282,6 +143,38 @@ func namedSessionBlockedBySuspension(cfg *config.City, agentCfg *config.Agent, s
 	return agentCfg.Suspended || (agentCfg.Dir != "" && suspendedRigs[agentCfg.Dir])
 }
 
+// doCityStatus prints the city-wide status overview. Accepts injected
+// runtime.Provider for testability.
+func doCityStatus(
+	sp runtime.Provider,
+	dops drainOps,
+	cfg *config.City,
+	cityPath string,
+	stdout, stderr io.Writer,
+) int {
+	store, code := openCityStatusStore(cityPath, stderr)
+	if code != 0 {
+		return code
+	}
+
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, stderr)
+	renderCityStatusText(snapshot, dops, stdout)
+
+	if store != nil {
+		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if sessions.ActiveSessions > 0 || sessions.SuspendedSessions > 0 {
+			fmt.Fprintln(stdout)                                                                                            //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", sessions.ActiveSessions, sessions.SuspendedSessions) //nolint:errcheck // best-effort stdout
+		}
+	}
+
+	return 0
+}
+
 // doCityStatusJSON outputs city status as JSON. Accepts injected providers
 // for testability.
 func doCityStatusJSON(
@@ -290,118 +183,23 @@ func doCityStatusJSON(
 	cityPath string,
 	stdout, stderr io.Writer,
 ) int {
-	_ = stderr // reserved for future error reporting
-	var store beads.Store
-	if cityPath != "" {
-		if opened, err := openCityStoreAt(cityPath); err == nil {
-			store = opened
-		}
+	store, code := openCityStatusStore(cityPath, stderr)
+	if code != 0 {
+		return code
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
-
-	// Build suspended rig lookup.
-	suspendedRigs := make(map[string]bool)
-	for _, r := range cfg.Rigs {
-		if r.Suspended {
-			suspendedRigs[r.Name] = true
-		}
-	}
-
-	// Controller.
-	ctrl := controllerStatusForCity(cityPath)
-
-	// Agents.
-	var agents []StatusAgentJSON
-	var totalAgents, runningAgents int
-	for _, a := range cfg.Agents {
-		suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
-		sp0 := scaleParamsFor(&a)
-		scope := "city"
-		if a.Dir != "" {
-			scope = "rig"
-		}
-
-		if a.SupportsInstanceExpansion() {
-			// Instance-expanding template — emit each instance.
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
-				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
-				sn := cliSessionName(cityPath, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, sn)
-				agents = append(agents, StatusAgentJSON{
-					Name:          instanceName,
-					QualifiedName: qualifiedInstance,
-					Scope:         scope,
-					Running:       obs.Running,
-					Suspended:     suspended || obs.Suspended,
-					Pool:          nil,
-				})
-				totalAgents++
-				if obs.Running {
-					runningAgents++
-				}
-			}
-		} else {
-			// Non-expanding template.
-			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-			obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, sn)
-			agents = append(agents, StatusAgentJSON{
-				Name:          a.Name,
-				QualifiedName: a.QualifiedName(),
-				Scope:         scope,
-				Running:       obs.Running,
-				Suspended:     suspended || obs.Suspended,
-				Pool:          nil,
-			})
-			totalAgents++
-			if obs.Running {
-				runningAgents++
-			}
-		}
-	}
-
-	// Rigs.
-	var rigs []StatusRigJSON
-	for _, r := range cfg.Rigs {
-		rigs = append(rigs, StatusRigJSON{
-			Name:      r.Name,
-			Path:      r.Path,
-			Suspended: cityStatusRigSuspended(cityPath, store, sp, cfg, cityName, r),
-		})
-	}
-
-	summary := StatusSummaryJSON{TotalAgents: totalAgents, RunningAgents: runningAgents}
-
-	// Chat sessions count (best-effort).
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, stderr)
 	if store != nil {
-		if catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg); err == nil {
-			if sessions, err := catalog.List("", ""); err == nil {
-				for _, s := range sessions {
-					switch s.State {
-					case session.StateActive:
-						summary.ActiveSessions++
-					case session.StateSuspended:
-						summary.SuspendedSessions++
-					}
-				}
-			}
+		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
+		snapshot.Summary.ActiveSessions = sessions.ActiveSessions
+		snapshot.Summary.SuspendedSessions = sessions.SuspendedSessions
 	}
 
-	status := StatusJSON{
-		CityName:        cityName,
-		CityPath:        cityPath,
-		EffectiveAPIURL: resolveEffectiveAPIURL(cityPath, cfg),
-		Controller:      ctrl,
-		Suspended:       citySuspended(cfg),
-		Agents:          agents,
-		Rigs:            rigs,
-		Summary:         summary,
-	}
-
+	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -411,48 +209,53 @@ func doCityStatusJSON(
 	return 0
 }
 
-func cityStatusRigSuspended(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, cityName string, rig config.Rig) bool {
-	if rig.Suspended {
-		return true
-	}
-	if cfg == nil {
-		return false
-	}
-	tmpl := cfg.Workspace.SessionTemplate
-	var agentCount, suspendedCount int
-	for _, a := range cfg.Agents {
-		if a.Dir != rig.Name {
-			continue
-		}
-		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, scaleParamsFor(&a), &a, cityName, tmpl, sp) {
-			agentCount++
-			sn := cliSessionName(cityPath, cityName, qualifiedInstance, tmpl)
-			obs, _ := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, sn)
-			if obs.Suspended {
-				suspendedCount++
-			}
-		}
-	}
-	return agentCount > 0 && suspendedCount == agentCount
-}
-
 func controllerStatusForCity(cityPath string) ControllerJSON {
-	if pid := controllerAlive(cityPath); pid != 0 {
-		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
-	}
 	_, registered, err := registeredCityEntry(cityPath)
+	supervisorWasAlive := false
 	if err == nil && registered {
 		ctrl := ControllerJSON{Mode: "supervisor"}
 		if pid := supervisorAliveHook(); pid != 0 {
+			supervisorWasAlive = true
 			ctrl.PID = pid
 			if running, status, known := supervisorCityRunningHook(cityPath); known {
 				ctrl.Running = running
 				ctrl.Status = status
+				return ctrl
+			}
+			if supervisorAliveHook() != 0 {
+				ctrl.Status = "unknown"
+				return ctrl
 			}
 		}
-		return ctrl
+	}
+	if supervisorWasAlive {
+		if pid := controllerAliveWithin(cityPath, controllerStatusStandaloneFallbackTimeout); pid != 0 {
+			return ControllerJSON{Running: true, PID: pid, Mode: "supervisor"}
+		}
+	}
+	if pid := controllerAlive(cityPath); pid != 0 {
+		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
+	}
+	if err == nil && registered {
+		return ControllerJSON{Mode: "supervisor"}
 	}
 	return ControllerJSON{}
+}
+
+func controllerAliveWithin(cityPath string, timeout time.Duration) int {
+	if timeout <= 0 {
+		return controllerAlive(cityPath)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if pid := controllerAlive(cityPath); pid != 0 {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			return 0
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func controllerSupervisorStatusText(status string) string {
@@ -522,7 +325,7 @@ func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 		if ctrl.Running {
 			return lines
 		}
-		if ctrl.Status == "" {
+		if ctrl.Status == "" || ctrl.Status == "unknown" {
 			return append(lines, "Next: "+startCommand+" to ask the supervisor to start this city")
 		}
 		if ctrl.Status == "init_failed" {

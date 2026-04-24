@@ -1,6 +1,9 @@
 package beads
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestIsContainerType(t *testing.T) {
 	tests := []struct {
@@ -64,5 +67,30 @@ func TestIsReadyExcludedType(t *testing.T) {
 		if got := IsReadyExcludedType(tt.typ); got != tt.want {
 			t.Errorf("IsReadyExcludedType(%q) = %v, want %v", tt.typ, got, tt.want)
 		}
+	}
+}
+
+func TestListQueryCreatedBeforeFiltersBeforeLimit(t *testing.T) {
+	base := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	items := []Bead{
+		{ID: "newer-2", Title: "newer 2", Status: "closed", CreatedAt: base.Add(2 * time.Minute), Labels: []string{"order-run:digest"}},
+		{ID: "newer-1", Title: "newer 1", Status: "closed", CreatedAt: base.Add(time.Minute), Labels: []string{"order-run:digest"}},
+		{ID: "older-2", Title: "older 2", Status: "closed", CreatedAt: base.Add(-2 * time.Minute), Labels: []string{"order-run:digest"}},
+		{ID: "older-1", Title: "older 1", Status: "closed", CreatedAt: base.Add(-time.Minute), Labels: []string{"order-run:digest"}},
+	}
+
+	got := ApplyListQuery(items, ListQuery{
+		Label:         "order-run:digest",
+		CreatedBefore: base,
+		Limit:         1,
+		IncludeClosed: true,
+		Sort:          SortCreatedDesc,
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].ID != "older-1" {
+		t.Fatalf("got[0].ID = %q, want older-1", got[0].ID)
 	}
 }

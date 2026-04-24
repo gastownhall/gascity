@@ -53,6 +53,7 @@ The Dog should watch for and flag:
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-reaper"
 version = 2
+contract = "graph.v2"
 
 [vars]
 [vars.max_age]

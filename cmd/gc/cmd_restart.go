@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -97,7 +96,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -124,10 +123,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
+	cityName := loadedCityName(cfg, cityPath)
 	sp := newSessionProvider()
 	rec := openCityRecorder(stderr)
 	store, _ := openCityStoreAt(cityPath)

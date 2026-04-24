@@ -487,7 +487,7 @@ func validateStage2TargetClaimants(
 			// any target. Not a conflict.
 			continue
 		}
-		otherKind := strings.TrimSpace(otherResolved.Kind)
+		otherKind := resolvedProviderLaunchFamily(otherResolved)
 		if otherKind != want.Provider {
 			// Different provider family — targets live in disjoint
 			// subtrees (`.mcp.json` / `.gemini/settings.json` /
@@ -550,7 +550,7 @@ func resolveProjectedMCPForTarget(
 			}
 			return resolvedMCPProjection{}, err
 		}
-		providerKind = strings.TrimSpace(resolved.Kind)
+		providerKind = resolvedProviderLaunchFamily(resolved)
 	}
 	catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, agent, identity, workDir, providerKind)
 	if err != nil {

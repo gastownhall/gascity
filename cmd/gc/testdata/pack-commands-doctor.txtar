@@ -15,6 +15,7 @@ env GC_SESSION=fake
 # Initialize a real city scaffold, then swap in the pack-import config.
 exec gc init $WORK/city
 cp $WORK/city.toml.custom $WORK/city/city.toml
+cp $WORK/site.toml.custom $WORK/city/.gc/site.toml
 
 cd $WORK/city
 
@@ -51,6 +52,9 @@ name = "testcity"
 [imports.ops]
 source = "../packs/ops"
 transitive = false
+
+-- site.toml.custom --
+workspace_name = "testcity"
 
 -- packs/ops/pack.toml --
 [pack]

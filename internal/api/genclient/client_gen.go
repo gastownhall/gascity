@@ -244,6 +244,7 @@ type AgentOutputResponse struct {
 
 // AgentPatch defines model for AgentPatch.
 type AgentPatch struct {
+	AppendFragments         *[]string         `json:"AppendFragments"`
 	Attach                  *bool             `json:"Attach"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
@@ -1511,6 +1512,7 @@ type MonitorFeedItemResponse struct {
 	ScopeRef           string  `json:"scope_ref"`
 	StartedAt          string  `json:"started_at"`
 	Status             string  `json:"status"`
+	StoreRef           *string `json:"store_ref,omitempty"`
 	Target             string  `json:"target"`
 	Title              string  `json:"title"`
 	Type               string  `json:"type"`
@@ -1544,7 +1546,7 @@ type OptionChoiceDTO struct {
 
 // OrderCheckListBody defines model for OrderCheckListBody.
 type OrderCheckListBody struct {
-	// Checks Order gate evaluations.
+	// Checks Order trigger evaluations.
 	Checks *[]OrderCheckResponse `json:"checks"`
 }
 
@@ -1565,6 +1567,7 @@ type OrderHistoryDetailResponse struct {
 	CreatedAt string    `json:"created_at"`
 	Labels    *[]string `json:"labels"`
 	Output    string    `json:"output"`
+	StoreRef  string    `json:"store_ref"`
 }
 
 // OrderHistoryEntry defines model for OrderHistoryEntry.
@@ -1581,6 +1584,7 @@ type OrderHistoryEntry struct {
 	Rig           *string   `json:"rig,omitempty"`
 	ScopedName    string    `json:"scoped_name"`
 	Signal        *string   `json:"signal,omitempty"`
+	StoreRef      string    `json:"store_ref"`
 	WispRootId    *string   `json:"wisp_root_id,omitempty"`
 }
 
@@ -1604,17 +1608,19 @@ type OrderResponse struct {
 	Enabled       bool    `json:"enabled"`
 	Exec          *string `json:"exec,omitempty"`
 	Formula       *string `json:"formula,omitempty"`
-	Gate          string  `json:"gate"`
-	Interval      *string `json:"interval,omitempty"`
-	Name          string  `json:"name"`
-	On            *string `json:"on,omitempty"`
-	Pool          *string `json:"pool,omitempty"`
-	Rig           *string `json:"rig,omitempty"`
-	Schedule      *string `json:"schedule,omitempty"`
-	ScopedName    string  `json:"scoped_name"`
-	Timeout       *string `json:"timeout,omitempty"`
-	TimeoutMs     int64   `json:"timeout_ms"`
-	Type          string  `json:"type"`
+	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
+	Gate       *string `json:"gate,omitempty"`
+	Interval   *string `json:"interval,omitempty"`
+	Name       string  `json:"name"`
+	On         *string `json:"on,omitempty"`
+	Pool       *string `json:"pool,omitempty"`
+	Rig        *string `json:"rig,omitempty"`
+	Schedule   *string `json:"schedule,omitempty"`
+	ScopedName string  `json:"scoped_name"`
+	Timeout    *string `json:"timeout,omitempty"`
+	TimeoutMs  int64   `json:"timeout_ms"`
+	Trigger    *string `json:"trigger,omitempty"`
+	Type       string  `json:"type"`
 }
 
 // OrdersFeedBody defines model for OrdersFeedBody.
@@ -1723,8 +1729,14 @@ type ProviderCreateInputBody struct {
 	// Args Command arguments.
 	Args *[]string `json:"args,omitempty"`
 
-	// Command Provider command binary.
-	Command string `json:"command"`
+	// ArgsAppend Arguments appended after inherited/base args.
+	ArgsAppend *[]string `json:"args_append,omitempty"`
+
+	// Base Optional provider base for inheritance.
+	Base *string `json:"base,omitempty"`
+
+	// Command Provider command binary. Omit for base-only descendants.
+	Command *string `json:"command,omitempty"`
 
 	// DisplayName Human-readable display name.
 	DisplayName *string `json:"display_name,omitempty"`
@@ -1734,6 +1746,9 @@ type ProviderCreateInputBody struct {
 
 	// Name Provider name.
 	Name string `json:"name"`
+
+	// OptionsSchemaMerge Options schema merge mode across inheritance chain.
+	OptionsSchemaMerge *string `json:"options_schema_merge,omitempty"`
 
 	// PromptFlag Flag for prompt delivery.
 	PromptFlag *string `json:"prompt_flag,omitempty"`
@@ -1765,15 +1780,18 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	Args         *[]string         `json:"Args"`
-	Command      *string           `json:"Command"`
-	Env          map[string]string `json:"Env"`
-	EnvRemove    *[]string         `json:"EnvRemove"`
-	Name         string            `json:"Name"`
-	PromptFlag   *string           `json:"PromptFlag"`
-	PromptMode   *string           `json:"PromptMode"`
-	ReadyDelayMs *int64            `json:"ReadyDelayMs"`
-	Replace      bool              `json:"Replace"`
+	Args               *[]string         `json:"Args"`
+	ArgsAppend         *[]string         `json:"ArgsAppend"`
+	Base               *string           `json:"Base"`
+	Command            *string           `json:"Command"`
+	Env                map[string]string `json:"Env"`
+	EnvRemove          *[]string         `json:"EnvRemove"`
+	Name               string            `json:"Name"`
+	OptionsSchemaMerge *string           `json:"OptionsSchemaMerge"`
+	PromptFlag         *string           `json:"PromptFlag"`
+	PromptMode         *string           `json:"PromptMode"`
+	ReadyDelayMs       *int64            `json:"ReadyDelayMs"`
+	Replace            bool              `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
@@ -1824,8 +1842,9 @@ type ProviderPublicResponse struct {
 
 // ProviderReadiness defines model for ProviderReadiness.
 type ProviderReadiness struct {
-	DisplayName string `json:"display_name"`
-	Status      string `json:"status"`
+	Detail      *string `json:"detail,omitempty"`
+	DisplayName string  `json:"display_name"`
+	Status      string  `json:"status"`
 }
 
 // ProviderReadinessResponse defines model for ProviderReadinessResponse.
@@ -1863,6 +1882,12 @@ type ProviderUpdateInputBody struct {
 	// Args Command arguments.
 	Args *[]string `json:"args,omitempty"`
 
+	// ArgsAppend Arguments appended after inherited/base args.
+	ArgsAppend *[]string `json:"args_append,omitempty"`
+
+	// Base Provider base for inheritance.
+	Base *string `json:"base,omitempty"`
+
 	// Command Provider command binary.
 	Command *string `json:"command,omitempty"`
 
@@ -1871,6 +1896,9 @@ type ProviderUpdateInputBody struct {
 
 	// Env Environment variables.
 	Env *map[string]string `json:"env,omitempty"`
+
+	// OptionsSchemaMerge Options schema merge mode across inheritance chain.
+	OptionsSchemaMerge *string `json:"options_schema_merge,omitempty"`
 
 	// PromptFlag Flag for prompt delivery.
 	PromptFlag *string `json:"prompt_flag,omitempty"`
@@ -1894,10 +1922,11 @@ type PublishReceipt struct {
 
 // ReadinessItem defines model for ReadinessItem.
 type ReadinessItem struct {
-	DisplayName string `json:"display_name"`
-	Kind        string `json:"kind"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
+	Detail      *string `json:"detail,omitempty"`
+	DisplayName string  `json:"display_name"`
+	Kind        string  `json:"kind"`
+	Name        string  `json:"name"`
+	Status      string  `json:"status"`
 }
 
 // ReadinessResponse defines model for ReadinessResponse.
@@ -2582,7 +2611,10 @@ type WorkflowSnapshotResponse struct {
 
 // WorkspaceResponse defines model for WorkspaceResponse.
 type WorkspaceResponse struct {
+	DeclaredName    *string `json:"declared_name,omitempty"`
+	DeclaredPrefix  *string `json:"declared_prefix,omitempty"`
 	Name            string  `json:"name"`
+	Prefix          *string `json:"prefix,omitempty"`
 	Provider        *string `json:"provider,omitempty"`
 	SessionTemplate *string `json:"session_template,omitempty"`
 	Suspended       bool    `json:"suspended"`
@@ -2590,7 +2622,7 @@ type WorkspaceResponse struct {
 
 // GetV0CityByCityNameAgentByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByBaseOutput.
 type GetV0CityByCityNameAgentByBaseOutputParams struct {
-	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
@@ -2602,7 +2634,7 @@ type PostV0CityByCityNameAgentByBaseByActionParamsAction string
 
 // GetV0CityByCityNameAgentByDirByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByDirByBaseOutput.
 type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
-	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Before Message UUID cursor for loading older messages.
@@ -2912,6 +2944,12 @@ type ReplyMailParams struct {
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
 }
 
+// GetV0CityByCityNameOrderHistoryByBeadIdParams defines parameters for GetV0CityByCityNameOrderHistoryByBeadId.
+type GetV0CityByCityNameOrderHistoryByBeadIdParams struct {
+	// StoreRef Store reference for disambiguating store-local bead IDs.
+	StoreRef *string `form:"store_ref,omitempty" json:"store_ref,omitempty"`
+}
+
 // GetV0CityByCityNameOrdersFeedParams defines parameters for GetV0CityByCityNameOrdersFeed.
 type GetV0CityByCityNameOrdersFeedParams struct {
 	// ScopeKind Scope kind (city or rig).
@@ -2992,7 +3030,7 @@ type StreamSessionParams struct {
 
 // GetV0CityByCityNameSessionByIdTranscriptParams defines parameters for GetV0CityByCityNameSessionByIdTranscript.
 type GetV0CityByCityNameSessionByIdTranscriptParams struct {
-	// Tail Number of recent compaction segments to return. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
+	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
 	// Format Transcript format: conversation (default) or raw.
@@ -3836,7 +3874,7 @@ type ClientInterface interface {
 	ReplyMail(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrderHistoryByBeadId request
-	GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrderByName request
 	GetV0CityByCityNameOrderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -5286,8 +5324,8 @@ func (c *Client) ReplyMail(ctx context.Context, cityName string, id string, para
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(c.Server, cityName, beadId)
+func (c *Client) GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(c.Server, cityName, beadId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -10857,7 +10895,7 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 }
 
 // NewGetV0CityByCityNameOrderHistoryByBeadIdRequest generates requests for GetV0CityByCityNameOrderHistoryByBeadId
-func NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(server string, cityName string, beadId string) (*http.Request, error) {
+func NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(server string, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -10887,6 +10925,28 @@ func NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(server string, cityName s
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.StoreRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "store_ref", *params.StoreRef, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -14654,7 +14714,7 @@ type ClientWithResponsesInterface interface {
 	ReplyMailWithResponse(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*ReplyMailResponse, error)
 
 	// GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request
-	GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error)
+	GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error)
 
 	// GetV0CityByCityNameOrderByNameWithResponse request
 	GetV0CityByCityNameOrderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderByNameResponse, error)
@@ -19034,8 +19094,8 @@ func (c *ClientWithResponses) ReplyMailWithResponse(ctx context.Context, cityNam
 }
 
 // GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request returning *GetV0CityByCityNameOrderHistoryByBeadIdResponse
-func (c *ClientWithResponses) GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error) {
-	rsp, err := c.GetV0CityByCityNameOrderHistoryByBeadId(ctx, cityName, beadId, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameOrderHistoryByBeadId(ctx, cityName, beadId, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

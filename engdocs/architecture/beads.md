@@ -202,7 +202,7 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
 | `cmd/gc/` (CLI commands) | `openCityStore` creates the appropriate Store; used by convoy, sling, order, handoff, and hook commands |
 | `internal/mail/beadmail` | Implements mail.Provider backed by beads.Store -- mail messages are beads with type `"message"` |
 | Formula-aware backends | Molecule creation and step materialization are delegated to the configured store backend |
-| `internal/orders` | Order dispatch uses Store for cooldown tracking (`ListByLabel` with `order-run:` labels) and cursor-based event gates |
+| `internal/orders` | Order dispatch uses Store for cooldown tracking (`ListByLabel` with `order-run:` labels) and cursor-based event triggers |
 | `internal/doctor` | Health checks verify Store accessibility for both city-level and per-rig bead databases |
 | `cmd/gc/cmd_convoy.go` | Convoy operations (create, list, status, add, close, check, stranded) all operate through Store |
 | `cmd/gc/cmd_handoff.go` | Work handoff between agents reads and writes beads through Store |

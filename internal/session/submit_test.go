@@ -10,6 +10,84 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// TestProviderKind_PreferenceOrder exercises the metadata preference
+// used to derive a session bead's family: builtin_ancestor > provider_kind
+// > provider. This keeps wrapped custom aliases (e.g. claude-max with
+// base = "builtin:claude", stamped as builtin_ancestor="claude" at
+// session-bead creation) routed through the same claude-family branches
+// as literal "claude".
+func TestProviderKind_PreferenceOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{
+			name: "builtin_ancestor wins over provider_kind and provider",
+			meta: map[string]string{
+				"builtin_ancestor": "claude",
+				"provider_kind":    "claude-max",
+				"provider":         "claude-max",
+			},
+			want: "claude",
+		},
+		{
+			name: "provider_kind wins over provider when builtin_ancestor absent",
+			meta: map[string]string{
+				"provider_kind": "claude",
+				"provider":      "custom-alias",
+			},
+			want: "claude",
+		},
+		{
+			name: "provider is the last-resort fallback",
+			meta: map[string]string{
+				"provider": "codex",
+			},
+			want: "codex",
+		},
+		{
+			name: "empty builtin_ancestor falls through",
+			meta: map[string]string{
+				"builtin_ancestor": "",
+				"provider_kind":    "gemini",
+				"provider":         "raw",
+			},
+			want: "gemini",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerKind(beads.Bead{Metadata: tc.meta})
+			if got != tc.want {
+				t.Errorf("providerKind(%+v) = %q, want %q", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWaitsForIdleAfterInterrupt_WrappedClaude verifies that a session
+// bead whose builtin_ancestor = "claude" (e.g. claude-max wrapping the
+// built-in) triggers the same wait-for-idle-after-interrupt branch that
+// a literal "claude" session does.
+func TestWaitsForIdleAfterInterrupt_WrappedClaude(t *testing.T) {
+	wrapped := beads.Bead{Metadata: map[string]string{
+		"builtin_ancestor": "claude",
+		"provider":         "claude-max",
+	}}
+	if !waitsForIdleAfterInterrupt(wrapped) {
+		t.Error("wrapped claude (builtin_ancestor=claude) should wait for idle after interrupt")
+	}
+	// Control: a wrapped codex must NOT trigger the claude-only branch.
+	wrappedCodex := beads.Bead{Metadata: map[string]string{
+		"builtin_ancestor": "codex",
+		"provider":         "codex-mini",
+	}}
+	if waitsForIdleAfterInterrupt(wrappedCodex) {
+		t.Error("wrapped codex (builtin_ancestor=codex) should not trigger claude-only branch")
+	}
+}
+
 func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -393,6 +471,52 @@ func TestSubmitFollowUpOnSuspendedSessionFallsBackToImmediateSend(t *testing.T) 
 	}
 	if !found {
 		t.Fatalf("calls = %#v, want NudgeNow(send this now)", sp.Calls)
+	}
+}
+
+func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "state", string(StateAsleep)); err != nil {
+		t.Fatalf("SetMetadata(state): %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "wake and send", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(follow_up) unexpectedly queued for asleep session")
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after follow_up on asleep session")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("pending queued submits = %d, want 0", len(state.Pending))
+	}
+	found := false
+	for _, call := range sp.Calls {
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "wake and send" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("calls = %#v, want NudgeNow(wake and send)", sp.Calls)
 	}
 }
 

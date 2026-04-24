@@ -10,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // isTestBinary reports whether the current process is a Go test binary.
@@ -146,7 +147,7 @@ func LoadConfig(path string) (Config, error) {
 // silent fallback to the user's real ~/.gc directory.
 func DefaultHome() string {
 	if v := os.Getenv("GC_HOME"); v != "" {
-		return v
+		return pathutil.NormalizePathForCompare(v)
 	}
 	if isTestBinary() {
 		panic("supervisor.DefaultHome: GC_HOME must be set during tests to prevent host supervisor interference")
@@ -168,7 +169,7 @@ func UsesIsolatedGCHomeOverride() bool {
 	if gcHome == "" {
 		return false
 	}
-	return filepath.Clean(gcHome) != filepath.Clean(builtinDefaultHome())
+	return pathutil.NormalizePathForCompare(gcHome) != pathutil.NormalizePathForCompare(builtinDefaultHome())
 }
 
 // RuntimeDir returns the directory for ephemeral runtime files (lock,
@@ -242,14 +243,14 @@ func shouldSeedIsolatedSupervisorConfig(path string) bool {
 	if gcHome == "" {
 		return false
 	}
-	if !samePath(path, ConfigPath()) {
+	if !pathutil.SamePath(path, ConfigPath()) {
 		return false
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return true
 	}
-	return !samePath(gcHome, filepath.Join(home, ".gc"))
+	return !pathutil.SamePath(gcHome, filepath.Join(home, ".gc"))
 }
 
 func reserveLoopbackPort() (int, error) {
@@ -263,23 +264,4 @@ func reserveLoopbackPort() (int, error) {
 		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
 	}
 	return addr.Port, nil
-}
-
-func samePath(a, b string) bool {
-	a = canonicalPath(a)
-	b = canonicalPath(b)
-	return a == b
-}
-
-func canonicalPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		p = resolved
-	}
-	return filepath.Clean(p)
 }

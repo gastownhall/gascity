@@ -22,7 +22,7 @@ tutorial prose are merged together.
   page renders them later without first establishing the helper agent or those
   sessions.
 - Tutorial 03: page driver waits for `mayor` to become peekable and for
-  `gc session logs mayor --tail 1` to become readable before the visible
+  `gc session logs mayor --tail 2` to become readable before the visible
   peek/log steps because native Claude transcript files can lag session start.
 - Tutorial 04: page driver nudges the mayor after `gc mail send` so the visible
   `gc session peek mayor --lines 6` step can exercise the communication path in

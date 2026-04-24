@@ -58,14 +58,15 @@ func FindAgent(cfg *City, identity string) *Agent {
 }
 
 // EffectiveCityName returns the name used for deterministic runtime naming.
-// When workspace.name is omitted, callers may pass a fallback derived from the
-// city path; loaded configs also carry ResolvedWorkspaceName for this purpose.
+// Loaded configs should populate ResolvedWorkspaceName with the effective
+// site-bound/declared/basename result; raw parsed configs may still rely on
+// workspace.name or the provided fallback.
 func EffectiveCityName(cfg *City, fallback string) string {
 	if cfg != nil {
-		if name := strings.TrimSpace(cfg.Workspace.Name); name != "" {
+		if name := strings.TrimSpace(cfg.ResolvedWorkspaceName); name != "" {
 			return name
 		}
-		if name := strings.TrimSpace(cfg.ResolvedWorkspaceName); name != "" {
+		if name := strings.TrimSpace(cfg.Workspace.Name); name != "" {
 			return name
 		}
 	}
@@ -73,8 +74,8 @@ func EffectiveCityName(cfg *City, fallback string) string {
 }
 
 // EffectiveCityName returns the effective deterministic naming prefix for the
-// loaded config. It is empty only when neither workspace.name nor a derived
-// city-root fallback is available.
+// loaded config. It is empty only when neither site-bound/legacy workspace
+// identity nor a derived city-root fallback is available.
 func (c *City) EffectiveCityName() string {
 	return EffectiveCityName(c, "")
 }

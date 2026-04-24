@@ -3,6 +3,7 @@ package pathutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -39,6 +40,46 @@ func TestSamePathSymlink(t *testing.T) {
 	}
 	if !SamePath(dir, link) {
 		t.Errorf("expected same path through symlink: %q vs %q", dir, link)
+	}
+}
+
+func TestNormalizePathForCompareResolvesSymlinkAncestorForMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real-parent")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(root, "link-parent")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got := NormalizePathForCompare(filepath.Join(linkParent, "missing", "gc-home"))
+	want := filepath.Join(realParent, "missing", "gc-home")
+	if got != want {
+		t.Fatalf("NormalizePathForCompare() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizePathForCompareCollapsesDarwinPrivateVarAlias(t *testing.T) {
+	got := NormalizePathForCompare("/private/var/folders/example/gc-home")
+	want := filepath.Clean("/private/var/folders/example/gc-home")
+	if runtime.GOOS == "darwin" {
+		want = filepath.Clean("/var/folders/example/gc-home")
+	}
+	if got != want {
+		t.Fatalf("NormalizePathForCompare() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizePathForCompareCollapsesDarwinPrivateTmpAlias(t *testing.T) {
+	got := NormalizePathForCompare("/private/tmp/gc-home")
+	want := filepath.Clean("/private/tmp/gc-home")
+	if runtime.GOOS == "darwin" {
+		want = filepath.Clean("/tmp/gc-home")
+	}
+	if got != want {
+		t.Fatalf("NormalizePathForCompare() = %q, want %q", got, want)
 	}
 }
 

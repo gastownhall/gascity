@@ -372,18 +372,19 @@ func reconcileSessionBeadsTraced(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
-					template := normalizedSessionTemplate(*session, cfg)
-					if template == "" {
-						template = session.Metadata["template"]
+					if beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout) {
+						if trace != nil {
+							template := normalizedSessionTemplate(*session, cfg)
+							if template == "" {
+								template = session.Metadata["template"]
+							}
+							trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
+								"store_query_partial": storeQueryPartial,
+								"provider_alive":      providerAlive,
+							}, nil, "")
+						}
+						fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 					}
-					if trace != nil {
-						trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
-							"store_query_partial": storeQueryPartial,
-							"provider_alive":      providerAlive,
-						}, nil, "")
-					}
-					beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
-					fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				} else {
 					// Not running and not desired — close the bead.
 					reason := "orphaned"
@@ -656,6 +657,25 @@ func reconcileSessionBeadsTraced(
 						}
 						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
 						if isNamedSessionBead(*session) {
+							// Defer config-drift restart for named sessions
+							// that are actively in use (pending interaction,
+							// tmux-attached, or recent activity). This prevents
+							// draining a working agent mid-task without graceful
+							// handoff. See gastownhall/gascity#119.
+							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(*session, store, sp, name, clk, storedHash+":"+currentHash)
+							if deferErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
+							}
+							if active {
+								if trace != nil {
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), traceRecordPayload{
+										"stored_hash":   storedHash,
+										"current_hash":  currentHash,
+										"active_reason": activeReason,
+									}, nil, "")
+								}
+								continue
+							}
 							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", traceRecordPayload{
@@ -673,7 +693,7 @@ func reconcileSessionBeadsTraced(
 						}
 						// Defer ordinary-session config-drift drain while a
 						// user is attached. Named-session config drift is
-						// non-deferrable and is handled above.
+						// deferred when actively in use (see above).
 						if pendingInteractionKeepsAwake(*session, sp, name, clk) {
 							drainCancelled := false
 							if dt != nil {
@@ -730,21 +750,28 @@ func reconcileSessionBeadsTraced(
 						if ddt <= 0 {
 							ddt = defaultDrainTimeout
 						}
-						beginSessionDrain(*session, sp, dt, "config-drift", clk, ddt)
-						fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
-						if trace != nil {
-							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", traceRecordPayload{
-								"stored_hash":  storedHash,
-								"current_hash": currentHash,
-							}, nil, "")
+						if beginSessionDrain(*session, sp, dt, "config-drift", clk, ddt) {
+							fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							rec.Record(events.Event{
+								Type:    events.SessionDraining,
+								Actor:   "gc",
+								Subject: tp.DisplayName(),
+								Message: "config drift detected",
+							})
 						}
-						rec.Record(events.Event{
-							Type:    events.SessionDraining,
-							Actor:   "gc",
-							Subject: tp.DisplayName(),
-							Message: "config drift detected",
-						})
 						continue
+					}
+
+					if isNamedSessionBead(*session) {
+						if err := clearNamedSessionConfigDriftDeferral(*session, store); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: clearing config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+						}
 					}
 
 					// Core config matches — check live-only drift.
@@ -961,12 +988,13 @@ func reconcileSessionBeadsTraced(
 					markIdleSleepPending(target.session, store)
 				}
 			}
-			beginSessionDrain(*target.session, sp, dt, reason, clk, defaultDrainTimeout)
-			fmt.Fprintf(stdout, "Draining session '%s': %s\n", target.session.Metadata["session_name"], reason) //nolint:errcheck
-			if trace != nil {
-				trace.recordDecision("reconciler.session.drain", target.tp.TemplateName, target.session.Metadata["session_name"], reason, "drain", traceRecordPayload{
-					"sleep_intent": intent,
-				}, nil, "")
+			if beginSessionDrain(*target.session, sp, dt, reason, clk, defaultDrainTimeout) {
+				fmt.Fprintf(stdout, "Draining session '%s': %s\n", target.session.Metadata["session_name"], reason) //nolint:errcheck
+				if trace != nil {
+					trace.recordDecision("reconciler.session.drain", target.tp.TemplateName, target.session.Metadata["session_name"], reason, "drain", traceRecordPayload{
+						"sleep_intent": intent,
+					}, nil, "")
+				}
 			}
 		}
 
@@ -1104,7 +1132,7 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 				continue
 			}
 			seen[key] = struct{}{}
-			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
+			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
 			if err != nil {
 				return false, err
 			}
@@ -1117,6 +1145,140 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 		}
 	}
 	return false, nil
+}
+
+// namedSessionActivityThreshold is the maximum age of the last reliable
+// activity reference for a named session to be considered "actively in use".
+//
+// namedSessionRecentActivityConfigDriftDeferralLimit bounds recent-activity
+// deferrals for one fixed drift episode. Recent output is only a heuristic,
+// unlike an attachment or pending interaction, so it should not hide config
+// drift indefinitely.
+const (
+	namedSessionActivityThreshold                      = 2 * time.Minute
+	namedSessionRecentActivityConfigDriftDeferralLimit = 30 * time.Second
+	namedSessionConfigDriftDeferredAtMetadata          = "config_drift_deferred_at"
+	namedSessionConfigDriftDeferredKeyMetadata         = "config_drift_deferred_key"
+)
+
+// namedSessionActivelyInUse returns true if a named session is currently
+// in active use and should not be immediately drained for config-drift.
+// It checks three positive-use signals:
+//  1. A pending interaction (user waiting for response)
+//  2. Tmux session attachment
+//  3. A recent reliable activity timestamp within the activity threshold
+//
+// If the provider cannot report activity, the function is conservative and
+// treats the live named session as active because config-drift cannot prove the
+// session is idle.
+func namedSessionActivelyInUse(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) bool {
+	_, active := namedSessionActiveUseReason(session, sp, name, clk)
+	return active
+}
+
+func shouldDeferNamedSessionConfigDrift(session beads.Bead, store beads.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
+	reason, active := namedSessionActiveUseReason(session, sp, name, clk)
+	if !active {
+		return "", false, nil
+	}
+	switch reason {
+	case "activity_unknown":
+		return boundedNamedSessionConfigDriftDeferral(session, store, clk, driftKey, reason, namedSessionActivityThreshold)
+	case "recent_activity":
+		return boundedNamedSessionConfigDriftDeferral(session, store, clk, driftKey, reason, namedSessionRecentActivityConfigDriftDeferralLimit)
+	}
+	return reason, true, nil
+}
+
+func boundedNamedSessionConfigDriftDeferral(
+	session beads.Bead,
+	store beads.Store,
+	clk clock.Clock,
+	driftKey string,
+	reason string,
+	limit time.Duration,
+) (string, bool, error) {
+	if clk == nil {
+		return reason, true, nil
+	}
+	now := clk.Now().UTC()
+	if session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] != driftKey {
+		if err := recordNamedSessionConfigDriftDeferredAt(session, store, now, driftKey); err != nil {
+			return "", false, err
+		}
+		return reason, true, nil
+	}
+	raw := session.Metadata[namedSessionConfigDriftDeferredAtMetadata]
+	if raw == "" {
+		if err := recordNamedSessionConfigDriftDeferredAt(session, store, now, driftKey); err != nil {
+			return "", false, err
+		}
+		return reason, true, nil
+	}
+	deferredAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		if err := recordNamedSessionConfigDriftDeferredAt(session, store, now, driftKey); err != nil {
+			return "", false, err
+		}
+		return reason, true, nil
+	}
+	if now.Sub(deferredAt) < limit {
+		return reason, true, nil
+	}
+	return "", false, nil
+}
+
+func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, store beads.Store, t time.Time, driftKey string) error {
+	if store == nil || session.ID == "" {
+		return nil
+	}
+	return store.SetMetadataBatch(session.ID, map[string]string{
+		namedSessionConfigDriftDeferredAtMetadata:  t.UTC().Format(time.RFC3339),
+		namedSessionConfigDriftDeferredKeyMetadata: driftKey,
+	})
+}
+
+func clearNamedSessionConfigDriftDeferral(session beads.Bead, store beads.Store) error {
+	if store == nil || session.ID == "" {
+		return nil
+	}
+	if session.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" &&
+		session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		return nil
+	}
+	return store.SetMetadataBatch(session.ID, map[string]string{
+		namedSessionConfigDriftDeferredAtMetadata:  "",
+		namedSessionConfigDriftDeferredKeyMetadata: "",
+	})
+}
+
+func namedSessionActiveUseReason(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
+	if sp == nil || name == "" {
+		return "", false
+	}
+	// Pending interaction means a user is actively waiting.
+	if pendingInteractionKeepsAwake(session, sp, name, clk) {
+		return "pending_interaction", true
+	}
+	// Tmux attachment means a user is watching.
+	if sp.IsAttached(name) {
+		return "attached", true
+	}
+	// Providers that cannot report activity for this routed session cannot
+	// prove a live named session is idle. Defer config-drift rather than
+	// stopping a potentially working headless agent mid-task.
+	sleepCapability := resolveSleepCapability(sp, name)
+	if sleepCapability == runtime.SessionSleepCapabilityDisabled ||
+		(sleepCapability == runtime.SessionSleepCapabilityTimedOnly && !sp.Capabilities().CanReportActivity) {
+		return "activity_unknown", true
+	}
+	// Recent activity means the agent may still be in active use.
+	if clk != nil {
+		if lastActivity, err := sp.GetLastActivity(name); err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
+			return "recent_activity", true
+		}
+	}
+	return "", false
 }
 
 func resetConfiguredNamedSessionForConfigDrift(
@@ -1144,6 +1306,8 @@ func resetConfiguredNamedSessionForConfigDrift(
 		newSessionKey = newKey
 	}
 	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
+	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
+	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return
@@ -1323,6 +1487,7 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		assigned, err := store.List(beads.ListQuery{
 			Assignee: assignee,
 			Status:   "in_progress",
+			Live:     true,
 			Sort:     beads.SortCreatedDesc,
 		})
 		if err != nil {

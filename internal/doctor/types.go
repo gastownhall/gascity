@@ -49,6 +49,11 @@ type CheckResult struct {
 	Details []string
 	// FixHint is a suggestion shown when the check fails and cannot auto-fix.
 	FixHint string
+	// FixError describes why an attempted automatic remediation failed.
+	FixError string
+	// FixAttempted is true when automatic remediation ran but did not
+	// leave the check passing.
+	FixAttempted bool
 	// Fixed is true when --fix successfully remediated the issue.
 	Fixed bool
 }

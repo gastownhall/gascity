@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Session is the resolved view of a Claude JSONL session file.
@@ -455,12 +458,27 @@ func FindSessionFileByID(searchPaths []string, workDir, sessionID string) string
 	if fileName == "" {
 		return ""
 	}
-	slug := ProjectSlug(workDir)
+	return findSessionFileByIDForCandidates(searchPaths, claudeProjectSlugCandidates(workDir), fileName)
+}
+
+func findSessionFileByIDForCandidates(searchPaths, slugs []string, fileName string) string {
 	for _, base := range searchPaths {
-		path := filepath.Join(base, slug, fileName)
-		info, err := os.Stat(path)
-		if err == nil && !info.IsDir() {
-			return path
+		var bestPath string
+		var bestTime int64
+		for _, slug := range slugs {
+			path := filepath.Join(base, slug, fileName)
+			info, err := os.Stat(path)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			mt := info.ModTime().UnixNano()
+			if mt > bestTime {
+				bestTime = mt
+				bestPath = path
+			}
+		}
+		if bestPath != "" {
+			return bestPath
 		}
 	}
 	return ""
@@ -470,12 +488,27 @@ func findClaudeLatestSessionFile(searchPaths []string, workDir string) string {
 	if workDir == "" {
 		return ""
 	}
-	slug := ProjectSlug(workDir)
+	return findClaudeLatestSessionFileForCandidates(searchPaths, claudeProjectSlugCandidates(workDir))
+}
+
+func findClaudeLatestSessionFileForCandidates(searchPaths, slugs []string) string {
 	for _, base := range searchPaths {
-		path := filepath.Join(base, slug, "latest-session.jsonl")
-		info, err := os.Stat(path)
-		if err == nil && !info.IsDir() {
-			return path
+		var bestPath string
+		var bestTime int64
+		for _, slug := range slugs {
+			path := filepath.Join(base, slug, "latest-session.jsonl")
+			info, err := os.Stat(path)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			mt := info.ModTime().UnixNano()
+			if mt > bestTime {
+				bestTime = mt
+				bestPath = path
+			}
+		}
+		if bestPath != "" {
+			return bestPath
 		}
 	}
 	return ""
@@ -490,31 +523,37 @@ func safeSessionLogFileName(sessionID string) string {
 }
 
 // findSlugSessionFile searches slug-organized search paths for the most
-// recently modified JSONL session file. Files are stored at
+// recently modified JSONL session file across all matching Claude
+// project slug candidates. Files are stored at
 // {searchPath}/{slug}/{sessionID}.jsonl where slug is the working
 // directory path with "/" and "." replaced by "-".
 func findSlugSessionFile(searchPaths []string, workDir string) string {
-	slug := ProjectSlug(workDir)
+	return findSlugSessionFileForCandidates(searchPaths, claudeProjectSlugCandidates(workDir))
+}
+
+func findSlugSessionFileForCandidates(searchPaths, slugs []string) string {
 	var globalBestPath string
 	var globalBestTime int64
-	for _, base := range searchPaths {
-		dir := filepath.Join(base, slug)
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-				continue
-			}
-			info, err := e.Info()
+	for _, slug := range slugs {
+		for _, base := range searchPaths {
+			dir := filepath.Join(base, slug)
+			entries, err := os.ReadDir(dir)
 			if err != nil {
 				continue
 			}
-			mt := info.ModTime().UnixNano()
-			if mt > globalBestTime {
-				globalBestTime = mt
-				globalBestPath = filepath.Join(dir, e.Name())
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+					continue
+				}
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				mt := info.ModTime().UnixNano()
+				if mt > globalBestTime {
+					globalBestTime = mt
+					globalBestPath = filepath.Join(dir, e.Name())
+				}
 			}
 		}
 	}
@@ -778,6 +817,78 @@ func providerFamily(provider string) string {
 		return "gemini"
 	default:
 		return p
+	}
+}
+
+func claudeProjectSlugCandidates(workDir string) []string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return nil
+	}
+
+	seenPaths := make(map[string]bool)
+	var paths []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if seenPaths[path] {
+			return
+		}
+		seenPaths[path] = true
+		paths = append(paths, path)
+	}
+
+	add(workDir)
+	if abs, err := filepath.Abs(workDir); err == nil {
+		add(abs)
+	}
+	add(pathutil.NormalizePathForCompare(workDir))
+
+	for _, path := range append([]string(nil), paths...) {
+		addDarwinClaudePathAliases(path, add)
+	}
+
+	seenSlugs := make(map[string]bool)
+	var slugs []string
+	for _, path := range paths {
+		slug := ProjectSlug(path)
+		if seenSlugs[slug] {
+			continue
+		}
+		seenSlugs[slug] = true
+		slugs = append(slugs, slug)
+	}
+	return slugs
+}
+
+func addDarwinClaudePathAliases(path string, add func(string)) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+
+	switch {
+	case path == "/tmp":
+		add("/private/tmp")
+	case strings.HasPrefix(path, "/tmp/"):
+		add("/private/tmp/" + strings.TrimPrefix(path, "/tmp/"))
+	case path == "/private/tmp":
+		add("/tmp")
+	case strings.HasPrefix(path, "/private/tmp/"):
+		add("/tmp/" + strings.TrimPrefix(path, "/private/tmp/"))
+	}
+
+	switch {
+	case path == "/var":
+		add("/private/var")
+	case strings.HasPrefix(path, "/var/"):
+		add("/private/var/" + strings.TrimPrefix(path, "/var/"))
+	case path == "/private/var":
+		add("/var")
+	case strings.HasPrefix(path, "/private/var/"):
+		add("/var/" + strings.TrimPrefix(path, "/private/var/"))
 	}
 }
 

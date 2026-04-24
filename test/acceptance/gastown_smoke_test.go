@@ -38,8 +38,8 @@ func TestGastownSmoke(t *testing.T) {
 			t.Fatalf("config.LoadWithIncludes: %v", err)
 		}
 
-		if cfg.Workspace.Name == "" {
-			t.Error("Workspace.Name is empty")
+		if cfg.EffectiveCityName() == "" {
+			t.Error("EffectiveCityName is empty")
 		}
 
 		if len(cfg.Agents) < 5 {

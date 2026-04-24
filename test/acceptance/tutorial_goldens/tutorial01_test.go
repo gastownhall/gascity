@@ -110,14 +110,28 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("cat city.toml: %v\n%s", err, out)
 			}
+			if !strings.Contains(out, `provider = "claude"`) {
+				t.Fatalf("city.toml missing workspace provider:\n%s", out)
+			}
+		})
+
+		t.Run("cat pack.toml", func(t *testing.T) {
+			out, err := ws.runShell("cat pack.toml", "")
+			if err != nil {
+				t.Fatalf("cat pack.toml: %v\n%s", err, out)
+			}
 			for _, want := range []string{
 				`name = "my-city"`,
-				`provider = "claude"`,
+				`schema = 2`,
+				`[[agent]]`,
 				`name = "mayor"`,
 				`prompt_template = "agents/mayor/prompt.template.md"`,
+				`[[named_session]]`,
+				`template = "mayor"`,
+				`mode = "always"`,
 			} {
 				if !strings.Contains(out, want) {
-					t.Fatalf("city.toml missing %q:\n%s", want, out)
+					t.Fatalf("pack.toml missing %q:\n%s", want, out)
 				}
 			}
 		})
@@ -152,8 +166,25 @@ func TestTutorial01Cities(t *testing.T) {
 			if !strings.Contains(out, `name = "my-project"`) {
 				t.Fatalf("city.toml missing rig entry:\n%s", out)
 			}
+			if strings.Contains(out, myProject) {
+				t.Fatalf("city.toml should not contain machine-local rig path %q:\n%s", myProject, out)
+			}
+		})
+
+		t.Run("read .gc/site.toml (with rig)", func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(myCity, ".gc", "site.toml"))
+			if err != nil {
+				t.Fatalf("read .gc/site.toml: %v", err)
+			}
+			out := string(data)
+			if !strings.Contains(out, `workspace_name = "my-city"`) {
+				t.Fatalf(".gc/site.toml missing workspace binding:\n%s", out)
+			}
+			if !strings.Contains(out, `name = "my-project"`) {
+				t.Fatalf(".gc/site.toml missing rig entry:\n%s", out)
+			}
 			if !strings.Contains(out, myProject) {
-				t.Fatalf("city.toml missing rig path %q:\n%s", myProject, out)
+				t.Fatalf(".gc/site.toml missing rig path %q:\n%s", myProject, out)
 			}
 		})
 
@@ -186,6 +217,7 @@ func TestTutorial01Cities(t *testing.T) {
 			if helloTaskID == "" {
 				t.Fatal("missing hello.py task id from prior sling step")
 			}
+			const helloPyReadyTimeout = 3 * time.Minute
 			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
 			if err != nil {
 				t.Fatalf("gc bd show --watch start: %v", err)
@@ -195,11 +227,20 @@ func TestTutorial01Cities(t *testing.T) {
 			if err := rs.waitFor(helloTaskID, 30*time.Second); err != nil {
 				t.Fatalf("gc bd show --watch did not render target bead: %v", err)
 			}
-			if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
+			if !waitForCondition(t, helloPyReadyTimeout, 2*time.Second, func() bool {
 				data, err := os.ReadFile(filepath.Join(myProject, "hello.py"))
 				return err == nil && strings.TrimSpace(string(data)) != ""
 			}) {
-				t.Fatalf("hello.py was not created in time\n%s", rs.output())
+				ws.noteWarning("tutorial 01 provider failure: gc sling rendered the visible watch flow but did not create hello.py within the acceptance timeout")
+				data, readErr := os.ReadFile(filepath.Join(myProject, "hello.py"))
+				switch {
+				case readErr != nil:
+					t.Fatalf("provider did not create hello.py within %s: %v", helloPyReadyTimeout, readErr)
+				case strings.TrimSpace(string(data)) == "":
+					t.Fatalf("provider created hello.py but left it empty after %s", helloPyReadyTimeout)
+				default:
+					t.Fatalf("provider created hello.py after timeout window; file was not ready within %s", helloPyReadyTimeout)
+				}
 			}
 		})
 

@@ -132,6 +132,58 @@ func TestEventsSchemaPublished(t *testing.T) {
 	}
 }
 
+func TestOrderResponseSchemaKeepsMigrationFieldsOptional(t *testing.T) {
+	sm := api.NewSupervisorMux(emptyTestResolver{}, false, "", time.Time{})
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var spec map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("parse live spec: %v", err)
+	}
+
+	components, ok := spec["components"].(map[string]any)
+	if !ok {
+		t.Fatal("openapi components missing")
+	}
+	schemas, ok := components["schemas"].(map[string]any)
+	if !ok {
+		t.Fatal("openapi schemas missing")
+	}
+	schema, ok := schemas["OrderResponse"].(map[string]any)
+	if !ok {
+		t.Fatal("OrderResponse schema missing")
+	}
+
+	if required, ok := schema["required"].([]any); ok {
+		for _, item := range required {
+			field, _ := item.(string)
+			if field == "trigger" || field == "gate" {
+				t.Fatalf("OrderResponse.%s should stay optional during migration; required=%v", field, required)
+			}
+		}
+	}
+
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("OrderResponse properties missing")
+	}
+	gate, ok := properties["gate"].(map[string]any)
+	if !ok {
+		t.Fatal("OrderResponse.gate property missing")
+	}
+	if deprecated, _ := gate["deprecated"].(bool); !deprecated {
+		t.Fatalf("OrderResponse.gate should be deprecated; property=%v", gate)
+	}
+	if _, ok := properties["trigger"].(map[string]any); !ok {
+		t.Fatal("OrderResponse.trigger property missing")
+	}
+}
+
 // emptyTestResolver is a CityResolver with no cities. Huma schema
 // generation is reflection-based and never calls resolver methods.
 type emptyTestResolver struct{}

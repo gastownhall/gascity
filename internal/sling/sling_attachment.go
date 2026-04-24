@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -139,15 +140,16 @@ func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) bool {
 	return label != ""
 }
 
-func closeAttachedBead(store beads.Store, attached beads.Bead) error {
+// CloseAttachedSubtree closes an attached workflow or molecule root and any
+// open descendants beneath it.
+func CloseAttachedSubtree(store beads.Store, attached beads.Bead) (int, error) {
 	if store == nil {
-		return fmt.Errorf("store unavailable")
+		return 0, fmt.Errorf("store unavailable")
 	}
 	if IsWorkflowAttachment(attached) {
-		_, err := sourceworkflow.CloseWorkflowSubtree(store, attached.ID)
-		return err
+		return sourceworkflow.CloseWorkflowSubtree(store, attached.ID)
 	}
-	return store.Close(attached.ID)
+	return molecule.CloseSubtree(store, attached.ID)
 }
 
 func clearAttachmentMetadata(store beads.Store, parent beads.Bead, attached beads.Bead) error {
@@ -199,7 +201,7 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 			}
 		}
 		if parentUnassigned && store != nil {
-			if burnErr := closeAttachedBead(store, attached); burnErr == nil {
+			if _, burnErr := CloseAttachedSubtree(store, attached); burnErr == nil {
 				if clearErr := clearAttachmentMetadata(store, parent, attached); clearErr != nil {
 					return clearErr
 				}
@@ -272,7 +274,7 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 				continue
 			}
 			if childUnassigned && store != nil {
-				if burnErr := closeAttachedBead(store, attached); burnErr == nil {
+				if _, burnErr := CloseAttachedSubtree(store, attached); burnErr == nil {
 					if clearErr := clearAttachmentMetadata(store, child, attached); clearErr != nil {
 						return clearErr
 					}

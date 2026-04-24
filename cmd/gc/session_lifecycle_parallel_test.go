@@ -620,8 +620,22 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 	if startCfg == nil {
 		t.Fatalf("expected Start call for mayor, calls=%#v", sp.Calls)
 	}
-	if got := startCfg.Command; got != "claude --dangerously-skip-permissions --session-id fresh-key-123" {
-		t.Fatalf("Start command = %q, want fresh session-id launch", got)
+	if !strings.HasPrefix(startCfg.Command, "claude --dangerously-skip-permissions --session-id ") {
+		t.Fatalf("Start command = %q, want fresh session-id launch", startCfg.Command)
+	}
+	gotSessionKey := strings.TrimPrefix(startCfg.Command, "claude --dangerously-skip-permissions --session-id ")
+	if gotSessionKey == "" {
+		t.Fatalf("Start command = %q, want non-empty generated session key", startCfg.Command)
+	}
+	if gotSessionKey == "fresh-key-123" {
+		t.Fatalf("Start command reused stale session key %q", gotSessionKey)
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if updated.Metadata["session_key"] != gotSessionKey {
+		t.Fatalf("stored session_key = %q, want generated key from command %q", updated.Metadata["session_key"], gotSessionKey)
 	}
 	if startCfg.Nudge != "Check mail and hook status, then act accordingly." {
 		t.Fatalf("Start nudge = %q, want startup nudge preserved", startCfg.Nudge)
@@ -2294,6 +2308,57 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 	if got := prepared.cfg.Env["GC_HOME"]; got != "/tmp/gc-home" {
 		t.Fatalf("GC_HOME = %q, want %q", got, "/tmp/gc-home")
+	}
+}
+
+func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name":       "s-gc-test",
+			"template":           "mayor",
+			"session_origin":     "manual",
+			"provider":           "claude-max",
+			"provider_kind":      "claude-max",
+			"builtin_ancestor":   "claude",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "tok",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	tp := TemplateParams{
+		Command:     "claude",
+		WorkDir:     t.TempDir(),
+		SessionName: "s-gc-test",
+		Alias:       "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude-max",
+			Kind:            "claude",
+			BuiltinAncestor: "claude",
+		},
+		TemplateName: "mayor",
+		InstanceName: "mayor",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{
+			session: &bead,
+			tp:      tp,
+		},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_PROVIDER"]; got != "claude" {
+		t.Fatalf("GC_PROVIDER = %q, want claude", got)
 	}
 }
 

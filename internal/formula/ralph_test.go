@@ -542,6 +542,62 @@ func TestApplyRalph_NestedRetryControlsPreserveOwnStepID(t *testing.T) {
 	}
 }
 
+func TestApplyRalph_StepTimeoutPropagated(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:      "build",
+			Title:   "Build project",
+			Type:    "task",
+			Timeout: "10m",
+			Ralph: &RalphSpec{
+				MaxAttempts: 3,
+				Check: &RalphCheckSpec{
+					Mode: "exec",
+					Path: "scripts/check.sh",
+				},
+			},
+		},
+	}
+
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+
+	control := got[0]
+	if control.Metadata["gc.step_timeout"] != "10m" {
+		t.Errorf("control gc.step_timeout = %q, want 10m", control.Metadata["gc.step_timeout"])
+	}
+}
+
+func TestApplyRalph_StepTimeoutOmittedWhenEmpty(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "build",
+			Title: "Build project",
+			Type:  "task",
+			// No Timeout set
+			Ralph: &RalphSpec{
+				MaxAttempts: 3,
+				Check: &RalphCheckSpec{
+					Mode: "exec",
+					Path: "scripts/check.sh",
+				},
+			},
+		},
+	}
+
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+
+	control := got[0]
+	if _, exists := control.Metadata["gc.step_timeout"]; exists {
+		t.Errorf("control should not have gc.step_timeout when step.Timeout is empty, got %q", control.Metadata["gc.step_timeout"])
+	}
+}
+
 func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	steps := []*Step{
 		{ID: "setup", Title: "Setup"},

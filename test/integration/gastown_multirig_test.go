@@ -68,7 +68,7 @@ func waitForActiveSessionTargets(t *testing.T, cityDir string, targets []string,
 // directories under an isolated integration GC_HOME. Returns the city
 // directory and a slice of rig directory paths.
 //
-// The city starts with the default tutorial scaffold. Callers overwrite
+// The city starts with the default minimal scaffold. Callers overwrite
 // city.toml afterward and use gc restart/start against the isolated
 // supervisor-managed city registered for this path.
 func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []string) {

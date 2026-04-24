@@ -1,10 +1,27 @@
 package agentutil
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type partialSessionLister struct {
+	running []string
+	err     error
+}
+
+func (p partialSessionLister) ListRunning(prefix string) ([]string, error) {
+	var filtered []string
+	for _, name := range p.running {
+		if len(prefix) == 0 || len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered, p.err
+}
 
 func TestExpandAgentsFixedAgent(t *testing.T) {
 	agents := []config.Agent{
@@ -78,6 +95,21 @@ func TestExpandAgentsSuspended(t *testing.T) {
 	result := ExpandAgents(agents, "city", "", nil)
 	if len(result) != 1 || !result[0].Suspended {
 		t.Error("expected suspended agent")
+	}
+}
+
+func TestExpandAgentsUnlimitedPoolFailsClosedOnPartialListResults(t *testing.T) {
+	agents := []config.Agent{
+		{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(-1)},
+	}
+	sp := partialSessionLister{
+		running: []string{"myrig--polecat-1", "myrig--polecat-2"},
+		err:     &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+
+	result := ExpandAgents(agents, "city", "", sp)
+	if len(result) != 0 {
+		t.Fatalf("got %d agents, want fail-closed empty result on partial list", len(result))
 	}
 }
 
