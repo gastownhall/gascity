@@ -614,6 +614,61 @@ provider = "file"
 	}
 }
 
+// TestGcBdRejectsStaleFileMarkerWithDiagnosticHint asserts the error when
+// a scope has a stale .gc/beads.json (file-store marker) but no
+// .beads/metadata.json (bd-store marker): gc rejects with a hint that
+// names the offending marker and suggests the fix. Regression for the
+// post-#899 behavior change where stale migration artifacts silently
+// reclassified rigs as file-backed with no diagnostic.
+func TestGcBdRejectsStaleFileMarkerWithDiagnosticHint(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "legacy-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "legacy-rig"
+path = "legacy-rig"
+prefix = "lg"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".gc", "beads.json"), []byte(`{"seq":1,"beads":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"--rig", "legacy-rig", "list"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("doBd() = %d, want non-zero", got)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, `resolved "file"`) {
+		t.Fatalf("stderr = %q, want named provider in error", out)
+	}
+	if !strings.Contains(out, ".gc/beads.json") {
+		t.Fatalf("stderr = %q, want named marker in hint", out)
+	}
+	if !strings.Contains(out, ".beads/metadata.json") {
+		t.Fatalf("stderr = %q, want named fix in hint", out)
+	}
+}
+
 func TestGcBdAllowsRigPassthroughForBdBackedRigUnderFileCity(t *testing.T) {
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
