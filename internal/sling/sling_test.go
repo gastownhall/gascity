@@ -397,10 +397,15 @@ func TestCheckBeadStateCustomBDQueryNoIdempotency(t *testing.T) {
 
 func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
 	bead, err := store.Create(beads.Bead{
 		Title:    "route me",
 		Type:     "task",
 		Status:   "open",
+		ParentID: convoy.ID,
 		Metadata: map[string]string{"gc.routed_to": "mayor"},
 	})
 	if err != nil {
@@ -417,6 +422,60 @@ func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	}
 	if len(result.Warnings) != 0 {
 		t.Fatalf("expected no warnings for pinned default sling_query, got %v", result.Warnings)
+	}
+}
+
+// TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent guards the recovery
+// path: a bead with gc.routed_to set (e.g. declared via bd create --metadata
+// rather than routed through gc sling) but no convoy parent must not be
+// treated as idempotent — otherwise the caller skips finalize() and the work
+// sits orphaned.
+func TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when routed bead has no convoy parent, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent ensures a prior
+// convoy whose run has finished does not count as a live attachment — the
+// next sling should still create a fresh convoy and poke the controller.
+func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "old convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.Close(convoy.ID); err != nil {
+		t.Fatalf("store.Close(convoy): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when convoy parent is closed, got %+v", result)
 	}
 }
 
@@ -924,8 +983,10 @@ func TestDoSlingIdempotent(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	store := beads.NewMemStore()
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
 	b, _ := store.Create(beads.Bead{
 		Title:    "test",
+		ParentID: convoy.ID,
 		Metadata: map[string]string{"gc.routed_to": "mayor"},
 	})
 
