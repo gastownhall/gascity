@@ -159,8 +159,13 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 
 	labels := []string{"thread:" + threadID, "reply-to:" + id}
 
+	title := subject
+	if title == "" {
+		title = deriveReplyTitle(original.Title, body)
+	}
+
 	b, err := p.store.Create(beads.Bead{
-		Title:       subject,
+		Title:       title,
 		Description: body,
 		Type:        "message",
 		Assignee:    original.From, // reply goes back to sender
@@ -171,6 +176,33 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// deriveReplyTitle returns a non-empty title for a reply when the caller
+// didn't supply a subject. Preference order:
+//  1. "Re: " + original's title, deduped to avoid "Re: Re: …".
+//  2. First line (≤80 chars) of the reply body.
+//  3. "Re: (no subject)".
+//
+// bd create rejects empty titles, so this function must never return "".
+func deriveReplyTitle(originalTitle, body string) string {
+	if t := strings.TrimSpace(originalTitle); t != "" {
+		lower := strings.ToLower(t)
+		if strings.HasPrefix(lower, "re:") {
+			return t
+		}
+		return "Re: " + t
+	}
+	if body != "" {
+		first := strings.SplitN(body, "\n", 2)[0]
+		if len(first) > 80 {
+			first = first[:77] + "..."
+		}
+		if first != "" {
+			return first
+		}
+	}
+	return "Re: (no subject)"
 }
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.

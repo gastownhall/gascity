@@ -561,6 +561,62 @@ func TestReply(t *testing.T) {
 	}
 }
 
+func TestReplyDerivesTitleWhenSubjectEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply with empty subject: %v", err)
+	}
+	if reply.Subject == "" {
+		t.Fatal("Reply Subject is empty; expected derived default like \"Re: Hello\"")
+	}
+	if !strings.Contains(strings.ToLower(reply.Subject), "hello") {
+		t.Errorf("Reply Subject = %q, want something referencing original \"Hello\"", reply.Subject)
+	}
+}
+
+func TestReplyDedupesReColonPrefix(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Re: Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := p.Reply(sent.ID, "bob", "", "body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if strings.HasPrefix(reply.Subject, "Re: Re:") {
+		t.Errorf("Reply Subject = %q, should not stack Re: prefixes", reply.Subject)
+	}
+}
+
+func TestReplyFallsBackToBodyWhenOriginalUntitled(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "some reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject == "" {
+		t.Fatal("Reply Subject is empty even after body fallback")
+	}
+}
+
 // --- Thread ---
 
 func TestThread(t *testing.T) {
