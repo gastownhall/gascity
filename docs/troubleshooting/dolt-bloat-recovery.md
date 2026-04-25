@@ -85,13 +85,17 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   floor; newer releases ship improved auto-GC
   heuristics and default archive compression.
 - **Let the dolt pack's `dolt-gc-nudge` order run continuously.** It
-  ships embedded in the dolt pack and fires every 6h by default. The
-  nudge catches the "bloated-but-stable" corner case where no single
-  write burst crosses Dolt's 125 MB auto-GC threshold. To opt out on a
-  given city, add `dolt-gc-nudge` to the city's `[orders] skip = [...]`
-  list (or to a rig-level `[[order.override]]`). Tune the trigger size
-  via the `GC_DOLT_GC_THRESHOLD_BYTES` environment variable
-  (default: 2 GiB) in the city's environment.
+  ships embedded in the dolt pack and fires `CALL DOLT_GC()` every 1h
+  by default, unconditionally. Empirical evidence (beads perf harness,
+  2026-04) shows Dolt's auto-GC does not fire under bd's fork-per-op
+  CLI workload even with `auto_gc_behavior.enable: true`, so the nudge
+  is the only mechanism bounding commit-graph growth. GC is idempotent
+  and near-free when there's nothing to reclaim, so running it every
+  hour is cheap. To opt out on a given city, add `dolt-gc-nudge` to the
+  city's `[orders] skip = [...]` list (or to a rig-level
+  `[[order.override]]`). To skip GC on small databases, set
+  `GC_DOLT_GC_THRESHOLD_BYTES` to a positive byte count in the city's
+  environment (default: 0 — run unconditionally).
 - **Mind `orders.max_timeout` if you set one.** The nudge order asks
   for a 24-hour timeout to accommodate serialized `CALL DOLT_GC()` runs
   on large stores. A city-level `orders.max_timeout` below 24h will cap the
