@@ -51,13 +51,11 @@ func (registryAdapter) Unregister(ctx context.Context, city cityinit.RegisteredC
 type reloaderAdapter struct{}
 
 func (reloaderAdapter) Reload() error {
-	reloadSupervisorNoWaitHook()
-	return nil
+	return reloadSupervisorNoWaitHook()
 }
 
 func (reloaderAdapter) ReloadAfterUnregister() error {
-	reloadSupervisorNoWait()
-	return nil
+	return reloadSupervisorNoWaitHook()
 }
 
 type cityInitLifecycleEvents struct {

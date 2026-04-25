@@ -1070,6 +1070,10 @@
           "path": {
             "description": "Resolved absolute path of the created city directory.",
             "type": "string"
+          },
+          "reload_warning": {
+            "description": "Non-empty when the city was created but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.",
+            "type": "string"
           }
         },
         "required": [
@@ -1209,6 +1213,10 @@
           },
           "path": {
             "description": "Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.",
+            "type": "string"
+          },
+          "reload_warning": {
+            "description": "Non-empty when the registry entry was removed but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.",
             "type": "string"
           }
         },

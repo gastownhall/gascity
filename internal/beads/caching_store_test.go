@@ -145,8 +145,9 @@ func TestCachingStorePrimeDoesNotResurrectConcurrentDelete(t *testing.T) {
 	}
 }
 
-func TestCachingStoreCreatePreservesCallerFields(t *testing.T) {
-	cs := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+func TestCachingStoreCreateRefreshesSparseBead(t *testing.T) {
+	backing := &sparseCreateStore{Store: beads.NewMemStore()}
+	cs := beads.NewCachingStoreForTest(backing, nil)
 	if err := cs.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -544,6 +545,18 @@ type staleReadAfterUpdateStore struct {
 	mu        sync.Mutex
 	stale     beads.Bead
 	returnOld bool
+}
+
+type sparseCreateStore struct {
+	beads.Store
+}
+
+func (s *sparseCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return beads.Bead{ID: created.ID, Title: created.Title}, nil
 }
 
 func (s *staleReadAfterUpdateStore) Update(id string, opts beads.UpdateOpts) error {
@@ -983,7 +996,7 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 		Title:    &updatedTitle,
 		Metadata: map[string]string{"gc.step_ref": "mol.review"},
 	}); err != nil {
-		t.Fatalf("Update backing: %v", err)
+		t.Fatalf("Update backing before event: %v", err)
 	}
 	updated := beads.Bead{ID: b1.ID, Title: updatedTitle, Status: "open", Metadata: map[string]string{"gc.step_ref": "mol.review"}}
 	payload, _ = json.Marshal(updated)

@@ -13,6 +13,12 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 		return created, err
 	}
 
+	if fresh, err := c.backing.Get(created.ID); err == nil {
+		created = fresh
+	} else if !errors.Is(err, ErrNotFound) {
+		c.recordProblem("refresh bead after create", fmt.Errorf("%s: %w", created.ID, err))
+	}
+
 	c.mu.Lock()
 	c.noteMutationLocked(created.ID)
 	c.beads[created.ID] = cloneBead(created)

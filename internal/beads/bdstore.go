@@ -547,14 +547,22 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if err := json.Unmarshal(extractJSON(out), &issue); err != nil {
 		return Bead{}, fmt.Errorf("bd create: parsing JSON: %w", err)
 	}
-	b.ID = issue.ID
-	b.Status = mapBdStatus(issue.Status)
-	b.CreatedAt = issue.CreatedAt.Truncate(time.Second)
-	if b.Type == "" {
-		b.Type = issue.IssueType
+	created := issue.toBead()
+	if created.Assignee == "" {
+		created.Assignee = b.Assignee
 	}
-	b.Metadata = metadata
-	return b, nil
+	if created.From == "" {
+		created.From = b.From
+	}
+	if created.Priority == nil && b.Priority != nil {
+		created.Priority = cloneIntPtr(b.Priority)
+	}
+	if len(metadata) > 0 {
+		if created.Metadata == nil {
+			created.Metadata = maps.Clone(metadata)
+		}
+	}
+	return created, nil
 }
 
 // Get retrieves a bead by ID via bd show.

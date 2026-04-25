@@ -52,11 +52,12 @@ func TestCityInitServiceScaffoldCreatesCityRegistersAndEmitsCreated(t *testing.T
 	reloadSawCreated := 0
 
 	oldReloadSupervisorNoWaitHook := reloadSupervisorNoWaitHook
-	reloadSupervisorNoWaitHook = func() {
+	reloadSupervisorNoWaitHook = func() error {
 		evts, err := events.ReadFiltered(filepath.Join(cityPath, ".gc", "events.jsonl"), events.Filter{Type: events.CityCreated})
 		if err == nil {
 			reloadSawCreated = len(evts)
 		}
+		return nil
 	}
 	t.Cleanup(func() {
 		reloadSupervisorNoWaitHook = oldReloadSupervisorNoWaitHook
@@ -116,6 +117,32 @@ func TestCityInitServiceScaffoldCreatesCityRegistersAndEmitsCreated(t *testing.T
 	})
 	if !errors.Is(err, cityinit.ErrAlreadyInitialized) {
 		t.Fatalf("second Scaffold error = %v, want ErrAlreadyInitialized", err)
+	}
+}
+
+func TestCityInitServiceScaffoldReturnsReloadWarning(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+
+	oldReloadSupervisorNoWaitHook := reloadSupervisorNoWaitHook
+	reloadSupervisorNoWaitHook = func() error {
+		return errors.New("reload unavailable")
+	}
+	t.Cleanup(func() {
+		reloadSupervisorNoWaitHook = oldReloadSupervisorNoWaitHook
+	})
+
+	result, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{
+		Dir:              cityPath,
+		Provider:         "codex",
+		BootstrapProfile: bootstrapProfileSingleHostCompat,
+		NameOverride:     "api-city",
+	})
+	if err != nil {
+		t.Fatalf("Scaffold: %v", err)
+	}
+	if result.ReloadWarning != "reload unavailable" {
+		t.Fatalf("ReloadWarning = %q, want reload unavailable", result.ReloadWarning)
 	}
 }
 
@@ -307,6 +334,36 @@ func TestCityInitServiceUnregisterRemovesRegistryAndEmitsEvent(t *testing.T) {
 		t.Fatalf("payload name = %q, want bright-lights", payload.Name)
 	}
 	assertSameTestPath(t, payload.Path, cityPath)
+}
+
+func TestCityInitServiceUnregisterReturnsReloadWarning(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldReloadSupervisorNoWaitHook := reloadSupervisorNoWaitHook
+	reloadSupervisorNoWaitHook = func() error {
+		return errors.New("reload unavailable")
+	}
+	t.Cleanup(func() {
+		reloadSupervisorNoWaitHook = oldReloadSupervisorNoWaitHook
+	})
+
+	result, err := mustNewCityInitService(t).Unregister(context.Background(), cityinit.UnregisterRequest{
+		CityName: "bright-lights",
+	})
+	if err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	if result.ReloadWarning != "reload unavailable" {
+		t.Fatalf("ReloadWarning = %q, want reload unavailable", result.ReloadWarning)
+	}
 }
 
 func TestCityInitServiceUnregisterDoesNotEmitEventWhenRegistryWriteFails(t *testing.T) {

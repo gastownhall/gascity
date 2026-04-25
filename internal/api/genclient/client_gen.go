@@ -526,6 +526,9 @@ type CityCreateResponse struct {
 
 	// Path Resolved absolute path of the created city directory.
 	Path string `json:"path"`
+
+	// ReloadWarning Non-empty when the city was created but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.
+	ReloadWarning *string `json:"reload_warning,omitempty"`
 }
 
 // CityGetResponse defines model for CityGetResponse.
@@ -575,6 +578,9 @@ type CityUnregisterResponse struct {
 
 	// Path Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.
 	Path string `json:"path"`
+
+	// ReloadWarning Non-empty when the registry entry was removed but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream.
+	ReloadWarning *string `json:"reload_warning,omitempty"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.

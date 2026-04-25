@@ -105,9 +105,10 @@ func TestSupervisorCityCreateScaffoldsViaInitializer(t *testing.T) {
 	cityPath := filepath.Join(home, "mc-city")
 	init := &fakeInitializer{
 		scaffoldResult: &cityinit.InitResult{
-			CityName:     "mc-city",
-			CityPath:     cityPath,
-			ProviderUsed: "codex",
+			CityName:      "mc-city",
+			CityPath:      cityPath,
+			ProviderUsed:  "codex",
+			ReloadWarning: "reload failed",
 		},
 	}
 	sm := newTestSupervisorMuxWithInitializer(t, init)
@@ -137,6 +138,9 @@ func TestSupervisorCityCreateScaffoldsViaInitializer(t *testing.T) {
 	}
 	if body := rec.Body.String(); !strings.Contains(body, `"name":"mc-city"`) || !strings.Contains(body, `"path":"`+cityPath+`"`) {
 		t.Fatalf("body = %s, want name and path", body)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"reload_warning":"reload failed"`) {
+		t.Fatalf("body = %s, want reload warning", body)
 	}
 }
 
@@ -190,8 +194,9 @@ func TestSupervisorCityCreateWithoutInitializerReturns501(t *testing.T) {
 func TestSupervisorCityUnregisterUsesInitializer(t *testing.T) {
 	init := &fakeInitializer{
 		unregisterResult: &cityinit.UnregisterResult{
-			CityName: "mc-city",
-			CityPath: "/tmp/mc-city",
+			CityName:      "mc-city",
+			CityPath:      "/tmp/mc-city",
+			ReloadWarning: "reload failed",
 		},
 	}
 	sm := newTestSupervisorMuxWithInitializer(t, init)
@@ -209,6 +214,9 @@ func TestSupervisorCityUnregisterUsesInitializer(t *testing.T) {
 	}
 	if body := rec.Body.String(); !strings.Contains(body, `"name":"mc-city"`) || !strings.Contains(body, `"path":"/tmp/mc-city"`) {
 		t.Fatalf("body = %s, want name and path", body)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"reload_warning":"reload failed"`) {
+		t.Fatalf("body = %s, want reload warning", body)
 	}
 }
 

@@ -95,6 +95,28 @@ func (s *prefixedAliasStore) Create(b beads.Bead) (beads.Bead, error) {
 	return s.beadToAlias(created), nil
 }
 
+type sparseCreateStore struct {
+	*beads.MemStore
+}
+
+func newSparseCreateStore() *sparseCreateStore {
+	return &sparseCreateStore{MemStore: beads.NewMemStore()}
+}
+
+func (s *sparseCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.MemStore.Create(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return beads.Bead{
+		ID:        created.ID,
+		Title:     created.Title,
+		Type:      created.Type,
+		Status:    created.Status,
+		CreatedAt: created.CreatedAt,
+	}, nil
+}
+
 func (s *prefixedAliasStore) Get(id string) (beads.Bead, error) {
 	s.getCalls++
 	b, err := s.base.Get(s.aliasToBase(id))
@@ -634,7 +656,7 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 
 func TestBeadCreateResponseUsesAuthoritativeStoredBead(t *testing.T) {
 	state := newFakeState(t)
-	store := beads.NewMemStore()
+	store := newSparseCreateStore()
 	state.stores["myrig"] = store
 	parent, err := store.Create(beads.Bead{Title: "Parent"})
 	if err != nil {

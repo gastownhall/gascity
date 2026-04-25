@@ -89,9 +89,10 @@ type cityCreateRequest struct {
 // response's Name; Error field explains the failure). Polling is
 // unnecessary.
 type cityCreateResponse struct {
-	OK   bool   `json:"ok" doc:"True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready."`
-	Name string `json:"name" doc:"Resolved city name as persisted in city.toml. Use this to filter the event stream for completion."`
-	Path string `json:"path" doc:"Resolved absolute path of the created city directory."`
+	OK            bool   `json:"ok" doc:"True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready."`
+	Name          string `json:"name" doc:"Resolved city name as persisted in city.toml. Use this to filter the event stream for completion."`
+	Path          string `json:"path" doc:"Resolved absolute path of the created city directory."`
+	ReloadWarning string `json:"reload_warning,omitempty" doc:"Non-empty when the city was created but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -117,9 +118,10 @@ type SupervisorCityCreateOutput struct {
 // city.unregister_failed if the reconciler cannot stop the
 // controller).
 type cityUnregisterResponse struct {
-	OK   bool   `json:"ok" doc:"True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered."`
-	Name string `json:"name" doc:"Resolved registry name. Filter the event stream by this to observe completion."`
-	Path string `json:"path" doc:"Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry."`
+	OK            bool   `json:"ok" doc:"True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered."`
+	Name          string `json:"name" doc:"Resolved registry name. Filter the event stream by this to observe completion."`
+	Path          string `json:"path" doc:"Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry."`
+	ReloadWarning string `json:"reload_warning,omitempty" doc:"Non-empty when the registry entry was removed but the supervisor reload signal failed; clients should surface this warning and retry reload or observe the event stream."`
 }
 
 // SupervisorCityUnregisterInput is the input for
@@ -390,9 +392,10 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		Status: http.StatusAccepted,
 	}
 	out.Body = cityCreateResponse{
-		OK:   true,
-		Name: result.CityName,
-		Path: result.CityPath,
+		OK:            true,
+		Name:          result.CityName,
+		Path:          result.CityPath,
+		ReloadWarning: result.ReloadWarning,
 	}
 	return out, nil
 }
@@ -431,9 +434,10 @@ func (sm *SupervisorMux) humaHandleCityUnregister(ctx context.Context, input *Su
 
 	out := &SupervisorCityUnregisterOutput{Status: http.StatusAccepted}
 	out.Body = cityUnregisterResponse{
-		OK:   true,
-		Name: result.CityName,
-		Path: result.CityPath,
+		OK:            true,
+		Name:          result.CityName,
+		Path:          result.CityPath,
+		ReloadWarning: result.ReloadWarning,
 	}
 	return out, nil
 }
