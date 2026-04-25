@@ -31,7 +31,7 @@ func writeLegacyScriptFile(t *testing.T, dir, relPath, content string) {
 	}
 }
 
-func TestPruneLegacyScripts_RemovesSymlinkOnlyTree(t *testing.T) {
+func TestPruneLegacyScripts_PreservesNonDanglingSymlinkOnlyTree(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "city")
 	packScripts := filepath.Join(dir, "packs/base/assets/scripts")
@@ -57,8 +57,30 @@ func TestPruneLegacyScripts_RemovesSymlinkOnlyTree(t *testing.T) {
 		t.Fatalf("pruneLegacyScripts: %v", err)
 	}
 
+	// Non-dangling legacy symlinks are preserved — removing them would
+	// break exec orders that reference $PACK_DIR/scripts/<script>.sh.
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "helper.sh")); err != nil {
+		t.Fatalf("non-dangling legacy symlink helper.sh should be preserved, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "checks", "review.sh")); err != nil {
+		t.Fatalf("non-dangling legacy symlink checks/review.sh should be preserved, err=%v", err)
+	}
+}
+
+func TestPruneLegacyScripts_RemovesDanglingSymlinkOnlyTree(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	// Targets are under cityPath but don't exist on disk — symlinks are dangling.
+	gone := filepath.Join(cityPath, "packs", "removed", "assets", "scripts")
+	writeLegacyScriptLink(t, cityPath, "scripts/helper.sh", filepath.Join(gone, "helper.sh"))
+	writeLegacyScriptLink(t, cityPath, "scripts/checks/review.sh", filepath.Join(gone, "checks", "review.sh"))
+
+	if err := pruneLegacyScripts(cityPath, nil); err != nil {
+		t.Fatalf("pruneLegacyScripts: %v", err)
+	}
+
 	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("scripts/ should be removed after pruning, err=%v", err)
+		t.Fatalf("dangling legacy scripts/ should be removed, err=%v", err)
 	}
 }
 
@@ -238,11 +260,12 @@ func TestPruneLegacyConfiguredScripts_PrunesCityAndRigOnly(t *testing.T) {
 		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
 	}
 
-	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("city scripts/ should be pruned, err=%v", err)
+	// Non-dangling legacy symlinks are preserved.
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("non-dangling city scripts/city.sh should be preserved, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("rig scripts/ should be pruned, err=%v", err)
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
+		t.Fatalf("non-dangling rig scripts/rig.sh should be preserved, err=%v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "scripts", "cwd.sh")); err != nil {
 		t.Fatalf("blank rig path should not prune cwd scripts, err=%v", err)
@@ -284,11 +307,15 @@ func TestPruneLegacyConfiguredScripts_FallsBackToScopeAssetsWhenPackDirsMissing(
 	if len(warnings) > 0 {
 		t.Fatalf("pruneLegacyConfiguredScripts warnings: %v", warnings)
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("city scripts/ should be pruned via local assets fallback, err=%v", err)
+	// Non-dangling legacy symlinks are preserved even with fallback origins.
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("non-dangling city scripts/city.sh should be preserved via fallback, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("rig scripts/ should be pruned via local assets fallback, err=%v", err)
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("non-dangling rig scripts/city.sh should be preserved via fallback, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
+		t.Fatalf("non-dangling rig scripts/rig.sh should be preserved via fallback, err=%v", err)
 	}
 }
 
@@ -348,10 +375,15 @@ func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 		t.Fatalf("prepareCityForSupervisor: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(cityPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("city scripts/ should be pruned by supervisor start path, err=%v", err)
+	// Non-dangling legacy symlinks are preserved by the supervisor start
+	// path — removing them would break exec orders.
+	if _, err := os.Lstat(filepath.Join(cityPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("non-dangling city scripts/city.sh should be preserved, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
-		t.Fatalf("rig scripts/ should be pruned by supervisor start path, err=%v", err)
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "city.sh")); err != nil {
+		t.Fatalf("non-dangling rig scripts/city.sh should be preserved, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rigPath, "scripts", "rig.sh")); err != nil {
+		t.Fatalf("non-dangling rig scripts/rig.sh should be preserved, err=%v", err)
 	}
 }

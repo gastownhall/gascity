@@ -102,12 +102,46 @@ schema = 2
 	}
 
 	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
-	if res.Status != doctor.StatusWarning {
-		t.Fatalf("symlink-only scripts/ should warn as stale legacy state; got status=%v message=%q details=%v",
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("non-dangling legacy symlinks should be OK; got status=%v message=%q details=%v",
 			res.Status, res.Message, res.Details)
 	}
-	if !strings.Contains(res.Message, "stale legacy symlinks") {
-		t.Fatalf("symlink-only scripts/ should report stale legacy state, got %q", res.Message)
+	if !strings.Contains(res.Message, "valid targets") {
+		t.Fatalf("non-dangling legacy symlinks should mention valid targets, got %q", res.Message)
+	}
+}
+
+func TestV2ScriptsLayoutWarnsForDanglingLegacySymlinks(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+`)
+	// Source file does NOT exist — symlink is dangling.
+	gone := filepath.Join(cityDir, "assets", "scripts", "helper.sh")
+
+	scriptsDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(gone, filepath.Join(scriptsDir, "helper.sh")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	res := v2ScriptsLayoutCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("dangling legacy symlinks should warn; got status=%v message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	if !strings.Contains(res.Message, "dangling legacy symlinks") {
+		t.Fatalf("dangling legacy symlinks should mention 'dangling', got %q", res.Message)
 	}
 }
 

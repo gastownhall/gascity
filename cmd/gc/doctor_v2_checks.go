@@ -264,9 +264,13 @@ func (v2ScriptsLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 					[]string{"scripts/"})
 			}
 			if legacyShim {
+				if !hasDanglingSymlinks(path) {
+					return okCheck("v2-scripts-layout",
+						"top-level scripts/ contains legacy symlinks with valid targets (preserved for exec order compatibility)")
+				}
 				return warnCheck("v2-scripts-layout",
-					"top-level scripts/ only contains stale legacy symlinks",
-					"delete scripts/ or rerun gc start/gc supervisor so runtime pruning can remove the old shim",
+					"top-level scripts/ contains dangling legacy symlinks",
+					"rerun gc start/gc supervisor to prune dangling symlinks, or delete scripts/ manually",
 					[]string{"scripts/"})
 			}
 			return warnCheck("v2-scripts-layout",
@@ -316,6 +320,30 @@ func inspectTopLevelScripts(dir string) ([]string, bool, error) {
 	}
 	sort.Strings(realFiles)
 	return realFiles, sawSymlink, nil
+}
+
+// hasDanglingSymlinks returns true if dir contains at least one symlink whose
+// target no longer exists on disk.
+func hasDanglingSymlinks(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		fi, lErr := os.Lstat(path)
+		if lErr != nil {
+			return nil
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return nil
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 func legacyTopLevelScriptsShim(cityPath string) (bool, error) {

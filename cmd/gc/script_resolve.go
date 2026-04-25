@@ -36,11 +36,14 @@ func pruneLegacyConfiguredScripts(cityPath string, cfg *config.City, handleErr f
 	}
 }
 
-// pruneLegacyScripts removes a top-level scripts/ directory only when it
-// exactly matches the absolute symlink tree the old ResolveScripts shim would
-// have generated from the legacy origins still represented in the current
-// tree. Real files, foreign symlinks, or user-managed symlink layouts that
-// merely point into pack script directories are preserved as user-owned.
+// pruneLegacyScripts removes dangling symlinks from a top-level scripts/
+// directory that exactly matches the absolute symlink tree the old
+// ResolveScripts shim would have generated. Real files, foreign symlinks,
+// or user-managed symlink layouts are preserved as user-owned.
+//
+// Non-dangling legacy symlinks (target file still exists) are preserved even
+// though they originated from the old shim — removing functional symlinks
+// breaks exec orders that reference $PACK_DIR/scripts/<script>.sh.
 func pruneLegacyScripts(targetDir string, legacySourceDirs []string, fallbackRoots ...string) error {
 	symlinks, ok, err := legacyShimLinks(targetDir, legacySourceDirs, fallbackRoots...)
 	if err != nil {
@@ -51,6 +54,12 @@ func pruneLegacyScripts(targetDir string, legacySourceDirs []string, fallbackRoo
 	}
 
 	for _, path := range symlinks {
+		// Only remove dangling symlinks. Non-dangling legacy symlinks may
+		// still be referenced by exec orders even after a layer
+		// reconfiguration.
+		if _, statErr := os.Stat(path); statErr == nil {
+			continue
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing legacy script symlink %q: %w", path, err)
 		}
