@@ -378,6 +378,7 @@ func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
 // writeCityTOML is a test helper that writes a city.toml with the given agents.
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
@@ -394,6 +395,7 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 
 func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idleTimeout string) string {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
