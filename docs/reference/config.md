@@ -268,6 +268,7 @@ DaemonConfig holds controller daemon settings.
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
+| `max_concurrent_wisps` | integer |  |  | MaxConcurrentWisps caps the total number of live wisp molecules across the workspace at any moment. When the cap is reached, the dispatcher defers new wisp launches until a slot opens (backpressure). Nil or 0 means unlimited. Set to a positive integer to bound resource use in large multi-agent deployments. |
 
 ## DoltConfig
 

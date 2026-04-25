@@ -1079,6 +1079,10 @@
           "type": "integer",
           "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
           "default": 5
+        },
+        "max_concurrent_wisps": {
+          "type": "integer",
+          "description": "MaxConcurrentWisps caps the total number of live wisp molecules across\nthe workspace at any moment. When the cap is reached, the dispatcher\ndefers new wisp launches until a slot opens (backpressure). Nil or 0\nmeans unlimited. Set to a positive integer to bound resource use in\nlarge multi-agent deployments."
         }
       },
       "additionalProperties": false,

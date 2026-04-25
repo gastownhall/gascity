@@ -1256,6 +1256,12 @@ type DaemonConfig struct {
 	// single tick. Nil (unset) defaults to 5. Values <= 0 are treated as the
 	// default — set a positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
+	// MaxConcurrentWisps caps the total number of live wisp molecules across
+	// the workspace at any moment. When the cap is reached, the dispatcher
+	// defers new wisp launches until a slot opens (backpressure). Nil or 0
+	// means unlimited. Set to a positive integer to bound resource use in
+	// large multi-agent deployments.
+	MaxConcurrentWisps *int `toml:"max_concurrent_wisps,omitempty"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1335,6 +1341,22 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 		return DefaultMaxWakesPerTick
 	}
 	return *d.MaxWakesPerTick
+}
+
+// WispBackpressureEnabled reports whether wisp backpressure is active.
+// Returns false when MaxConcurrentWisps is nil or <= 0 (unlimited).
+func (d *DaemonConfig) WispBackpressureEnabled() bool {
+	return d.MaxConcurrentWisps != nil && *d.MaxConcurrentWisps > 0
+}
+
+// ShouldThrottleWisps returns true when the active wisp count has reached
+// the configured cap and new wisp dispatch should be deferred.
+// Always returns false when backpressure is disabled (unlimited).
+func (d *DaemonConfig) ShouldThrottleWisps(activeCount int) bool {
+	if !d.WispBackpressureEnabled() {
+		return false
+	}
+	return activeCount >= *d.MaxConcurrentWisps
 }
 
 // DriftDrainTimeoutDuration returns the drift drain timeout as a time.Duration.
