@@ -78,16 +78,16 @@ mechanism is provably composable from the primitives.
 
 Capabilities activate progressively via config presence.
 
-| Level | Adds                    |
-|-------|-------------------------|
-| 0-1   | Agent + tasks           |
-| 2     | Task loop               |
-| 3     | Multiple agents + pool  |
-| 4     | Messaging               |
-| 5     | Formulas & molecules    |
-| 6     | Health monitoring       |
-| 7     | Orders             |
-| 8     | Full orchestration      |
+| Level | Adds                   |
+| ----- | ---------------------- |
+| 0-1   | Agent + tasks          |
+| 2     | Task loop              |
+| 3     | Multiple agents + pool |
+| 4     | Messaging              |
+| 5     | Formulas & molecules   |
+| 6     | Health monitoring      |
+| 7     | Orders                 |
+| 8     | Full orchestration     |
 
 ## Architecture docs
 
@@ -108,7 +108,7 @@ Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
 
 - **Object model at the center.** `internal/{beads, mail, convoy,
-  formula, agent, events, session, sling, ...}` is the canonical
+formula, agent, events, session, sling, ...}` is the canonical
   domain. The CLI (`cmd/gc/`) and the HTTP+SSE API
   (`internal/api/`) are projections over it. Neither re-implements
   domain logic.
@@ -155,7 +155,7 @@ These decisions are final. Do not revisit them.
 - **Zero Framework Cognition (ZFC)** — Go handles transport, not reasoning.
   If a line of Go contains a judgment call, it's a violation. **The ZFC
   test:** does any line of Go contain a judgment call? An `if stuck then
-  restart` is framework intelligence. Move the decision to the prompt.
+restart` is framework intelligence. Move the decision to the prompt.
 - **Bitter Lesson** — every primitive must become MORE useful as models
   improve, not less. Don't build heuristics or decision trees.
 - **GUPP** — "If you find work on your hook, YOU RUN IT." No confirmation,
@@ -238,62 +238,6 @@ Before considering any task complete:
 - No premature abstractions
 - Tests cover happy path AND edge cases
 
-## Architecture Best Practices
-
-These apply to all code in this project — frontend and server:
-
-- **TDD (Test-Driven Development)** - write the tests first; the implementation
-  code isn't done until the tests pass.
-- **Consider First Principles** to assess your current architecture against the
-  one you'd use if you started over from scratch.
-- **Leverage Types** using statically typed languages (TypeScript, Rust, etc) so
-  that we can leverage the power of the compiler as guardrails and immediate
-  feedback on our code at build-time instead of waiting until run-time.
-- **DRY (Don't Repeat Yourself)** – eliminate duplicated logic by extracting
-  shared utilities and modules.
-- **Separation of Concerns** – each module should handle one distinct
-  responsibility.
-- **Single Responsibility Principle (SRP)** – every class/module/function/file
-  should have exactly one reason to change.
-- **Clear Abstractions & Contracts** – expose intent through small, stable
-  interfaces and hide implementation details.
-- **Low Coupling, High Cohesion** – keep modules self-contained, minimize
-  cross-dependencies.
-- **Scalability & Statelessness** – design components to scale horizontally and
-  prefer stateless services when possible.
-- **Observability & Testability** – build in logging, metrics, tracing, and
-  ensure components can be unit/integration tested.
-- **KISS (Keep It Simple, Sir)** - keep solutions as simple as possible.
-- **YAGNI (You're Not Gonna Need It)** – avoid speculative complexity or
-  over-engineering.
-- **Don't Swallow Errors** by catching exceptions, silently filling in required
-  but missing values, masking deserialization with nulls or empty lists, or
-  ignoring timeouts when something hangs. All of those are errors (client-side
-  and server-side) and must be tracked in a centralized log so it can be used to
-  improve the app over time. Also, inform the user as appropriate so that they
-  can take necessary action.
-- **No Placeholder Code** - we're building production code here, not toys.
-- **No Comments for Removed Functionality** - the source is not the place to
-  keep history of what's changed; it's the place to implement the current
-  requirements only.
-- **Layered Architecture** - organize code into clear tiers where each layer
-  depends only on the one(s) below it, keeping logic cleanly separated.
-- **Use Non-Nullable Variables** when possible; use nullability only when
-  there is NO other possiblity.
-- **Use Async Notifications** when possible over inefficient polling.
-- **Eliminate Race Conditions** that might cause dropped or corrupted data
-- **Write for Maintainability** so that the code is clear and readable and easy
-  to maintain by future developers.
-- **Arrange Project Idiomatically** for the language and framework being used,
-  including recommended lints, static analysis tools, folder structure and
-  gitignore entries.
-- **Keep Serialization/Deserialization At The Edges** to make full use of
-  type-safe objects in the app itself and to centralize error handling for
-  type-system translation. Do NOT allow untyped data with known shapes to flow
-  through the system and subvert the type system.
-- **Prefer Well-Known, High Quality OSS Libraries** instead of hand-rolling your
-  own behavior to get more robust, better maintained and better tested results.
-
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
@@ -369,3 +313,59 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Architecture Best Practices
+
+These apply to all code in this project — frontend and server:
+
+- **TDD (Test-Driven Development)** - write the tests first; the implementation
+  code isn't done until the tests pass.
+- **Consider First Principles** to assess your current architecture against the
+  one you'd use if you started over from scratch.
+- **Leverage Types** using statically typed languages (TypeScript, Rust, etc) so
+  that we can leverage the power of the compiler as guardrails and immediate
+  feedback on our code at build-time instead of waiting until run-time.
+- **DRY (Don't Repeat Yourself)** – eliminate duplicated logic by extracting
+  shared utilities and modules.
+- **Separation of Concerns** – each module should handle one distinct
+  responsibility.
+- **Single Responsibility Principle (SRP)** – every class/module/function/file
+  should have exactly one reason to change.
+- **Clear Abstractions & Contracts** – expose intent through small, stable
+  interfaces and hide implementation details.
+- **Low Coupling, High Cohesion** – keep modules self-contained, minimize
+  cross-dependencies.
+- **Scalability & Statelessness** – design components to scale horizontally and
+  prefer stateless services when possible.
+- **Observability & Testability** – build in logging, metrics, tracing, and
+  ensure components can be unit/integration tested.
+- **KISS (Keep It Simple, Sir)** - keep solutions as simple as possible.
+- **YAGNI (You're Not Gonna Need It)** – avoid speculative complexity or
+  over-engineering.
+- **Don't Swallow Errors** by catching exceptions, silently filling in required
+  but missing values, masking deserialization with nulls or empty lists, or
+  ignoring timeouts when something hangs. All of those are errors (client-side
+  and server-side) and must be tracked in a centralized log so it can be used to
+  improve the app over time. Also, inform the user as appropriate so that they
+  can take necessary action.
+- **No Placeholder Code** - we're building production code here, not toys.
+- **No Comments for Removed Functionality** - the source is not the place to
+  keep history of what's changed; it's the place to implement the current
+  requirements only.
+- **Layered Architecture** - organize code into clear tiers where each layer
+  depends only on the one(s) below it, keeping logic cleanly separated.
+- **Use Non-Nullable Variables** when possible; use nullability only when
+  there is NO other possiblity.
+- **Use Async Notifications** when possible over inefficient polling.
+- **Eliminate Race Conditions** that might cause dropped or corrupted data
+- **Write for Maintainability** so that the code is clear and readable and easy
+  to maintain by future developers.
+- **Arrange Project Idiomatically** for the language and framework being used,
+  including recommended lints, static analysis tools, folder structure and
+  gitignore entries.
+- **Keep Serialization/Deserialization At The Edges** to make full use of
+  type-safe objects in the app itself and to centralize error handling for
+  type-system translation. Do NOT allow untyped data with known shapes to flow
+  through the system and subvert the type system.
+- **Prefer Well-Known, High Quality OSS Libraries** instead of hand-rolling your
+  own behavior to get more robust, better maintained and better tested results.

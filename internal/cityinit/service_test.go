@@ -118,7 +118,7 @@ func mustNewService(t *testing.T, deps ServiceDeps) *Service {
 
 func TestServiceValidateInitRequest(t *testing.T) {
 	absDir := filepath.Join(t.TempDir(), "city")
-	svc := mustNewService(t, ServiceDeps{FS: testOSScaffoldFS{}})
+	svc := mustNewService(t, ServiceDeps{FS: fsys.OSScaffoldFS{}})
 
 	tests := []struct {
 		name    string
@@ -177,7 +177,7 @@ func TestServiceValidateInitRequest(t *testing.T) {
 
 func TestServiceValidateInitRequestUsesInternalProviderValidation(t *testing.T) {
 	absDir := filepath.Join(t.TempDir(), "city")
-	svc := mustNewService(t, ServiceDeps{FS: testOSScaffoldFS{}})
+	svc := mustNewService(t, ServiceDeps{FS: fsys.OSScaffoldFS{}})
 
 	if err := svc.ValidateInitRequest(InitRequest{
 		Dir:              absDir,
@@ -202,7 +202,7 @@ func TestServiceInitScaffoldsAndFinalizes(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "init-city")
 	var calls []string
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 		Initializer: &mockInitializer{
 			scaffoldFn: func(_ context.Context, req InitRequest) error {
 				calls = append(calls, "do-init:"+req.Dir+":"+req.Provider)
@@ -237,7 +237,7 @@ func TestServiceInitScaffoldsAndFinalizes(t *testing.T) {
 func TestServiceInitRequiresInitializerBeforeSideEffects(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "init-city")
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 	})
 
 	_, err := svc.Init(context.Background(), InitRequest{
@@ -258,7 +258,7 @@ func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
 	var reloaded bool
 	lifecycleEvents := &recordingLifecycleEvents{}
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
 				return err
@@ -306,7 +306,7 @@ func TestServiceScaffoldUsesInternalScaffoldDetection(t *testing.T) {
 		t.Fatalf("EnsureCityScaffoldFS: %v", err)
 	}
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 		Initializer: &mockInitializer{scaffoldFn: func(context.Context, InitRequest) error {
 			t.Fatal("Scaffold should not run for an already scaffolded city")
 			return nil
@@ -331,7 +331,7 @@ func TestServiceScaffoldRequiresRegisterBeforeSideEffects(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "api-city")
 	scaffoldCalled := false
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			scaffoldCalled = true
 			return os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755)
@@ -358,7 +358,7 @@ func TestServiceScaffoldFailsBeforeRegisterWhenEventLogCannotBeCreated(t *testin
 	var registered bool
 	eventErr := errors.New("event log unavailable")
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
 				return err
@@ -403,7 +403,7 @@ func TestServiceScaffoldRollbackUsesInternalManagedPaths(t *testing.T) {
 	}
 
 	svc := mustNewService(t, ServiceDeps{
-		FS: testOSScaffoldFS{},
+		FS: fsys.OSScaffoldFS{},
 		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			if err := os.WriteFile(generatedAgentPath, []byte("generated"), 0o644); err != nil {
 				return err

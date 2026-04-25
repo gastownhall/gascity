@@ -1088,8 +1088,8 @@ func TestBdStoreCreateWithLabels(t *testing.T) {
 	if !strings.Contains(args, "--labels owned") {
 		t.Errorf("args = %q, want to contain '--labels owned'", args)
 	}
-	if len(created.Labels) != 0 {
-		t.Errorf("created.Labels = %#v, want empty until backend confirms labels", created.Labels)
+	if len(created.Labels) != 1 || created.Labels[0] != "owned" {
+		t.Errorf("created.Labels = %#v, want [owned]", created.Labels)
 	}
 }
 
@@ -1128,12 +1128,12 @@ func TestBdStoreCreateWithParentID(t *testing.T) {
 	if !strings.Contains(args, "--parent bd-parent-1") {
 		t.Errorf("args = %q, want to contain '--parent bd-parent-1'", args)
 	}
-	if created.ParentID != "" {
-		t.Errorf("created.ParentID = %q, want empty until backend confirms parent", created.ParentID)
+	if created.ParentID != "bd-parent-1" {
+		t.Errorf("created.ParentID = %q, want bd-parent-1", created.ParentID)
 	}
 }
 
-func TestBdStoreCreateDoesNotBackfillUnconfirmedFields(t *testing.T) {
+func TestBdStoreCreatePreservesCallerFields(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"accepted":"true"}}`), nil
 	}
@@ -1151,20 +1151,20 @@ func TestBdStoreCreateDoesNotBackfillUnconfirmedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Description != "" {
-		t.Fatalf("created.Description = %q, want empty until backend confirms it", created.Description)
+	if created.Description != "local description" {
+		t.Fatalf("created.Description = %q, want %q", created.Description, "local description")
 	}
-	if created.ParentID != "" {
-		t.Fatalf("created.ParentID = %q, want empty until backend confirms it", created.ParentID)
+	if created.ParentID != "bd-parent-1" {
+		t.Fatalf("created.ParentID = %q, want %q", created.ParentID, "bd-parent-1")
 	}
-	if len(created.Labels) != 0 {
-		t.Fatalf("created.Labels = %#v, want empty until backend confirms them", created.Labels)
+	if len(created.Labels) != 1 || created.Labels[0] != "owned" {
+		t.Fatalf("created.Labels = %#v, want [owned]", created.Labels)
 	}
-	if len(created.Needs) != 0 {
-		t.Fatalf("created.Needs = %#v, want empty until backend confirms them", created.Needs)
+	if len(created.Needs) != 1 || created.Needs[0] != "bd-2" {
+		t.Fatalf("created.Needs = %#v, want [bd-2]", created.Needs)
 	}
-	if len(created.Metadata) != 1 || created.Metadata["accepted"] != "true" {
-		t.Fatalf("created.Metadata = %#v, want backend metadata only", created.Metadata)
+	if created.Metadata["local"] != "value" || created.Metadata["accepted"] != "" {
+		t.Fatalf("created.Metadata = %#v, want caller metadata only (bd response metadata not merged)", created.Metadata)
 	}
 }
 

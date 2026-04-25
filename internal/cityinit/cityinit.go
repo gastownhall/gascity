@@ -128,6 +128,10 @@ type InitResult struct {
 	// Resumed is true when Init detected an existing scaffold and
 	// skipped to finalization only.
 	Resumed bool
+
+	// ReloadWarning is non-empty when the supervisor reload after
+	// scaffold succeeded but returned a best-effort error.
+	ReloadWarning string
 }
 
 // UnregisterRequest is the typed input for Service.Unregister.
@@ -148,4 +152,8 @@ type UnregisterResult struct {
 	// removed from the registry. Useful for clients that want to
 	// filter completion events by path as well as name.
 	CityPath string
+
+	// ReloadWarning is non-empty when the supervisor reload after
+	// unregister succeeded but returned a best-effort error.
+	ReloadWarning string
 }

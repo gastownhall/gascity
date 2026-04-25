@@ -10,27 +10,10 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-var _ ScaffoldFS = testOSScaffoldFS{}
-
-type testOSScaffoldFS struct{ fsys.OSFS }
-
-func (testOSScaffoldFS) Walk(root string, fn filepath.WalkFunc) error {
-	return filepath.Walk(root, fn)
-}
-
-func (testOSScaffoldFS) Readlink(name string) (string, error) {
-	return os.Readlink(name)
-}
-
-func (testOSScaffoldFS) Symlink(oldname, newname string) error {
-	return os.Symlink(oldname, newname)
-}
-
-func (testOSScaffoldFS) RemoveAll(path string) error {
-	return os.RemoveAll(path)
-}
-
-var _ ScaffoldFS = (*fakeScaffoldFS)(nil)
+var (
+	_ ScaffoldFS = fsys.OSScaffoldFS{}
+	_ ScaffoldFS = (*fakeScaffoldFS)(nil)
+)
 
 type fakeScaffoldFS struct {
 	*fsys.Fake

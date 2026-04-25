@@ -16,7 +16,7 @@ import (
 
 func newCityInitService() (*cityinit.Service, error) {
 	return cityinit.NewService(cityinit.ServiceDeps{
-		FS:              osScaffoldFS{},
+		FS:              fsys.OSScaffoldFS{},
 		Initializer:     initializerAdapter{},
 		Registry:        registryAdapter{},
 		Reloader:        reloaderAdapter{},
