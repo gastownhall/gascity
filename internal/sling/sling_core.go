@@ -86,6 +86,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Dependency cycle check: reject slings that would create a deadlock.
+	if shouldCheckDepCycle(opts) {
+		if err := DetectCycle(opts.BeadOrFormula, deps.Store); err != nil {
+			return result, err
+		}
+	}
+
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
 		check := CheckBeadState(querier, opts.BeadOrFormula, a, deps)
@@ -128,6 +135,13 @@ func shouldValidateExistingBead(opts SlingOpts) bool {
 
 func usesFormulaBackedRoute(opts SlingOpts) bool {
 	return opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "")
+}
+
+func shouldCheckDepCycle(opts SlingOpts) bool {
+	// Only meaningful for plain-bead slinging where a bead ID is known.
+	// Formula slinging creates new molecules whose deps aren't bead-graph deps.
+	// Force and dry-run bypass cycle detection intentionally.
+	return !opts.IsFormula && opts.OnFormula == "" && !opts.Force && !opts.DryRun && !opts.InlineText
 }
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
