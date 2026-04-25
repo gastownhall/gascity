@@ -618,6 +618,33 @@ func TestComputePoolDesiredStates_RoutedButUnassignedDoesNotSpawnNew(t *testing.
 	}
 }
 
+// Regression: sessions in "creating" state must count toward pool size so
+// the reconciler doesn't keep spawning new sessions while creates are pending.
+func TestComputePoolDesiredStates_CreatingSessionsCountTowardDeficit(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},
+	}
+	// No assigned work beads — all demand comes from scale_check.
+	// But one session is already in "creating" state.
+	sessions := []beads.Bead{
+		{ID: "s-creating", Status: "open", Type: "session", Metadata: map[string]string{
+			"template": "rig/claude", "state": "creating", "pool_managed": "true",
+		}},
+	}
+	scaleCheck := map[string]int{"rig/claude": 2}
+
+	result := ComputePoolDesiredStates(cfg, nil, sessions, scaleCheck)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	// scale_check=2, 1 creating session already in flight → deficit=1, not 2.
+	if total != 1 {
+		t.Errorf("total requests = %d, want 1 (creating session counted toward deficit)", total)
+	}
+}
+
 // Regression: same as above but for a rig-scoped agent.
 func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 	cfg := &config.City{

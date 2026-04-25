@@ -161,6 +161,23 @@ func computePoolDesiredStates(
 		for _, r := range allRequests {
 			beadDriven[r.Template]++
 		}
+
+		// Count sessions in "creating" state per template. These are
+		// already being spawned but haven't reached "active" yet, so
+		// they must count toward pool size to prevent unbounded spawning.
+		creatingCount := make(map[string]int)
+		for _, sb := range sessionBeads {
+			if sb.Status == "closed" {
+				continue
+			}
+			if sb.Metadata["state"] == "creating" {
+				tmpl := strings.TrimSpace(sb.Metadata["template"])
+				if tmpl != "" {
+					creatingCount[tmpl]++
+				}
+			}
+		}
+
 		for _, agent := range cfg.Agents {
 			if agent.Suspended {
 				continue
@@ -170,7 +187,7 @@ func computePoolDesiredStates(
 			if !ok {
 				continue
 			}
-			deficit := scaleCount - beadDriven[template]
+			deficit := scaleCount - beadDriven[template] - creatingCount[template]
 			for j := 0; j < deficit; j++ {
 				allRequests = append(allRequests, SessionRequest{
 					Template: template,
