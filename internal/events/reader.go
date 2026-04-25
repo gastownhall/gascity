@@ -14,8 +14,11 @@ import (
 type Filter struct {
 	Type     string    // match events with this Type
 	Actor    string    // match events with this Actor
+	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
+	Until    time.Time // match events at or before this time
 	AfterSeq uint64    // match events with Seq > AfterSeq (0 = no filter)
+	Limit    int       // cap results at this count (0 = unlimited)
 }
 
 // ReadAll reads all events from the JSONL file at path.
@@ -59,6 +62,9 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 	for _, e := range all {
 		if eventMatchesFilter(e, filter) {
 			result = append(result, e)
+			if filter.Limit > 0 && len(result) >= filter.Limit {
+				break
+			}
 		}
 	}
 	return result, nil
@@ -147,10 +153,22 @@ func eventMatchesFilter(e Event, filter Filter) bool {
 	if filter.Actor != "" && e.Actor != filter.Actor {
 		return false
 	}
+	if filter.Subject != "" && e.Subject != filter.Subject {
+		return false
+	}
 	if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
 		return false
 	}
+	if !filter.Until.IsZero() && e.Ts.After(filter.Until) {
+		return false
+	}
 	return true
+}
+
+// matchesFilter reports whether e satisfies all non-zero predicates in f.
+// It does not enforce Limit; callers apply that after appending matches.
+func matchesFilter(e Event, f Filter) bool {
+	return eventMatchesFilter(e, f)
 }
 
 // ReadLatestSeq returns the latest complete event Seq in the events file, or

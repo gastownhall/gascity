@@ -58,6 +58,9 @@ func (f *Fake) List(filter Filter) ([]Event, error) {
 	for _, e := range f.Events {
 		if eventMatchesFilter(e, filter) {
 			result = append(result, e)
+			if filter.Limit > 0 && len(result) >= filter.Limit {
+				break
+			}
 		}
 	}
 	return result, nil
