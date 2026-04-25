@@ -411,6 +411,15 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			rs.Labels = append(rs.Labels, "gate:"+step.WaitsFor)
 		}
 
+		// Inject provider hint into metadata so the runtime can route to a
+		// matching agent without inspecting the formula layer.
+		if step.Provider != "" {
+			if rs.Metadata == nil {
+				rs.Metadata = make(map[string]string)
+			}
+			rs.Metadata["gc.provider"] = step.Provider
+		}
+
 		*out = append(*out, rs)
 
 		// Ralph-generated graph nodes intentionally avoid parent-child semantics.

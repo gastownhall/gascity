@@ -291,6 +291,13 @@ type Step struct {
 	// Overrides DefaultGateTimeout (5m) unless check.timeout is set.
 	Timeout string `json:"timeout,omitempty" toml:"timeout,omitempty"`
 
+	// Provider hints which inference provider should handle this step.
+	// Must match a provider name registered in the workspace (e.g., "groq",
+	// "cerebras", "claude"). The runtime resolves this hint to a concrete
+	// agent assignment via the gc.provider metadata key. Unset means the
+	// step inherits the agent that owns the workflow.
+	Provider string `json:"provider,omitempty" toml:"provider,omitempty"`
+
 	// Source tracing fields: track where this step came from.
 	// These are set during parsing/transformation and copied to Issues during cooking.
 
@@ -398,6 +405,7 @@ type stepTOMLAlias struct {
 	Ralph           json.RawMessage   `json:"ralph,omitempty"`
 	Retry           *RetrySpec        `json:"retry,omitempty"`
 	Timeout         string            `json:"timeout,omitempty"`
+	Provider        string            `json:"provider,omitempty"`
 }
 
 type loopTOMLAlias struct {
@@ -472,6 +480,7 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 		Ralph:           ralph,
 		Retry:           a.Retry,
 		Timeout:         a.Timeout,
+		Provider:        a.Provider,
 	}, nil
 }
 
@@ -1054,6 +1063,12 @@ func (f *Formula) Validate() error {
 		if step.OnComplete != nil {
 			validateOnComplete(step.OnComplete, &errs, fmt.Sprintf("steps[%d] (%s)", i, step.ID))
 		}
+		// Validate provider field
+		if step.Provider != "" {
+			if err := validateProvider(step.Provider); err != nil {
+				errs = append(errs, fmt.Sprintf("steps[%d] (%s): provider: %s", i, step.ID, err.Error()))
+			}
+		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))
 	}
@@ -1281,6 +1296,16 @@ func validateWaitsFor(value string, stepIDLocations map[string]string) error {
 	}
 
 	return fmt.Errorf("waits_for has invalid value %q (must be all-children, any-children, or children-of(step-id))", value)
+}
+
+// validateProvider checks that a provider hint is syntactically valid.
+// It does not verify that the named provider is registered in the workspace —
+// that check happens at dispatch time via the gc.provider metadata key.
+func validateProvider(name string) error {
+	if strings.ContainsAny(name, " \t\n\r") {
+		return fmt.Errorf("must not contain whitespace")
+	}
+	return nil
 }
 
 // validateChildDependsOn recursively validates depends_on and needs references for children.

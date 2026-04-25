@@ -256,6 +256,7 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		expanded.Description = substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars)
 		expanded.Notes = substituteVars(substituteTargetPlaceholders(tmpl.Notes, target), vars)
 		expanded.Assignee = substituteVars(tmpl.Assignee, vars)
+		expanded.Provider = substituteVars(tmpl.Provider, vars)
 		// Keep condition expressions intact for the normal condition-filtering
 		// pass, which understands the {{var}} syntax. Eager single-brace var
 		// substitution here can corrupt "!{{flag}}" into "!{value}".

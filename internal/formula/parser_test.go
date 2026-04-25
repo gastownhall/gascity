@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2853,5 +2854,95 @@ title = "Test"
 		if v.Description != "A required variable" {
 			t.Errorf("required_var.Description = %q, want 'A required variable'", v.Description)
 		}
+	}
+}
+
+// --- Provider field tests ---
+
+func TestParseProvider_TOML(t *testing.T) {
+	src := `
+formula = "mol-vote"
+version  = 1
+type     = "workflow"
+contract = "graph.v2"
+
+[[steps]]
+id       = "ask"
+title    = "Ask voter"
+provider = "groq"
+`
+	p := NewParser()
+	f, err := p.ParseTOML([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseTOML: %v", err)
+	}
+	if len(f.Steps) == 0 {
+		t.Fatal("expected steps")
+	}
+	if f.Steps[0].Provider != "groq" {
+		t.Errorf("Provider = %q, want %q", f.Steps[0].Provider, "groq")
+	}
+}
+
+func TestValidate_ProviderValid(t *testing.T) {
+	f := &Formula{
+		Formula: "mol-vote",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "ask", Title: "Ask voter", Provider: "cerebras"},
+		},
+	}
+	if err := f.Validate(); err != nil {
+		t.Errorf("valid provider should pass: %v", err)
+	}
+}
+
+func TestValidate_ProviderWithWhitespace(t *testing.T) {
+	f := &Formula{
+		Formula: "mol-vote",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "ask", Title: "Ask voter", Provider: "groq cerebras"},
+		},
+	}
+	if err := f.Validate(); err == nil {
+		t.Error("provider with whitespace should fail validation")
+	}
+}
+
+func TestCompile_ProviderInjectsGCMetadata(t *testing.T) {
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(false) })
+
+	src := `
+formula  = "mol-vote"
+version  = 1
+type     = "workflow"
+contract = "graph.v2"
+
+[[steps]]
+id       = "ask"
+title    = "Ask voter"
+provider = "groq"
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mol-vote.toml"), []byte(src), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	r, err := Compile(context.Background(), "mol-vote", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	var found bool
+	for _, step := range r.Steps {
+		if step.Metadata["gc.provider"] == "groq" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected gc.provider=groq in compiled recipe metadata")
 	}
 }
