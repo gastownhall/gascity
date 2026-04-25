@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -698,7 +699,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if readOnly {
 		fmt.Fprintf(stderr, "gc supervisor: binding to %s — mutation endpoints disabled (non-localhost)\n", bind) //nolint:errcheck
 	}
-	apiMux := api.NewSupervisorMux(registry, readOnly, version, startedAt)
+	apiMux := api.NewSupervisorMux(registry, NewInitializer(), readOnly, version, startedAt)
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -902,13 +903,13 @@ func reconcileCities(
 	})
 
 	for i, mc := range toStop {
-		name := filepath.Base(toStopPaths[i])
-		fmt.Fprintf(stdout, "Unregistered city '%s', stopping...\n", name) //nolint:errcheck
-		// Reconcile path: stop error is already logged inside stopManagedCity
-		// and propagating it would require bubbling through the whole
-		// reconcile loop. The supervisor-shutdown aggregator is the path
-		// that cares about these errors.
-		_ = stopManagedCity(mc, toStopPaths[i], stderr)
+		path := toStopPaths[i]
+		cityName := mc.name
+		if cityName == "" {
+			cityName = filepath.Base(path)
+		}
+		fmt.Fprintf(stdout, "Unregistered city '%s', stopping...\n", cityName) //nolint:errcheck
+		stopErr := stopManagedCity(mc, path, stderr)
 		// Clear backoff so re-registering starts immediately.
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -916,10 +917,36 @@ func reconcileCities(
 			initFailures map[string]*initFailRecord,
 			panicHistory map[string]*panicRecord,
 		) {
-			delete(panicHistory, toStopPaths[i])
-			delete(initFailures, toStopPaths[i])
+			delete(panicHistory, path)
+			delete(initFailures, path)
 		})
-		fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+		// Emit the terminal unregister event to the city's event log
+		// so /v0/events/stream subscribers observe completion without
+		// polling. The event lands on disk BEFORE the running-city
+		// provider is dropped from the multiplexer, so connected
+		// subscribers see the event via the running-provider path.
+		// Best-effort: a failure to open the recorder just means
+		// subscribers learn via GET /v0/cities instead.
+		evType := events.CityUnregistered
+		var payload []byte
+		if stopErr == nil {
+			fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
+			p, _ := json.Marshal(api.CityUnregisteredPayload{Name: cityName, Path: path})
+			payload = p
+		} else {
+			evType = events.CityUnregisterFailed
+			p, _ := json.Marshal(api.CityUnregisterFailedPayload{Name: cityName, Path: path, Error: stopErr.Error()})
+			payload = p
+		}
+		if fr, frErr := events.NewFileRecorder(filepath.Join(path, ".gc", "events.jsonl"), stderr); frErr == nil {
+			fr.Record(events.Event{
+				Type:    evType,
+				Actor:   "gc",
+				Subject: cityName,
+				Payload: payload,
+			})
+			fr.Close() //nolint:errcheck // best-effort
+		}
 	}
 
 	// Clear panicHistory and initFailures for any path no longer in the
@@ -1132,6 +1159,28 @@ func reconcileCities(
 			) {
 				delete(initStatus, path)
 			})
+			// Emit city.init_failed to the city's event file so
+			// clients watching /v0/events/stream observe async
+			// failure signal without polling. Best-effort: if the
+			// file recorder can't open (e.g. .gc/ missing or
+			// permissions), fall through to recordInitFailure which
+			// surfaces the error via /v0/cities.
+			evPath := filepath.Join(path, ".gc", "events.jsonl")
+			if fr, frErr := events.NewFileRecorder(evPath, stderr); frErr == nil {
+				if payload, mErr := json.Marshal(api.CityInitFailedPayload{
+					Name:  cityName,
+					Path:  path,
+					Error: err.Error(),
+				}); mErr == nil {
+					fr.Record(events.Event{
+						Type:    events.CityInitFailed,
+						Actor:   "gc",
+						Subject: cityName,
+						Payload: payload,
+					})
+				}
+				fr.Close() //nolint:errcheck // best-effort
+			}
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
 		}
@@ -1273,6 +1322,7 @@ func reconcileCities(
 		}
 		cs.ct = cityRuntime.crashTrack()
 		cs.pokeCh = pokeCh
+		cs.configDirty = configDirty
 		cs.services = cityRuntime.svc
 		cs.startBeadEventWatcher(cityCtx)
 		cityRuntime.setControllerState(cs)
@@ -1503,6 +1553,19 @@ func reconcileCities(
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+		// Signal city.ready on the supervisor event bus so clients
+		// that POST /v0/city and subscribe to /v0/events/stream
+		// observe completion without polling. Handler returned 202
+		// synchronously; this event is the async completion signal.
+		readyPayload, readyErr := json.Marshal(api.CityReadyPayload{Name: cityName, Path: path})
+		if readyErr == nil {
+			rec.Record(events.Event{
+				Type:    events.CityReady,
+				Actor:   "gc",
+				Subject: cityName,
+				Payload: readyPayload,
+			})
+		}
 		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 	}

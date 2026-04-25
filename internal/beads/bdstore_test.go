@@ -969,16 +969,19 @@ func TestBdStoreCreateWithLabels(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		gotArgs = args
-		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","labels":["owned"]}`), nil
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	_, err := s.Create(beads.Bead{Title: "test", Type: "convoy", Labels: []string{"owned"}})
+	created, err := s.Create(beads.Bead{Title: "test", Type: "convoy", Labels: []string{"owned"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--labels owned") {
 		t.Errorf("args = %q, want to contain '--labels owned'", args)
+	}
+	if len(created.Labels) != 0 {
+		t.Errorf("created.Labels = %#v, want empty until backend confirms labels", created.Labels)
 	}
 }
 
@@ -1009,13 +1012,51 @@ func TestBdStoreCreateWithParentID(t *testing.T) {
 		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	_, err := s.Create(beads.Bead{Title: "test", ParentID: "bd-parent-1"})
+	created, err := s.Create(beads.Bead{Title: "test", ParentID: "bd-parent-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--parent bd-parent-1") {
 		t.Errorf("args = %q, want to contain '--parent bd-parent-1'", args)
+	}
+	if created.ParentID != "" {
+		t.Errorf("created.ParentID = %q, want empty until backend confirms parent", created.ParentID)
+	}
+}
+
+func TestBdStoreCreateDoesNotBackfillUnconfirmedFields(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"accepted":"true"}}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{
+		Title:       "test",
+		Description: "local description",
+		ParentID:    "bd-parent-1",
+		Labels:      []string{"owned"},
+		Needs:       []string{"bd-2"},
+		Metadata: map[string]string{
+			"local": "value",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Description != "" {
+		t.Fatalf("created.Description = %q, want empty until backend confirms it", created.Description)
+	}
+	if created.ParentID != "" {
+		t.Fatalf("created.ParentID = %q, want empty until backend confirms it", created.ParentID)
+	}
+	if len(created.Labels) != 0 {
+		t.Fatalf("created.Labels = %#v, want empty until backend confirms them", created.Labels)
+	}
+	if len(created.Needs) != 0 {
+		t.Fatalf("created.Needs = %#v, want empty until backend confirms them", created.Needs)
+	}
+	if len(created.Metadata) != 1 || created.Metadata["accepted"] != "true" {
+		t.Fatalf("created.Metadata = %#v, want backend metadata only", created.Metadata)
 	}
 }
 
@@ -1038,6 +1079,92 @@ func TestBdStoreDepAddParentChildAlreadyParentedIsNoop(t *testing.T) {
 	}
 	if len(calls) != 1 {
 		t.Fatalf("calls = %v, want only bd show", calls)
+	}
+}
+
+func TestBdStoreGetNormalizesShowStyleDependencies(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-child`: {
+			out: []byte(`[
+				{
+					"id":"bd-child",
+					"title":"child",
+					"status":"open",
+					"issue_type":"task",
+					"created_at":"2025-01-15T10:30:00Z",
+					"dependencies":[
+						{
+							"id":"bd-parent",
+							"title":"parent",
+							"status":"open",
+							"issue_type":"task",
+							"dependency_type":"parent-child"
+						},
+						{
+							"issue_id":"",
+							"depends_on_id":"",
+							"type":""
+						}
+					],
+					"parent":"bd-parent"
+				}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.Get("bd-child")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("Dependencies = %#v, want one normalized dependency", got.Dependencies)
+	}
+	dep := got.Dependencies[0]
+	if dep.IssueID != "bd-child" || dep.DependsOnID != "bd-parent" || dep.Type != "parent-child" {
+		t.Fatalf("dependency = %+v, want child -> parent parent-child", dep)
+	}
+}
+
+func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=mc-live-contract --include-infra --include-gates --limit 50`: {
+			out: []byte(`[
+				{
+					"id":"bd-child",
+					"title":"child",
+					"status":"open",
+					"issue_type":"task",
+					"created_at":"2025-01-15T10:30:00Z",
+					"labels":["mc-live-contract"],
+					"dependencies":[
+						{
+							"issue_id":"bd-child",
+							"depends_on_id":"bd-parent",
+							"type":"parent-child"
+						}
+					]
+				}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.List(beads.ListQuery{Label: "mc-live-contract", Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1", len(got))
+	}
+	if got[0].ParentID != "bd-parent" {
+		t.Fatalf("ParentID = %q, want bd-parent", got[0].ParentID)
 	}
 }
 

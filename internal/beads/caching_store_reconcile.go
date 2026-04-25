@@ -62,6 +62,11 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 
 func (c *CachingStore) runReconciliation() {
 	start := time.Now()
+
+	c.mu.RLock()
+	startSeq := c.mutationSeq
+	c.mu.RUnlock()
+
 	fresh, err := c.backing.List(ListQuery{AllowScan: true})
 	if err != nil {
 		c.mu.Lock()
@@ -86,6 +91,84 @@ func (c *CachingStore) runReconciliation() {
 	}
 
 	c.mu.Lock()
+	if c.mutationSeq != startSeq {
+		var adds, removes, updates int64
+		notifications := make([]cacheNotification, 0, len(freshByID))
+
+		for id, freshBead := range freshByID {
+			if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+				continue
+			}
+
+			old, exists := c.beads[id]
+			switch {
+			case !exists:
+				adds++
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.created",
+					bead:      cloneBead(freshBead),
+				})
+			case beadChanged(old, freshBead):
+				updates++
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.updated",
+					bead:      cloneBead(freshBead),
+				})
+			case depErr == nil && depsChanged(c.deps[id], depMap[id]):
+				updates++
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.updated",
+					bead:      cloneBead(freshBead),
+				})
+			}
+
+			c.beads[id] = cloneBead(freshBead)
+			if depErr == nil {
+				c.deps[id] = cloneDeps(depMap[id])
+			}
+			delete(c.dirty, id)
+			delete(c.deletedSeq, id)
+			delete(c.beadSeq, id)
+		}
+
+		for id, old := range c.beads {
+			if _, exists := freshByID[id]; exists {
+				continue
+			}
+			if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+				continue
+			}
+			removes++
+			closed := cloneBead(old)
+			closed.Status = "closed"
+			notifications = append(notifications, cacheNotification{
+				eventType: "bead.closed",
+				bead:      closed,
+			})
+			delete(c.beads, id)
+			delete(c.deps, id)
+			delete(c.dirty, id)
+			delete(c.deletedSeq, id)
+			delete(c.beadSeq, id)
+		}
+
+		c.syncFailures = 0
+		if c.state == cacheDegraded {
+			c.state = cacheLive
+		}
+		now := time.Now()
+		durMs := float64(time.Since(start).Microseconds()) / 1000.0
+		c.stats.LastReconcileAt = now
+		c.stats.LastReconcileMs = durMs
+		c.stats.Adds += adds
+		c.stats.Removes += removes
+		c.stats.Updates += updates
+		c.markFreshLocked(now)
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		c.notifyChanges(notifications)
+		return
+	}
 
 	var adds, removes, updates int64
 	notifications := make([]cacheNotification, 0, len(freshByID))
@@ -136,6 +219,8 @@ func (c *CachingStore) runReconciliation() {
 	c.beads = freshByID
 	c.deps = nextDeps
 	c.dirty = make(map[string]struct{})
+	c.beadSeq = make(map[string]uint64)
+	c.deletedSeq = make(map[string]uint64)
 	c.syncFailures = 0
 	if c.state == cacheDegraded {
 		c.state = cacheLive

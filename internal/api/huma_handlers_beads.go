@@ -181,25 +181,20 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, huma.Error404NotFound("bead " + rootID + " not found")
 	}
 
-	all, err := foundStore.List(beads.ListQuery{
-		Metadata:      map[string]string{"gc.root_bead_id": rootID},
-		IncludeClosed: true,
-	})
+	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-
-	graphBeads := []beads.Bead{root}
-	beadIndex := map[string]beads.Bead{root.ID: root}
-	for _, b := range all {
-		if b.ID == root.ID {
-			continue
-		}
-		graphBeads = append(graphBeads, b)
+	beadIndex := make(map[string]beads.Bead, len(graphBeads))
+	for _, b := range graphBeads {
 		beadIndex[b.ID] = b
 	}
 
-	deps, _ := collectWorkflowDeps(foundStore, beadIndex)
+	deps, depPartial := collectWorkflowDeps(foundStore, beadIndex)
+	if depPartial {
+		return nil, huma.Error500InternalServerError("listing bead graph dependencies failed")
+	}
+	deps = mergeWorkflowDeps(deps, parentEdges)
 
 	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),
@@ -310,10 +305,18 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 		Assignee:    assignee,
 		Description: input.Body.Description,
 		Labels:      input.Body.Labels,
+		ParentID:    input.Body.Parent,
+		Metadata:    input.Body.Metadata,
 	})
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		return nil, huma.Error500InternalServerError(err.Error())
+	}
+
+	// Some stores return a minimal create envelope and require a follow-up
+	// read for the canonical persisted bead state.
+	if persisted, getErr := store.Get(b.ID); getErr == nil {
+		b = persisted
 	}
 	s.idem.storeResponse(idemKey, bodyHash, b)
 
@@ -421,6 +424,14 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,
+		Metadata:     body.Metadata,
+	}
+	if body.parentSet {
+		parent := ""
+		if body.Parent != nil {
+			parent = *body.Parent
+		}
+		opts.ParentID = &parent
 	}
 
 	for _, store := range s.beadStoresForID(id) {
@@ -446,12 +457,6 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
 			}
 			return nil, huma.Error500InternalServerError(err.Error())
-		}
-		// Apply metadata key-value pairs if provided.
-		if len(body.Metadata) > 0 {
-			if err := store.SetMetadataBatch(id, body.Metadata); err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
-			}
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "updated"

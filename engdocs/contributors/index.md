@@ -9,6 +9,8 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Architecture Overview](../architecture/index.md)
 - [Primitive Test](primitive-test.md)
 - [Reconciler Debugging](reconciler-debugging.md)
+- [Huma Usage Notes](huma-usage.md) when touching `internal/api/`,
+  OpenAPI generation, or SSE registration
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 

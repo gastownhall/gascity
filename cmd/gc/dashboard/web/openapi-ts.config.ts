@@ -6,7 +6,7 @@ import { defineConfig } from "@hey-api/openapi-ts";
 // path construction, request/response typing, event discrimination,
 // retry, and auth headers all flow through generated code.
 //
-// See specs/architecture.md §6 "Tooling landscape" for the rationale.
+// See engdocs/architecture/api-control-plane.md §6 "Tooling landscape" for the rationale.
 export default defineConfig({
   input: "../../../../internal/api/openapi.json",
   output: {

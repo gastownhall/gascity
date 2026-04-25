@@ -28,7 +28,18 @@ var (
 var (
 	registerCityWithSupervisorTestHook func(cityPath, commandName string, stdout, stderr io.Writer) (bool, int)
 	supervisorCityErrorHook            = supervisorCityError
+	reloadSupervisorNoWaitHook         = reloadSupervisorNoWait
 )
+
+type supervisorRegistry interface {
+	List() ([]supervisor.CityEntry, error)
+	Register(cityPath, effectiveName string) error
+	Unregister(cityPath string) error
+}
+
+var newSupervisorRegistry = func() supervisorRegistry {
+	return supervisor.NewRegistry(supervisor.RegistryPath())
+}
 
 func supervisorCityStartTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
@@ -240,6 +251,42 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		}
 	}
 	return 0
+}
+
+// registerCityForAPI is the registry-write portion of async
+// POST /v0/city. It records the city in the supervisor registry but
+// intentionally does NOT wait for readiness. Callers are responsible
+// for emitting any lifecycle events they need before waking the
+// reconciler, so event ordering stays deterministic.
+func registerCityForAPI(cityPath, nameOverride string) error {
+	cityPath = normalizePathForCompare(cityPath)
+	name, err := registeredCityName(cityPath, nameOverride)
+	if err != nil {
+		return err
+	}
+	reg := newSupervisorRegistry()
+	if err := reg.Register(cityPath, name); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reloadSupervisorNoWait sends a "reload" command to the supervisor
+// socket without waiting for the reply. Used by registerCityForAPI
+// so the async POST /v0/city handler doesn't block on the
+// reconciler tick.
+func reloadSupervisorNoWait() {
+	sockPath, _ := runningSupervisorSocket()
+	if sockPath == "" {
+		return
+	}
+	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // best-effort
+	_ = conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	_, _ = conn.Write([]byte("reload\n"))
 }
 
 func retrySupervisorCityStartAfterControllerLock(cityPath string, stdout, stderr io.Writer, startErr error) (bool, error) {

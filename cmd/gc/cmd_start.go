@@ -981,7 +981,7 @@ func passthroughEnv() map[string]string {
 	} else if home := os.Getenv("HOME"); home != "" {
 		m["XDG_STATE_HOME"] = filepath.Join(home, ".local", "state")
 	}
-	// Pass through all GC_* and ANTHROPIC_* vars. Agent credentials are
+	// Pass through GC_* vars and provider credential env. Agent credentials are
 	// included in the global baseline because the SDK cannot know which
 	// agent uses which provider (zero hardcoded roles); the trust boundary
 	// is the managed session itself.
@@ -990,7 +990,7 @@ func passthroughEnv() map[string]string {
 		if !ok || val == "" {
 			continue
 		}
-		if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "ANTHROPIC_") {
+		if strings.HasPrefix(key, "GC_") || isProviderCredentialEnv(key) {
 			m[key] = val
 		}
 	}

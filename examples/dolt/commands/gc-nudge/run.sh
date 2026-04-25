@@ -1,16 +1,19 @@
 #!/bin/sh
-# gc dolt gc-nudge — Size-triggered CALL DOLT_GC() to compact a bloated
-# Dolt database.
+# gc dolt gc-nudge — periodic CALL DOLT_GC() to bound the Dolt commit graph.
 #
-# Why this exists: Dolt's auto-GC (default-on in 1.75+) fires on *growth*
-# — 125 MB delta since last GC. A database that bloated once and then
-# stabilized never auto-GCs on its own. This command closes that corner:
-# it checks disk size on each registered rig's Dolt database, and if any
-# are above the configured threshold, issues CALL DOLT_GC() against the
-# managed sql-server.
+# Why this exists: empirical evidence (beads perf harness, 2026-04) shows
+# Dolt's auto-GC does not fire under the beads-CLI fork-per-op workload even
+# with `auto_gc_behavior.enable: true`. Unbounded commit-graph growth causes
+# both disk bloat (~120 GB after a few days) and tail-latency degradation
+# (p99 at 143 MB of history → 16.9s, extrapolates to minutes at GB scale).
+# Manual CALL DOLT_GC() reclaims ~43% in seconds, so a periodic nudge is
+# both necessary and cheap.
 #
-# Runs from the dolt pack's dolt-gc-nudge order on a slow cooldown (6h by
-# default). Intended to be idempotent and cheap when nothing needs GC.
+# Policy: fire CALL DOLT_GC() unconditionally on every cooldown tick
+# (default 1h). The GC is idempotent and near-free when there's nothing
+# to reclaim. A threshold knob remains as an optional escape hatch.
+#
+# Runs from the dolt pack's dolt-gc-nudge order.
 #
 # Environment:
 #   GC_CITY_PATH         (required) — city root
@@ -19,8 +22,9 @@
 #   GC_DOLT_USER         (default: root)
 #   GC_DOLT_PASSWORD     (optional)
 #   GC_DOLT_GC_THRESHOLD_BYTES
-#     (default: 2147483648 = 2 GiB) — minimum .dolt/ size that triggers GC.
-#     Set to 0 to force GC on every tick (useful for tests).
+#     (default: 0 — run unconditionally). Set a positive byte count to
+#     skip GC on databases below that size; useful for test suites that
+#     don't want GC noise on tiny fixtures.
 #   GC_DOLT_GC_CALL_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for one `CALL DOLT_GC()` invocation.
 #   GC_DOLT_GC_DRY_RUN   (optional) — when set, prints what would happen
@@ -90,7 +94,7 @@ fi
 : "${GC_DOLT_USER:=root}"
 
 host="${GC_DOLT_HOST:-127.0.0.1}"
-threshold="${GC_DOLT_GC_THRESHOLD_BYTES:-2147483648}"
+threshold="${GC_DOLT_GC_THRESHOLD_BYTES:-0}"
 gc_call_timeout="${GC_DOLT_GC_CALL_TIMEOUT_SECS:-1800}"
 dry_run="${GC_DOLT_GC_DRY_RUN:-}"
 

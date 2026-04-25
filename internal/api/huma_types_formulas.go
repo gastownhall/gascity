@@ -138,7 +138,7 @@ type FormulaRunsInput struct {
 // their defaults. Callers that need to supply variable values use
 // POST /v0/city/{cityName}/formulas/{name}/preview (FormulaPreviewInput)
 // so the variable dictionary is a spec-visible typed body rather than
-// a dynamic wildcard query scheme. See architecture.md §3.5.1.
+// a dynamic wildcard query scheme. See engdocs/architecture/api-control-plane.md §3.5.1.
 type FormulaDetailInput struct {
 	CityScope
 	Name      string `path:"name" doc:"Formula name."`
@@ -170,7 +170,7 @@ func (i *FormulaDetailInput) Resolve(ctx huma.Context, _ *huma.PathBuffer) []err
 // input surface spec-visible. A prior revision accepted dynamic
 // var.* query parameters via a huma.Resolver; that scheme was
 // removed because OpenAPI 3.1 cannot describe wildcard query keys.
-// See architecture.md §3.5.1.
+// See engdocs/architecture/api-control-plane.md §3.5.1.
 type FormulaPreviewBody struct {
 	ScopeKind string            `json:"scope_kind,omitempty" doc:"Scope kind (city or rig)."`
 	ScopeRef  string            `json:"scope_ref,omitempty" doc:"Scope reference."`

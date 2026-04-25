@@ -78,6 +78,49 @@ func bindCity[I any, O any](
 	}
 }
 
+// csrfHeaderName is the anti-CSRF header required on every mutation
+// request. Any non-empty value satisfies the check; the header's
+// presence is what matters, because cross-origin XHR from an attacker
+// origin cannot set custom request headers without triggering a CORS
+// preflight the API does not grant. See OWASP's "Use of Custom Request
+// Headers" defense.
+const csrfHeaderName = "X-GC-Request"
+
+// csrfHeaderDescription is the shared description used for the header
+// in generated OpenAPI specs so the spec and runtime enforcement agree.
+const csrfHeaderDescription = "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks."
+
+// addMutationCSRFParam is an operationHandler (see huma.Post et al.)
+// that appends the X-GC-Request required header parameter to op.
+// Mutation-verb registration helpers pass this handler so the spec
+// describes the middleware's enforcement rather than advertising a
+// false "no special headers needed" contract.
+//
+// The header is declared once per mutation operation (OpenAPI 3.1 has
+// no mechanism for global per-verb parameters; see
+// speakeasy.com/openapi/responses/headers). Idempotent so handlers
+// whose input struct happens to declare the header explicitly are not
+// double-registered.
+func addMutationCSRFParam(op *huma.Operation) {
+	for _, p := range op.Parameters {
+		if p != nil && p.In == "header" && p.Name == csrfHeaderName {
+			return
+		}
+	}
+	minLen := 1
+	op.Parameters = append(op.Parameters, &huma.Param{
+		Name:        csrfHeaderName,
+		In:          "header",
+		Required:    true,
+		Description: csrfHeaderDescription,
+		Schema: &huma.Schema{
+			Type:        "string",
+			MinLength:   &minLen,
+			Description: csrfHeaderDescription,
+		},
+	})
+}
+
 // cityGet registers a per-city GET op at /v0/city/{cityName}+tail.
 // The tail starts with "/" (e.g. "/agents") or is "" for the
 // city-detail base path.
@@ -87,41 +130,51 @@ func cityGet[I any, O any](sm *SupervisorMux, tail string,
 	huma.Get(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn))
 }
 
-// cityPost is the POST sibling of cityGet.
+// cityPost is the POST sibling of cityGet. Every city-scoped POST
+// mutation flows through this helper, so declaring the X-GC-Request
+// header param here covers every current and future mutation without
+// per-input-struct boilerplate.
 func cityPost[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
 ) {
-	huma.Post(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn))
+	huma.Post(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
 }
 
-// cityPut is the PUT sibling of cityGet.
+// cityPut is the PUT sibling of cityGet. See cityPost for the CSRF
+// header rationale.
 func cityPut[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
 ) {
-	huma.Put(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn))
+	huma.Put(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
 }
 
-// cityPatch is the PATCH sibling of cityGet.
+// cityPatch is the PATCH sibling of cityGet. See cityPost for the CSRF
+// header rationale.
 func cityPatch[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
 ) {
-	huma.Patch(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn))
+	huma.Patch(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
 }
 
-// cityDelete is the DELETE sibling of cityGet.
+// cityDelete is the DELETE sibling of cityGet. See cityPost for the
+// CSRF header rationale.
 func cityDelete[I any, O any](sm *SupervisorMux, tail string,
 	fn func(*Server, context.Context, *I) (*O, error),
 ) {
-	huma.Delete(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn))
+	huma.Delete(sm.humaAPI, cityScopePrefix+tail, bindCity(sm, fn), addMutationCSRFParam)
 }
 
 // cityRegister is the per-city analog of huma.Register. Use it when
 // the op needs explicit OperationID, DefaultStatus, Summary, etc.
-// op.Path is the tail after /v0/city/{cityName}.
+// op.Path is the tail after /v0/city/{cityName}. CSRF-header declaration
+// is applied automatically for mutation verbs.
 func cityRegister[I any, O any](sm *SupervisorMux, op huma.Operation,
 	fn func(*Server, context.Context, *I) (*O, error),
 ) {
 	op.Path = cityScopePrefix + op.Path
+	if isMutationMethod(op.Method) {
+		addMutationCSRFParam(&op)
+	}
 	huma.Register(sm.humaAPI, op, bindCity(sm, fn))
 }
 

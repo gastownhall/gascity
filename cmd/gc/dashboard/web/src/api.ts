@@ -58,11 +58,11 @@ export type CityInfoRecord = DashboardSchema["CityInfo"];
 // The supervisor's CSRF middleware requires `X-GC-Request: true` on
 // every mutation. Attaching it as a default request editor means
 // callers never have to remember the header.
+export const mutationHeaders = { "X-GC-Request": "true" } as const;
+
 export const api = createClient<paths>({
   baseUrl: supervisorBaseURL(),
-  headers: {
-    "X-GC-Request": "true",
-  },
+  headers: mutationHeaders,
 });
 
 // Configure the hey-api SSE client with the same base URL + CSRF
@@ -71,9 +71,7 @@ export const api = createClient<paths>({
 // client instance.
 sseClient.setConfig({
   baseUrl: supervisorBaseURL(),
-  headers: {
-    "X-GC-Request": "true",
-  },
+  headers: mutationHeaders,
 });
 
 api.use({
@@ -134,13 +132,15 @@ export function cityAPI(cityName: string) {
 
     beadAssign(id: string, assignee: string) {
       return api.POST("/v0/city/{cityName}/bead/{id}/assign", {
-        params: { path: { cityName, id } },
+        params: { path: { cityName, id }, header: mutationHeaders },
         body: { assignee },
       });
     },
 
     beadClose(id: string) {
-      return api.POST("/v0/city/{cityName}/bead/{id}/close", { params: { path: { cityName, id } } });
+      return api.POST("/v0/city/{cityName}/bead/{id}/close", {
+        params: { path: { cityName, id }, header: mutationHeaders },
+      });
     },
 
     beadDeps(id: string) {
@@ -148,12 +148,14 @@ export function cityAPI(cityName: string) {
     },
 
     beadReopen(id: string) {
-      return api.POST("/v0/city/{cityName}/bead/{id}/reopen", { params: { path: { cityName, id } } });
+      return api.POST("/v0/city/{cityName}/bead/{id}/reopen", {
+        params: { path: { cityName, id }, header: mutationHeaders },
+      });
     },
 
     beadUpdate(id: string, body: { labels?: string[]; priority?: number }) {
       return api.POST("/v0/city/{cityName}/bead/{id}/update", {
-        params: { path: { cityName, id } },
+        params: { path: { cityName, id }, header: mutationHeaders },
         body,
       });
     },
@@ -172,7 +174,7 @@ export function cityAPI(cityName: string) {
       title: string;
     }) {
       return api.POST("/v0/city/{cityName}/beads", {
-        params: { path: { cityName } },
+        params: { path: { cityName }, header: mutationHeaders },
         body,
       });
     },
@@ -183,7 +185,7 @@ export function cityAPI(cityName: string) {
 
     convoyAdd(id: string, items: string[]) {
       return api.POST("/v0/city/{cityName}/convoy/{id}/add", {
-        params: { path: { cityName, id } },
+        params: { path: { cityName, id }, header: mutationHeaders },
         body: { items },
       });
     },
@@ -196,7 +198,7 @@ export function cityAPI(cityName: string) {
 
     createConvoy(title: string, items: string[]) {
       return api.POST("/v0/city/{cityName}/convoys", {
-        params: { path: { cityName } },
+        params: { path: { cityName }, header: mutationHeaders },
         body: { title, items },
       });
     },
@@ -224,7 +226,7 @@ export function cityAPI(cityName: string) {
 
     rigAction(name: string, action: string) {
       return api.POST("/v0/city/{cityName}/rig/{name}/{action}", {
-        params: { path: { cityName, name, action } },
+        params: { path: { cityName, name, action }, header: mutationHeaders },
       });
     },
 
@@ -234,7 +236,7 @@ export function cityAPI(cityName: string) {
 
     serviceRestart(name: string) {
       return api.POST("/v0/city/{cityName}/service/{name}/restart", {
-        params: { path: { cityName, name } },
+        params: { path: { cityName, name }, header: mutationHeaders },
       });
     },
 
@@ -252,7 +254,7 @@ export function cityAPI(cityName: string) {
 
     sling(body: { bead: string; rig?: string; target: string }) {
       return api.POST("/v0/city/{cityName}/sling", {
-        params: { path: { cityName } },
+        params: { path: { cityName }, header: mutationHeaders },
         body,
       });
     },

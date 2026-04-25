@@ -378,7 +378,7 @@ func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
 
 func TestDocumentProblemTypesIsIdempotent(t *testing.T) {
 	state := newFakeMutatorState(t)
-	sm := NewSupervisorMux(&stateCityResolver{state: state}, false, "test", time.Now())
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
 	oapi := sm.humaAPI.OpenAPI()
 
 	documentProblemTypes(oapi)

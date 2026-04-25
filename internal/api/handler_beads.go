@@ -232,6 +232,99 @@ type BeadGraphResponse struct {
 	Deps  []workflowDepResponse `json:"deps"`
 }
 
+func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+	graphBeads := make([]beads.Bead, 0, 1)
+	beadIndex := make(map[string]beads.Bead)
+
+	upsert := func(b beads.Bead) {
+		if b.ID == "" {
+			return
+		}
+		if existing, ok := beadIndex[b.ID]; ok {
+			if existing.ParentID == "" && b.ParentID != "" {
+				existing.ParentID = b.ParentID
+				beadIndex[b.ID] = existing
+				for i := range graphBeads {
+					if graphBeads[i].ID == b.ID {
+						graphBeads[i].ParentID = b.ParentID
+						break
+					}
+				}
+			}
+			return
+		}
+		beadIndex[b.ID] = b
+		graphBeads = append(graphBeads, b)
+	}
+	upsert(root)
+
+	metadataChildren, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": root.ID},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
+	}
+	for _, child := range metadataChildren {
+		upsert(child)
+	}
+
+	parentEdges := make([]workflowDepResponse, 0)
+	seenEdges := make(map[string]bool)
+	addParentEdge := func(parentID, childID string) {
+		if parentID == "" || childID == "" {
+			return
+		}
+		edge := workflowDepResponse{From: parentID, To: childID, Kind: "parent-child"}
+		key := edge.From + "|" + edge.To + "|" + edge.Kind
+		if seenEdges[key] {
+			return
+		}
+		seenEdges[key] = true
+		parentEdges = append(parentEdges, edge)
+	}
+
+	for i := 0; i < len(graphBeads); i++ {
+		parent := graphBeads[i]
+		children, err := store.List(beads.ListQuery{
+			ParentID:      parent.ID,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedAsc,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing child beads for bead %q: %w", parent.ID, err)
+		}
+		for _, child := range children {
+			if child.ParentID == "" {
+				child.ParentID = parent.ID
+			}
+			addParentEdge(parent.ID, child.ID)
+			upsert(child)
+		}
+	}
+
+	return graphBeads, parentEdges, nil
+}
+
+func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepResponse {
+	if len(extra) == 0 {
+		return primary
+	}
+	seen := make(map[string]bool, len(primary)+len(extra))
+	for _, edge := range primary {
+		seen[edge.From+"|"+edge.To+"|"+edge.Kind] = true
+	}
+	for _, edge := range extra {
+		key := edge.From + "|" + edge.To + "|" + edge.Kind
+		if seen[key] {
+			continue
+		}
+		primary = append(primary, edge)
+		seen[key] = true
+	}
+	return primary
+}
+
 // beadPrefix extracts the alphabetic prefix from a bead ID (e.g., "ga" from "ga-5b8i").
 func beadPrefix(id string) string {
 	for i, c := range id {

@@ -23,7 +23,7 @@ import (
 // yields the authoritative contract for every HTTP endpoint the control
 // plane exposes.
 func TestOpenAPISpecInSync(t *testing.T) {
-	sm := api.NewSupervisorMux(emptyTestResolver{}, false, "", time.Time{})
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
@@ -133,7 +133,7 @@ func TestEventsSchemaPublished(t *testing.T) {
 }
 
 func TestOrderResponseSchemaKeepsMigrationFieldsOptional(t *testing.T) {
-	sm := api.NewSupervisorMux(emptyTestResolver{}, false, "", time.Time{})
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)

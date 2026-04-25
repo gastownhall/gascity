@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -322,6 +323,93 @@ func TestMaterializeBuiltinPacks_Idempotent(t *testing.T) {
 	// Files should still exist.
 	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml")); err != nil {
 		t.Error("bd pack.toml missing after second call")
+	}
+}
+
+func TestMaterializeBuiltinPacks_DoesNotRewriteUnchangedFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "skills", "gc-dashboard", "SKILL.md")
+	past := time.Unix(123456789, 0)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatalf("Chtimes(%s): %v", path, err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	if !info.ModTime().Equal(past) {
+		t.Fatalf("unchanged file was rewritten: modtime = %s, want %s", info.ModTime(), past)
+	}
+}
+
+func TestMaterializeBuiltinPacks_RestoresModeWhenContentUnchanged(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	path := filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "doctor", "check-bd", "run.sh")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod(%s): %v", path, err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("script mode was not restored: %v", info.Mode().Perm())
+	}
+}
+
+func TestMaterializeBuiltinPacks_ReplacesMatchingSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "skills", "gc-dashboard", "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	target := filepath.Join(dir, "outside-skill.md")
+	if err := os.WriteFile(target, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", target, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove(%s): %v", path, err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("Symlink: %v", err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat(%s): %v", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("matching symlink was preserved, want regular file")
 	}
 }
 

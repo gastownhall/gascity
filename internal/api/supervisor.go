@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -31,6 +32,25 @@ type CityResolver interface {
 	ListCities() []CityInfo
 	// CityState returns the State for a named city, or nil if not found/not running.
 	CityState(name string) State
+}
+
+// TransientCityEventSource is an optional CityResolver extension
+// that lets the supervisor-scope event multiplexer include event
+// providers for cities that are registered but not yet (or no
+// longer) in the Running set — newly scaffolded cities whose
+// reconciler hasn't picked them up, cities currently running
+// prepareCityForSupervisor, and cities whose init failed. Without
+// this, /v0/events/stream subscribers can't observe city.created,
+// city.ready, or city.init_failed for cities that aren't yet
+// reporting Running=true through ListCities.
+//
+// Resolvers that implement this return one entry per transient
+// city; the key is the city name, the value is an event provider
+// backed by that city's .gc/events.jsonl file. The supervisor
+// multiplexer adds these on top of the Running-city providers it
+// already picks up via ListCities + CityState.
+type TransientCityEventSource interface {
+	TransientCityEventProviders() map[string]events.Provider
 }
 
 // cachedCityServer pairs a State with its pre-built Server for caching.
@@ -53,11 +73,12 @@ type cachedCityServer struct {
 // to per-city Server.mux. Workspace services own their own HTTP
 // contracts and are explicitly excluded from the typed control plane.
 type SupervisorMux struct {
-	resolver  CityResolver
-	readOnly  bool
-	version   string
-	startedAt time.Time
-	server    *http.Server
+	resolver    CityResolver
+	initializer cityinit.Initializer
+	readOnly    bool
+	version     string
+	startedAt   time.Time
+	server      *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -76,21 +97,30 @@ type SupervisorMux struct {
 }
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
-// resolved by the given CityResolver.
-func NewSupervisorMux(resolver CityResolver, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
+// resolved by the given CityResolver. The initializer is invoked by the
+// POST /v0/city handler to scaffold new cities in-process; passing nil
+// is allowed for tests that don't exercise city creation (the handler
+// returns 501 Not Implemented in that case).
+func NewSupervisorMux(resolver CityResolver, initializer cityinit.Initializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
 	humaMux := http.NewServeMux()
 	sm := &SupervisorMux{
-		resolver:  resolver,
-		readOnly:  readOnly,
-		version:   version,
-		startedAt: startedAt,
-		humaMux:   humaMux,
-		humaAPI:   newSupervisorHumaAPI(humaMux, readOnly),
-		cache:     make(map[string]cachedCityServer),
+		resolver:    resolver,
+		initializer: initializer,
+		readOnly:    readOnly,
+		version:     version,
+		startedAt:   startedAt,
+		humaMux:     humaMux,
+		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
+		cache:       make(map[string]cachedCityServer),
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()
 	documentProblemTypes(sm.humaAPI.OpenAPI())
+	// Declare framework-level response headers (X-GC-Request-Id) via
+	// components.headers + $ref on every operation. Middleware writes
+	// the header at runtime; the spec describes the contract. Must run
+	// after all routes are registered.
+	registerFrameworkHeaders(sm.humaAPI)
 	// /svc/* workspace-service pass-through. This is the single remaining
 	// non-Huma registration on the supervisor — untyped by design (the
 	// proxy passes bodies through to external service processes, which
@@ -239,7 +269,13 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 }
 
 // buildMultiplexer creates a Multiplexer from all running cities'
-// event providers.
+// event providers plus any transient-city providers surfaced by a
+// resolver that implements TransientCityEventSource. Including
+// transient (pending init, in-progress, or failed) cities matters
+// for clients that POST /v0/city and wait for city.created /
+// city.ready / city.init_failed events on /v0/events/stream without
+// polling — the city's own events.jsonl exists from Scaffold
+// onward, but the city isn't in Running=true yet.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
 	cities := sm.resolver.ListCities()
@@ -256,6 +292,14 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 			continue
 		}
 		mux.Add(c.Name, ep)
+	}
+	if transient, ok := sm.resolver.(TransientCityEventSource); ok {
+		for name, ep := range transient.TransientCityEventProviders() {
+			if ep == nil {
+				continue
+			}
+			mux.Add(name, ep)
+		}
 	}
 	return mux
 }

@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -17,10 +18,27 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		return
 	}
 
-	b, err := decodeCacheEvent(payload)
+	patch, fields, err := decodeCacheEvent(payload)
 	if err != nil {
 		c.recordProblem(fmt.Sprintf("apply %s event", eventType), err)
 		return
+	}
+
+	c.mu.RLock()
+	if c.state != cacheLive {
+		c.mu.RUnlock()
+		return
+	}
+	_, cached := c.beads[patch.ID]
+	c.mu.RUnlock()
+
+	b := patch
+	if !cached {
+		if fresh, err := c.backing.Get(patch.ID); err == nil {
+			b = fresh
+		} else if !errors.Is(err, ErrNotFound) {
+			c.recordProblem(fmt.Sprintf("refresh %s event", eventType), err)
+		}
 	}
 
 	c.mu.Lock()
@@ -28,28 +46,43 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	if c.state != cacheLive {
 		return
 	}
+	if current, ok := c.beads[patch.ID]; ok {
+		b = mergeCacheEventPatch(current, patch, fields)
+	}
 
+	mutated := false
 	switch eventType {
 	case "bead.created":
 		if _, exists := c.beads[b.ID]; !exists {
+			c.noteMutationLocked(b.ID)
 			c.beads[b.ID] = cloneBead(b)
 			delete(c.dirty, b.ID)
-			c.updateStatsLocked()
+			delete(c.deletedSeq, b.ID)
 		}
+		c.updateStatsLocked()
+		mutated = true
 	case "bead.updated":
+		c.noteMutationLocked(b.ID)
 		c.beads[b.ID] = cloneBead(b)
 		delete(c.dirty, b.ID)
+		delete(c.deletedSeq, b.ID)
+		mutated = true
 	case "bead.closed":
+		c.noteMutationLocked(b.ID)
 		if _, exists := c.beads[b.ID]; !exists {
 			c.updateStatsLocked()
 		}
 		c.beads[b.ID] = cloneBead(b)
 		delete(c.dirty, b.ID)
+		delete(c.deletedSeq, b.ID)
+		mutated = true
 	default:
 		return
 	}
 
-	c.markFreshLocked(time.Now())
+	if mutated {
+		c.markFreshLocked(time.Now())
+	}
 }
 
 // ApplyDepEvent updates the dep cache for a bead. Call after dep
@@ -60,33 +93,91 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	if c.state != cacheLive {
 		return
 	}
+	c.noteMutationLocked(beadID)
 	c.deps[beadID] = cloneDeps(deps)
 	delete(c.dirty, beadID)
+	delete(c.deletedSeq, beadID)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 }
 
-func decodeCacheEvent(payload json.RawMessage) (Bead, error) {
+func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) Bead {
+	merged := cloneBead(base)
+	if hasCacheEventField(fields, "title") {
+		merged.Title = patch.Title
+	}
+	if hasCacheEventField(fields, "status") {
+		merged.Status = patch.Status
+	}
+	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
+		merged.Type = patch.Type
+	}
+	if hasCacheEventField(fields, "priority") {
+		merged.Priority = cloneIntPtr(patch.Priority)
+	}
+	if hasCacheEventField(fields, "created_at") {
+		merged.CreatedAt = patch.CreatedAt
+	}
+	if hasCacheEventField(fields, "assignee") {
+		merged.Assignee = patch.Assignee
+	}
+	if hasCacheEventField(fields, "from") {
+		merged.From = patch.From
+	}
+	if hasCacheEventField(fields, "parent") {
+		merged.ParentID = patch.ParentID
+	}
+	if hasCacheEventField(fields, "ref") {
+		merged.Ref = patch.Ref
+	}
+	if hasCacheEventField(fields, "needs") {
+		merged.Needs = slices.Clone(patch.Needs)
+	}
+	if hasCacheEventField(fields, "description") {
+		merged.Description = patch.Description
+	}
+	if hasCacheEventField(fields, "labels") {
+		merged.Labels = slices.Clone(patch.Labels)
+	}
+	if hasCacheEventField(fields, "metadata") {
+		merged.Metadata = maps.Clone(patch.Metadata)
+	}
+	if hasCacheEventField(fields, "dependencies") {
+		merged.Dependencies = slices.Clone(patch.Dependencies)
+	}
+	return merged
+}
+
+func hasCacheEventField(fields map[string]json.RawMessage, name string) bool {
+	_, ok := fields[name]
+	return ok
+}
+
+func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return Bead{}, nil, err
+	}
 	var wire struct {
 		Bead
 		Metadata   StringMap `json:"metadata,omitempty"`
 		TypeCompat string    `json:"type,omitempty"`
 	}
 	if err := json.Unmarshal(payload, &wire); err != nil {
-		return Bead{}, err
+		return Bead{}, nil, err
 	}
 	b := wire.Bead
 	if wire.Metadata != nil {
 		b.Metadata = map[string]string(wire.Metadata)
 	}
 	if b.ID == "" {
-		return Bead{}, fmt.Errorf("missing bead id")
+		return Bead{}, nil, fmt.Errorf("missing bead id")
 	}
 	// bd hook payloads use "issue_type" while exec-style payloads may use "type".
 	if b.Type == "" && wire.TypeCompat != "" {
 		b.Type = wire.TypeCompat
 	}
-	return b, nil
+	return b, fields, nil
 }
 
 func (c *CachingStore) notifyChange(eventType string, b Bead) {

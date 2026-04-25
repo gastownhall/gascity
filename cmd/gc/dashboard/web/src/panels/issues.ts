@@ -1,5 +1,5 @@
 import type { BeadRecord } from "../api";
-import { api, cityScope } from "../api";
+import { api, cityScope, mutationHeaders } from "../api";
 import { promptActionDialog } from "../modals";
 import { byId, clear, el } from "../util/dom";
 import { beadPriority, formatTimestamp, priorityBadgeClass, truncate } from "../util/legacy";
@@ -347,7 +347,7 @@ async function closeIssue(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/close", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Close failed", res.error.detail ?? "Could not close issue");
@@ -362,7 +362,7 @@ async function reopenIssue(issueID: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/reopen", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
   });
   if (res.error) {
     showToast("error", "Reopen failed", res.error.detail ?? "Could not reopen issue");
@@ -377,7 +377,7 @@ async function updateIssuePriority(issueID: string, priority: number): Promise<v
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/update", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
     body: { priority },
   });
   if (res.error) {
@@ -393,7 +393,7 @@ async function assignIssue(issueID: string, assignee: string): Promise<void> {
   const city = cityScope();
   if (!city) return;
   const res = await api.POST("/v0/city/{cityName}/bead/{id}/assign", {
-    params: { path: { cityName: city, id: issueID } },
+    params: { path: { cityName: city, id: issueID }, header: mutationHeaders },
     body: { assignee },
   });
   if (res.error) {
@@ -416,7 +416,7 @@ async function slingIssue(issueID: string): Promise<void> {
   });
   if (!selection) return;
   const res = await api.POST("/v0/city/{cityName}/sling", {
-    params: { path: { cityName: city } },
+    params: { path: { cityName: city }, header: mutationHeaders },
     body: { bead: issueID, target: selection.target, rig: selection.rig || undefined },
   });
   if (res.error) {
@@ -449,7 +449,7 @@ export async function createIssue(input: {
   const city = cityScope();
   if (!city) return { ok: false, error: "no city selected" };
   const { error } = await api.POST("/v0/city/{cityName}/beads", {
-    params: { path: { cityName: city } },
+    params: { path: { cityName: city }, header: mutationHeaders },
     body: {
       title: input.title,
       description: input.description,

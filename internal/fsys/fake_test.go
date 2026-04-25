@@ -23,6 +23,22 @@ func TestFakeStatDir(t *testing.T) {
 	}
 }
 
+func TestFakeStatDirModeIncludesDirBit(t *testing.T) {
+	f := NewFake()
+	f.Dirs["/city/.gc"] = true
+
+	fi, err := f.Stat("/city/.gc")
+	if err != nil {
+		t.Fatalf("Stat existing dir: %v", err)
+	}
+	if fi.Mode().IsRegular() {
+		t.Fatalf("directory mode reports regular file: %v", fi.Mode())
+	}
+	if fi.Mode()&os.ModeDir == 0 {
+		t.Fatalf("directory mode missing ModeDir bit: %v", fi.Mode())
+	}
+}
+
 func TestFakeStatFile(t *testing.T) {
 	f := NewFake()
 	f.Files["/city/city.toml"] = []byte("hello")
@@ -114,6 +130,17 @@ func TestFakeWriteFile(t *testing.T) {
 	}
 }
 
+func TestFakeWriteFileInitializesModes(t *testing.T) {
+	f := &Fake{Files: map[string][]byte{}}
+
+	if err := f.WriteFile("/city/run.sh", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if f.Modes["/city/run.sh"] != 0o755 {
+		t.Fatalf("mode = %v, want 0755", f.Modes["/city/run.sh"])
+	}
+}
+
 func TestFakeWriteFileError(t *testing.T) {
 	f := NewFake()
 	injected := fmt.Errorf("read-only fs")
@@ -159,6 +186,28 @@ func TestFakeReadDir(t *testing.T) {
 	}
 }
 
+func TestFakeReadDirInfoReportsTrackedMode(t *testing.T) {
+	f := NewFake()
+	if err := f.WriteFile("/city/rigs/run.sh", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entries, err := f.ReadDir("/city/rigs")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	info, err := entries[0].Info()
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("ReadDir entry mode = %v, want 0755", info.Mode().Perm())
+	}
+}
+
 func TestFakeReadDirError(t *testing.T) {
 	f := NewFake()
 	injected := fmt.Errorf("no such directory")
@@ -200,6 +249,36 @@ func TestFakeRename(t *testing.T) {
 
 	if len(f.Calls) != 1 || f.Calls[0].Method != "Rename" {
 		t.Errorf("Calls = %+v, want single Rename", f.Calls)
+	}
+}
+
+func TestFakeRenameClearsStaleDestinationMode(t *testing.T) {
+	f := NewFake()
+	f.Files["/city/generated.tmp"] = []byte("new")
+	f.Files["/city/generated"] = []byte("old")
+	f.Modes["/city/generated"] = 0o644
+
+	if err := f.Rename("/city/generated.tmp", "/city/generated"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	info, err := f.Stat("/city/generated")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("renamed file mode = %v, want default 0755", info.Mode().Perm())
+	}
+}
+
+func TestFakeChmodInitializesModes(t *testing.T) {
+	f := &Fake{Files: map[string][]byte{"/city/run.sh": []byte("#!/bin/sh\n")}}
+
+	if err := f.Chmod("/city/run.sh", 0o755); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if f.Modes["/city/run.sh"] != 0o755 {
+		t.Fatalf("mode = %v, want 0755", f.Modes["/city/run.sh"])
 	}
 }
 

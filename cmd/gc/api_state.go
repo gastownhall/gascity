@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -45,9 +47,17 @@ type controllerState struct {
 	startedAt     time.Time
 	ct            crashTracker  // nil if crash tracking disabled
 	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty   *atomic.Bool  // optional dirty flag shared with the reconciler reload path
 	services      workspacesvc.Registry
 	extmsgSvc     *extmsg.Services
 	adapterReg    *extmsg.AdapterRegistry
+}
+
+type configMutationSnapshot struct {
+	cityPath   string
+	files      map[string][]byte
+	existed    map[string]bool
+	agentFiles map[string]struct{}
 }
 
 // newControllerState creates a controllerState with per-rig stores.
@@ -236,11 +246,6 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
-	// Skip events we emitted ourselves (reconciler-detected changes).
-	if evt.Actor == "cache-reconcile" {
-		return
-	}
-
 	cs.mu.RLock()
 	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
 	for _, s := range cs.beadStores {
@@ -256,7 +261,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}
-	cs.Poke()
+	if evt.Actor != "cache-reconcile" {
+		cs.Poke()
+	}
 }
 
 // update replaces the config, session provider, and reopens stores.
@@ -449,20 +456,24 @@ func (cs *controllerState) Orders() []orders.Order {
 // EnableOrder creates or updates an override with enabled=true.
 func (cs *controllerState) EnableOrder(name, rig string) error {
 	enabled := true
-	return cs.editor.MergeOrderOverride(config.OrderOverride{
-		Name:    name,
-		Rig:     rig,
-		Enabled: &enabled,
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.MergeOrderOverride(config.OrderOverride{
+			Name:    name,
+			Rig:     rig,
+			Enabled: &enabled,
+		})
 	})
 }
 
 // DisableOrder creates or updates an override with enabled=false.
 func (cs *controllerState) DisableOrder(name, rig string) error {
 	enabled := false
-	return cs.editor.MergeOrderOverride(config.OrderOverride{
-		Name:    name,
-		Rig:     rig,
-		Enabled: &enabled,
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.MergeOrderOverride(config.OrderOverride{
+			Name:    name,
+			Rig:     rig,
+			Enabled: &enabled,
+		})
 	})
 }
 
@@ -511,104 +522,251 @@ func (cs *controllerState) ResumeCity() error {
 
 // CreateAgent adds a new agent to city.toml.
 func (cs *controllerState) CreateAgent(a config.Agent) error {
-	return cs.editor.CreateAgent(a)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.CreateAgent(a)
+	})
 }
 
 // UpdateAgent partially updates an existing agent definition in city.toml.
 func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error {
-	return cs.editor.UpdateAgent(name, configedit.AgentUpdate{
-		Provider:  patch.Provider,
-		Scope:     patch.Scope,
-		Suspended: patch.Suspended,
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.UpdateAgent(name, configedit.AgentUpdate{
+			Provider:  patch.Provider,
+			Scope:     patch.Scope,
+			Suspended: patch.Suspended,
+		})
 	})
 }
 
 // DeleteAgent removes an agent from city.toml.
 func (cs *controllerState) DeleteAgent(name string) error {
-	return cs.editor.DeleteAgent(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteAgent(name)
+	})
 }
 
 // CreateRig adds a new rig to city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
-	return cs.editor.CreateRig(r)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.CreateRig(r)
+	})
 }
 
 // UpdateRig partially updates a rig in city.toml.
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
-	return cs.editor.UpdateRig(name, configedit.RigUpdate{
-		Path:      patch.Path,
-		Prefix:    patch.Prefix,
-		Suspended: patch.Suspended,
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.UpdateRig(name, configedit.RigUpdate{
+			Path:      patch.Path,
+			Prefix:    patch.Prefix,
+			Suspended: patch.Suspended,
+		})
 	})
 }
 
 // DeleteRig removes a rig from city.toml.
 func (cs *controllerState) DeleteRig(name string) error {
-	return cs.editor.DeleteRig(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteRig(name)
+	})
 }
 
 // CreateProvider adds a new city-level provider to city.toml.
 func (cs *controllerState) CreateProvider(name string, spec config.ProviderSpec) error {
-	return cs.editor.CreateProvider(name, spec)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.CreateProvider(name, spec)
+	})
 }
 
 // UpdateProvider partially updates an existing city-level provider.
 func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate) error {
-	return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
-		DisplayName:        patch.DisplayName,
-		Base:               patch.Base,
-		Command:            patch.Command,
-		Args:               patch.Args,
-		ArgsAppend:         patch.ArgsAppend,
-		PromptMode:         patch.PromptMode,
-		PromptFlag:         patch.PromptFlag,
-		ReadyDelayMs:       patch.ReadyDelayMs,
-		Env:                patch.Env,
-		OptionsSchemaMerge: patch.OptionsSchemaMerge,
-		OptionsSchema:      patch.OptionsSchema,
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
+			DisplayName:        patch.DisplayName,
+			Base:               patch.Base,
+			Command:            patch.Command,
+			Args:               patch.Args,
+			ArgsAppend:         patch.ArgsAppend,
+			PromptMode:         patch.PromptMode,
+			PromptFlag:         patch.PromptFlag,
+			ReadyDelayMs:       patch.ReadyDelayMs,
+			Env:                patch.Env,
+			OptionsSchemaMerge: patch.OptionsSchemaMerge,
+			OptionsSchema:      patch.OptionsSchema,
+		})
 	})
 }
 
 // DeleteProvider removes a city-level provider from city.toml.
 func (cs *controllerState) DeleteProvider(name string) error {
-	return cs.editor.DeleteProvider(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteProvider(name)
+	})
 }
 
 // SetAgentPatch creates or replaces an agent patch in city.toml.
 func (cs *controllerState) SetAgentPatch(patch config.AgentPatch) error {
-	return cs.editor.SetAgentPatch(patch)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SetAgentPatch(patch)
+	})
 }
 
 // DeleteAgentPatch removes an agent patch from city.toml.
 func (cs *controllerState) DeleteAgentPatch(name string) error {
-	return cs.editor.DeleteAgentPatch(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteAgentPatch(name)
+	})
 }
 
 // SetRigPatch creates or replaces a rig patch in city.toml.
 func (cs *controllerState) SetRigPatch(patch config.RigPatch) error {
-	return cs.editor.SetRigPatch(patch)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SetRigPatch(patch)
+	})
 }
 
 // DeleteRigPatch removes a rig patch from city.toml.
 func (cs *controllerState) DeleteRigPatch(name string) error {
-	return cs.editor.DeleteRigPatch(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteRigPatch(name)
+	})
 }
 
 // SetProviderPatch creates or replaces a provider patch in city.toml.
 func (cs *controllerState) SetProviderPatch(patch config.ProviderPatch) error {
-	return cs.editor.SetProviderPatch(patch)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SetProviderPatch(patch)
+	})
 }
 
 // DeleteProviderPatch removes a provider patch from city.toml.
 func (cs *controllerState) DeleteProviderPatch(name string) error {
-	return cs.editor.DeleteProviderPatch(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.DeleteProviderPatch(name)
+	})
+}
+
+func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, error) {
+	snapshot := &configMutationSnapshot{
+		cityPath:   cityPath,
+		files:      make(map[string][]byte),
+		existed:    make(map[string]bool),
+		agentFiles: make(map[string]struct{}),
+	}
+
+	capture := func(path string) error {
+		data, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			snapshot.files[path] = data
+			snapshot.existed[path] = true
+		case os.IsNotExist(err):
+			snapshot.existed[path] = false
+		default:
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
+		return nil
+	}
+
+	for _, path := range []string{
+		filepath.Join(cityPath, "city.toml"),
+		filepath.Join(cityPath, ".gc", "site.toml"),
+	} {
+		if err := capture(path); err != nil {
+			return nil, err
+		}
+	}
+
+	agentFiles, err := filepath.Glob(filepath.Join(cityPath, "agents", "*", "agent.toml"))
+	if err != nil {
+		return nil, fmt.Errorf("listing agent overrides: %w", err)
+	}
+	for _, path := range agentFiles {
+		snapshot.agentFiles[path] = struct{}{}
+		if err := capture(path); err != nil {
+			return nil, err
+		}
+	}
+
+	return snapshot, nil
+}
+
+func (s *configMutationSnapshot) restore() error {
+	var restoreErr error
+
+	currentAgentFiles, err := filepath.Glob(filepath.Join(s.cityPath, "agents", "*", "agent.toml"))
+	if err != nil {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("listing current agent overrides: %w", err))
+	} else {
+		for _, path := range currentAgentFiles {
+			if _, existed := s.agentFiles[path]; existed {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("removing %s: %w", path, err))
+			}
+		}
+	}
+
+	for path, existed := range s.existed {
+		if !existed {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("removing %s: %w", path, err))
+			}
+			continue
+		}
+		if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, s.files[path], 0o644); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restoring %s: %w", path, err))
+		}
+	}
+
+	return restoreErr
 }
 
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	var snapshot *configMutationSnapshot
+	if cs.cityPath != "" {
+		var err error
+		snapshot, err = captureConfigMutationSnapshot(cs.cityPath)
+		if err != nil {
+			return fmt.Errorf("snapshotting current city config: %w", err)
+		}
+	}
 	if err := mutate(); err != nil {
 		return err
 	}
+	if err := cs.refreshConfigSnapshot(); err != nil {
+		if snapshot != nil {
+			if restoreErr := snapshot.restore(); restoreErr != nil {
+				restoreFailure := fmt.Errorf("restoring previous city config: %w", restoreErr)
+				return fmt.Errorf("refreshing updated city config: %w", errors.Join(err, restoreFailure))
+			}
+		}
+		return fmt.Errorf("refreshing updated city config: %w", err)
+	}
+	if cs.configDirty != nil {
+		cs.configDirty.Store(true)
+	}
 	cs.Poke()
+	return nil
+}
+
+func (cs *controllerState) refreshConfigSnapshot() error {
+	if cs.cityPath == "" || cs.cfg == nil {
+		return nil
+	}
+
+	tomlPath := filepath.Join(cs.cityPath, "city.toml")
+	nextCfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	if err != nil {
+		return fmt.Errorf("loading updated city config: %w", err)
+	}
+	applyFeatureFlags(nextCfg)
+	applyRuntimeCityIdentity(nextCfg, cs.cityName)
+
+	cs.mu.RLock()
+	sp := cs.sp
+	cs.mu.RUnlock()
+	cs.update(nextCfg, sp)
 	return nil
 }
 

@@ -290,21 +290,29 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Status       string    `json:"status"`
-	IssueType    string    `json:"issue_type"`
-	Priority     *int      `json:"priority,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	Assignee     string    `json:"assignee"`
-	From         string    `json:"from"`
-	ParentID     string    `json:"parent"`
-	Ref          string    `json:"ref"`
-	Needs        []string  `json:"needs"`
-	Description  string    `json:"description"`
-	Labels       []string  `json:"labels"`
-	Metadata     StringMap `json:"metadata,omitempty"`
-	Dependencies []Dep     `json:"dependencies,omitempty"`
+	ID           string       `json:"id"`
+	Title        string       `json:"title"`
+	Status       string       `json:"status"`
+	IssueType    string       `json:"issue_type"`
+	Priority     *int         `json:"priority,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+	Assignee     string       `json:"assignee"`
+	From         string       `json:"from"`
+	ParentID     string       `json:"parent"`
+	Ref          string       `json:"ref"`
+	Needs        []string     `json:"needs"`
+	Description  string       `json:"description"`
+	Labels       []string     `json:"labels"`
+	Metadata     StringMap    `json:"metadata,omitempty"`
+	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
+}
+
+type bdIssueDep struct {
+	IssueID        string `json:"issue_id"`
+	DependsOnID    string `json:"depends_on_id"`
+	Type           string `json:"type"`
+	ID             string `json:"id"`
+	DependencyType string `json:"dependency_type"`
 }
 
 // parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
@@ -354,6 +362,16 @@ func (b *bdIssue) toBead() Bead {
 	if from == "" && b.Metadata != nil {
 		from = b.Metadata["from"]
 	}
+	deps := b.normalizedDependencies()
+	parentID := b.ParentID
+	if parentID == "" {
+		for _, dep := range deps {
+			if dep.IssueID == b.ID && dep.Type == "parent-child" {
+				parentID = dep.DependsOnID
+				break
+			}
+		}
+	}
 	return Bead{
 		ID:           b.ID,
 		Title:        b.Title,
@@ -363,14 +381,47 @@ func (b *bdIssue) toBead() Bead {
 		CreatedAt:    b.CreatedAt.Truncate(time.Second),
 		Assignee:     b.Assignee,
 		From:         from,
-		ParentID:     b.ParentID,
+		ParentID:     parentID,
 		Ref:          b.Ref,
 		Needs:        b.Needs,
 		Description:  b.Description,
 		Labels:       b.Labels,
 		Metadata:     b.Metadata,
-		Dependencies: append([]Dep(nil), b.Dependencies...),
+		Dependencies: deps,
 	}
+}
+
+func (b *bdIssue) normalizedDependencies() []Dep {
+	if len(b.Dependencies) == 0 {
+		return nil
+	}
+	deps := make([]Dep, 0, len(b.Dependencies))
+	for _, raw := range b.Dependencies {
+		issueID := strings.TrimSpace(raw.IssueID)
+		if issueID == "" && raw.ID != "" {
+			issueID = b.ID
+		}
+		dependsOnID := strings.TrimSpace(raw.DependsOnID)
+		if dependsOnID == "" {
+			dependsOnID = strings.TrimSpace(raw.ID)
+		}
+		depType := strings.TrimSpace(raw.Type)
+		if depType == "" {
+			depType = strings.TrimSpace(raw.DependencyType)
+		}
+		if issueID == "" || dependsOnID == "" {
+			continue
+		}
+		if depType == "" {
+			depType = "blocks"
+		}
+		deps = append(deps, Dep{
+			IssueID:     issueID,
+			DependsOnID: dependsOnID,
+			Type:        depType,
+		})
+	}
+	return deps
 }
 
 // isBdNotFound returns true if the error from bd CLI indicates a "not found" condition.
@@ -456,8 +507,10 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if created.Priority == nil && b.Priority != nil {
 		created.Priority = cloneIntPtr(b.Priority)
 	}
-	if created.Metadata == nil && len(metadata) > 0 {
-		created.Metadata = metadata
+	if len(metadata) > 0 {
+		if created.Metadata == nil {
+			created.Metadata = maps.Clone(metadata)
+		}
 	}
 	return created, nil
 }

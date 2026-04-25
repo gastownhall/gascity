@@ -1,6 +1,7 @@
 package fsys
 
 import (
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 type Fake struct {
 	Dirs     map[string]bool   // pre-populated directories
 	Files    map[string][]byte // pre-populated files
+	Modes    map[string]os.FileMode
 	Symlinks map[string]string // pre-populated symlinks (path -> target)
 	Errors   map[string]error  // path → injected error (checked first)
 	Calls    []Call            // spy log
@@ -21,7 +23,7 @@ type Fake struct {
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method string // "MkdirAll", "WriteFile", "ReadFile", "Stat", "ReadDir", "Rename", "Remove", or "Chmod"
+	Method string // "MkdirAll", "WriteFile", "ReadFile", "ReadRegularFile", "Stat", "ReadDir", "Rename", "Remove", or "Chmod"
 	Path   string // path argument
 }
 
@@ -30,33 +32,50 @@ func NewFake() *Fake {
 	return &Fake{
 		Dirs:     make(map[string]bool),
 		Files:    make(map[string][]byte),
+		Modes:    make(map[string]os.FileMode),
 		Symlinks: make(map[string]string),
 		Errors:   make(map[string]error),
 	}
 }
 
 // MkdirAll records the call and adds the directory (and parents) to Dirs.
-func (f *Fake) MkdirAll(path string, _ os.FileMode) error {
+func (f *Fake) MkdirAll(path string, perm os.FileMode) error {
 	f.Calls = append(f.Calls, Call{Method: "MkdirAll", Path: path})
 	if err, ok := f.Errors[path]; ok {
 		return err
 	}
+	if f.Dirs == nil {
+		f.Dirs = make(map[string]bool)
+	}
+	if f.Modes == nil {
+		f.Modes = make(map[string]os.FileMode)
+	}
 	// Record this directory and all parents.
 	for p := filepath.Clean(path); p != "." && p != "/" && p != string(filepath.Separator); p = filepath.Dir(p) {
+		if !f.Dirs[p] {
+			f.Modes[p] = perm.Perm()
+		}
 		f.Dirs[p] = true
 	}
 	return nil
 }
 
 // WriteFile records the call and stores the data in Files.
-func (f *Fake) WriteFile(name string, data []byte, _ os.FileMode) error {
+func (f *Fake) WriteFile(name string, data []byte, perm os.FileMode) error {
 	f.Calls = append(f.Calls, Call{Method: "WriteFile", Path: name})
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
+	if f.Files == nil {
+		f.Files = make(map[string][]byte)
+	}
+	if f.Modes == nil {
+		f.Modes = make(map[string]os.FileMode)
+	}
 	f.Files[name] = cp
+	f.Modes[name] = perm.Perm()
 	return nil
 }
 
@@ -74,6 +93,37 @@ func (f *Fake) ReadFile(name string) ([]byte, error) {
 	return nil, &os.PathError{Op: "read", Path: name, Err: os.ErrNotExist}
 }
 
+// ReadRegularFile records the call and returns file contents without following
+// symlinks or accepting directories.
+func (f *Fake) ReadRegularFile(name string) ([]byte, error) {
+	f.Calls = append(f.Calls, Call{Method: "ReadRegularFile", Path: name})
+	if err, ok := f.Errors[name]; ok {
+		return nil, err
+	}
+	if _, ok := f.Symlinks[name]; ok {
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrInvalid}
+	}
+	if f.Dirs[name] {
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrInvalid}
+	}
+	if data, ok := f.Files[name]; ok {
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		return cp, nil
+	}
+	return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
+}
+
+// readRegularFileSnapshot returns regular file contents plus a stable fake
+// identity for the path.
+func (f *Fake) readRegularFileSnapshot(name string) (regularFileSnapshot, error) {
+	data, err := f.ReadRegularFile(name)
+	if err != nil {
+		return regularFileSnapshot{}, err
+	}
+	return regularFileSnapshot{data: data, id: fakeIdentity(name), hasID: true}, nil
+}
+
 // Stat records the call and returns info based on Dirs/Files maps.
 // Symlinks are followed — use Lstat to detect them without following.
 func (f *Fake) Stat(name string) (os.FileInfo, error) {
@@ -83,18 +133,18 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 	}
 	if target, ok := f.Symlinks[name]; ok {
 		if f.Dirs[target] {
-			return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
+			return fakeFileInfo{name: filepath.Base(name), dir: true, mode: f.modeFor(target), id: fakeIdentity(target), hasID: true}, nil
 		}
 		if data, ok := f.Files[target]; ok {
-			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(target), id: fakeIdentity(target), hasID: true}, nil
 		}
 		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 	}
 	if f.Dirs[name] {
-		return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
+		return fakeFileInfo{name: filepath.Base(name), dir: true, mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
 	}
 	if data, ok := f.Files[name]; ok {
-		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
 	}
 	return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 }
@@ -107,13 +157,13 @@ func (f *Fake) Lstat(name string) (os.FileInfo, error) {
 		return nil, err
 	}
 	if _, ok := f.Symlinks[name]; ok {
-		return fakeFileInfo{name: filepath.Base(name), symlink: true}, nil
+		return fakeFileInfo{name: filepath.Base(name), symlink: true, id: fakeIdentity(name), hasID: true}, nil
 	}
 	if f.Dirs[name] {
-		return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
+		return fakeFileInfo{name: filepath.Base(name), dir: true, mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
 	}
 	if data, ok := f.Files[name]; ok {
-		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
 	}
 	return nil, &os.PathError{Op: "lstat", Path: name, Err: os.ErrNotExist}
 }
@@ -135,7 +185,7 @@ func (f *Fake) ReadDir(name string) ([]os.DirEntry, error) {
 			base := filepath.Base(d)
 			if !seen[base] {
 				seen[base] = true
-				entries = append(entries, fakeDirEntry{name: base, dir: true})
+				entries = append(entries, fakeDirEntry{name: base, dir: true, mode: f.modeFor(d), id: fakeIdentity(d), hasID: true})
 			}
 		}
 	}
@@ -145,7 +195,7 @@ func (f *Fake) ReadDir(name string) ([]os.DirEntry, error) {
 			base := filepath.Base(p)
 			if !seen[base] {
 				seen[base] = true
-				entries = append(entries, fakeDirEntry{name: base, size: int64(len(data))})
+				entries = append(entries, fakeDirEntry{name: base, size: int64(len(data)), mode: f.modeFor(p), id: fakeIdentity(p), hasID: true})
 			}
 		}
 	}
@@ -165,6 +215,13 @@ func (f *Fake) Rename(oldpath, newpath string) error {
 	if data, ok := f.Files[oldpath]; ok {
 		f.Files[newpath] = data
 		delete(f.Files, oldpath)
+		if mode, ok := f.Modes[oldpath]; ok {
+			f.Modes[newpath] = mode
+		} else {
+			delete(f.Modes, newpath)
+		}
+		delete(f.Modes, oldpath)
+		delete(f.Symlinks, newpath)
 		return nil
 	}
 	return &os.PathError{Op: "rename", Path: oldpath, Err: os.ErrNotExist}
@@ -178,29 +235,46 @@ func (f *Fake) Remove(name string) error {
 	}
 	if _, ok := f.Files[name]; ok {
 		delete(f.Files, name)
+		delete(f.Modes, name)
+		return nil
+	}
+	if _, ok := f.Symlinks[name]; ok {
+		delete(f.Symlinks, name)
 		return nil
 	}
 	if f.Dirs[name] {
 		delete(f.Dirs, name)
+		delete(f.Modes, name)
 		return nil
 	}
 	return &os.PathError{Op: "remove", Path: name, Err: os.ErrNotExist}
 }
 
-// Chmod records the call. Mode is not tracked — the spy log is sufficient
-// for tests that care about which paths were chmodded.
-func (f *Fake) Chmod(name string, _ os.FileMode) error {
+// Chmod records the call and updates the stored mode.
+func (f *Fake) Chmod(name string, mode os.FileMode) error {
 	f.Calls = append(f.Calls, Call{Method: "Chmod", Path: name})
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
+	if f.Modes == nil {
+		f.Modes = make(map[string]os.FileMode)
+	}
 	if _, ok := f.Files[name]; ok {
+		f.Modes[name] = mode.Perm()
 		return nil
 	}
 	if f.Dirs[name] {
+		f.Modes[name] = mode.Perm()
 		return nil
 	}
 	return &os.PathError{Op: "chmod", Path: name, Err: os.ErrNotExist}
+}
+
+func (f *Fake) modeFor(name string) os.FileMode {
+	if mode, ok := f.Modes[name]; ok {
+		return mode
+	}
+	return 0o755
 }
 
 // --- fake os.FileInfo ---
@@ -208,6 +282,9 @@ func (f *Fake) Chmod(name string, _ os.FileMode) error {
 type fakeFileInfo struct {
 	name    string
 	size    int64
+	mode    os.FileMode
+	id      fileIdentity
+	hasID   bool
 	dir     bool
 	symlink bool
 }
@@ -218,18 +295,29 @@ func (fi fakeFileInfo) Mode() os.FileMode {
 	if fi.symlink {
 		return 0o777 | os.ModeSymlink
 	}
-	return 0o755
+	if fi.dir {
+		return fi.mode | os.ModeDir
+	}
+	return fi.mode
 }
 func (fi fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (fi fakeFileInfo) IsDir() bool        { return fi.dir }
-func (fi fakeFileInfo) Sys() any           { return nil }
+func (fi fakeFileInfo) Sys() any {
+	if !fi.hasID {
+		return nil
+	}
+	return struct{ Dev, Ino uint64 }{fi.id.dev, fi.id.ino}
+}
 
 // --- fake os.DirEntry ---
 
 type fakeDirEntry struct {
-	name string
-	size int64
-	dir  bool
+	name  string
+	size  int64
+	mode  os.FileMode
+	id    fileIdentity
+	hasID bool
+	dir   bool
 }
 
 func (de fakeDirEntry) Name() string { return de.name }
@@ -242,7 +330,13 @@ func (de fakeDirEntry) Type() fs.FileMode {
 }
 
 func (de fakeDirEntry) Info() (fs.FileInfo, error) {
-	return fakeFileInfo{name: de.name, size: de.size, dir: de.dir}, nil
+	return fakeFileInfo{name: de.name, size: de.size, mode: de.mode, id: de.id, hasID: de.hasID, dir: de.dir}, nil
+}
+
+func fakeIdentity(name string) fileIdentity {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return fileIdentity{dev: 1, ino: h.Sum64()}
 }
 
 var (

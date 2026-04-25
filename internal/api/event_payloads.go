@@ -28,6 +28,41 @@ type MailEventPayload struct {
 // IsEventPayload marks MailEventPayload as an events.Payload variant.
 func (MailEventPayload) IsEventPayload() {}
 
+// CityLifecyclePayload is emitted by city lifecycle events. Keeping all
+// same-shaped city lifecycle payloads on one Go type keeps the generated
+// EventPayload oneOf unambiguous for validators that only see the payload
+// object, not the enclosing event type.
+type CityLifecyclePayload struct {
+	Name            string   `json:"name"`
+	Path            string   `json:"path"`
+	Error           string   `json:"error,omitempty"`
+	PhasesCompleted []string `json:"phases_completed,omitempty"`
+}
+
+// IsEventPayload marks CityLifecyclePayload as an events.Payload variant.
+func (CityLifecyclePayload) IsEventPayload() {}
+
+// CityCreatedPayload is emitted on city.created when the supervisor's
+// POST /v0/city handler has scaffolded and registered a new city.
+type CityCreatedPayload = CityLifecyclePayload
+
+// CityReadyPayload is emitted on city.ready when the supervisor
+// reconciler has finished preparing a city.
+type CityReadyPayload = CityLifecyclePayload
+
+// CityInitFailedPayload is emitted on city.init_failed when the
+// supervisor reconciler fails to bring up a city.
+type CityInitFailedPayload = CityLifecyclePayload
+
+// CityUnregisterRequestedPayload is emitted when unregister starts.
+type CityUnregisterRequestedPayload = CityLifecyclePayload
+
+// CityUnregisteredPayload is emitted when unregister completes.
+type CityUnregisteredPayload = CityLifecyclePayload
+
+// CityUnregisterFailedPayload is emitted when unregister fails.
+type CityUnregisterFailedPayload = CityLifecyclePayload
+
 // BeadEventPayload is the shape of every bead.* event payload
 // (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
 // snapshot of the bead as of the event; it is emitted by the beads
@@ -97,9 +132,15 @@ func init() {
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
+	events.RegisterPayload(events.CityCreated, CityCreatedPayload{})
+	events.RegisterPayload(events.CityReady, CityReadyPayload{})
+	events.RegisterPayload(events.CityInitFailed, CityInitFailedPayload{})
 	events.RegisterPayload(events.OrderFired, events.NoPayload{})
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
+	events.RegisterPayload(events.CityUnregisterRequested, CityUnregisterRequestedPayload{})
+	events.RegisterPayload(events.CityUnregistered, CityUnregisteredPayload{})
+	events.RegisterPayload(events.CityUnregisterFailed, CityUnregisterFailedPayload{})
 }

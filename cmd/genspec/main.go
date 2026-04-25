@@ -43,7 +43,10 @@ func main() {
 	flag.BoolVar(&stdoutFlag, "stdout", false, "Write the spec to stdout instead of disk.")
 	flag.Parse()
 
-	sm := api.NewSupervisorMux(emptyResolver{}, false, "", time.Time{})
+	// Spec generation does not exercise city creation; nil Initializer
+	// leaves POST /v0/city returning 501 in the live spec, which is
+	// not observable at spec generation time.
+	sm := api.NewSupervisorMux(emptyResolver{}, nil, false, "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
