@@ -4568,6 +4568,9 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 
 	// Before Pagination cursor: return entries before this UUID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
+
+	// After Pagination cursor: return entries after this UUID.
+	After *string `form:"after,omitempty" json:"after,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
@@ -18757,6 +18760,22 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 		if params.Before != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "before", *params.Before, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

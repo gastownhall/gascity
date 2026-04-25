@@ -3482,6 +3482,176 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	}
 }
 
+func TestHandleSessionTranscriptAfterCursor(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"second\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"third\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"fourth\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?after=2", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp SessionStreamMessageEvent
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Turns) != 2 {
+		t.Fatalf("got %d turns, want 2 (entries after uuid 2); turns: %+v", len(resp.Turns), resp.Turns)
+	}
+	if resp.Turns[0].Text != "third" {
+		t.Errorf("Turns[0].Text = %q, want %q", resp.Turns[0].Text, "third")
+	}
+	if resp.Turns[1].Text != "fourth" {
+		t.Errorf("Turns[1].Text = %q, want %q", resp.Turns[1].Text, "fourth")
+	}
+}
+
+func TestHandleSessionTranscriptAfterCursorRaw(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"second\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"third\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=raw&after=1", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var raw struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Messages) != 2 {
+		t.Fatalf("got %d raw messages, want 2 (entries after uuid 1)", len(raw.Messages))
+	}
+}
+
+func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?before=3&after=1", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d (before+after exclusive); body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+}
+
+func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?after=nonexistent", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp SessionStreamMessageEvent
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Turns) != 2 {
+		t.Fatalf("got %d turns, want 2 (cursor not found = full set)", len(resp.Turns))
+	}
+}
+
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

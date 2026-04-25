@@ -161,12 +161,20 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		// sentinel) rather than 1 compaction.
 		tail, _ := input.Compactions()
 		before := input.Before
+		after := input.After
+
+		if before != "" && after != "" {
+			return nil, huma.Error422UnprocessableEntity("before and after are mutually exclusive")
+		}
 
 		if wantRaw {
 			var rawSess *sessionlog.Session
-			if before != "" {
+			switch {
+			case before != "":
 				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			} else {
+			case after != "":
+				rawSess, err = sessionlog.ReadProviderFileRawNewer(info.Provider, path, tail, after)
+			default:
 				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
 			}
 			if err != nil {
@@ -186,9 +194,12 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		}
 
 		var sess *sessionlog.Session
-		if before != "" {
+		switch {
+		case before != "":
 			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		} else {
+		case after != "":
+			sess, err = sessionlog.ReadProviderFileNewer(info.Provider, path, tail, after)
+		default:
 			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
 		}
 		if err != nil {

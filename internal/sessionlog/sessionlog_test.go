@@ -489,7 +489,7 @@ func TestReadFileOlderDiagnostics(t *testing.T) {
 
 func TestSliceAtCompactBoundariesNoBoundaries(t *testing.T) {
 	entries := makeEntries("a", "b", "c", "d")
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "")
 	if len(sliced) != 4 {
 		t.Fatalf("got %d, want all 4 (no boundaries to slice at)", len(sliced))
 	}
@@ -512,7 +512,7 @@ func TestSliceAtCompactBoundariesOneBoundary(t *testing.T) {
 	}
 
 	// tailCompactions=1 with 2 boundaries → slice from the last boundary.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "")
 	if len(sliced) != 2 {
 		t.Fatalf("got %d, want 2 (from cb2 to end)", len(sliced))
 	}
@@ -538,7 +538,7 @@ func TestSliceAtCompactBoundariesReturnsAllWhenFewer(t *testing.T) {
 	}
 
 	// 1 boundary, tailCompactions=1 → len(boundaries) <= tailCompactions → return all.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "")
 	if len(sliced) != 3 {
 		t.Fatalf("got %d, want 3 (all entries returned when boundaries <= tailCompactions)", len(sliced))
 	}
@@ -562,7 +562,7 @@ func TestSliceAtCompactBoundariesMultiple(t *testing.T) {
 	}
 
 	// tailCompactions=2 → include from the 2nd-from-last boundary.
-	sliced, info := sliceAtCompactBoundaries(entries, 2, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 2, "", "")
 	if len(sliced) != 4 {
 		t.Fatalf("got %d, want 4", len(sliced))
 	}
@@ -584,7 +584,7 @@ func TestSliceAtCompactBoundariesBeforeCursor(t *testing.T) {
 	}
 
 	// Load older messages before "cb2".
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb2")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb2", "")
 	// Working set is [a, cb1, b] — 1 boundary, tailCompactions=1 → return all.
 	if len(sliced) != 3 {
 		t.Fatalf("got %d, want 3 (all working set when boundaries <= tailCompactions)", len(sliced))
@@ -610,7 +610,7 @@ func TestSliceAtCompactBoundariesBeforeCursorWithSlicing(t *testing.T) {
 
 	// Load older before "cb3". Working set: [a, cb1, b, cb2, c].
 	// 2 boundaries in working set, tailCompactions=1 → slice from cb2.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb3")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb3", "")
 	if len(sliced) != 2 {
 		t.Fatalf("got %d, want 2", len(sliced))
 	}
@@ -619,6 +619,79 @@ func TestSliceAtCompactBoundariesBeforeCursorWithSlicing(t *testing.T) {
 	}
 	if !info.HasOlderMessages {
 		t.Error("expected HasOlderMessages")
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursor(t *testing.T) {
+	entries := []*Entry{
+		{UUID: "a", Type: "user"},
+		{UUID: "cb1", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "b", Type: "assistant"},
+		{UUID: "cb2", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "c", Type: "user"},
+	}
+
+	// After "cb1" with tailCompactions=0 → returns [b, cb2, c].
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "cb1")
+	if len(sliced) != 3 {
+		t.Fatalf("got %d, want 3 (entries after cb1)", len(sliced))
+	}
+	if sliced[0].UUID != "b" {
+		t.Errorf("first = %q, want %q", sliced[0].UUID, "b")
+	}
+	if info.ReturnedMessageCount != 3 {
+		t.Errorf("ReturnedMessageCount = %d, want 3", info.ReturnedMessageCount)
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursorWithSlicing(t *testing.T) {
+	entries := []*Entry{
+		{UUID: "a", Type: "user"},
+		{UUID: "cb1", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "b", Type: "assistant"},
+		{UUID: "cb2", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "c", Type: "user"},
+		{UUID: "cb3", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "d", Type: "assistant"},
+	}
+
+	// After "a" with tailCompactions=1 → working set is [cb1, b, cb2, c, cb3, d],
+	// then sliced from last boundary cb3 → [cb3, d].
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "a")
+	if len(sliced) != 2 {
+		t.Fatalf("got %d, want 2 (sliced from cb3)", len(sliced))
+	}
+	if sliced[0].UUID != "cb3" {
+		t.Errorf("first = %q, want %q", sliced[0].UUID, "cb3")
+	}
+	if !info.HasOlderMessages {
+		t.Error("expected HasOlderMessages after compaction slicing")
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursorLastEntry(t *testing.T) {
+	entries := makeEntries("a", "b", "c")
+
+	// After last entry → empty slice.
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "c")
+	if len(sliced) != 0 {
+		t.Fatalf("got %d, want 0 (cursor at last entry)", len(sliced))
+	}
+	if info.ReturnedMessageCount != 0 {
+		t.Errorf("ReturnedMessageCount = %d, want 0", info.ReturnedMessageCount)
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursorNotFound(t *testing.T) {
+	entries := makeEntries("a", "b", "c")
+
+	// After nonexistent UUID → full set returned.
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "z")
+	if len(sliced) != 3 {
+		t.Fatalf("got %d, want 3 (cursor not found = full set)", len(sliced))
+	}
+	if info.ReturnedMessageCount != 3 {
+		t.Errorf("ReturnedMessageCount = %d, want 3", info.ReturnedMessageCount)
 	}
 }
 
@@ -1091,6 +1164,59 @@ func TestReadFileOlder(t *testing.T) {
 	}
 }
 
+func TestReadFileNewer(t *testing.T) {
+	path := writeJSONL(t,
+		`{"uuid":"a","parentUuid":"","type":"user","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"b","parentUuid":"a","type":"assistant","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"cb1","parentUuid":"b","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"c","parentUuid":"cb1","type":"user","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"cb2","parentUuid":"c","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:04Z"}`,
+		`{"uuid":"d","parentUuid":"cb2","type":"assistant","timestamp":"2025-01-01T00:00:05Z"}`,
+	)
+	sess, err := ReadFileNewer(path, 0, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should return display-type entries after "b": c and d (cb1/cb2 are system).
+	for _, m := range sess.Messages {
+		if m.UUID == "a" || m.UUID == "b" {
+			t.Errorf("should not contain entry %q (before or at cursor)", m.UUID)
+		}
+	}
+	found := false
+	for _, m := range sess.Messages {
+		if m.UUID == "d" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected entry d in newer messages")
+	}
+}
+
+func TestReadFileRawNewer(t *testing.T) {
+	path := writeJSONL(t,
+		`{"uuid":"a","parentUuid":"","type":"user","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"b","parentUuid":"a","type":"assistant","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"cb1","parentUuid":"b","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"c","parentUuid":"cb1","type":"user","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"d","parentUuid":"c","type":"assistant","timestamp":"2025-01-01T00:00:05Z"}`,
+	)
+	sess, err := ReadFileRawNewer(path, 0, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Raw includes all types (including system). After "b": cb1, c, d.
+	if len(sess.Messages) != 3 {
+		t.Fatalf("got %d messages, want 3 (cb1, c, d after cursor b)", len(sess.Messages))
+	}
+	for _, m := range sess.Messages {
+		if m.UUID == "a" || m.UUID == "b" {
+			t.Errorf("should not contain entry %q (before or at cursor)", m.UUID)
+		}
+	}
+}
+
 // --- Edge case tests (from review findings) ---
 
 func TestSliceAtCompactBoundariesCursorAtFirstMessage(t *testing.T) {
@@ -1100,7 +1226,7 @@ func TestSliceAtCompactBoundariesCursorAtFirstMessage(t *testing.T) {
 		{UUID: "c", Type: "user"},
 	}
 	// Cursor at first message → should return empty working set.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "a")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "a", "")
 	if len(sliced) != 0 {
 		t.Fatalf("got %d, want 0 (cursor at first message = no older messages)", len(sliced))
 	}
@@ -1116,7 +1242,7 @@ func TestSliceAtCompactBoundariesTailCompactionsZero(t *testing.T) {
 		{UUID: "b", Type: "assistant"},
 	}
 	// tailCompactions=0 should return everything (no panic).
-	sliced, info := sliceAtCompactBoundaries(entries, 0, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "")
 	if len(sliced) != 3 {
 		t.Fatalf("got %d, want 3", len(sliced))
 	}
@@ -1132,7 +1258,7 @@ func TestSliceAtCompactBoundariesTailZeroWithCursor(t *testing.T) {
 		{UUID: "c", Type: "user"},
 	}
 	// tailCompactions=0 with cursor should still respect the cursor.
-	sliced, info := sliceAtCompactBoundaries(entries, 0, "b")
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "b", "")
 	if len(sliced) != 1 {
 		t.Fatalf("got %d, want 1 (only messages before cursor 'b')", len(sliced))
 	}
