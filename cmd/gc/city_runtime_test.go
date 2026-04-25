@@ -2244,6 +2244,129 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeTick_RebasesConfigHashesAfterManualReload(t *testing.T) {
+	// Isolate from ambient GC_BEADS so the config's [beads] provider wins.
+	t.Setenv("GC_BEADS", "file")
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+
+	// Initial config with agent "worker".
+	initial := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[[agent]]\nname = \"worker\"\ncommand = \"echo hello\"\n"
+	if err := os.WriteFile(tomlPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	sp := runtime.NewFake()
+
+	// Register session in fake provider so reapStaleSessionBeads doesn't close it.
+	sessionName := "worker"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("start fake session: %v", err)
+	}
+
+	doneCh := make(chan reloadControlReply, 1)
+	dirty := &atomic.Bool{}
+	dirty.Store(true)
+
+	var stdout bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:    cityPath,
+		CityName:    "test-city",
+		TomlPath:    tomlPath,
+		ConfigRev:   configRev,
+		ConfigDirty: dirty,
+		Cfg:         cfg,
+		SP:          sp,
+		BuildFn: func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+			return DesiredStateResult{
+				State: map[string]TemplateParams{
+					sessionName: {
+						Command:      "echo world",
+						SessionName:  sessionName,
+						TemplateName: "worker",
+					},
+				},
+			}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+	cr.activeReload = &reloadRequest{doneCh: doneCh}
+
+	// Create session bead with a stale config hash in the controller's
+	// file store so it survives the store re-open during reload.
+	store := cs.CityBeadStore()
+	created, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":        sessionName,
+			"template":            "worker",
+			"started_config_hash": "stale-hash-value",
+			"state":               "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	// Hook lifecycle to no-op (avoids real bead lifecycle init).
+	prevStart := cityRuntimeStartBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error { return nil }
+	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = prevStart })
+
+	// Write modified config so revision changes → reloadOutcomeApplied.
+	modified := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n\n[[agent]]\nname = \"worker\"\ncommand = \"echo world\"\n"
+	if err := os.WriteFile(tomlPath, []byte(modified), 0o644); err != nil {
+		t.Fatalf("write modified config: %v", err)
+	}
+
+	lastProviderName := "fake"
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+
+	// Verify reload was applied.
+	select {
+	case reply := <-doneCh:
+		if reply.Outcome != reloadOutcomeApplied {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeApplied)
+		}
+	default:
+		t.Fatal("manual reload did not reply after tick")
+	}
+
+	// Re-read from the controller's store (may have been re-opened during reload).
+	postStore := cr.cityBeadStore()
+	got, err := postStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Metadata["started_config_hash"] == "stale-hash-value" {
+		t.Fatalf("started_config_hash was not rebased after manual reload (metadata=%v)", got.Metadata)
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash is empty after rebase")
+	}
+	if !strings.Contains(stdout.String(), "Rebased config hash") {
+		t.Fatalf("stdout = %q, want rebase message", stdout.String())
+	}
+}
+
 func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
