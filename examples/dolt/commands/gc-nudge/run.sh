@@ -296,7 +296,8 @@ run_dolt_gc_for_db() {
   run_bounded "$gc_call_timeout" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
-    sql --database "$db" -q "CALL DOLT_GC()" || cmd_rc=$?
+    --use-db "$db" \
+    sql -q "CALL DOLT_GC()" || cmd_rc=$?
   elapsed=$(( $(date +%s) - start ))
 
   after=$(dir_bytes "$db_dir")
