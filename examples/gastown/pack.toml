@@ -1,7 +1,7 @@
 # Gas Town root pack — wires the gastown pack at both city and rig scope.
 #
-# City-level: [imports.gastown] in city.toml expands city-scoped agents
-# (mayor, deacon, boot).
+# City-level: [imports.gastown] expands city-scoped agents (mayor, deacon,
+# boot) on city startup.
 #
 # Rig-level: [defaults.rig.imports.gastown] ensures every new rig
 # automatically imports rig-scoped agents (witness, refinery, polecat)
@@ -10,6 +10,9 @@
 [pack]
 name = "gastown-city"
 schema = 2
+
+[imports.gastown]
+source = "packs/gastown"
 
 [defaults.rig.imports.gastown]
 source = "packs/gastown"
