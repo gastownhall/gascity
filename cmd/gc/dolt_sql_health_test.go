@@ -10,19 +10,77 @@ import (
 	"time"
 )
 
-func TestManagedDoltReadOnlyProbeDoesNotDropProbeDatabase(t *testing.T) {
-	for _, query := range append(append([]string{}, managedDoltReadOnlyProbeStatements[:]...), managedDoltReadOnlyProbeSQL) {
-		assertNoManagedDoltProbeDrop(t, "read-only probe", query)
-	}
-	assertManagedDoltProbeWrites(t, "joined read-only probe", managedDoltReadOnlyProbeSQL)
-	foundWriteStatement := false
-	for _, query := range managedDoltReadOnlyProbeStatements {
-		if strings.Contains(query, "REPLACE INTO __gc_probe.__probe VALUES (1)") {
-			foundWriteStatement = true
+func TestManagedDoltReadOnlyProbeStatementsForReturnsNothingForEmptyDB(t *testing.T) {
+	for _, db := range []string{"", " ", "\t"} {
+		if got := managedDoltReadOnlyProbeStatementsFor(db); got != nil {
+			t.Fatalf("managedDoltReadOnlyProbeStatementsFor(%q) = %v, want nil", db, got)
+		}
+		if got := managedDoltReadOnlyProbeSQLFor(db); got != "" {
+			t.Fatalf("managedDoltReadOnlyProbeSQLFor(%q) = %q, want \"\"", db, got)
 		}
 	}
-	if !foundWriteStatement {
-		t.Fatal("read-only probe statements must include a write to __gc_probe.__probe")
+}
+
+func TestManagedDoltReadOnlyProbeNeverTargetsLegacyDatabase(t *testing.T) {
+	for _, db := range []string{"gascity", "gm", "be", "user_db", "003", "name-with-hyphen"} {
+		stmts := managedDoltReadOnlyProbeStatementsFor(db)
+		joined := managedDoltReadOnlyProbeSQLFor(db)
+		for _, q := range append(append([]string{}, stmts...), joined) {
+			assertNoManagedDoltProbeLegacyTarget(t, "probe stmts for "+db, q)
+			assertNoManagedDoltProbeDrop(t, "probe stmts for "+db, q)
+		}
+		wantTable := "`" + db + "`.`__probe`"
+		for _, q := range stmts {
+			if !strings.Contains(q, wantTable) {
+				t.Fatalf("probe stmt for %s missing %q: %s", db, wantTable, q)
+			}
+		}
+		if !strings.Contains(joined, "REPLACE INTO "+wantTable+" VALUES (1)") {
+			t.Fatalf("probe SQL for %s must write to %s: %s", db, wantTable, joined)
+		}
+	}
+}
+
+func TestManagedDoltQuoteIdentEscapesBackticks(t *testing.T) {
+	cases := map[string]string{
+		"gascity":            "`gascity`",
+		"003":                "`003`",
+		"with`backtick":      "`with``backtick`",
+		"name with spaces":   "`name with spaces`",
+		"":                   "``",
+	}
+	for in, want := range cases {
+		if got := managedDoltQuoteIdent(in); got != want {
+			t.Fatalf("managedDoltQuoteIdent(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestManagedDoltFirstUserDatabaseSkipsSystemDatabases(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"all system", []string{"Database", "information_schema", "mysql", "dolt_cluster", "__gc_probe"}, ""},
+		{"first user wins", []string{"Database", "__gc_probe", "dolt_cluster", "gascity", "be"}, "gascity"},
+		{"case-insensitive system match", []string{"Database", "Information_Schema", "MySQL", "DOLT_CLUSTER", "__GC_PROBE", "gm"}, "gm"},
+		{"empty", []string{}, ""},
+		{"only header", []string{"Database"}, ""},
+		{"whitespace + blanks ignored", []string{"Database", "", "  ", "gascity"}, "gascity"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := managedDoltFirstUserDatabase(tc.lines); got != tc.want {
+				t.Fatalf("managedDoltFirstUserDatabase(%v) = %q, want %q", tc.lines, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedDoltSystemDatabasesIncludesLegacyProbe(t *testing.T) {
+	if _, ok := managedDoltSystemDatabases[managedDoltProbeDatabase]; !ok {
+		t.Fatalf("managedDoltSystemDatabases missing %q — probe could re-elect legacy database", managedDoltProbeDatabase)
 	}
 }
 
@@ -38,6 +96,24 @@ func assertNoManagedDoltProbeDrop(t *testing.T, label, text string) {
 	}
 }
 
+// assertNoManagedDoltProbeLegacyTarget enforces that gc CLI probe SQL never
+// CREATEs or writes to the legacy `__gc_probe` database — that's what made
+// it dolt's stats backing store and accumulated 596k buckets in production.
+func assertNoManagedDoltProbeLegacyTarget(t *testing.T, label, text string) {
+	t.Helper()
+	createLegacy := regexp.MustCompile("(?i)\\bCREATE\\s+(DATABASE|TABLE)\\s+(IF\\s+NOT\\s+EXISTS\\s+)?`?__gc_probe`?")
+	writeLegacy := regexp.MustCompile("(?i)\\b(REPLACE|INSERT)\\s+INTO\\s+`?__gc_probe`?")
+	if createLegacy.MatchString(text) {
+		t.Fatalf("%s must not create __gc_probe: %s", label, text)
+	}
+	if writeLegacy.MatchString(text) {
+		t.Fatalf("%s must not write to __gc_probe: %s", label, text)
+	}
+}
+
+// assertManagedDoltProbeWrites is retained for the gc-beads-bd.sh fallback
+// test (the bash branch still hits the legacy probe target until its own
+// follow-up bead lands).
 func assertManagedDoltProbeWrites(t *testing.T, label, text string) {
 	t.Helper()
 	if !strings.Contains(text, "REPLACE INTO __gc_probe.__probe VALUES (1)") {

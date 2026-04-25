@@ -1778,8 +1778,20 @@ func TestDoltStateReadOnlyCheckCmdDetectsReadOnly(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
-echo 'database is read only' >&2
-exit 1
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt_cluster\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__probe"*)
+    echo 'database is read only' >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1793,8 +1805,14 @@ exit 1
 	if err != nil {
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
-	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", string(invocation))
-	assertManagedDoltProbeWrites(t, "read-only-check invocation", string(invocation))
+	text := string(invocation)
+	bt := "`"
+	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", text)
+	assertNoManagedDoltProbeLegacyTarget(t, "read-only-check invocation", text)
+	wantWrite := "REPLACE INTO " + bt + "gascity" + bt + "." + bt + "__probe" + bt + " VALUES (1)"
+	if !strings.Contains(text, wantWrite) {
+		t.Fatalf("read-only-check invocation = %s, want %q", text, wantWrite)
+	}
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
@@ -1803,7 +1821,15 @@ func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
-exit 0
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1813,6 +1839,11 @@ exit 0
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1; stderr = %s", code, stderr.String())
 	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	assertNoManagedDoltProbeLegacyTarget(t, "read-only-check writable invocation", string(invocation))
 }
 
 func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
@@ -1901,7 +1932,11 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\ninformation_schema\nmysql\ndolt_cluster\n__gc_probe\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__probe"*)
     echo 'database is read only' >&2
     exit 1
     ;;
@@ -1939,8 +1974,13 @@ esac
 	}
 	text := string(invocation)
 	assertNoManagedDoltProbeDrop(t, "health-check read-only probe", text)
-	assertManagedDoltProbeWrites(t, "health-check read-only probe", text)
-	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST"} {
+	assertNoManagedDoltProbeLegacyTarget(t, "health-check read-only probe", text)
+	bt := "`"
+	wantWrite := "REPLACE INTO " + bt + "gascity" + bt + "." + bt + "__probe" + bt + " VALUES (1)"
+	if !strings.Contains(text, wantWrite) {
+		t.Fatalf("health-check probe = %s, want %q", text, wantWrite)
+	}
+	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST", "SHOW DATABASES"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
 		}
@@ -1986,9 +2026,13 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
-	if strings.Contains(text, "CREATE DATABASE IF NOT EXISTS __gc_probe") {
+	if strings.Contains(text, "CREATE TABLE IF NOT EXISTS") && strings.Contains(text, "__probe") {
 		t.Fatalf("health-check unexpectedly ran read-only probe: %s", text)
 	}
+	if strings.Contains(text, "SHOW DATABASES") {
+		t.Fatalf("health-check unexpectedly enumerated databases without --check-read-only: %s", text)
+	}
+	assertNoManagedDoltProbeLegacyTarget(t, "health-check skip-read-only probe", text)
 	for _, want := range []string{"SELECT active_branch()", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
@@ -2025,7 +2069,11 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__probe"*)
     echo 'probe exploded' >&2
     exit 1
     ;;
@@ -2418,7 +2466,11 @@ INNERPY
   *"SELECT active_branch()"*)
     exit 0
     ;;
-  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__probe"*)
     if [ -f "$READ_ONLY_ONCE" ]; then
       rm -f "$READ_ONLY_ONCE"
       echo "read only" >&2
@@ -2857,7 +2909,11 @@ INNERPY
     echo "final health probe failed" >&2
     exit 1
     ;;
-  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ngascity\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__probe"*)
     exit 0
     ;;
   *)
