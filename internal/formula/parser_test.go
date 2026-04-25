@@ -1285,6 +1285,87 @@ func TestParseWaitsFor(t *testing.T) {
 	}
 }
 
+// TestParseWaitsForQuorum tests quorum(N) parsing specifically.
+func TestParseWaitsForQuorum(t *testing.T) {
+	tests := []struct {
+		input      string
+		wantNil    bool
+		wantGate   string
+		wantQuorum int
+	}{
+		{"quorum(1)", false, "quorum(1)", 1},
+		{"quorum(3)", false, "quorum(3)", 3},
+		{"quorum(10)", false, "quorum(10)", 10},
+		{"quorum(0)", true, "", 0},
+		{"quorum(-1)", true, "", 0},
+		{"quorum()", true, "", 0},
+		{"quorum(abc)", true, "", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			spec := ParseWaitsFor(tt.input)
+			if tt.wantNil {
+				if spec != nil {
+					t.Errorf("ParseWaitsFor(%q) = %+v, want nil", tt.input, spec)
+				}
+				return
+			}
+			if spec == nil {
+				t.Fatalf("ParseWaitsFor(%q) = nil, want non-nil", tt.input)
+			}
+			if spec.Gate != tt.wantGate {
+				t.Errorf("ParseWaitsFor(%q).Gate = %q, want %q", tt.input, spec.Gate, tt.wantGate)
+			}
+			if spec.Quorum != tt.wantQuorum {
+				t.Errorf("ParseWaitsFor(%q).Quorum = %d, want %d", tt.input, spec.Quorum, tt.wantQuorum)
+			}
+		})
+	}
+}
+
+// TestValidate_WaitsForQuorum tests quorum(N) validation via formula.Validate.
+func TestValidate_WaitsForQuorum(t *testing.T) {
+	valid := &Formula{
+		Formula: "mol-quorum",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "vote", Title: "Cast votes"},
+			{ID: "tally", Title: "Tally votes", WaitsFor: "quorum(2)", Needs: []string{"vote"}},
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Errorf("quorum(2) should be valid: %v", err)
+	}
+
+	invalidZero := &Formula{
+		Formula: "mol-bad-quorum",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1"},
+			{ID: "gate", Title: "Gate", WaitsFor: "quorum(0)", Needs: []string{"step1"}},
+		},
+	}
+	if err := invalidZero.Validate(); err == nil {
+		t.Error("quorum(0) should fail validation")
+	}
+
+	invalidStr := &Formula{
+		Formula: "mol-bad-quorum2",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1"},
+			{ID: "gate", Title: "Gate", WaitsFor: "quorum(abc)", Needs: []string{"step1"}},
+		},
+	}
+	if err := invalidStr.Validate(); err == nil {
+		t.Error("quorum(abc) should fail validation")
+	}
+}
+
 // TestValidate_ChildNeedsAndWaitsFor tests needs and waits_for in child steps
 func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	formula := &Formula{

@@ -30,6 +30,7 @@ package formula
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -1225,11 +1226,14 @@ func collectChildIDs(children []*Step, idLocations map[string]string, errs *[]st
 
 // WaitsForSpec holds the parsed waits_for field.
 type WaitsForSpec struct {
-	// Gate is the gate type: "all-children" or "any-children"
+	// Gate is the gate type: "all-children", "any-children", or "quorum(N)"
 	Gate string
 	// SpawnerID is the step ID whose children to wait for.
 	// Empty means infer from context (typically first step in needs).
 	SpawnerID string
+	// Quorum is the minimum number of children that must close before the gate
+	// opens. Non-zero only when Gate is "quorum(N)".
+	Quorum int
 }
 
 // ParseWaitsFor parses a waits_for value into its components.
@@ -1253,6 +1257,14 @@ func ParseWaitsFor(value string) *WaitsForSpec {
 		}
 	}
 
+	// quorum(N) syntax — gate opens when N children close
+	if strings.HasPrefix(value, "quorum(") && strings.HasSuffix(value, ")") {
+		raw := value[len("quorum(") : len(value)-1]
+		if n, err := strconv.Atoi(raw); err == nil && n >= 1 {
+			return &WaitsForSpec{Gate: value, Quorum: n}
+		}
+	}
+
 	// Invalid - return nil (validation should have caught this)
 	return nil
 }
@@ -1262,6 +1274,7 @@ func ParseWaitsFor(value string) *WaitsForSpec {
 //   - "all-children": wait for all dynamically-bonded children
 //   - "any-children": wait for first child to complete
 //   - "children-of(step-id)": wait for children of a specific step
+//   - "quorum(N)": wait for N children to close (N >= 1)
 func validateWaitsFor(value string, stepIDLocations map[string]string) error {
 	// Simple gate types
 	if value == "all-children" || value == "any-children" {
@@ -1280,7 +1293,17 @@ func validateWaitsFor(value string, stepIDLocations map[string]string) error {
 		return nil
 	}
 
-	return fmt.Errorf("waits_for has invalid value %q (must be all-children, any-children, or children-of(step-id))", value)
+	// quorum(N) syntax
+	if strings.HasPrefix(value, "quorum(") && strings.HasSuffix(value, ")") {
+		raw := value[len("quorum(") : len(value)-1]
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return fmt.Errorf("waits_for quorum() requires a positive integer, got %q", raw)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("waits_for has invalid value %q (must be all-children, any-children, children-of(step-id), or quorum(N))", value)
 }
 
 // validateChildDependsOn recursively validates depends_on and needs references for children.
