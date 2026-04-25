@@ -2,7 +2,6 @@ package cityinit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,9 +9,38 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+type recordingLifecycleEvents struct {
+	ensureErr     error
+	createdErr    error
+	unregisterErr error
+	ensured       []string
+	created       []struct {
+		path string
+		name string
+	}
+	unregistered []RegisteredCity
+}
+
+func (r *recordingLifecycleEvents) EnsureCityLog(cityPath string) error {
+	r.ensured = append(r.ensured, cityPath)
+	return r.ensureErr
+}
+
+func (r *recordingLifecycleEvents) CityCreated(cityPath, name string) error {
+	r.created = append(r.created, struct {
+		path string
+		name string
+	}{path: cityPath, name: name})
+	return r.createdErr
+}
+
+func (r *recordingLifecycleEvents) CityUnregisterRequested(city RegisteredCity) error {
+	r.unregistered = append(r.unregistered, city)
+	return r.unregisterErr
+}
 
 func TestServiceValidateInitRequest(t *testing.T) {
 	absDir := filepath.Join(t.TempDir(), "city")
@@ -158,6 +186,7 @@ func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "api-city")
 	var registered bool
 	var reloaded bool
+	lifecycleEvents := &recordingLifecycleEvents{}
 	svc := NewService(ServiceDeps{
 		DoInit: func(_ context.Context, req InitRequest) error {
 			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
@@ -173,6 +202,7 @@ func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
 			return nil
 		},
 		ReloadSupervisor: func() { reloaded = true },
+		LifecycleEvents:  lifecycleEvents,
 	})
 
 	result, err := svc.Scaffold(context.Background(), InitRequest{
@@ -191,23 +221,11 @@ func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
 	if !reloaded {
 		t.Fatal("ReloadSupervisor was not called")
 	}
-
-	evts, err := events.ReadFiltered(filepath.Join(cityPath, ".gc", "events.jsonl"), events.Filter{Type: events.CityCreated})
-	if err != nil {
-		t.Fatalf("read events: %v", err)
+	if !reflect.DeepEqual(lifecycleEvents.ensured, []string{cityPath}) {
+		t.Fatalf("ensured event logs = %v, want [%s]", lifecycleEvents.ensured, cityPath)
 	}
-	if len(evts) != 1 {
-		t.Fatalf("city.created events = %d, want 1", len(evts))
-	}
-	var payload struct {
-		Name string `json:"name"`
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(evts[0].Payload, &payload); err != nil {
-		t.Fatalf("decode city.created payload: %v", err)
-	}
-	if payload.Name != "api-city" || payload.Path != cityPath {
-		t.Fatalf("city.created payload = %+v", payload)
+	if len(lifecycleEvents.created) != 1 || lifecycleEvents.created[0].name != "api-city" || lifecycleEvents.created[0].path != cityPath {
+		t.Fatalf("created lifecycle events = %+v, want api-city/%s", lifecycleEvents.created, cityPath)
 	}
 }
 
@@ -264,22 +282,27 @@ func TestServiceScaffoldRequiresRegisterBeforeSideEffects(t *testing.T) {
 func TestServiceScaffoldFailsBeforeRegisterWhenEventLogCannotBeCreated(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "api-city")
 	var registered bool
+	eventErr := errors.New("event log unavailable")
 	svc := NewService(ServiceDeps{
 		DoInit: func(_ context.Context, req InitRequest) error {
-			return os.WriteFile(filepath.Join(req.Dir, citylayout.RuntimeRoot), []byte("not a directory"), 0o644)
+			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
 		},
 		RegisterCity: func(context.Context, string, string) error {
 			registered = true
 			return nil
 		},
+		LifecycleEvents: &recordingLifecycleEvents{ensureErr: eventErr},
 	})
 
 	_, err := svc.Scaffold(context.Background(), InitRequest{
 		Dir:      cityPath,
 		Provider: "codex",
 	})
-	if err == nil {
-		t.Fatal("Scaffold error = nil, want event log creation error")
+	if !errors.Is(err, eventErr) {
+		t.Fatalf("Scaffold error = %v, want %v", err, eventErr)
 	}
 	if registered {
 		t.Fatal("RegisterCity was called after event log creation failed")

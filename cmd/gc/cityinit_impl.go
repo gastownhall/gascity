@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/cityinit"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -21,8 +25,67 @@ func newCityInitService() *cityinit.Service {
 		ReloadSupervisorAfterUnregister: reloadSupervisorNoWait,
 		FindCity:                        cityInitFindRegisteredCity,
 		UnregisterCity:                  cityInitUnregisterCity,
-		EventWriter:                     io.Discard,
+		LifecycleEvents:                 cityInitLifecycleEvents{stderr: io.Discard},
 	})
+}
+
+type cityInitLifecycleEvents struct {
+	stderr io.Writer
+}
+
+type cityInitLifecyclePayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+func (e cityInitLifecycleEvents) EnsureCityLog(cityPath string) error {
+	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
+	if err != nil {
+		return err
+	}
+	if err := fr.Close(); err != nil {
+		return fmt.Errorf("closing event log: %w", err)
+	}
+	return nil
+}
+
+func (e cityInitLifecycleEvents) CityCreated(cityPath, name string) error {
+	return e.record(cityPath, events.CityCreated, name, cityInitLifecyclePayload{Name: name, Path: cityPath})
+}
+
+func (e cityInitLifecycleEvents) CityUnregisterRequested(city cityinit.RegisteredCity) error {
+	return e.record(city.Path, events.CityUnregisterRequested, city.Name, cityInitLifecyclePayload{Name: city.Name, Path: city.Path})
+}
+
+func (e cityInitLifecycleEvents) record(cityPath, eventType, subject string, payload cityInitLifecyclePayload) error {
+	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		if closeErr := fr.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("closing event log: %w", closeErr))
+		}
+		return err
+	}
+	fr.Record(events.Event{
+		Type:    eventType,
+		Actor:   "gc",
+		Subject: subject,
+		Payload: raw,
+	})
+	if err := fr.Close(); err != nil {
+		return fmt.Errorf("closing event log: %w", err)
+	}
+	return nil
+}
+
+func (e cityInitLifecycleEvents) stderrOrDiscard() io.Writer {
+	if e.stderr != nil {
+		return e.stderr
+	}
+	return io.Discard
 }
 
 func cityInitDoInit(_ context.Context, req cityinit.InitRequest) error {

@@ -3,18 +3,14 @@ package cityinit
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 
-	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -29,7 +25,7 @@ type ServiceDeps struct {
 	ReloadSupervisorAfterUnregister func()
 	FindCity                        func(ctx context.Context, name string) (RegisteredCity, error)
 	UnregisterCity                  func(ctx context.Context, city RegisteredCity) error
-	EventWriter                     io.Writer
+	LifecycleEvents                 LifecycleEvents
 }
 
 // RegisteredCity is the minimal registry view Service needs for
@@ -37,6 +33,15 @@ type ServiceDeps struct {
 type RegisteredCity struct {
 	Name string
 	Path string
+}
+
+// LifecycleEvents records durable city lifecycle events required by async
+// clients. Implementations live at process edges so this package does not own
+// stdout/stderr or event-log output sinks.
+type LifecycleEvents interface {
+	EnsureCityLog(cityPath string) error
+	CityCreated(cityPath, name string) error
+	CityUnregisterRequested(city RegisteredCity) error
 }
 
 // Service owns city scaffolding/finalization orchestration for both the
@@ -138,7 +143,7 @@ func (s *Service) Scaffold(ctx context.Context, req InitRequest) (*InitResult, e
 	}
 
 	cityName := s.resolveCityName(req.NameOverride, "", req.Dir)
-	if err := ensureCityEventLog(req.Dir, s.deps.EventWriter); err != nil {
+	if err := s.lifecycleEvents().EnsureCityLog(req.Dir); err != nil {
 		return nil, rollbackScaffoldFailure(req.Dir, dirExisted, rollbackState, fmt.Errorf("creating city event log: %w", err))
 	}
 	if dirExisted && rollbackState != nil {
@@ -159,7 +164,7 @@ func (s *Service) Scaffold(ctx context.Context, req InitRequest) (*InitResult, e
 		}
 		return nil, fmt.Errorf("register with supervisor: %w", err)
 	}
-	if err := recordCityEvent(req.Dir, events.CityCreated, cityName, cityLifecyclePayload{Name: cityName, Path: req.Dir}, s.deps.EventWriter); err != nil {
+	if err := s.lifecycleEvents().CityCreated(req.Dir, cityName); err != nil {
 		return nil, fmt.Errorf("record city created event: %w", err)
 	}
 	if s.deps.ReloadSupervisor != nil {
@@ -196,13 +201,7 @@ func (s *Service) Unregister(ctx context.Context, req UnregisterRequest) (*Unreg
 		}
 		return nil, fmt.Errorf("removing %q from supervisor registry: %w", name, err)
 	}
-	if err := recordCityEvent(
-		city.Path,
-		events.CityUnregisterRequested,
-		city.Name,
-		cityLifecyclePayload(city),
-		s.deps.EventWriter,
-	); err != nil {
+	if err := s.lifecycleEvents().CityUnregisterRequested(city); err != nil {
 		return nil, fmt.Errorf("record city unregister requested event: %w", err)
 	}
 	if s.deps.ReloadSupervisorAfterUnregister != nil {
@@ -251,9 +250,11 @@ func (s *Service) managedPaths() []string {
 	return ManagedScaffoldPaths()
 }
 
-type cityLifecyclePayload struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+func (s *Service) lifecycleEvents() LifecycleEvents {
+	if s.deps.LifecycleEvents != nil {
+		return s.deps.LifecycleEvents
+	}
+	return noopLifecycleEvents{}
 }
 
 func rollbackScaffoldFailure(dir string, dirExisted bool, rollbackState *scaffoldRollbackState, err error) error {
@@ -272,48 +273,6 @@ func rollbackScaffoldFailure(dir string, dirExisted bool, rollbackState *scaffol
 		}
 	}
 	return err
-}
-
-func ensureCityEventLog(cityPath string, writer io.Writer) error {
-	if writer == nil {
-		writer = io.Discard
-	}
-	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), writer)
-	if err != nil {
-		return err
-	}
-	if err := fr.Close(); err != nil {
-		return fmt.Errorf("closing event log: %w", err)
-	}
-	return nil
-}
-
-func recordCityEvent(cityPath, eventType, subject string, payload any, writer io.Writer) error {
-	if writer == nil {
-		writer = io.Discard
-	}
-	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), writer)
-	if err != nil {
-		return err
-	}
-
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		if closeErr := fr.Close(); closeErr != nil {
-			return errors.Join(err, fmt.Errorf("closing event log: %w", closeErr))
-		}
-		return err
-	}
-	fr.Record(events.Event{
-		Type:    eventType,
-		Actor:   "gc",
-		Subject: subject,
-		Payload: raw,
-	})
-	if err := fr.Close(); err != nil {
-		return fmt.Errorf("closing event log: %w", err)
-	}
-	return nil
 }
 
 type scaffoldRollbackEntry struct {
@@ -498,3 +457,11 @@ func (s *scaffoldRollbackState) restore() error {
 	}
 	return nil
 }
+
+type noopLifecycleEvents struct{}
+
+func (noopLifecycleEvents) EnsureCityLog(string) error { return nil }
+
+func (noopLifecycleEvents) CityCreated(string, string) error { return nil }
+
+func (noopLifecycleEvents) CityUnregisterRequested(RegisteredCity) error { return nil }

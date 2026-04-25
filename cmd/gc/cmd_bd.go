@@ -126,7 +126,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = bdCommandEnv(cityPath, cfg, target)
+	cmd.Env = workQueryEnvForDir(bdCommandEnv(cityPath, cfg, target), cmd.Dir)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
