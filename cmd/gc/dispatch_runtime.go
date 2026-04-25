@@ -39,7 +39,6 @@ func controlDispatcherBinding(store beads.Store, cityName string, cfg *config.Ci
 		Store:    store,
 		Cfg:      cfg,
 		Resolver: cliAgentResolver{},
-		Stderr:   os.Stderr,
 	}
 	return sling.ControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
 }
@@ -59,7 +58,6 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		Cfg:                   cfg,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
-		Stderr:                os.Stderr,
 	}
 	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }

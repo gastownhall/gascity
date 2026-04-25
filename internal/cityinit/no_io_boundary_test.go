@@ -7,30 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
 func TestPackageDoesNotExposeInputOutputWriters(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(file)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir(%q): %v", dir, err)
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || filepath.Ext(name) != ".go" || filepath.Base(name) == "no_io_boundary_test.go" {
-			continue
-		}
-		path := filepath.Join(dir, name)
+	for _, file := range packageGoFiles(t) {
+		name := filepath.Base(file)
 		fset := token.NewFileSet()
-		parsed, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		parsed, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
 		if err != nil {
-			t.Fatalf("ParseFile(%q): %v", path, err)
+			t.Fatalf("ParseFile(%q): %v", file, err)
 		}
 		for _, imp := range parsed.Imports {
 			if imp.Path.Value == `"io"` {
@@ -38,9 +25,9 @@ func TestPackageDoesNotExposeInputOutputWriters(t *testing.T) {
 			}
 		}
 
-		parsed, err = parser.ParseFile(fset, path, nil, 0)
+		parsed, err = parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
-			t.Fatalf("ParseFile(%q): %v", path, err)
+			t.Fatalf("ParseFile(%q): %v", file, err)
 		}
 		ast.Inspect(parsed, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
@@ -54,4 +41,64 @@ func TestPackageDoesNotExposeInputOutputWriters(t *testing.T) {
 			return true
 		})
 	}
+}
+
+func TestPackageBoundary_NoDataIO(t *testing.T) {
+	for _, file := range packageGoFiles(t) {
+		name := filepath.Base(file)
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("ParseFile(%q): %v", file, err)
+		}
+		for _, imp := range parsed.Imports {
+			if imp.Path.Value == `"os"` {
+				t.Fatalf("%s imports os; route filesystem I/O through ScaffoldFS port", name)
+			}
+		}
+
+		parsed, err = parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("ParseFile(%q): %v", file, err)
+		}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if ident.Name == "filepath" && sel.Sel.Name == "Walk" {
+				t.Fatalf("%s references filepath.Walk; use ScaffoldFS.Walk instead", name)
+			}
+			return true
+		})
+	}
+}
+
+func packageGoFiles(t *testing.T) []string {
+	t.Helper()
+	_, caller, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(caller)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", dir, err)
+	}
+	var files []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || filepath.Ext(name) != ".go" {
+			continue
+		}
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		files = append(files, filepath.Join(dir, name))
+	}
+	return files
 }

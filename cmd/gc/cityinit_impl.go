@@ -14,19 +14,50 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func newCityInitService() *cityinit.Service {
+func newCityInitService() (*cityinit.Service, error) {
 	return cityinit.NewService(cityinit.ServiceDeps{
-		DoInit:   cityInitDoInit,
-		Finalize: cityInitFinalize,
-		RegisterCity: func(_ context.Context, dir, nameOverride string) error {
-			return registerCityForAPI(dir, nameOverride)
-		},
-		ReloadSupervisor:                reloadSupervisorNoWaitHook,
-		ReloadSupervisorAfterUnregister: reloadSupervisorNoWait,
-		FindCity:                        cityInitFindRegisteredCity,
-		UnregisterCity:                  cityInitUnregisterCity,
-		LifecycleEvents:                 cityInitLifecycleEvents{stderr: io.Discard},
+		FS:              osScaffoldFS{},
+		Initializer:     initializerAdapter{},
+		Registry:        registryAdapter{},
+		Reloader:        reloaderAdapter{},
+		LifecycleEvents: cityInitLifecycleEvents{stderr: io.Discard},
 	})
+}
+
+type initializerAdapter struct{}
+
+func (initializerAdapter) Scaffold(ctx context.Context, req cityinit.InitRequest) error {
+	return cityInitDoInit(ctx, req)
+}
+
+func (initializerAdapter) Finalize(ctx context.Context, req cityinit.InitRequest) error {
+	return cityInitFinalize(ctx, req)
+}
+
+type registryAdapter struct{}
+
+func (registryAdapter) Register(_ context.Context, dir, nameOverride string) error {
+	return registerCityForAPI(dir, nameOverride)
+}
+
+func (registryAdapter) Find(ctx context.Context, name string) (cityinit.RegisteredCity, error) {
+	return cityInitFindRegisteredCity(ctx, name)
+}
+
+func (registryAdapter) Unregister(ctx context.Context, city cityinit.RegisteredCity) error {
+	return cityInitUnregisterCity(ctx, city)
+}
+
+type reloaderAdapter struct{}
+
+func (reloaderAdapter) Reload() error {
+	reloadSupervisorNoWaitHook()
+	return nil
+}
+
+func (reloaderAdapter) ReloadAfterUnregister() error {
+	reloadSupervisorNoWait()
+	return nil
 }
 
 type cityInitLifecycleEvents struct {

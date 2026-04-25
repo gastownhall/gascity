@@ -198,17 +198,16 @@ func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
 	a := config.Agent{Name: "worker"}
 	template := "custom {} --route={{.Rig"
 
-	var buf strings.Builder
-	got := BuildSlingCommandForAgent("sling_query", template, "BL-42", cityPath, "", a, nil, &buf)
+	got, warning := BuildSlingCommandForAgent("sling_query", template, "BL-42", cityPath, "", a, nil)
 
 	if got != "custom 'BL-42' --route={{.Rig" {
 		t.Fatalf("BuildSlingCommandForAgent() = %q, want %q", got, "custom 'BL-42' --route={{.Rig")
 	}
-	if !strings.Contains(buf.String(), "sling_query") {
-		t.Fatalf("stderr missing field name: %q", buf.String())
+	if !strings.Contains(warning, "sling_query") {
+		t.Fatalf("warning missing field name: %q", warning)
 	}
-	if strings.Contains(buf.String(), template) {
-		t.Fatalf("stderr should redact raw template, got %q", buf.String())
+	if strings.Contains(warning, template) {
+		t.Fatalf("warning should redact raw template, got %q", warning)
 	}
 }
 
@@ -218,7 +217,7 @@ func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
 	a := config.Agent{Name: "worker", Dir: "frontend"}
 	rigs := []config.Rig{{Name: "frontend", Path: rigPath}}
 
-	got := BuildSlingCommandForAgent(
+	got, _ := BuildSlingCommandForAgent(
 		"sling_query",
 		"custom {} --route={{.CityName}}/{{.Rig}}/{{.AgentBase}}",
 		"BL-42",
@@ -226,7 +225,6 @@ func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
 		"",
 		a,
 		rigs,
-		nil,
 	)
 
 	if want := "custom 'BL-42' --route=demo-city/frontend/worker"; got != want {

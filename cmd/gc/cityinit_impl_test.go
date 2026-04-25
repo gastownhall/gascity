@@ -15,6 +15,15 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
+func mustNewCityInitService(t *testing.T) *cityinit.Service {
+	t.Helper()
+	svc, err := newCityInitService()
+	if err != nil {
+		t.Fatalf("newCityInitService: %v", err)
+	}
+	return svc
+}
+
 type fakeSupervisorRegistry struct {
 	entries       []supervisor.CityEntry
 	listErr       error
@@ -53,7 +62,7 @@ func TestCityInitServiceScaffoldCreatesCityRegistersAndEmitsCreated(t *testing.T
 		reloadSupervisorNoWaitHook = oldReloadSupervisorNoWaitHook
 	})
 
-	result, err := newCityInitService().Scaffold(context.Background(), cityinit.InitRequest{
+	result, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{
 		Dir:              cityPath,
 		Provider:         "codex",
 		BootstrapProfile: bootstrapProfileSingleHostCompat,
@@ -101,7 +110,7 @@ func TestCityInitServiceScaffoldCreatesCityRegistersAndEmitsCreated(t *testing.T
 		t.Fatalf("reload saw %d city.created events, want 1 before wake", reloadSawCreated)
 	}
 
-	_, err = newCityInitService().Scaffold(context.Background(), cityinit.InitRequest{
+	_, err = mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{
 		Dir:      cityPath,
 		Provider: "codex",
 	})
@@ -122,7 +131,7 @@ func TestCityInitServiceScaffoldDoesNotEmitCreatedWhenRegisterFails(t *testing.T
 		newSupervisorRegistry = oldNewSupervisorRegistry
 	})
 
-	_, err := newCityInitService().Scaffold(context.Background(), cityinit.InitRequest{
+	_, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{
 		Dir:              cityPath,
 		Provider:         "codex",
 		BootstrapProfile: bootstrapProfileSingleHostCompat,
@@ -170,7 +179,7 @@ func TestCityInitServiceScaffoldPreservesExistingDirectoryWhenRegisterFails(t *t
 		newSupervisorRegistry = oldNewSupervisorRegistry
 	})
 
-	_, err := newCityInitService().Scaffold(context.Background(), cityinit.InitRequest{
+	_, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{
 		Dir:              cityPath,
 		Provider:         "codex",
 		BootstrapProfile: bootstrapProfileSingleHostCompat,
@@ -205,7 +214,7 @@ func TestCityInitServiceScaffoldPreservesExistingDirectoryWhenRegisterFails(t *t
 	}
 
 	newSupervisorRegistry = oldNewSupervisorRegistry
-	result, err := newCityInitService().Scaffold(context.Background(), cityinit.InitRequest{
+	result, err := mustNewCityInitService(t).Scaffold(context.Background(), cityinit.InitRequest{
 		Dir:              cityPath,
 		Provider:         "codex",
 		BootstrapProfile: bootstrapProfileSingleHostCompat,
@@ -225,7 +234,7 @@ func TestCityInitServiceInitScaffoldsAndFinalizes(t *testing.T) {
 	configureRealBdAndDoltPath(t)
 	cityPath := filepath.Join(t.TempDir(), "init-city")
 
-	result, err := newCityInitService().Init(context.Background(), cityinit.InitRequest{
+	result, err := mustNewCityInitService(t).Init(context.Background(), cityinit.InitRequest{
 		Dir:                   cityPath,
 		StartCommand:          "true",
 		NameOverride:          "init-city",
@@ -241,7 +250,7 @@ func TestCityInitServiceInitScaffoldsAndFinalizes(t *testing.T) {
 		t.Fatalf(".gc missing after Init finalization: %v", err)
 	}
 
-	_, err = newCityInitService().Init(context.Background(), cityinit.InitRequest{
+	_, err = mustNewCityInitService(t).Init(context.Background(), cityinit.InitRequest{
 		Dir:          cityPath,
 		StartCommand: "true",
 	})
@@ -261,7 +270,7 @@ func TestCityInitServiceUnregisterRemovesRegistryAndEmitsEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := newCityInitService().Unregister(context.Background(), cityinit.UnregisterRequest{
+	result, err := mustNewCityInitService(t).Unregister(context.Background(), cityinit.UnregisterRequest{
 		CityName: " bright-lights ",
 	})
 	if err != nil {
@@ -321,7 +330,7 @@ func TestCityInitServiceUnregisterDoesNotEmitEventWhenRegistryWriteFails(t *test
 		newSupervisorRegistry = oldNewSupervisorRegistry
 	})
 
-	_, err := newCityInitService().Unregister(context.Background(), cityinit.UnregisterRequest{
+	_, err := mustNewCityInitService(t).Unregister(context.Background(), cityinit.UnregisterRequest{
 		CityName: "bright-lights",
 	})
 	if err == nil || !strings.Contains(err.Error(), "removing \"bright-lights\" from supervisor registry") {
@@ -340,12 +349,12 @@ func TestCityInitServiceUnregisterDoesNotEmitEventWhenRegistryWriteFails(t *test
 func TestCityInitServiceUnregisterMissingCity(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 
-	_, err := newCityInitService().Unregister(context.Background(), cityinit.UnregisterRequest{CityName: "missing"})
+	_, err := mustNewCityInitService(t).Unregister(context.Background(), cityinit.UnregisterRequest{CityName: "missing"})
 	if !errors.Is(err, cityinit.ErrNotRegistered) {
 		t.Fatalf("Unregister missing error = %v, want ErrNotRegistered", err)
 	}
 
-	_, err = newCityInitService().Unregister(context.Background(), cityinit.UnregisterRequest{})
+	_, err = mustNewCityInitService(t).Unregister(context.Background(), cityinit.UnregisterRequest{})
 	if !errors.Is(err, cityinit.ErrNotRegistered) {
 		t.Fatalf("Unregister blank error = %v, want ErrNotRegistered", err)
 	}

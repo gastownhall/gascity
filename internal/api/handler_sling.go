@@ -93,7 +93,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
-		Stderr:   apiSlingStderr(),
+		Tracer: func(format string, args ...any) {
+			fmt.Fprintf(apiSlingStderr(), format+"\n", args...) //nolint:errcheck
+		},
 	}
 	sl, err := sling.New(deps)
 	if err != nil {

@@ -1,8 +1,9 @@
 package cityinit
 
 import (
+	"errors"
 	"fmt"
-	"os"
+	iofs "io/fs"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -66,7 +67,7 @@ func EnsureCityScaffoldFS(fs fsys.FS, cityPath string) error {
 	eventsPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
 	if _, err := fs.Stat(eventsPath); err == nil {
 		return nil
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, iofs.ErrNotExist) {
 		return fmt.Errorf("checking city event log %q: %w", eventsPath, err)
 	}
 	if err := fs.WriteFile(eventsPath, nil, 0o644); err != nil {

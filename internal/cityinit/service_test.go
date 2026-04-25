@@ -42,9 +42,83 @@ func (r *recordingLifecycleEvents) CityUnregisterRequested(city RegisteredCity) 
 	return r.unregisterErr
 }
 
+type mockRegistry struct {
+	registerFn   func(ctx context.Context, dir, nameOverride string) error
+	findFn       func(ctx context.Context, name string) (RegisteredCity, error)
+	unregisterFn func(ctx context.Context, city RegisteredCity) error
+}
+
+func (m *mockRegistry) Register(ctx context.Context, dir, nameOverride string) error {
+	if m.registerFn != nil {
+		return m.registerFn(ctx, dir, nameOverride)
+	}
+	return nil
+}
+
+func (m *mockRegistry) Find(ctx context.Context, name string) (RegisteredCity, error) {
+	if m.findFn != nil {
+		return m.findFn(ctx, name)
+	}
+	return RegisteredCity{}, ErrNotRegistered
+}
+
+func (m *mockRegistry) Unregister(ctx context.Context, city RegisteredCity) error {
+	if m.unregisterFn != nil {
+		return m.unregisterFn(ctx, city)
+	}
+	return nil
+}
+
+type mockReloader struct {
+	reloadFn           func() error
+	reloadAfterUnregFn func() error
+}
+
+func (m *mockReloader) Reload() error {
+	if m.reloadFn != nil {
+		return m.reloadFn()
+	}
+	return nil
+}
+
+func (m *mockReloader) ReloadAfterUnregister() error {
+	if m.reloadAfterUnregFn != nil {
+		return m.reloadAfterUnregFn()
+	}
+	return nil
+}
+
+type mockInitializer struct {
+	scaffoldFn func(ctx context.Context, req InitRequest) error
+	finalizeFn func(ctx context.Context, req InitRequest) error
+}
+
+func (m *mockInitializer) Scaffold(ctx context.Context, req InitRequest) error {
+	if m.scaffoldFn != nil {
+		return m.scaffoldFn(ctx, req)
+	}
+	return nil
+}
+
+func (m *mockInitializer) Finalize(ctx context.Context, req InitRequest) error {
+	if m.finalizeFn != nil {
+		return m.finalizeFn(ctx, req)
+	}
+	return nil
+}
+
+func mustNewService(t *testing.T, deps ServiceDeps) *Service {
+	t.Helper()
+	svc, err := NewService(deps)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
+}
+
 func TestServiceValidateInitRequest(t *testing.T) {
 	absDir := filepath.Join(t.TempDir(), "city")
-	svc := NewService(ServiceDeps{})
+	svc := mustNewService(t, ServiceDeps{FS: testOSScaffoldFS{}})
 
 	tests := []struct {
 		name    string
@@ -103,7 +177,7 @@ func TestServiceValidateInitRequest(t *testing.T) {
 
 func TestServiceValidateInitRequestUsesInternalProviderValidation(t *testing.T) {
 	absDir := filepath.Join(t.TempDir(), "city")
-	svc := NewService(ServiceDeps{})
+	svc := mustNewService(t, ServiceDeps{FS: testOSScaffoldFS{}})
 
 	if err := svc.ValidateInitRequest(InitRequest{
 		Dir:              absDir,
@@ -127,17 +201,20 @@ func TestServiceValidateInitRequestUsesInternalProviderValidation(t *testing.T) 
 func TestServiceInitScaffoldsAndFinalizes(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "init-city")
 	var calls []string
-	svc := NewService(ServiceDeps{
-		DoInit: func(_ context.Context, req InitRequest) error {
-			calls = append(calls, "do-init:"+req.Dir+":"+req.Provider)
-			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
-				return err
-			}
-			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"init-city\"\n"), 0o644)
-		},
-		Finalize: func(_ context.Context, req InitRequest) error {
-			calls = append(calls, "finalize:"+req.Dir)
-			return nil
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
+		Initializer: &mockInitializer{
+			scaffoldFn: func(_ context.Context, req InitRequest) error {
+				calls = append(calls, "do-init:"+req.Dir+":"+req.Provider)
+				if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"init-city\"\n"), 0o644)
+			},
+			finalizeFn: func(_ context.Context, req InitRequest) error {
+				calls = append(calls, "finalize:"+req.Dir)
+				return nil
+			},
 		},
 	})
 
@@ -157,14 +234,10 @@ func TestServiceInitScaffoldsAndFinalizes(t *testing.T) {
 	}
 }
 
-func TestServiceInitRequiresFinalizeBeforeSideEffects(t *testing.T) {
+func TestServiceInitRequiresInitializerBeforeSideEffects(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "init-city")
-	doInitCalled := false
-	svc := NewService(ServiceDeps{
-		DoInit: func(_ context.Context, req InitRequest) error {
-			doInitCalled = true
-			return os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755)
-		},
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
 	})
 
 	_, err := svc.Init(context.Background(), InitRequest{
@@ -173,9 +246,6 @@ func TestServiceInitRequiresFinalizeBeforeSideEffects(t *testing.T) {
 	})
 	if !errors.Is(err, ErrNotWired) {
 		t.Fatalf("Init error = %v, want ErrNotWired", err)
-	}
-	if doInitCalled {
-		t.Fatal("DoInit was called before required dependencies were wired")
 	}
 	if _, statErr := os.Stat(cityPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("city path after unwired Init = %v, want removed/not created", statErr)
@@ -187,22 +257,23 @@ func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
 	var registered bool
 	var reloaded bool
 	lifecycleEvents := &recordingLifecycleEvents{}
-	svc := NewService(ServiceDeps{
-		DoInit: func(_ context.Context, req InitRequest) error {
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
+		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
 				return err
 			}
 			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
-		},
-		RegisterCity: func(_ context.Context, dir, nameOverride string) error {
+		}},
+		Registry: &mockRegistry{registerFn: func(_ context.Context, dir, nameOverride string) error {
 			if dir != cityPath || nameOverride != "" {
-				t.Fatalf("RegisterCity(%q, %q), want (%q, \"\")", dir, nameOverride, cityPath)
+				t.Fatalf("Register(%q, %q), want (%q, \"\")", dir, nameOverride, cityPath)
 			}
 			registered = true
 			return nil
-		},
-		ReloadSupervisor: func() { reloaded = true },
-		LifecycleEvents:  lifecycleEvents,
+		}},
+		Reloader:        &mockReloader{reloadFn: func() error { reloaded = true; return nil }},
+		LifecycleEvents: lifecycleEvents,
 	})
 
 	result, err := svc.Scaffold(context.Background(), InitRequest{
@@ -234,15 +305,17 @@ func TestServiceScaffoldUsesInternalScaffoldDetection(t *testing.T) {
 	if err := EnsureCityScaffoldFS(fsys.OSFS{}, cityPath); err != nil {
 		t.Fatalf("EnsureCityScaffoldFS: %v", err)
 	}
-	svc := NewService(ServiceDeps{
-		DoInit: func(context.Context, InitRequest) error {
-			t.Fatal("DoInit should not run for an already scaffolded city")
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
+		Initializer: &mockInitializer{scaffoldFn: func(context.Context, InitRequest) error {
+			t.Fatal("Scaffold should not run for an already scaffolded city")
 			return nil
-		},
-		RegisterCity: func(context.Context, string, string) error {
-			t.Fatal("RegisterCity should not run for an already scaffolded city")
+		}},
+		Registry: &mockRegistry{registerFn: func(context.Context, string, string) error {
+			t.Fatal("Register should not run for an already scaffolded city")
 			return nil
-		},
+		}},
+		LifecycleEvents: &recordingLifecycleEvents{},
 	})
 
 	_, err := svc.Scaffold(context.Background(), InitRequest{
@@ -256,12 +329,13 @@ func TestServiceScaffoldUsesInternalScaffoldDetection(t *testing.T) {
 
 func TestServiceScaffoldRequiresRegisterBeforeSideEffects(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "api-city")
-	doInitCalled := false
-	svc := NewService(ServiceDeps{
-		DoInit: func(_ context.Context, req InitRequest) error {
-			doInitCalled = true
+	scaffoldCalled := false
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
+		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
+			scaffoldCalled = true
 			return os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755)
-		},
+		}},
 	})
 
 	_, err := svc.Scaffold(context.Background(), InitRequest{
@@ -271,8 +345,8 @@ func TestServiceScaffoldRequiresRegisterBeforeSideEffects(t *testing.T) {
 	if !errors.Is(err, ErrNotWired) {
 		t.Fatalf("Scaffold error = %v, want ErrNotWired", err)
 	}
-	if doInitCalled {
-		t.Fatal("DoInit was called before RegisterCity was wired")
+	if scaffoldCalled {
+		t.Fatal("Initializer.Scaffold was called before Registry was wired")
 	}
 	if _, statErr := os.Stat(cityPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("city path after unwired Scaffold = %v, want removed/not created", statErr)
@@ -283,17 +357,18 @@ func TestServiceScaffoldFailsBeforeRegisterWhenEventLogCannotBeCreated(t *testin
 	cityPath := filepath.Join(t.TempDir(), "api-city")
 	var registered bool
 	eventErr := errors.New("event log unavailable")
-	svc := NewService(ServiceDeps{
-		DoInit: func(_ context.Context, req InitRequest) error {
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
+		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
 				return err
 			}
 			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
-		},
-		RegisterCity: func(context.Context, string, string) error {
+		}},
+		Registry: &mockRegistry{registerFn: func(context.Context, string, string) error {
 			registered = true
 			return nil
-		},
+		}},
 		LifecycleEvents: &recordingLifecycleEvents{ensureErr: eventErr},
 	})
 
@@ -327,8 +402,9 @@ func TestServiceScaffoldRollbackUsesInternalManagedPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewService(ServiceDeps{
-		DoInit: func(_ context.Context, req InitRequest) error {
+	svc := mustNewService(t, ServiceDeps{
+		FS: testOSScaffoldFS{},
+		Initializer: &mockInitializer{scaffoldFn: func(_ context.Context, req InitRequest) error {
 			if err := os.WriteFile(generatedAgentPath, []byte("generated"), 0o644); err != nil {
 				return err
 			}
@@ -336,10 +412,11 @@ func TestServiceScaffoldRollbackUsesInternalManagedPaths(t *testing.T) {
 				return err
 			}
 			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
-		},
-		RegisterCity: func(context.Context, string, string) error {
+		}},
+		Registry: &mockRegistry{registerFn: func(context.Context, string, string) error {
 			return errors.New("registry unavailable")
-		},
+		}},
+		LifecycleEvents: &recordingLifecycleEvents{},
 	})
 
 	_, err := svc.Scaffold(context.Background(), InitRequest{

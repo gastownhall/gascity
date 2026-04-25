@@ -38,6 +38,20 @@ type SessionStreamRawMessageEvent struct {
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
+type sessionStreamActivityPayload struct {
+	Activity string `json:"activity"`
+}
+
+type syntheticContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type syntheticAssistantFrame struct {
+	Role    string                  `json:"role"`
+	Content []syntheticContentBlock `json:"content"`
+}
+
 var sessionStreamPendingStallTimeout = 5 * time.Second
 
 func runtimePendingInteraction(pending *worker.PendingInteraction) runtime.PendingInteraction {
@@ -182,7 +196,7 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 		return
 	}
 	writeSSE(w, "turn", 1, data)
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
+	actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: "idle"})
 	writeSSE(w, "activity", 2, actData)
 }
 
@@ -206,7 +220,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 		return
 	}
 	writeSSE(w, "message", 1, data)
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
+	actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: "idle"})
 	writeSSE(w, "activity", 2, actData)
 }
 
@@ -285,7 +299,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		if currentActivity != "" && currentActivity != lastActivity {
 			lastActivity = currentActivity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": currentActivity})
+			actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: currentActivity})
 			writeSSE(w, "activity", seq, actData)
 			lastProgress = time.Now()
 			emitted = true
@@ -306,7 +320,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 					activity = "in-turn"
 				}
 				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": activity})
+				actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: activity})
 				writeSSE(w, "activity", seq, actData)
 				return true
 			}
@@ -438,7 +452,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
+			actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: activity})
 			writeSSE(w, "activity", seq, actData)
 			emitted = true
 		}
@@ -532,11 +546,9 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			lastOutput = output
 			seq++
 			if output != "" {
-				fakeMsg, _ := json.Marshal(map[string]interface{}{
-					"role": "assistant",
-					"content": []map[string]string{
-						{"type": "text", "text": output},
-					},
+				fakeMsg, _ := json.Marshal(syntheticAssistantFrame{
+					Role:    "assistant",
+					Content: []syntheticContentBlock{{Type: "text", Text: output}},
 				})
 				data, err := json.Marshal(SessionStreamRawMessageEvent{
 					ID:       info.ID,
@@ -957,11 +969,9 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 		lastOutput = output
 
 		if output != "" {
-			fakeMsg, err := json.Marshal(map[string]any{
-				"role": "assistant",
-				"content": []map[string]string{
-					{"type": "text", "text": output},
-				},
+			fakeMsg, err := json.Marshal(syntheticAssistantFrame{
+				Role:    "assistant",
+				Content: []syntheticContentBlock{{Type: "text", Text: output}},
 			})
 			if err == nil {
 				seq++

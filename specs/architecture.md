@@ -20,8 +20,8 @@ Two architectural themes run through everything below:
 ## 1. The object model
 
 `internal/{beads, mail, convoy, formula, agent, events, session,
-sling, graphroute, agentutil, pathutil, ...}` is the canonical
-domain. All business logic lives there. The two surfaces below call
+sling, graphroute, agentutil, pathutil, cityinit, ...}` is the
+canonical domain. All business logic lives there. The two surfaces below call
 into it; neither re-implements validation, routing, or invariants.
 
 ```

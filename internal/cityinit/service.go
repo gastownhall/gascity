@@ -5,27 +5,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // ServiceDeps contains the side-effecting operations Service needs from
 // the binary layer while the scaffold/finalize body is still being split
 // out of cmd/gc.
 type ServiceDeps struct {
-	DoInit                          func(ctx context.Context, req InitRequest) error
-	Finalize                        func(ctx context.Context, req InitRequest) error
-	RegisterCity                    func(ctx context.Context, dir, nameOverride string) error
-	ReloadSupervisor                func()
-	ReloadSupervisorAfterUnregister func()
-	FindCity                        func(ctx context.Context, name string) (RegisteredCity, error)
-	UnregisterCity                  func(ctx context.Context, city RegisteredCity) error
-	LifecycleEvents                 LifecycleEvents
+	FS              ScaffoldFS
+	Initializer     Initializer
+	Registry        Registry
+	Reloader        SupervisorReloader
+	LifecycleEvents LifecycleEvents
 }
 
 // RegisteredCity is the minimal registry view Service needs for
@@ -50,9 +45,13 @@ type Service struct {
 	deps ServiceDeps
 }
 
-// NewService constructs the concrete city-init service.
-func NewService(deps ServiceDeps) *Service {
-	return &Service{deps: deps}
+// NewService constructs the concrete city-init service. Returns
+// ErrNotWired if the universally required FS dependency is nil.
+func NewService(deps ServiceDeps) (*Service, error) {
+	if deps.FS == nil {
+		return nil, fmt.Errorf("%w: FS is required", ErrNotWired)
+	}
+	return &Service{deps: deps}, nil
 }
 
 // ValidateInitRequest validates a city init request before side effects.
@@ -91,16 +90,16 @@ func (s *Service) Init(ctx context.Context, req InitRequest) (*InitResult, error
 	if err := s.validateInitDeps(); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(req.Dir, 0o755); err != nil {
+	if err := s.deps.FS.MkdirAll(req.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating directory %q: %w", req.Dir, err)
 	}
 	if s.hasScaffold(req.Dir) {
 		return nil, ErrAlreadyInitialized
 	}
-	if err := s.deps.DoInit(ctx, req); err != nil {
+	if err := s.deps.Initializer.Scaffold(ctx, req); err != nil {
 		return nil, err
 	}
-	if err := s.deps.Finalize(ctx, req); err != nil {
+	if err := s.deps.Initializer.Finalize(ctx, req); err != nil {
 		return nil, err
 	}
 	return &InitResult{
@@ -122,44 +121,44 @@ func (s *Service) Scaffold(ctx context.Context, req InitRequest) (*InitResult, e
 	}
 	dirExisted := false
 	var rollbackState *scaffoldRollbackState
-	if _, err := os.Stat(req.Dir); err == nil {
+	if _, err := s.deps.FS.Stat(req.Dir); err == nil {
 		dirExisted = true
 		var snapshotErr error
-		rollbackState, snapshotErr = newScaffoldRollbackState(req.Dir, s.managedPaths())
+		rollbackState, snapshotErr = newScaffoldRollbackState(s.deps.FS, req.Dir, s.managedPaths())
 		if snapshotErr != nil {
 			return nil, fmt.Errorf("snapshot rollback state for %q: %w", req.Dir, snapshotErr)
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("stat directory %q: %w", req.Dir, err)
 	}
-	if err := os.MkdirAll(req.Dir, 0o755); err != nil {
+	if err := s.deps.FS.MkdirAll(req.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating directory %q: %w", req.Dir, err)
 	}
 	if s.hasScaffold(req.Dir) {
 		return nil, ErrAlreadyInitialized
 	}
-	if err := s.deps.DoInit(ctx, req); err != nil {
-		return nil, rollbackScaffoldFailure(req.Dir, dirExisted, rollbackState, err)
+	if err := s.deps.Initializer.Scaffold(ctx, req); err != nil {
+		return nil, rollbackScaffoldFailure(s.deps.FS, req.Dir, dirExisted, rollbackState, err)
 	}
 
 	cityName := s.resolveCityName(req.NameOverride, "", req.Dir)
 	if err := s.lifecycleEvents().EnsureCityLog(req.Dir); err != nil {
-		return nil, rollbackScaffoldFailure(req.Dir, dirExisted, rollbackState, fmt.Errorf("creating city event log: %w", err))
+		return nil, rollbackScaffoldFailure(s.deps.FS, req.Dir, dirExisted, rollbackState, fmt.Errorf("creating city event log: %w", err))
 	}
 	if dirExisted && rollbackState != nil {
-		if err := rollbackState.markScaffoldState(); err != nil {
+		if err := rollbackState.markScaffoldState(s.deps.FS); err != nil {
 			return nil, fmt.Errorf("snapshot scaffold state for %q: %w", req.Dir, err)
 		}
 	}
 
-	if err := s.deps.RegisterCity(ctx, req.Dir, req.NameOverride); err != nil {
+	if err := s.deps.Registry.Register(ctx, req.Dir, req.NameOverride); err != nil {
 		if dirExisted {
 			if rollbackState != nil {
-				if cleanupErr := rollbackState.restore(); cleanupErr != nil {
+				if cleanupErr := rollbackState.restore(s.deps.FS); cleanupErr != nil {
 					return nil, errors.Join(fmt.Errorf("register with supervisor: %w", err), fmt.Errorf("restoring existing directory after failed registration: %w", cleanupErr))
 				}
 			}
-		} else if cleanupErr := os.RemoveAll(req.Dir); cleanupErr != nil {
+		} else if cleanupErr := s.deps.FS.RemoveAll(req.Dir); cleanupErr != nil {
 			return nil, errors.Join(fmt.Errorf("register with supervisor: %w", err), fmt.Errorf("cleaning scaffold after failed registration: %w", cleanupErr))
 		}
 		return nil, fmt.Errorf("register with supervisor: %w", err)
@@ -167,8 +166,8 @@ func (s *Service) Scaffold(ctx context.Context, req InitRequest) (*InitResult, e
 	if err := s.lifecycleEvents().CityCreated(req.Dir, cityName); err != nil {
 		return nil, fmt.Errorf("record city created event: %w", err)
 	}
-	if s.deps.ReloadSupervisor != nil {
-		s.deps.ReloadSupervisor()
+	if s.deps.Reloader != nil {
+		_ = s.deps.Reloader.Reload()
 	}
 
 	return &InitResult{
@@ -185,18 +184,18 @@ func (s *Service) Unregister(ctx context.Context, req UnregisterRequest) (*Unreg
 	if name == "" {
 		return nil, fmt.Errorf("%w: city_name is required", ErrNotRegistered)
 	}
-	if s.deps.FindCity == nil || s.deps.UnregisterCity == nil {
+	if s.deps.Registry == nil || s.deps.LifecycleEvents == nil {
 		return nil, ErrNotWired
 	}
-	city, err := s.deps.FindCity(ctx, name)
+	city, err := s.deps.Registry.Find(ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrNotRegistered) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("reading supervisor registry: %w", err)
 	}
-	if err := s.deps.UnregisterCity(ctx, city); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err := s.deps.Registry.Unregister(ctx, city); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %q: %w", ErrNotRegistered, name, err)
 		}
 		return nil, fmt.Errorf("removing %q from supervisor registry: %w", name, err)
@@ -204,10 +203,8 @@ func (s *Service) Unregister(ctx context.Context, req UnregisterRequest) (*Unreg
 	if err := s.lifecycleEvents().CityUnregisterRequested(city); err != nil {
 		return nil, fmt.Errorf("record city unregister requested event: %w", err)
 	}
-	if s.deps.ReloadSupervisorAfterUnregister != nil {
-		s.deps.ReloadSupervisorAfterUnregister()
-	} else if s.deps.ReloadSupervisor != nil {
-		s.deps.ReloadSupervisor()
+	if s.deps.Reloader != nil {
+		_ = s.deps.Reloader.ReloadAfterUnregister()
 	}
 	return &UnregisterResult{
 		CityName: city.Name,
@@ -223,20 +220,20 @@ func (s *Service) normalizeRequest(req InitRequest) InitRequest {
 }
 
 func (s *Service) hasScaffold(dir string) bool {
-	return CityHasScaffoldFS(fsys.OSFS{}, dir)
+	return CityHasScaffoldFS(s.deps.FS, dir)
 }
 
 func (s *Service) validateInitDeps() error {
-	if s.deps.DoInit == nil ||
-		s.deps.Finalize == nil {
+	if s.deps.Initializer == nil {
 		return ErrNotWired
 	}
 	return nil
 }
 
 func (s *Service) validateScaffoldDeps() error {
-	if s.deps.DoInit == nil ||
-		s.deps.RegisterCity == nil {
+	if s.deps.Initializer == nil ||
+		s.deps.Registry == nil ||
+		s.deps.LifecycleEvents == nil {
 		return ErrNotWired
 	}
 	return nil
@@ -251,24 +248,21 @@ func (s *Service) managedPaths() []string {
 }
 
 func (s *Service) lifecycleEvents() LifecycleEvents {
-	if s.deps.LifecycleEvents != nil {
-		return s.deps.LifecycleEvents
-	}
-	return noopLifecycleEvents{}
+	return s.deps.LifecycleEvents
 }
 
-func rollbackScaffoldFailure(dir string, dirExisted bool, rollbackState *scaffoldRollbackState, err error) error {
+func rollbackScaffoldFailure(sfs ScaffoldFS, dir string, dirExisted bool, rollbackState *scaffoldRollbackState, err error) error {
 	if dirExisted && rollbackState != nil {
-		if markErr := rollbackState.markScaffoldState(); markErr != nil {
+		if markErr := rollbackState.markScaffoldState(sfs); markErr != nil {
 			return errors.Join(err, fmt.Errorf("snapshot scaffold state for rollback: %w", markErr))
 		}
-		if cleanupErr := rollbackState.restore(); cleanupErr != nil {
+		if cleanupErr := rollbackState.restore(sfs); cleanupErr != nil {
 			return errors.Join(err, fmt.Errorf("restoring existing directory after scaffold failure: %w", cleanupErr))
 		}
 		return err
 	}
 	if !dirExisted {
-		if cleanupErr := os.RemoveAll(dir); cleanupErr != nil {
+		if cleanupErr := sfs.RemoveAll(dir); cleanupErr != nil {
 			return errors.Join(err, fmt.Errorf("cleaning scaffold after failure: %w", cleanupErr))
 		}
 	}
@@ -276,7 +270,7 @@ func rollbackScaffoldFailure(dir string, dirExisted bool, rollbackState *scaffol
 }
 
 type scaffoldRollbackEntry struct {
-	mode       os.FileMode
+	mode       fs.FileMode
 	data       []byte
 	linkTarget string
 }
@@ -294,8 +288,8 @@ type scaffoldRollbackState struct {
 	after  map[string]scaffoldRollbackEntry
 }
 
-func newScaffoldRollbackState(root string, paths []string) (*scaffoldRollbackState, error) {
-	snapshot, err := captureScaffoldSnapshot(root, paths)
+func newScaffoldRollbackState(sfs ScaffoldFS, root string, paths []string) (*scaffoldRollbackState, error) {
+	snapshot, err := captureScaffoldSnapshot(sfs, root, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -306,30 +300,30 @@ func newScaffoldRollbackState(root string, paths []string) (*scaffoldRollbackSta
 	}, nil
 }
 
-func captureScaffoldSnapshot(root string, paths []string) (*scaffoldSnapshot, error) {
+func captureScaffoldSnapshot(sfs ScaffoldFS, root string, paths []string) (*scaffoldSnapshot, error) {
 	snapshot := &scaffoldSnapshot{
 		root:    root,
 		paths:   append([]string(nil), paths...),
 		entries: make(map[string]scaffoldRollbackEntry),
 	}
 	for _, rel := range paths {
-		if err := snapshot.capture(rel); err != nil {
+		if err := snapshot.capture(sfs, rel); err != nil {
 			return nil, err
 		}
 	}
 	return snapshot, nil
 }
 
-func (s *scaffoldSnapshot) capture(rel string) error {
+func (s *scaffoldSnapshot) capture(sfs ScaffoldFS, rel string) error {
 	abs := filepath.Join(s.root, rel)
-	_, err := os.Lstat(abs)
-	if os.IsNotExist(err) {
+	_, err := sfs.Lstat(abs)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("snapshot %q: %w", abs, err)
 	}
-	return filepath.Walk(abs, func(path string, info os.FileInfo, walkErr error) error {
+	return sfs.Walk(abs, func(path string, info fs.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("snapshot %q: %w", path, walkErr)
 		}
@@ -338,14 +332,14 @@ func (s *scaffoldSnapshot) capture(rel string) error {
 			return fmt.Errorf("relative path for %q: %w", path, err)
 		}
 		entry := scaffoldRollbackEntry{mode: info.Mode()}
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(path)
+		if info.Mode()&fs.ModeSymlink != 0 {
+			target, err := sfs.Readlink(path)
 			if err != nil {
 				return fmt.Errorf("readlink %q: %w", path, err)
 			}
 			entry.linkTarget = target
 		} else if !info.IsDir() {
-			data, err := os.ReadFile(path)
+			data, err := sfs.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("read %q: %w", path, err)
 			}
@@ -356,8 +350,8 @@ func (s *scaffoldSnapshot) capture(rel string) error {
 	})
 }
 
-func (s *scaffoldRollbackState) markScaffoldState() error {
-	snapshot, err := captureScaffoldSnapshot(s.root, s.paths)
+func (s *scaffoldRollbackState) markScaffoldState(sfs ScaffoldFS) error {
+	snapshot, err := captureScaffoldSnapshot(sfs, s.root, s.paths)
 	if err != nil {
 		return err
 	}
@@ -369,28 +363,28 @@ func rollbackEntryEqual(a, b scaffoldRollbackEntry) bool {
 	return a.mode == b.mode && a.linkTarget == b.linkTarget && bytes.Equal(a.data, b.data)
 }
 
-func restoreRollbackEntry(abs string, entry scaffoldRollbackEntry) error {
+func restoreRollbackEntry(sfs ScaffoldFS, abs string, entry scaffoldRollbackEntry) error {
 	switch {
 	case entry.mode.IsDir():
-		return os.MkdirAll(abs, entry.mode.Perm())
-	case entry.mode&os.ModeSymlink != 0:
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return sfs.MkdirAll(abs, entry.mode.Perm())
+	case entry.mode&fs.ModeSymlink != 0:
+		if err := sfs.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return err
 		}
-		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+		if err := sfs.Remove(abs); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		return os.Symlink(entry.linkTarget, abs)
+		return sfs.Symlink(entry.linkTarget, abs)
 	default:
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		if err := sfs.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return err
 		}
-		return os.WriteFile(abs, entry.data, entry.mode.Perm())
+		return sfs.WriteFile(abs, entry.data, entry.mode.Perm())
 	}
 }
 
-func (s *scaffoldRollbackState) restore() error {
-	current, err := captureScaffoldSnapshot(s.root, s.paths)
+func (s *scaffoldRollbackState) restore(sfs ScaffoldFS) error {
+	current, err := captureScaffoldSnapshot(sfs, s.root, s.paths)
 	if err != nil {
 		return err
 	}
@@ -407,7 +401,7 @@ func (s *scaffoldRollbackState) restore() error {
 				continue
 			}
 			if existsNow && rollbackEntryEqual(currentEntry, after) {
-				if err := os.Remove(filepath.Join(s.root, rel)); err != nil && !os.IsNotExist(err) {
+				if err := sfs.Remove(filepath.Join(s.root, rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 					errs = append(errs, fmt.Errorf("remove %q: %w", filepath.Join(s.root, rel), err))
 				}
 			}
@@ -418,7 +412,7 @@ func (s *scaffoldRollbackState) restore() error {
 				continue
 			}
 			if existsNow && rollbackEntryEqual(currentEntry, after) {
-				if err := restoreRollbackEntry(filepath.Join(s.root, rel), before); err != nil {
+				if err := restoreRollbackEntry(sfs, filepath.Join(s.root, rel), before); err != nil {
 					errs = append(errs, fmt.Errorf("restore %q: %w", filepath.Join(s.root, rel), err))
 				}
 			}
@@ -435,7 +429,7 @@ func (s *scaffoldRollbackState) restore() error {
 		if _, existsNow := current.entries[rel]; existsNow {
 			continue
 		}
-		if err := restoreRollbackEntry(filepath.Join(s.root, rel), before); err != nil {
+		if err := restoreRollbackEntry(sfs, filepath.Join(s.root, rel), before); err != nil {
 			errs = append(errs, fmt.Errorf("restore %q: %w", filepath.Join(s.root, rel), err))
 		}
 	}
@@ -444,7 +438,7 @@ func (s *scaffoldRollbackState) restore() error {
 		return len(createdDirs[i]) > len(createdDirs[j])
 	})
 	for _, rel := range createdDirs {
-		if err := os.Remove(filepath.Join(s.root, rel)); err != nil && !os.IsNotExist(err) {
+		if err := sfs.Remove(filepath.Join(s.root, rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			if errors.Is(err, syscall.ENOTEMPTY) {
 				continue
 			}
@@ -457,11 +451,3 @@ func (s *scaffoldRollbackState) restore() error {
 	}
 	return nil
 }
-
-type noopLifecycleEvents struct{}
-
-func (noopLifecycleEvents) EnsureCityLog(string) error { return nil }
-
-func (noopLifecycleEvents) CityCreated(string, string) error { return nil }
-
-func (noopLifecycleEvents) CityUnregisterRequested(RegisteredCity) error { return nil }

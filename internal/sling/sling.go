@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -113,7 +111,7 @@ type SlingDeps struct {
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	Stderr               io.Writer
+	Tracer               func(format string, args ...any)
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution
@@ -289,18 +287,21 @@ type ScaleInfo struct {
 // extra env vars and returns combined output.
 type SlingRunner func(dir, command string, env map[string]string) (string, error)
 
-// SlingTracef writes to the sling trace log if GC_SLING_TRACE is set.
+// SlingTracef calls the package-level trace function if set. Wire via
+// SetTracer at process startup; the domain package never opens files or
+// reads environment variables directly.
 func SlingTracef(format string, args ...any) {
-	path := strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
-	if path == "" {
-		return
+	if globalTracer != nil {
+		globalTracer(format, args...)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()                                                                                    //nolint:errcheck // best-effort trace log
-	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
+}
+
+var globalTracer func(format string, args ...any)
+
+// SetTracer installs the package-level trace function. Call once at
+// process startup from the CLI edge.
+func SetTracer(fn func(format string, args ...any)) {
+	globalTracer = fn
 }
 
 // FindRigByPrefix finds a rig whose effective prefix matches (case-insensitive).
@@ -367,22 +368,22 @@ func BuildSlingCommand(template, beadID string) string {
 
 // BuildSlingCommandForAgent expands any PathContext placeholders in a custom
 // sling_query, then replaces {} with the bead ID. Malformed templates fall back
-// to the raw sling_query so routing behavior remains non-fatal.
-func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig, stderr io.Writer) string {
+// to the raw sling_query so routing behavior remains non-fatal. The returned
+// warning is non-empty when template expansion failed and the raw template was
+// used as fallback.
+func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig) (command, warning string) {
 	if strings.Contains(template, "{{") {
 		expanded, err := workdirutil.ExpandCommandTemplate(template, cityPath, cityName, a, rigs)
 		if err != nil {
-			if stderr != nil {
-				if fieldName == "" {
-					fieldName = "sling_query"
-				}
-				fmt.Fprintf(stderr, "BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)\n", a.QualifiedName(), fieldName, err) //nolint:errcheck
+			if fieldName == "" {
+				fieldName = "sling_query"
 			}
+			warning = fmt.Sprintf("BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)", a.QualifiedName(), fieldName, err)
 		} else {
 			template = expanded
 		}
 	}
-	return BuildSlingCommand(template, beadID)
+	return BuildSlingCommand(template, beadID), warning
 }
 
 // FormatBeadLabel formats a bead ID with optional title for display.

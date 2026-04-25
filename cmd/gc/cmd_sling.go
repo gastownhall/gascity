@@ -26,6 +26,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func init() {
+	sling.SetTracer(func(format string, args ...any) {
+		path := strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
+		if path == "" {
+			return
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()                                                                                    //nolint:errcheck
+		fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
+	})
+}
+
 // slingStdin returns the reader for --stdin input. Extracted for testability.
 var slingStdin = func() io.Reader { return os.Stdin }
 
@@ -330,7 +345,6 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			}
 			return out, nil
 		},
-		Stderr: stderr,
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
@@ -492,7 +506,7 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
-			slingCmd := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs, r.deps.Stderr)
+			slingCmd, _ := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs)
 			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
 			return err
 		}
@@ -1480,7 +1494,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  This creates a wisp and returns its root bead ID.")
 		w("")
 
-		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), "<wisp-root>", deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
+		routeCmd, _ := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), "<wisp-root>", deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
@@ -1558,7 +1572,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("")
 		}
 
-		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), previewBeadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
+		routeCmd, _ := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), previewBeadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {
@@ -1650,7 +1664,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	// Route commands.
 	w("Route commands (not executed):")
 	for _, c := range open {
-		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), c.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, io.Discard)
+		routeCmd, _ := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), c.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 		w("  " + routeCmd)
 	}
 	w("")
