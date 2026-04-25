@@ -202,9 +202,12 @@ func loadExpanded(t *testing.T) *config.City {
 
 func TestCityTomlParses(t *testing.T) {
 	dir := exampleDir()
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	// city.toml is the deployment shell; [imports.gastown] now lives in
+	// pack.toml (definition). LoadWithIncludes expands pack.toml into the
+	// effective config, so the import shows up there.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadWithIncludes: %v", err)
 	}
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
