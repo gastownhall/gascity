@@ -262,6 +262,24 @@ func TestConfigRefsCheck_UndefinedProvider(t *testing.T) {
 	}
 }
 
+func TestConfigRefsCheck_BuiltinProviderNotFlagged(t *testing.T) {
+	// Builtin providers (e.g. "claude") should not be flagged as undefined
+	// even when custom providers are declared in [providers].
+	dir := t.TempDir()
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{"ollama-local": {}},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "claude"},
+			{Name: "coder", Provider: "codex"},
+		},
+	}
+	c := NewConfigRefsCheck(cfg, dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (builtin providers are implicitly valid); details = %v", r.Status, r.Details)
+	}
+}
+
 func TestConfigRefsCheck_NoProvidersDefined(t *testing.T) {
 	// When no providers section exists, agent provider refs are not checked.
 	dir := t.TempDir()

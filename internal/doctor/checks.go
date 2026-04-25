@@ -190,7 +190,9 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 			}
 		}
 		if a.Provider != "" && len(c.cfg.Providers) > 0 {
-			if _, ok := c.cfg.Providers[a.Provider]; !ok {
+			_, declared := c.cfg.Providers[a.Provider]
+			_, builtin := config.BuiltinProviders()[a.Provider]
+			if !declared && !builtin {
 				issues = append(issues, fmt.Sprintf("agent %q: provider %q not defined in [providers]", qn, a.Provider))
 			}
 		}
