@@ -88,6 +88,62 @@ func clearProcessLiveEnvForTests() {
 	}
 }
 
+func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
+	cleared := []string{
+		"BEADS_ACTOR",
+		"BEADS_DIR",
+		"DOLT_CONFIG_PATH",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_CITY_PATH",
+		"GC_DOLT_HOST",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_SESSION_NAME",
+	}
+	preserved := []string{
+		"GC_FAST_UNIT",
+		"GC_TEST_KEEP",
+	}
+
+	for _, key := range append(cleared, preserved...) {
+		t.Setenv(key, "from-parent-session")
+	}
+
+	clearProcessLiveEnvForTests()
+
+	for _, key := range cleared {
+		if value, ok := os.LookupEnv(key); ok {
+			t.Errorf("%s survived scrub with value %q", key, value)
+		}
+	}
+	for _, key := range preserved {
+		if value := os.Getenv(key); value != "from-parent-session" {
+			t.Errorf("%s = %q, want preserved test-control value", key, value)
+		}
+	}
+}
+
+func TestIsTestscriptCommandInvocation(t *testing.T) {
+	tests := []struct {
+		name string
+		arg0 string
+		want bool
+	}{
+		{name: "gc helper", arg0: "/tmp/testscript-main/bin/gc", want: true},
+		{name: "bd helper", arg0: "/tmp/testscript-main/bin/bd", want: true},
+		{name: "windows gc helper", arg0: `C:\Temp\testscript-main\bin\gc.exe`, want: true},
+		{name: "top level test binary", arg0: "/tmp/go-build/cmd/gc.test", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isTestscriptCommandInvocation(tt.arg0); got != tt.want {
+				t.Fatalf("isTestscriptCommandInvocation(%q) = %v, want %v", tt.arg0, got, tt.want)
+			}
+		})
+	}
+}
+
 func liveEnvKeysForTests() []string {
 	keys := make(map[string]struct{})
 	for _, group := range [][]string{gcEnvVars, inheritedCityRoutingEnvVars, liveTestEnvVars} {
