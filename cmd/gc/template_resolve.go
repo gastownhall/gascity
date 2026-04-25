@@ -372,8 +372,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 
-	// Step 10: Merge environment layers.
-	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	// Step 10: Merge environment layers. Workspace.Env sits between
+	// passthrough and provider so a per-provider/agent/patch entry can
+	// still override a workspace-wide default.
+	var workspaceEnv map[string]string
+	if p.workspace != nil {
+		workspaceEnv = p.workspace.Env
+	}
+	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 

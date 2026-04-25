@@ -2290,6 +2290,13 @@
           },
           "type": "array",
           "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use root pack.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env defines workspace-wide environment variables applied to every\nmanaged session. Lowest config-precedence — overridden by provider,\nagent, and patch env. Use for cross-cutting variables like\nGC_TARGET_BRANCH that every agent should inherit."
         }
       },
       "additionalProperties": false,

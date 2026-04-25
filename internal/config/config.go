@@ -1093,6 +1093,11 @@ type Workspace struct {
 	// Run gc doctor to inspect; gc doctor --fix handles the safe mechanical
 	// rewrites available in this release wave.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
+	// Env defines workspace-wide environment variables applied to every
+	// managed session. Lowest config-precedence — overridden by provider,
+	// agent, and patch env. Use for cross-cutting variables like
+	// GC_TARGET_BRANCH that every agent should inherit.
+	Env map[string]string `toml:"env,omitempty"`
 }
 
 // LegacyIncludes returns the compatibility-only city.toml include list.
