@@ -231,12 +231,13 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		t.Fatalf("restored child parent = %q, want %q", restoredChild.ParentID, rootBead.ID)
 	}
 
-	deps := liveContractJSON[struct {
-		Children []beads.Bead `json:"children"`
-	}](t, baseURL, validator, http.MethodGet, cityBase+"/bead/"+url.PathEscape(rootBead.ID)+"/deps", nil, http.StatusOK)
-	if !beadListContains(deps.Children, childBead.ID) {
-		t.Fatalf("deps children = %#v, want child %s", deps.Children, childBead.ID)
-	}
+	// Poll the deps endpoint briefly: the parent restoration above
+	// completes its SQL update before the child's parent-child
+	// dependency row is staged via Dolt — separate transactions inside
+	// the bd update CLI. Under CI runner load, `bd list --parent` can
+	// race the second transaction and miss the child. Tolerate a small
+	// window so this test isn't flaky against shared-runner timing.
+	waitForLiveContractDepsHasChild(t, baseURL, validator, cityBase, rootBead.ID, childBead.ID, 5*time.Second)
 	graph := liveContractJSON[struct {
 		Beads []beads.Bead       `json:"beads"`
 		Deps  []contractGraphDep `json:"deps"`
@@ -519,6 +520,30 @@ func waitForCityAbsent(t *testing.T, baseURL string, v openapivalidator.Validato
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for city %q to disappear from /v0/cities", cityName)
+}
+
+// waitForLiveContractDepsHasChild polls GET /bead/{parentID}/deps until the
+// response includes childID in its Children list, or the timeout expires.
+// Used after a `bd update --parent` reparent flow, where the issue update
+// and the parent-child dependency edge land in separate Dolt transactions
+// inside the bd CLI: the parent field on the child is visible immediately,
+// but the deps subquery used by `bd list --parent` may briefly race the
+// dependency-row write under CI runner load.
+func waitForLiveContractDepsHasChild(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, parentID, childID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []beads.Bead
+	for time.Now().Before(deadline) {
+		deps := liveContractJSON[struct {
+			Children []beads.Bead `json:"children"`
+		}](t, baseURL, v, http.MethodGet, cityBase+"/bead/"+url.PathEscape(parentID)+"/deps", nil, http.StatusOK)
+		last = deps.Children
+		if beadListContains(deps.Children, childID) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for child %s in deps of %s; last response = %#v", timeout, childID, parentID, last)
 }
 
 func waitForLiveContractRig(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName, rigDir string, timeout time.Duration) {
