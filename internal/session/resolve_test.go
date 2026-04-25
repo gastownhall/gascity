@@ -2,11 +2,22 @@ package session_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type listCountingStore struct {
+	beads.Store
+	listCalls []beads.ListQuery
+}
+
+func (s *listCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls = append(s.listCalls, q)
+	return s.Store.List(q)
+}
 
 func TestResolveSessionID_DirectLookup(t *testing.T) {
 	store := beads.NewMemStore()
@@ -651,6 +662,37 @@ func TestRepairEmptyType_NoopForNonEmpty(t *testing.T) {
 	session.RepairEmptyType(store, &b)
 	if b.Type != session.BeadType {
 		t.Errorf("type = %q, want %q", b.Type, session.BeadType)
+	}
+}
+
+func TestResolveSessionID_BoundedListCalls(t *testing.T) {
+	inner := beads.NewMemStore()
+	for i := 0; i < 200; i++ {
+		_, _ = inner.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name": fmt.Sprintf("worker-%d", i),
+			},
+		})
+	}
+	target, _ := inner.Create(beads.Bead{
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"alias": "mayor"},
+	})
+	store := &listCountingStore{Store: inner}
+	id, err := session.ResolveSessionID(store, "mayor")
+	if err != nil || id != target.ID {
+		t.Fatalf("resolve failed: id=%q err=%v", id, err)
+	}
+	if len(store.listCalls) == 0 {
+		t.Fatalf("expected at least one List call")
+	}
+	for i, q := range store.listCalls {
+		if len(q.Metadata) == 0 {
+			t.Fatalf("List call #%d has no metadata filter (would scan all beads): %+v", i, q)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,80 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type listQueryCaptureStore struct {
+	beads.Store
+	listCalls []beads.ListQuery
+}
+
+func (s *listQueryCaptureStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls = append(s.listCalls, q)
+	return s.Store.List(q)
+}
+
+func TestResolveConfiguredNamedSessionID_BoundedListCalls(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok := findNamedSessionSpec(cfg, cityName, "mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(mayor) = false")
+	}
+
+	inner := beads.NewMemStore()
+	for i := 0; i < 200; i++ {
+		_, _ = inner.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name": fmt.Sprintf("worker-%d", i),
+			},
+		})
+	}
+	target, err := inner.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               spec.SessionName,
+			"alias":                      "mayor",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     spec.Mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+
+	store := &listQueryCaptureStore{Store: inner}
+	id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, "mayor", namedSessionResolveOptions{})
+	if err != nil {
+		t.Fatalf("resolveConfiguredNamedSessionID: %v", err)
+	}
+	if !matched {
+		t.Fatalf("matched = false, want true")
+	}
+	if id != target.ID {
+		t.Fatalf("got %q, want canonical %q", id, target.ID)
+	}
+	if len(store.listCalls) == 0 {
+		t.Fatalf("expected at least one List call")
+	}
+	for i, q := range store.listCalls {
+		if len(q.Metadata) == 0 {
+			t.Fatalf("List call #%d has no metadata filter (would scan all beads): %+v", i, q)
+		}
+	}
+}
 
 func TestResolveSessionID_BeadID(t *testing.T) {
 	store := beads.NewMemStore()

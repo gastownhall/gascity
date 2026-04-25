@@ -57,11 +57,14 @@ func resolveConfiguredNamedSessionID(
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	candidates, err := session.NamedSessionResolutionCandidates(store, spec)
+	canonicalCandidates, err := store.List(beads.ListQuery{
+		Label:    session.LabelSession,
+		Metadata: map[string]string{namedSessionIdentityMetadata: spec.Identity},
+	})
 	if err != nil {
-		return "", true, err
+		return "", true, fmt.Errorf("listing canonical named session candidates: %w", err)
 	}
-	if bead, ok := session.FindCanonicalNamedSessionBead(candidates, spec); ok {
+	if bead, ok := session.FindCanonicalNamedSessionBead(canonicalCandidates, spec); ok {
 		return bead.ID, true, nil
 	}
 	// When materializing, check for a closed bead with this identity and
@@ -73,7 +76,22 @@ func resolveConfiguredNamedSessionID(
 			return bead.ID, true, nil
 		}
 	}
-	if bead, conflict := session.FindNamedSessionConflict(candidates, spec); conflict {
+	sessionNameConflicts, err := store.List(beads.ListQuery{
+		Label:    session.LabelSession,
+		Metadata: map[string]string{"session_name": spec.SessionName},
+	})
+	if err != nil {
+		return "", true, fmt.Errorf("listing session_name conflicts: %w", err)
+	}
+	aliasConflicts, err := store.List(beads.ListQuery{
+		Label:    session.LabelSession,
+		Metadata: map[string]string{"alias": spec.Identity},
+	})
+	if err != nil {
+		return "", true, fmt.Errorf("listing alias conflicts: %w", err)
+	}
+	conflictCandidates := append(append([]beads.Bead{}, sessionNameConflicts...), aliasConflicts...)
+	if bead, conflict := session.FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, bead.ID)
 	}
 	if !opts.materialize {
