@@ -2,12 +2,12 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Summary
 
 Dispatch is Gas City's work routing mechanism -- a Layer 2-4 derived
-mechanism that composes primitives (Agent Protocol, Bead Store, Event Bus,
+mechanism that composes primitives (Session, Bead Store, Event Bus,
 Config) to route work to agents. The `gc sling` command resolves a target
 agent or pool, optionally instantiates a formula as a wisp, executes the
 agent's sling query to route each bead, optionally wraps single beads in

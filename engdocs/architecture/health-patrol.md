@@ -3,7 +3,7 @@ title: "Health Patrol"
 ---
 
 
-> Last verified against code: 2026-03-18
+> Last verified against code: 2026-04-25
 
 ## Summary
 
@@ -141,7 +141,7 @@ Additional sub-states within "running" are checked in order:
 1. **Restart requested**: Agent self-requested restart (context
    exhaustion). Stop + start.
 2. **Idle timeout exceeded**: `idleTracker.checkIdle()` returns true.
-   Stop + start, emit `agent.idle_killed` event.
+   Stop + start, emit `session.idle_killed` event.
 3. **Config drift**: Stored hash differs from current. Stop + start.
 
 Agents not running are subject to **crash loop quarantine**: if
@@ -152,7 +152,7 @@ hit).
 **Orphan cleanup** (Phase 2) handles sessions with the city prefix that
 are not in the desired set:
 - Pool excess members are drained gracefully via `drainOps`.
-- Suspended agents are stopped with an `agent.suspended` event.
+- Suspended agents are stopped with a `session.suspended` event.
 - True orphans are killed immediately.
 
 **Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
@@ -251,7 +251,7 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 | Erlang/OTP concept       | Gas City equivalent                       |
 |--------------------------|-------------------------------------------|
 | Supervisor               | Controller (`controllerLoop`)             |
-| Worker                   | Agent (any role)                          |
+| Worker                   | Session running an `[[agent]]` role       |
 | Child spec               | `[[agent]]` entry in `city.toml`         |
 | one_for_one restart      | Restart dead agent only (no cascade)      |
 | max_restarts/max_seconds | `max_restarts` / `restart_window`         |
@@ -267,10 +267,10 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event trigger queries. |
+| `internal/events` | `Recorder` interface for emitting lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.quarantined`, `session.idle_killed`, `session.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event trigger queries. Event names were renamed from the `agent.*` prefix by commit `be8debd8`. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
 | `internal/orders` | `Scan()` to discover orders from formula layers. `CheckTrigger()` to evaluate trigger conditions. `Order` struct for dispatch metadata. |
-| `internal/agent` | `Agent` interface wrapping config + session provider for `Start()`/`Stop()`/`IsRunning()`/`SessionName()` operations. |
+| `internal/agent` | `SessionNameFor()` for session name computation and `StartupHints` for runtime config assembly (`internal/agent/` is now a small helper package; the former `Agent` / `Handle` interfaces were removed by `dd90ac0a`). |
 | `github.com/fsnotify/fsnotify` | File system watcher for config directory change detection. |
 
 | Depended on by | How |

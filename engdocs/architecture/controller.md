@@ -3,7 +3,7 @@ title: "Controller"
 ---
 
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Summary
 
@@ -53,7 +53,7 @@ automations, and garbage-collects expired wisps.
 
 The controller is implemented entirely in `cmd/gc/` as a set of
 collaborating functions and interfaces -- not as a standalone package.
-It composes primitives (Agent Protocol, Config, Event Bus, Beads, Prompts)
+It composes primitives (Session, Config, Event Bus, Beads, Prompts)
 into the runtime orchestration loop.
 
 ### Data Flow
