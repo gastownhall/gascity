@@ -106,6 +106,8 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processRetryEval(store, bead, opts)
 	case "fanout":
 		return processFanout(store, bead, opts)
+	case "tally":
+		return processTallyControl(store, bead, opts)
 	case "scope-check":
 		return processScopeCheck(store, bead, opts)
 	case "workflow-finalize":
