@@ -165,6 +165,9 @@ func computePoolDesiredStates(
 		// Count sessions in "creating" state per template. These are
 		// already being spawned but haven't reached "active" yet, so
 		// they must count toward pool size to prevent unbounded spawning.
+		// Creating sessions are materialized via the session-bead discovery
+		// overlay (Phase 2), not via pool requests, so they reduce the
+		// deficit without needing their own request entries here.
 		creatingCount := make(map[string]int)
 		for _, sb := range sessionBeads {
 			if sb.Status == "closed" {

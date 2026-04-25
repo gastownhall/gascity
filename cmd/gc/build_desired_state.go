@@ -693,7 +693,11 @@ func discoverSessionBeadsWithRoots(
 			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating {
 				continue
 			}
-			if !manualSession && !desiredHasTemplate(desired, template) {
+			// Creating sessions are exempt: the pool deficit accounts for
+			// them (so no new sessions are spawned), but they must still
+			// be discovered here so they appear in desired state with
+			// correct bead-derived identity.
+			if !manualSession && !creating && !desiredHasTemplate(desired, template) {
 				continue
 			}
 		}
