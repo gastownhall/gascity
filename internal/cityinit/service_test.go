@@ -1,0 +1,338 @@
+package cityinit
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+)
+
+func TestServiceValidateInitRequest(t *testing.T) {
+	absDir := filepath.Join(t.TempDir(), "city")
+	svc := NewService(ServiceDeps{})
+
+	tests := []struct {
+		name    string
+		req     InitRequest
+		wantErr error
+	}{
+		{
+			name:    "missing dir",
+			req:     InitRequest{Provider: "codex"},
+			wantErr: ErrInvalidDirectory,
+		},
+		{
+			name:    "relative dir",
+			req:     InitRequest{Dir: "relative", Provider: "codex"},
+			wantErr: ErrInvalidDirectory,
+		},
+		{
+			name:    "provider or start command required",
+			req:     InitRequest{Dir: absDir},
+			wantErr: ErrInvalidProvider,
+		},
+		{
+			name:    "provider and start command conflict",
+			req:     InitRequest{Dir: absDir, Provider: "codex", StartCommand: "custom-agent"},
+			wantErr: ErrInvalidProvider,
+		},
+		{
+			name:    "unknown provider",
+			req:     InitRequest{Dir: absDir, Provider: "not-a-provider"},
+			wantErr: ErrInvalidProvider,
+		},
+		{
+			name:    "unknown bootstrap",
+			req:     InitRequest{Dir: absDir, Provider: "codex", BootstrapProfile: "moon-base"},
+			wantErr: ErrInvalidBootstrapProfile,
+		},
+		{
+			name: "valid provider",
+			req:  InitRequest{Dir: absDir, Provider: "codex"},
+		},
+		{
+			name: "valid custom command",
+			req:  InitRequest{Dir: absDir, StartCommand: "custom-agent"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := svc.ValidateInitRequest(tt.req)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateInitRequest error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestServiceValidateInitRequestUsesInternalProviderValidation(t *testing.T) {
+	absDir := filepath.Join(t.TempDir(), "city")
+	svc := NewService(ServiceDeps{})
+
+	if err := svc.ValidateInitRequest(InitRequest{
+		Dir:              absDir,
+		Provider:         "codex",
+		BootstrapProfile: "kubernetes",
+	}); err != nil {
+		t.Fatalf("ValidateInitRequest valid provider/profile error = %v, want nil", err)
+	}
+
+	err := svc.ValidateInitRequest(InitRequest{Dir: absDir, Provider: "not-a-provider"})
+	if !errors.Is(err, ErrInvalidProvider) {
+		t.Fatalf("ValidateInitRequest unknown provider error = %v, want ErrInvalidProvider", err)
+	}
+
+	err = svc.ValidateInitRequest(InitRequest{Dir: absDir, Provider: "codex", BootstrapProfile: "moon-base"})
+	if !errors.Is(err, ErrInvalidBootstrapProfile) {
+		t.Fatalf("ValidateInitRequest unknown bootstrap error = %v, want ErrInvalidBootstrapProfile", err)
+	}
+}
+
+func TestServiceInitScaffoldsAndFinalizes(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "init-city")
+	var calls []string
+	svc := NewService(ServiceDeps{
+		DoInit: func(_ context.Context, req InitRequest) error {
+			calls = append(calls, "do-init:"+req.Dir+":"+req.Provider)
+			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"init-city\"\n"), 0o644)
+		},
+		Finalize: func(_ context.Context, req InitRequest) error {
+			calls = append(calls, "finalize:"+req.Dir)
+			return nil
+		},
+	})
+
+	result, err := svc.Init(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if result.CityName != "init-city" || result.CityPath != cityPath || result.ProviderUsed != "codex" {
+		t.Fatalf("Init result = %+v", result)
+	}
+	wantCalls := []string{"do-init:" + cityPath + ":codex", "finalize:" + cityPath}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", calls, wantCalls)
+	}
+}
+
+func TestServiceInitRequiresFinalizeBeforeSideEffects(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "init-city")
+	doInitCalled := false
+	svc := NewService(ServiceDeps{
+		DoInit: func(_ context.Context, req InitRequest) error {
+			doInitCalled = true
+			return os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755)
+		},
+	})
+
+	_, err := svc.Init(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if !errors.Is(err, ErrNotWired) {
+		t.Fatalf("Init error = %v, want ErrNotWired", err)
+	}
+	if doInitCalled {
+		t.Fatal("DoInit was called before required dependencies were wired")
+	}
+	if _, statErr := os.Stat(cityPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("city path after unwired Init = %v, want removed/not created", statErr)
+	}
+}
+
+func TestServiceScaffoldRegistersAndEmitsCreated(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+	var registered bool
+	var reloaded bool
+	svc := NewService(ServiceDeps{
+		DoInit: func(_ context.Context, req InitRequest) error {
+			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
+		},
+		RegisterCity: func(_ context.Context, dir, nameOverride string) error {
+			if dir != cityPath || nameOverride != "" {
+				t.Fatalf("RegisterCity(%q, %q), want (%q, \"\")", dir, nameOverride, cityPath)
+			}
+			registered = true
+			return nil
+		},
+		ReloadSupervisor: func() { reloaded = true },
+	})
+
+	result, err := svc.Scaffold(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if err != nil {
+		t.Fatalf("Scaffold: %v", err)
+	}
+	if result.CityName != "api-city" || result.CityPath != cityPath || result.ProviderUsed != "codex" {
+		t.Fatalf("Scaffold result = %+v", result)
+	}
+	if !registered {
+		t.Fatal("RegisterCity was not called")
+	}
+	if !reloaded {
+		t.Fatal("ReloadSupervisor was not called")
+	}
+
+	evts, err := events.ReadFiltered(filepath.Join(cityPath, ".gc", "events.jsonl"), events.Filter{Type: events.CityCreated})
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("city.created events = %d, want 1", len(evts))
+	}
+	var payload struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(evts[0].Payload, &payload); err != nil {
+		t.Fatalf("decode city.created payload: %v", err)
+	}
+	if payload.Name != "api-city" || payload.Path != cityPath {
+		t.Fatalf("city.created payload = %+v", payload)
+	}
+}
+
+func TestServiceScaffoldUsesInternalScaffoldDetection(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+	if err := EnsureCityScaffoldFS(fsys.OSFS{}, cityPath); err != nil {
+		t.Fatalf("EnsureCityScaffoldFS: %v", err)
+	}
+	svc := NewService(ServiceDeps{
+		DoInit: func(context.Context, InitRequest) error {
+			t.Fatal("DoInit should not run for an already scaffolded city")
+			return nil
+		},
+		RegisterCity: func(context.Context, string, string) error {
+			t.Fatal("RegisterCity should not run for an already scaffolded city")
+			return nil
+		},
+	})
+
+	_, err := svc.Scaffold(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if !errors.Is(err, ErrAlreadyInitialized) {
+		t.Fatalf("Scaffold error = %v, want ErrAlreadyInitialized", err)
+	}
+}
+
+func TestServiceScaffoldRequiresRegisterBeforeSideEffects(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+	doInitCalled := false
+	svc := NewService(ServiceDeps{
+		DoInit: func(_ context.Context, req InitRequest) error {
+			doInitCalled = true
+			return os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755)
+		},
+	})
+
+	_, err := svc.Scaffold(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if !errors.Is(err, ErrNotWired) {
+		t.Fatalf("Scaffold error = %v, want ErrNotWired", err)
+	}
+	if doInitCalled {
+		t.Fatal("DoInit was called before RegisterCity was wired")
+	}
+	if _, statErr := os.Stat(cityPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("city path after unwired Scaffold = %v, want removed/not created", statErr)
+	}
+}
+
+func TestServiceScaffoldFailsBeforeRegisterWhenEventLogCannotBeCreated(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+	var registered bool
+	svc := NewService(ServiceDeps{
+		DoInit: func(_ context.Context, req InitRequest) error {
+			return os.WriteFile(filepath.Join(req.Dir, citylayout.RuntimeRoot), []byte("not a directory"), 0o644)
+		},
+		RegisterCity: func(context.Context, string, string) error {
+			registered = true
+			return nil
+		},
+	})
+
+	_, err := svc.Scaffold(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if err == nil {
+		t.Fatal("Scaffold error = nil, want event log creation error")
+	}
+	if registered {
+		t.Fatal("RegisterCity was called after event log creation failed")
+	}
+	if _, statErr := os.Stat(cityPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("city path after failed scaffold = %v, want removed", statErr)
+	}
+}
+
+func TestServiceScaffoldRollbackUsesInternalManagedPaths(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "api-city")
+	keepPath := filepath.Join(cityPath, "keep.txt")
+	customAgentPath := filepath.Join(cityPath, "agents", "custom.txt")
+	generatedAgentPath := filepath.Join(cityPath, "agents", "generated.txt")
+	if err := os.MkdirAll(filepath.Dir(customAgentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keepPath, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(customAgentPath, []byte("custom"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewService(ServiceDeps{
+		DoInit: func(_ context.Context, req InitRequest) error {
+			if err := os.WriteFile(generatedAgentPath, []byte("generated"), 0o644); err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Join(req.Dir, citylayout.RuntimeRoot), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(req.Dir, citylayout.CityConfigFile), []byte("[workspace]\nname = \"api-city\"\n"), 0o644)
+		},
+		RegisterCity: func(context.Context, string, string) error {
+			return errors.New("registry unavailable")
+		},
+	})
+
+	_, err := svc.Scaffold(context.Background(), InitRequest{
+		Dir:      cityPath,
+		Provider: "codex",
+	})
+	if err == nil {
+		t.Fatal("Scaffold error = nil, want registration failure")
+	}
+	if _, statErr := os.Stat(generatedAgentPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("generated managed file stat = %v, want removed", statErr)
+	}
+	if data, readErr := os.ReadFile(customAgentPath); readErr != nil || string(data) != "custom" {
+		t.Fatalf("custom agent file = %q/%v, want preserved", string(data), readErr)
+	}
+	if data, readErr := os.ReadFile(keepPath); readErr != nil || string(data) != "keep" {
+		t.Fatalf("keep file = %q/%v, want preserved", string(data), readErr)
+	}
+}

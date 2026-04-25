@@ -1490,6 +1490,8 @@ set -eu
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_DOLT_PORT", "9999")
 
 	var stdout, stderr bytes.Buffer

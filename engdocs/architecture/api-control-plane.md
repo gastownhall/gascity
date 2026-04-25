@@ -32,8 +32,8 @@ invariants.
 
 City initialization is a worked example: the HTTP handler for
 `POST /v0/city` does **not** shell out to `gc init`; it calls
-`cityinit.Initializer.Scaffold` in-process, which is the same
-entry point the CLI drives. The scaffolded city registers with
+`cityinit.Service.Scaffold` in-process, and the CLI drives the same
+`cityinit.Service.Init` contract. The scaffolded city registers with
 the supervisor synchronously before `202 Accepted` returns; the
 reconciler runs the slow finalize later and publishes `city.ready`
 / `city.init_failed` events. Both projections live on the same
@@ -644,7 +644,7 @@ rename or remove a cited symbol (`events.KnownEventTypes`,
 `EventPayloadUnion`, `TestEveryKnownEventTypeHasRegisteredPayload`,
 `cmd/gc/apiroute.go:apiClient()`, `addMutationCSRFParam`,
 `registerFrameworkHeaders`, `sseResponseHeaders`,
-`OptionalParam`, `cityinit.Initializer`, `cityinit.InitRequest`,
+`OptionalParam`, `cityinit.Service`, `cityinit.InitRequest`,
 `cityinit.InitResult`, `cityinit.UnregisterRequest`,
 `cityinit.UnregisterResult`, `cityinit.ErrNotRegistered`,
 `TransientCityEventSource`, etc.), **update this document in the same

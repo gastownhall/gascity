@@ -53,6 +53,11 @@ type TransientCityEventSource interface {
 	TransientCityEventProviders() map[string]events.Provider
 }
 
+type cityInitializer interface {
+	Scaffold(context.Context, cityinit.InitRequest) (*cityinit.InitResult, error)
+	Unregister(context.Context, cityinit.UnregisterRequest) (*cityinit.UnregisterResult, error)
+}
+
 // cachedCityServer pairs a State with its pre-built Server for caching.
 type cachedCityServer struct {
 	state State
@@ -74,7 +79,7 @@ type cachedCityServer struct {
 // contracts and are explicitly excluded from the typed control plane.
 type SupervisorMux struct {
 	resolver    CityResolver
-	initializer cityinit.Initializer
+	initializer cityInitializer
 	readOnly    bool
 	version     string
 	startedAt   time.Time
@@ -101,7 +106,7 @@ type SupervisorMux struct {
 // POST /v0/city handler to scaffold new cities in-process; passing nil
 // is allowed for tests that don't exercise city creation (the handler
 // returns 501 Not Implemented in that case).
-func NewSupervisorMux(resolver CityResolver, initializer cityinit.Initializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
+func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
 	humaMux := http.NewServeMux()
 	sm := &SupervisorMux{
 		resolver:    resolver,

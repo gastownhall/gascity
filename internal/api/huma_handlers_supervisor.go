@@ -327,7 +327,7 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 }
 
 // humaHandleCityCreate handles POST /v0/city asynchronously. Calls
-// Initializer.Scaffold in-process to write the on-disk shape and
+// the city initializer in-process to write the on-disk shape and
 // register the city with the supervisor, then returns 202 Accepted
 // immediately. The supervisor reconciler runs the slow finalize
 // (prepareCityForSupervisor: pack materialization, bead store
@@ -353,11 +353,11 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		dir = filepath.Join(home, dir)
 	}
 
-	// Cheap pre-check that does not require an Initializer: if the
+	// Cheap pre-check that does not require a city initializer: if the
 	// target directory already looks like an initialized city on disk,
 	// return 409 before we try to scaffold. Keeps the API well-behaved
 	// in test configurations that build a SupervisorMux without an
-	// Initializer.
+	// initializer.
 	if cityDirAlreadyInitialized(dir) {
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
 	}
@@ -378,7 +378,8 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 	switch {
 	case errors.Is(err, cityinit.ErrAlreadyInitialized):
 		return nil, huma.Error409Conflict("conflict: city already initialized at " + dir)
-	case errors.Is(err, cityinit.ErrInvalidProvider),
+	case errors.Is(err, cityinit.ErrInvalidDirectory),
+		errors.Is(err, cityinit.ErrInvalidProvider),
 		errors.Is(err, cityinit.ErrInvalidBootstrapProfile):
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	case err != nil:
@@ -397,7 +398,7 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 }
 
 // humaHandleCityUnregister handles POST /v0/city/{cityName}/unregister
-// asynchronously. Calls Initializer.Unregister in-process to remove
+// asynchronously. Calls the city initializer in-process to remove
 // the city from the supervisor's registry and signal reconcile, then
 // returns 202 Accepted immediately. The supervisor reconciler stops
 // the city's controller on its next tick and emits city.unregistered

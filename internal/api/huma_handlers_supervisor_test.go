@@ -45,7 +45,7 @@ func (f *fakeInitializer) Unregister(_ context.Context, req cityinit.UnregisterR
 	return f.unregisterResult, nil
 }
 
-func newTestSupervisorMuxWithInitializer(t *testing.T, init cityinit.Initializer) *SupervisorMux {
+func newTestSupervisorMuxWithInitializer(t *testing.T, init cityInitializer) *SupervisorMux {
 	t.Helper()
 	return NewSupervisorMux(&fakeCityResolver{cities: map[string]*fakeState{}}, init, false, "test", time.Now())
 }
@@ -148,6 +148,7 @@ func TestSupervisorCityCreateMapsInitializerErrors(t *testing.T) {
 		want int
 	}{
 		{name: "already initialized", err: cityinit.ErrAlreadyInitialized, want: http.StatusConflict},
+		{name: "invalid directory", err: cityinit.ErrInvalidDirectory, want: http.StatusUnprocessableEntity},
 		{name: "invalid provider", err: cityinit.ErrInvalidProvider, want: http.StatusUnprocessableEntity},
 		{name: "invalid bootstrap", err: cityinit.ErrInvalidBootstrapProfile, want: http.StatusUnprocessableEntity},
 		{name: "generic", err: errors.New("boom"), want: http.StatusInternalServerError},

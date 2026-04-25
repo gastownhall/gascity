@@ -1405,7 +1405,7 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 	cfg := config.DefaultCity("old-name")
 	sp := runtime.NewFake()
 	var cityOut, cityErr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "old-name",
 		Cfg:      &cfg,
