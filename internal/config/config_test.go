@@ -271,6 +271,27 @@ mcp = ["city-mcp"]
 	}
 }
 
+func TestParseWorkspaceEnv(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "bright-lights"
+
+[workspace.env]
+GC_TARGET_BRANCH = "boylec/develop"
+FOO = "bar"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Workspace.Env["GC_TARGET_BRANCH"]; got != "boylec/develop" {
+		t.Errorf("Workspace.Env[GC_TARGET_BRANCH] = %q, want %q", got, "boylec/develop")
+	}
+	if got := cfg.Workspace.Env["FOO"]; got != "bar" {
+		t.Errorf("Workspace.Env[FOO] = %q, want %q", got, "bar")
+	}
+}
+
 func TestParseNoAgents(t *testing.T) {
 	data := []byte(`
 [workspace]
