@@ -944,10 +944,8 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	// The tiered query has sh -c wrapper; workflowServeQuery replaces the
-	// first --limit=1 with --limit=20 for scan width.
 	cdAgent := config.Agent{Name: config.ControlDispatcherAgentName}
-	wantQuery := workflowServeQuery(cdAgent.EffectiveWorkQuery())
+	wantQuery := workflowServeWorkQuery(cdAgent)
 	var gotQueries []string
 	var gotDirs []string
 	var gotEnv []map[string]string
@@ -1001,6 +999,96 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 			t.Fatalf("workflowServeList env[%d] GC_STORE_SCOPE = %q, want city", i, env["GC_STORE_SCOPE"])
 		}
 	}
+}
+
+func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+	if strings.Contains(query, "GC_SESSION_ORIGIN") {
+		t.Fatalf("workflowServeControlReadyQuery should not gate legacy routes on session origin: %q", query)
+	}
+	for _, want := range []string{
+		`bd list --status in_progress --assignee="$cand"`,
+		`bd ready --assignee="$cand"`,
+		`bd ready --metadata-field gc.routed_to=control-dispatcher --unassigned`,
+		`bd ready --metadata-field gc.routed_to=workflow-control --unassigned`,
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
+		}
+	}
+	if !strings.Contains(query, `--limit=20`) {
+		t.Fatalf("workflowServeControlReadyQuery missing scan limit: %q", query)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryPrefersInProgressAssigned(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME":   "gascity--control-dispatcher",
+		"GC_ALIAS":          "gascity/control-dispatcher",
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-in-progress"}]'
+    ;;
+  "ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-ready"}]'
+    ;;
+  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-routed"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-in-progress"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME":   "gascity--control-dispatcher",
+		"GC_ALIAS":          "gascity/control-dispatcher",
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
+    printf '[{"id":"ga-legacy-route"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
+		t.Fatalf("control query output = %q, want %q", got, want)
+	}
+}
+
+func runWorkflowServeShellQueryForTest(t *testing.T, query string, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	queryEnv := []string{"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH")}
+	for key, value := range env {
+		queryEnv = append(queryEnv, key+"="+value)
+	}
+	out, err := shellWorkQueryWithEnv(query, t.TempDir(), queryEnv)
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	return out
 }
 
 // TestRunWorkflowServeOverridesInheritedCityBeadsDir is a regression test for

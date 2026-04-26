@@ -213,7 +213,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeQuery(workQuery), storePath, workEnv)
+		queue, err := workflowServeList(workflowServeWorkQuery(agentCfg, workQuery), storePath, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
@@ -399,6 +399,72 @@ func workflowServeQuery(workQuery string) string {
 		return strings.Replace(workQuery, single, scan, 1)
 	}
 	return workQuery
+}
+
+func workflowServeWorkQuery(agentCfg config.Agent, expandedWorkQuery ...string) string {
+	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
+		return workflowServeControlReadyQuery(agentCfg)
+	}
+	workQuery := agentCfg.EffectiveWorkQuery()
+	if len(expandedWorkQuery) > 0 {
+		workQuery = expandedWorkQuery[0]
+	}
+	return workflowServeQuery(workQuery)
+}
+
+func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
+	qualified := strings.TrimSpace(agentCfg.QualifiedName())
+	return qualified == config.ControlDispatcherAgentName ||
+		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
+}
+
+func workflowServeControlReadyQuery(agentCfg config.Agent) string {
+	target := strings.TrimSpace(agentCfg.QualifiedName())
+	if target == "" {
+		target = config.ControlDispatcherAgentName
+	}
+	limit := fmt.Sprintf("%d", workflowServeScanLimit)
+	query := `sh -c '` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "` + target + `"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`done; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "` + target + `"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd ready --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`done; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
+	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
+		query += `bd ready --metadata-field gc.routed_to=` + legacy +
+			` --unassigned --json --limit=` + limit + ` 2>/dev/null'`
+	} else {
+		query += `printf "[]"` + `'`
+	}
+	return query
+}
+
+func workflowServeLegacyControlRoute(target string) string {
+	target = strings.TrimSpace(target)
+	if target == config.ControlDispatcherAgentName {
+		return "workflow-control"
+	}
+	const suffix = "/" + config.ControlDispatcherAgentName
+	if strings.HasSuffix(target, suffix) {
+		return strings.TrimSuffix(target, suffix) + "/workflow-control"
+	}
+	return ""
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
