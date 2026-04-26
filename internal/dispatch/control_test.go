@@ -2,8 +2,8 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -439,11 +439,8 @@ func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
 	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
-	if err == nil {
-		t.Fatal("expected invariant violation error")
-	}
-	if !strings.Contains(err.Error(), "invariant violation") {
-		t.Fatalf("error = %v, want invariant violation", err)
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
 }
 
@@ -844,6 +841,42 @@ func TestProcessRalphControlClosesEnclosingScopeOnIterationFailure(t *testing.T)
 	scopeAfter := mustGet(t, store, scopeBody.ID)
 	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "fail" {
 		t.Fatalf("scope body = status %q outcome %q, want closed/fail", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessRalphControlReturnsPendingForOpenIteration(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+		},
+	})
+	iteration := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.scope_role":   "body",
+			"gc.attempt":      "1",
+		},
+	})
+	mustDep(t, store, control.ID, iteration.ID, "blocks")
+
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
 }
 

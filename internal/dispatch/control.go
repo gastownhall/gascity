@@ -38,8 +38,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no attempt found", bead.ID)
 	}
 	if attempt.Status != "closed" {
-		// Invariant violation: control bead should not be ready if attempt is open.
-		return ControlResult{}, fmt.Errorf("%s: latest attempt %s is %s, not closed (invariant violation)", bead.ID, attempt.ID, attempt.Status)
+		return ControlResult{}, ErrControlPending
 	}
 
 	attemptNum, _ := strconv.Atoi(attempt.Metadata["gc.attempt"])
@@ -139,7 +138,7 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no iteration found", bead.ID)
 	}
 	if iteration.Status != "closed" {
-		return ControlResult{}, fmt.Errorf("%s: latest iteration %s is %s, not closed (invariant violation)", bead.ID, iteration.ID, iteration.Status)
+		return ControlResult{}, ErrControlPending
 	}
 
 	iterationNum, _ := strconv.Atoi(iteration.Metadata["gc.attempt"])

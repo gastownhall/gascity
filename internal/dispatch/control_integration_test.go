@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1163,14 +1164,14 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 	allAfterFirst, _ := store.ListOpen()
 	countAfterFirst := len(allAfterFirst)
 
-	// Process again with same state — epoch conflict should prevent double spawn.
+	// Process again with same state -- epoch conflict should prevent double spawn.
 	// The epoch was already incremented by the first Attach, so a second
 	// processRetryControl with the same attempt (attempt 1 still closed, attempt 2
 	// still open) will find attempt 2 as the latest and see it's not closed.
-	// This verifies the invariant violation guard.
+	// This verifies the pending guard.
 	_, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
-	if err == nil {
-		t.Fatal("expected error on second process (attempt 2 is open)")
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("second process error = %v, want %v", err, ErrControlPending)
 	}
 
 	// No new beads should have been created.
