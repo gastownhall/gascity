@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const PATH_PREFIX =
-  `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
+  `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
 async function run(directory, ...args) {
   try {
