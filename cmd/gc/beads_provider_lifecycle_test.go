@@ -3909,14 +3909,15 @@ esac
 		"3307",
 		filepath.Join(rigDir, ".beads"),
 	}, "|")
-	for _, name := range []string{"config.env", "migrate.env"} {
-		data, err := os.ReadFile(filepath.Join(captureDir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if got := strings.TrimSpace(string(data)); got != wantPinned {
-			t.Fatalf("%s = %q, want %q", name, got, wantPinned)
-		}
+	data, err := os.ReadFile(filepath.Join(captureDir, "migrate.env"))
+	if err != nil {
+		t.Fatalf("read migrate.env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != wantPinned {
+		t.Fatalf("migrate.env = %q, want %q", got, wantPinned)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "config.env")); !os.IsNotExist(err) {
+		t.Fatalf("config.env exists after init; err=%v", err)
 	}
 	listData, err := os.ReadFile(filepath.Join(captureDir, "list.env"))
 	if err != nil {
@@ -4419,20 +4420,21 @@ esac
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
-	for _, name := range []string{"config-db.log", "migrate-db.log"} {
-		data, err := os.ReadFile(filepath.Join(captureDir, name))
-		if err != nil {
-			t.Fatalf("ReadFile(%s): %v", name, err)
+	data, err := os.ReadFile(filepath.Join(captureDir, "migrate-db.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(migrate-db.log): %v", err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) == 0 {
+		t.Fatal("migrate-db.log empty")
+	}
+	for _, line := range lines {
+		if line != "gascity" {
+			t.Fatalf("migrate-db.log line = %q, want gascity", line)
 		}
-		lines := strings.Fields(string(data))
-		if len(lines) == 0 {
-			t.Fatalf("%s empty", name)
-		}
-		for _, line := range lines {
-			if line != "gascity" {
-				t.Fatalf("%s line = %q, want gascity", name, line)
-			}
-		}
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "config-db.log")); !os.IsNotExist(err) {
+		t.Fatalf("config-db.log exists after init; err=%v", err)
 	}
 	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
 	if err != nil {
@@ -4563,20 +4565,21 @@ esac
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
-	for _, name := range []string{"config-db.log", "migrate-db.log"} {
-		data, err := os.ReadFile(filepath.Join(captureDir, name))
-		if err != nil {
-			t.Fatalf("ReadFile(%s): %v", name, err)
+	data, err := os.ReadFile(filepath.Join(captureDir, "migrate-db.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(migrate-db.log): %v", err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) == 0 {
+		t.Fatal("migrate-db.log empty")
+	}
+	for _, line := range lines {
+		if line != strings.ToUpper(managedDoltProbeDatabase) {
+			t.Fatalf("migrate-db.log line = %q, want %s", line, strings.ToUpper(managedDoltProbeDatabase))
 		}
-		lines := strings.Fields(string(data))
-		if len(lines) == 0 {
-			t.Fatalf("%s empty", name)
-		}
-		for _, line := range lines {
-			if line != strings.ToUpper(managedDoltProbeDatabase) {
-				t.Fatalf("%s line = %q, want %s", name, line, strings.ToUpper(managedDoltProbeDatabase))
-			}
-		}
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "config-db.log")); !os.IsNotExist(err) {
+		t.Fatalf("config-db.log exists after init; err=%v", err)
 	}
 
 	metaData, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))

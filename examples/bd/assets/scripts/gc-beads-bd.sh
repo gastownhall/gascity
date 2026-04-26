@@ -427,6 +427,28 @@ wait_for_bd_runtime_schema() {
     return 1
 }
 
+# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml when
+# the key is absent. bd reads this YAML key as a fallback when the database
+# config table is unset (see beads internal/config: GetCustomTypesFromYAML),
+# so writing here registers the types without paying bd's per-command
+# auto-migrate cost (~50s on populated databases). Idempotent: re-running
+# never appends duplicates.
+ensure_types_custom_in_yaml() {
+    local dir="$1"
+    local types="$2"
+    local config_yaml="$dir/.beads/config.yaml"
+    [ -f "$config_yaml" ] || return 0
+    [ -n "$types" ] || return 0
+    if grep -q "^types\.custom:" "$config_yaml" 2>/dev/null; then
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
+    cat "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    printf 'types.custom: %s\n' "$types" >> "$tmp"
+    mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
+}
+
 # --- Robustness Helpers ---
 
 # save_state writes the private provider runtime state atomically (no jq dependency).
@@ -1980,7 +2002,7 @@ op_init() {
                 # and bd-specific bootstrap only.
                 ensure_beads_dir_permissions "$dir"
                 normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-                run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+                ensure_types_custom_in_yaml "$dir" "$custom_types"
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 backfill_project_id_if_missing "$dir"
@@ -2033,8 +2055,9 @@ op_init() {
         die "bd schema not visible for $dolt_database after init"
     fi
 
-    # Configure custom bead types (required since beads v0.46.0).
-    run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+    # Configure custom bead types without invoking `bd config set`, which can
+    # spend tens of seconds in auto-migrate on populated stores.
+    ensure_types_custom_in_yaml "$dir" "$custom_types"
     ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is
