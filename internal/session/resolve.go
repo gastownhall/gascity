@@ -66,6 +66,7 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	if err != nil {
 		return "", fmt.Errorf("listing sessions by alias: %w", err)
 	}
+	bySessionName = filterOutAliasMatches(bySessionName, identifier)
 
 	openSessionName, closedSessionName := splitOpen(bySessionName)
 	if len(openSessionName) > 0 {
@@ -105,6 +106,17 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+func filterOutAliasMatches(in []beads.Bead, identifier string) []beads.Bead {
+	out := in[:0]
+	for _, b := range in {
+		if strings.TrimSpace(b.Metadata["alias"]) == identifier {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 func splitOpen(in []beads.Bead) (open, closed []beads.Bead) {

@@ -277,6 +277,33 @@ func TestResolveSessionID_PrefersSessionNameOverAlias(t *testing.T) {
 	}
 }
 
+func TestResolveSessionID_PrefersSessionNameOverDualAliasSessionNameBead(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "worker",
+		},
+	})
+	named, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != named.ID {
+		t.Fatalf("got %q, want session-name-only match %q", id, named.ID)
+	}
+}
+
 func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
@@ -688,6 +715,9 @@ func TestResolveSessionID_BoundedListCalls(t *testing.T) {
 	}
 	if len(store.listCalls) == 0 {
 		t.Fatalf("expected at least one List call")
+	}
+	if len(store.listCalls) != 2 {
+		t.Fatalf("List calls = %d, want 2", len(store.listCalls))
 	}
 	for i, q := range store.listCalls {
 		if len(q.Metadata) == 0 {

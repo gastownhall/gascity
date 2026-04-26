@@ -67,6 +67,13 @@ func resolveConfiguredNamedSessionID(
 	if bead, ok := session.FindCanonicalNamedSessionBead(canonicalCandidates, spec); ok {
 		return bead.ID, true, nil
 	}
+	canonicalCandidates, err = appendCanonicalRuntimeSessionNameCandidates(store, canonicalCandidates, spec)
+	if err != nil {
+		return "", true, err
+	}
+	if bead, ok := session.FindCanonicalNamedSessionBead(canonicalCandidates, spec); ok {
+		return bead.ID, true, nil
+	}
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
@@ -101,6 +108,36 @@ func resolveConfiguredNamedSessionID(
 		materializeMetadata: opts.materializeMetadata,
 	})
 	return id, true, err
+}
+
+func appendCanonicalRuntimeSessionNameCandidates(store beads.Store, candidates []beads.Bead, spec session.NamedSessionSpec) ([]beads.Bead, error) {
+	seen := make(map[string]bool, len(candidates))
+	for _, b := range candidates {
+		seen[b.ID] = true
+	}
+	queriedValues := map[string]bool{}
+	for _, value := range []string{spec.SessionName, spec.Identity} {
+		value = strings.TrimSpace(value)
+		if value == "" || queriedValues[value] {
+			continue
+		}
+		queriedValues[value] = true
+		matches, err := store.List(beads.ListQuery{
+			Label:    session.LabelSession,
+			Metadata: map[string]string{"session_name": value},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing canonical named session candidates by session_name: %w", err)
+		}
+		for _, b := range matches {
+			if seen[b.ID] {
+				continue
+			}
+			candidates = append(candidates, b)
+			seen[b.ID] = true
+		}
+	}
+	return candidates, nil
 }
 
 func resolveSessionIDWithConfig(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
