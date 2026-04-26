@@ -213,7 +213,7 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			_ = writeProviderHookContext(stdout, hookFormat, formatInjectOutput(messages))
+			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
 		}
 		return 0 // --inject always exits 0
 	}

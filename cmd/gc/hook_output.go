@@ -6,17 +6,39 @@ import (
 	"strings"
 )
 
-const hookOutputFormatGemini = "gemini"
+const (
+	hookOutputFormatCodex  = "codex"
+	hookOutputFormatGemini = "gemini"
+)
 
 func writeProviderHookContext(stdout io.Writer, format, content string) error {
+	return writeProviderHookContextForEvent(stdout, format, "", content)
+}
+
+func writeProviderHookContextForEvent(stdout io.Writer, format, eventName, content string) error {
 	if content == "" {
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(format), hookOutputFormatGemini) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case hookOutputFormatCodex:
+		return json.NewEncoder(stdout).Encode(codexHookAdditionalContext(eventName, content))
+	case hookOutputFormatGemini:
 		return json.NewEncoder(stdout).Encode(geminiHookAdditionalContext(content))
 	}
 	_, err := io.WriteString(stdout, content)
 	return err
+}
+
+func codexHookAdditionalContext(eventName, content string) map[string]any {
+	if eventName == "" {
+		eventName = "SessionStart"
+	}
+	return map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":     eventName,
+			"additionalContext": strings.TrimRight(content, "\n"),
+		},
+	}
 }
 
 func geminiHookAdditionalContext(content string) map[string]any {

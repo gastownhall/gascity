@@ -248,7 +248,7 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 	if inject {
 		if hasWork {
 			content := formatHookInjectReminder(normalized)
-			_ = writeProviderHookContext(stdout, hookFormat, content)
+			_ = writeProviderHookContextForEvent(stdout, hookFormat, "Stop", content)
 		}
 		return 0 // --inject always exits 0
 	}

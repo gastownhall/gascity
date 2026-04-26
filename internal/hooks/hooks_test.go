@@ -231,6 +231,29 @@ func TestInstallClaudeUpgradesGeneratedFileSessionStartMatcher(t *testing.T) {
 	}
 }
 
+func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, "--hook-format codex") {
+		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
+	}
+}
+
 func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) {
 	fs := fsys.NewFake()
 	current, err := readEmbedded("config/claude.json")
@@ -683,6 +706,10 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		if _, ok := fs.Files[rel]; !ok {
 			t.Errorf("expected overlay-managed provider file %s to be written", rel)
 		}
+	}
+	codexHooks := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(codexHooks, "--hook-format codex") {
+		t.Error("codex hooks should request Codex hook output format")
 	}
 }
 

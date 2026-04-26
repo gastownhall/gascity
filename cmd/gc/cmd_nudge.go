@@ -357,7 +357,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	var writeErr error
 	if inject {
-		writeErr = writeProviderHookContext(stdout, hookFormat, out)
+		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", out)
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}

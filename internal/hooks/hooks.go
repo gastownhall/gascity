@@ -158,6 +158,9 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
 		return piHookNeedsUpgrade
 	}
+	if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
+		return codexFileNeedsUpgrade
+	}
 	return nil
 }
 
@@ -342,6 +345,18 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 		return candidateMissing, nil, nil
 	}
 	return candidateUnreadable, nil, err
+}
+
+func codexFileNeedsUpgrade(existing []byte) bool {
+	content := string(existing)
+	return codexContainsManagedHook(content) && !strings.Contains(content, `--hook-format codex`)
+}
+
+func codexContainsManagedHook(content string) bool {
+	return strings.Contains(content, `gc prime --hook`) ||
+		strings.Contains(content, `gc nudge drain --inject`) ||
+		strings.Contains(content, `gc mail check --inject`) ||
+		strings.Contains(content, `gc hook --inject`)
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {
