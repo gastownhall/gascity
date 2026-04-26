@@ -43,23 +43,22 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 
 	attemptNum, _ := strconv.Atoi(attempt.Metadata["gc.attempt"])
 	result := classifyRetryAttempt(attempt)
-
-	// Record decision in attempt log.
-	if err := appendAttemptLog(store, bead.ID, attemptNum, result.Outcome, result.Reason); err != nil {
+	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], attemptNum, result.Outcome, result.Reason)
+	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 
 	switch result.Outcome {
 	case "pass":
+		closeMetadata := map[string]string{
+			"gc.attempt_log": attemptLog,
+			"gc.outcome":     "pass",
+		}
 		if outputJSON := attempt.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(bead.ID, "gc.output_json", outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating output: %w", bead.ID, err)
-			}
+			closeMetadata["gc.output_json"] = outputJSON
 		}
-		if err := propagateRetrySubjectMetadata(store, bead.ID, attempt); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating metadata: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		copyNonGCMetadata(closeMetadata, attempt.Metadata)
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -69,15 +68,14 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{Processed: true, Action: "pass", Skipped: scopeResult.Skipped}, nil
 
 	case "hard":
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		if err := updateMetadataAndClose(store, bead.ID, map[string]string{
+			"gc.attempt_log":       attemptLog,
+			"gc.outcome":           "fail",
 			"gc.failed_attempt":    strconv.Itoa(attemptNum),
 			"gc.failure_class":     "hard",
 			"gc.failure_reason":    result.Reason,
 			"gc.final_disposition": "hard_fail",
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking hard fail: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -88,7 +86,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 
 	case "transient":
 		if attemptNum >= maxAttempts {
-			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted)
+			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted, attemptLog)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -101,6 +99,9 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		}
 
 		// Spawn next attempt.
+		if err := store.SetMetadata(bead.ID, "gc.attempt_log", attemptLog); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
+		}
 		nextAttempt := attemptNum + 1
 		if err := spawnNextAttempt(context.Background(), store, bead, nextAttempt, opts); err != nil {
 			// Controller-internal failure → close with hard error.
@@ -163,17 +164,20 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
 
-	if err := appendAttemptLog(store, bead.ID, iterationNum, checkResult.Outcome, checkResult.Stderr); err != nil {
+	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], iterationNum, checkResult.Outcome, checkResult.Stderr)
+	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 
 	if checkResult.Outcome == convergence.GatePass {
-		if outputJSON := iteration.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(bead.ID, "gc.output_json", outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating output: %w", bead.ID, err)
-			}
+		closeMetadata := map[string]string{
+			"gc.attempt_log": attemptLog,
+			"gc.outcome":     "pass",
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		if outputJSON := iteration.Metadata["gc.output_json"]; outputJSON != "" {
+			closeMetadata["gc.output_json"] = outputJSON
+		}
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -184,13 +188,11 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	if iterationNum >= maxAttempts {
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		if err := updateMetadataAndClose(store, bead.ID, map[string]string{
+			"gc.attempt_log":    attemptLog,
 			"gc.outcome":        "fail",
 			"gc.failed_attempt": strconv.Itoa(iterationNum),
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking exhausted: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", bead.ID, err)
 		}
 		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
@@ -201,6 +203,9 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	// Spawn next iteration.
+	if err := store.SetMetadata(bead.ID, "gc.attempt_log", attemptLog); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
+	}
 	nextIteration := iterationNum + 1
 	if err := spawnNextAttempt(context.Background(), store, bead, nextIteration, opts); err != nil {
 		_ = store.SetMetadataBatch(bead.ID, map[string]string{
@@ -217,31 +222,29 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	return ControlResult{Processed: true, Action: "retry", Created: 1}, nil
 }
 
-func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted string) (ControlResult, error) {
+func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
 	if onExhausted == "soft_fail" {
-		if err := store.SetMetadataBatch(beadID, map[string]string{
+		if err := updateMetadataAndClose(store, beadID, map[string]string{
+			"gc.attempt_log":       attemptLog,
+			"gc.outcome":           "pass",
 			"gc.failed_attempt":    strconv.Itoa(attemptNum),
 			"gc.failure_class":     "transient",
 			"gc.failure_reason":    reason,
 			"gc.final_disposition": "soft_fail",
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking soft-fail: %w", beadID, err)
-		}
-		if err := setOutcomeAndClose(store, beadID, "pass"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing soft-failed: %w", beadID, err)
 		}
 		return ControlResult{Processed: true, Action: "soft-fail"}, nil
 	}
 
-	if err := store.SetMetadataBatch(beadID, map[string]string{
+	if err := updateMetadataAndClose(store, beadID, map[string]string{
+		"gc.attempt_log":       attemptLog,
+		"gc.outcome":           "fail",
 		"gc.failed_attempt":    strconv.Itoa(attemptNum),
 		"gc.failure_class":     "transient",
 		"gc.failure_reason":    reason,
 		"gc.final_disposition": "hard_fail",
 	}); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: marking exhausted: %w", beadID, err)
-	}
-	if err := setOutcomeAndClose(store, beadID, "fail"); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", beadID, err)
 	}
 	return ControlResult{Processed: true, Action: "fail"}, nil
@@ -977,10 +980,17 @@ func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome,
 	if err != nil {
 		return err
 	}
+	logJSON, err := appendAttemptLogValue(control.Metadata["gc.attempt_log"], attempt, outcome, reason)
+	if err != nil {
+		return err
+	}
+	return store.SetMetadata(controlID, "gc.attempt_log", logJSON)
+}
 
+func appendAttemptLogValue(existing string, attempt int, outcome, reason string) (string, error) {
 	var log []map[string]string
-	if raw := control.Metadata["gc.attempt_log"]; raw != "" {
-		_ = json.Unmarshal([]byte(raw), &log)
+	if existing != "" {
+		_ = json.Unmarshal([]byte(existing), &log)
 	}
 
 	entry := map[string]string{
@@ -1007,10 +1017,27 @@ func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome,
 	log = append(log, entry)
 	logJSON, err := json.Marshal(log)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return store.SetMetadata(controlID, "gc.attempt_log", string(logJSON))
+	return string(logJSON), nil
+}
+
+func copyNonGCMetadata(dst, src map[string]string) {
+	for key, value := range src {
+		if key == "" || strings.HasPrefix(key, "gc.") {
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+	status := "closed"
+	return store.Update(beadID, beads.UpdateOpts{
+		Status:   &status,
+		Metadata: metadata,
+	})
 }
 
 // Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,

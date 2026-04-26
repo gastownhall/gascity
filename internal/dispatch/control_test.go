@@ -72,6 +72,69 @@ func TestProcessRetryControlPass(t *testing.T) {
 	}
 }
 
+func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"ok":true}`,
+			"review.verdict":  "approved",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &controlCloseTrackingStore{Store: base, targetID: control.ID}
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+	if store.setMetadataCalls != 0 || store.setMetadataBatchCalls != 0 {
+		t.Fatalf("metadata calls before close = SetMetadata:%d SetMetadataBatch:%d, want none", store.setMetadataCalls, store.setMetadataBatchCalls)
+	}
+	if store.closeUpdateCalls != 1 {
+		t.Fatalf("close update calls = %d, want 1", store.closeUpdateCalls)
+	}
+	for key, want := range map[string]string{
+		"gc.outcome":     "pass",
+		"gc.output_json": `{"ok":true}`,
+		"review.verdict": "approved",
+	} {
+		if got := store.closeUpdateMetadata[key]; got != want {
+			t.Fatalf("close metadata %s = %q, want %q", key, got, want)
+		}
+	}
+	if store.closeUpdateMetadata["gc.attempt_log"] == "" {
+		t.Fatal("close metadata missing gc.attempt_log")
+	}
+}
+
 func TestProcessRetryControlHardFail(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -1235,6 +1298,40 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 	if err := store.DepAdd(from, to, depType); err != nil {
 		t.Fatalf("dep %s -> %s: %v", from, to, err)
 	}
+}
+
+type controlCloseTrackingStore struct {
+	beads.Store
+	targetID              string
+	setMetadataCalls      int
+	setMetadataBatchCalls int
+	closeUpdateCalls      int
+	closeUpdateMetadata   map[string]string
+}
+
+func (s *controlCloseTrackingStore) SetMetadata(id, key, value string) error {
+	if id == s.targetID {
+		s.setMetadataCalls++
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *controlCloseTrackingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.targetID {
+		s.setMetadataBatchCalls++
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *controlCloseTrackingStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.targetID && opts.Status != nil && *opts.Status == "closed" {
+		s.closeUpdateCalls++
+		s.closeUpdateMetadata = make(map[string]string, len(opts.Metadata))
+		for key, value := range opts.Metadata {
+			s.closeUpdateMetadata[key] = value
+		}
+	}
+	return s.Store.Update(id, opts)
 }
 
 // ---------------------------------------------------------------------------
