@@ -2134,6 +2134,21 @@ func (p *dieAfterStartProvider) IsRunning(name string) bool {
 	return p.Fake.IsRunning(name)
 }
 
+// zombieAfterStartProvider leaves the runtime container/pane present but marks
+// the actual agent process dead. This matches wrappers that keep tmux alive
+// after the CLI exits with a stale resume-session error.
+type zombieAfterStartProvider struct {
+	*runtime.Fake
+}
+
+func (p *zombieAfterStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	p.Zombies[name] = true
+	return nil
+}
+
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
@@ -2172,6 +2187,52 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	r := results[0]
 	if r.err == nil {
 		t.Fatal("expected error for session that died during startup with stale key")
+	}
+	if !strings.Contains(r.err.Error(), "died during startup") {
+		t.Fatalf("unexpected error: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-99",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"session_key":  "stale-key-abc",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume stale-key-abc",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume stale-key-abc",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		nil,
+		10*time.Second,
+		1,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err == nil {
+		t.Fatal("expected error for dead agent process left behind in a live pane")
 	}
 	if !strings.Contains(r.err.Error(), "died during startup") {
 		t.Fatalf("unexpected error: %v", r.err)

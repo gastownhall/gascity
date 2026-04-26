@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -498,12 +499,17 @@ func executePreparedStartWave(
 			if err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
 				time.Sleep(staleKeyDetectDelay)
 				running := false
+				alive := false
 				if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
 					running = sp != nil && sp.IsRunning(item.candidate.name())
+					alive = running && (sp == nil || sp.ProcessAlive(item.candidate.name(), item.cfg.ProcessNames))
 				} else {
-					running, err = workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+					var obs worker.LiveObservation
+					obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+					running = obs.Running
+					alive = obs.Alive
 				}
-				if err != nil || !running {
+				if err != nil || !running || !alive {
 					err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				}
 			}
