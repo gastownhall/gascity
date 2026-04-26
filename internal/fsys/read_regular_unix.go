@@ -47,7 +47,7 @@ func (OSFS) readRegularFileSnapshot(name string) (regularFileSnapshot, error) {
 	}
 	return regularFileSnapshot{
 		data:  data,
-		id:    fileIdentity{dev: stat.Dev, ino: stat.Ino},
+		id:    fileIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino)},
 		hasID: true,
 	}, nil
 }
