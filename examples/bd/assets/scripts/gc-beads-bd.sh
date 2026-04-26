@@ -155,6 +155,37 @@ server_sql() {
         sql -q "$1"
 }
 
+# ensure_issue_prefix sets the issue_prefix row in bd's `config` table.
+#
+# bd 1.0.3+ rejects `bd config set issue_prefix` because the key is reserved
+# for the init/bootstrap path; the previous `2>/dev/null || true` swallowed
+# that rejection silently, leaving the runtime config row absent. `bd ready`
+# (which reads from a different code path) keeps working, but `bd create`
+# fails with "database not initialized: issue_prefix config is missing" on the
+# very first sling. See gastownhall/gascity#1232.
+#
+# Strategy: try the bd CLI first so we keep working with older bd versions
+# that still allow `config set issue_prefix`. If bd rejects it, fall back to
+# writing the row directly through the dolt server we already control. The
+# `config` table is the authoritative read path bd uses at create time, so
+# this is the same value bd would have written had it accepted the command.
+ensure_issue_prefix() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+
+    if run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null; then
+        return 0
+    fi
+
+    # Escape single quotes for safe SQL embedding (POSIX-compatible).
+    local quoted_prefix
+    quoted_prefix=$(printf '%s' "$prefix" | sed "s/'/''/g")
+    local quoted_db
+    quoted_db=$(printf '%s' "$dolt_database" | sed 's/`/``/g')
+    server_sql "USE \`$quoted_db\`; INSERT INTO config (\`key\`, value) VALUES ('issue_prefix', '$quoted_prefix') ON DUPLICATE KEY UPDATE value='$quoted_prefix'; CALL DOLT_COMMIT('-Am', 'set issue_prefix');" >/dev/null 2>&1 || true
+}
+
 # is_retryable_error checks if an error message is a transient Dolt failure worth retrying.
 # Matches the 7 patterns from upstream isDoltRetryableError().
 is_retryable_error() {
@@ -1746,7 +1777,7 @@ op_init() {
             # and bd-specific bootstrap only.
             ensure_beads_dir_permissions "$dir"
             normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-            run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+            ensure_issue_prefix "$dir" "$prefix" "$dolt_database"
             run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
             backfill_project_id_if_missing "$dir"
             exit 0
@@ -1791,7 +1822,9 @@ op_init() {
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is
     # compatibility state for raw bd operations, not a second GC authority.
-    run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+    # Falls back to direct SQL when bd 1.0.3+ rejects `config set issue_prefix`
+    # (gastownhall/gascity#1232).
+    ensure_issue_prefix "$dir" "$prefix" "$dolt_database"
 
     # Configure custom bead types (required since beads v0.46.0).
     run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
