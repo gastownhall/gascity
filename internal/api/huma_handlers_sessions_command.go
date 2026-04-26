@@ -24,6 +24,8 @@ import (
 // respond, suspend, close, wake, rename). Split out of huma_handlers_sessions.go
 // to isolate mutation logic from reads and streaming.
 
+var sessionMessageAsyncTimeout = 90 * time.Second
+
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
@@ -189,6 +191,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}()
 
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
+	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
 	return out, nil
 }
@@ -328,6 +331,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	}()
 
 	out := &SessionCreateOutput{Status: http.StatusAccepted}
+	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
 	return out, nil
 }
@@ -453,6 +457,7 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 	}()
 
 	out := &SessionSubmitOutput{}
+	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
 	return out, nil
 }
@@ -475,19 +480,55 @@ func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessa
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
-		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store, sessionTarget)
-		if err != nil {
-			s.emitSessionMessageFailed(reqID, "resolve_failed", err.Error())
-			return
+
+		type messageResult struct {
+			sessionID string
+			errorCode string
+			err       error
 		}
-		if err := s.sendUserMessageToSession(context.Background(), store, id, message); err != nil {
-			s.emitSessionMessageFailed(reqID, "message_failed", err.Error())
-		} else {
-			s.emitSessionMessageSucceeded(reqID, id)
+
+		resultCh := make(chan messageResult, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					resultCh <- messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)}
+				}
+			}()
+			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionTarget)
+			if err != nil {
+				resultCh <- messageResult{errorCode: "resolve_failed", err: err}
+				return
+			}
+			if err := s.sendUserMessageToSession(ctx, store, id, message); err != nil {
+				code := "message_failed"
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					code = "timeout"
+				}
+				resultCh <- messageResult{sessionID: id, errorCode: code, err: err}
+				return
+			}
+			resultCh <- messageResult{sessionID: id}
+		}()
+
+		timer := time.NewTimer(sessionMessageAsyncTimeout)
+		defer timer.Stop()
+		select {
+		case result := <-resultCh:
+			if result.err != nil {
+				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
+				return
+			}
+			s.emitSessionMessageSucceeded(reqID, result.sessionID)
+		case <-timer.C:
+			cancel()
+			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
 		}
 	}()
 
 	out := &SessionMessageOutput{}
+	out.Body.Status = "accepted"
 	out.Body.RequestID = reqID
 	return out, nil
 }
@@ -534,6 +575,12 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 
 	mgr := s.sessionManager(store)
 	if err := mgr.Kill(id); err != nil {
+		if errors.Is(err, session.ErrSessionClosed) {
+			out := &OKWithIDResponse{}
+			out.Body.Status = "ok"
+			out.Body.ID = id
+			return out, nil
+		}
 		return nil, humaSessionManagerError(err)
 	}
 	out := &OKWithIDResponse{}
@@ -633,8 +680,12 @@ func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseIn
 	// Optional: permanently delete the bead after closing.
 	if input.Delete {
 		if err := store.Delete(id); err != nil {
-			log.Printf("gc api: deleting bead after close %s: %v", id, err)
-			return nil, huma.Error500InternalServerError("closed but delete failed: " + err.Error())
+			if errors.Is(err, beads.ErrNotFound) {
+				log.Printf("gc api: deleting bead after close %s: already gone", id)
+			} else {
+				log.Printf("gc api: deleting bead after close %s: %v", id, err)
+				return nil, huma.Error500InternalServerError("closed but delete failed: " + err.Error())
+			}
 		}
 	}
 
@@ -681,6 +732,15 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	go func() {
+		if err := handle.Start(context.Background()); err != nil {
+			log.Printf("gc api: waking session %s: %v", id, err)
+		}
+	}()
 
 	out := &OKWithIDResponse{}
 	out.Body.Status = "ok"

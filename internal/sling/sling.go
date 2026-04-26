@@ -94,6 +94,7 @@ type RouteRequest struct {
 	Metadata map[string]string // gc.routed_to, pool label, etc.
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
+	Force    bool              // allow best-effort routing when the bead is absent
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.

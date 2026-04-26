@@ -83,15 +83,9 @@ func (WireTaggedEvent) Schema(r huma.Registry) *huma.Schema {
 //
 // Policy:
 //   - Registered event types: emit with the typed payload variant.
-//   - Unregistered event types (e.g. ad-hoc `gc event emit custom.foo`
-//     from a user hook): emit the envelope with a null payload so the
-//     CLI user's custom events remain visible in the list. The type
-//     string, actor, subject, message, seq, and ts are preserved — only
-//     structured payload data is dropped (there is no registered schema
-//     to interpret it against). The registry-coverage test
-//     (TestEveryKnownEventTypeHasRegisteredPayload) still guarantees
-//     every KnownEventTypes constant has a registered payload; this
-//     passthrough covers only types the SDK does not know about.
+//   - Unregistered event types: skip. The list and stream OpenAPI schemas
+//     are discriminated unions over registered event types, so emitting
+//     ad-hoc event names would make runtime JSON disagree with the spec.
 //   - Decode error on registered types: skip + log. Emitting a typed
 //     event with bus corruption would violate Principle 7.
 func toWireEvent(e events.Event) (WireEvent, bool) {
@@ -100,10 +94,10 @@ func toWireEvent(e events.Event) (WireEvent, bool) {
 		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
 		return WireEvent{}, false
 	}
-	var payload events.Payload
-	if registered {
-		payload, _ = decoded.(events.Payload)
+	if !registered {
+		return WireEvent{}, false
 	}
+	payload, _ := decoded.(events.Payload)
 	return WireEvent{
 		Seq:     e.Seq,
 		Type:    e.Type,

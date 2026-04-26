@@ -417,6 +417,9 @@ type AnnotatedProviderResponse struct {
 type AsyncAcceptedBody struct {
 	// RequestId Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
 	RequestId string `json:"request_id"`
+
+	// Status Async request status.
+	Status string `json:"status"`
 }
 
 // AsyncAcceptedResponse defines model for AsyncAcceptedResponse.

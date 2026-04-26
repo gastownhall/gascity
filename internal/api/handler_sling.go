@@ -90,6 +90,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			return s.sourceWorkflowStores(), nil
 		},
 		Runner:   s.slingRunner(),
+		Router:   apiBeadRouter{server: s, store: store},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
@@ -193,7 +194,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	if resp.WorkflowID == "" && resp.RootBeadID == "" {
 		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id", nil
 	}
-	return resp, http.StatusCreated, "", "", nil
+	return resp, http.StatusOK, "", "", nil
 }
 
 func allowsForceStoreFallback(body slingBody, agentCfg config.Agent) bool {
@@ -402,4 +403,40 @@ func (n *apiNotifier) PokeController(_ string) {
 
 func (n *apiNotifier) PokeControlDispatch(_ string) {
 	n.state.Poke()
+}
+
+type apiBeadRouter struct {
+	server *Server
+	store  beads.Store
+}
+
+func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
+	if r.server == nil {
+		return fmt.Errorf("sling router: missing server")
+	}
+	cfg := r.server.state.Config()
+	if cfg != nil {
+		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, req.Target); ok && sling.IsCustomSlingQuery(agentCfg) {
+			runner := r.server.slingRunner()
+			if runner == nil {
+				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			slingCmd, slingWarn := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.server.state.CityPath(), r.server.state.CityName(), agentCfg, cfg.Rigs)
+			if slingWarn != "" {
+				fmt.Fprintf(apiSlingStderr(), "gc api sling: %s\n", slingWarn) //nolint:errcheck
+			}
+			_, err := runner(req.WorkDir, slingCmd, req.Env)
+			return err
+		}
+	}
+	if r.store == nil {
+		return fmt.Errorf("built-in sling routing requires a store")
+	}
+	if err := r.store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
+		if req.Force && errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	return nil
 }

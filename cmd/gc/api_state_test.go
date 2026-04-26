@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -610,6 +611,80 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	}
 	if len(rigList) != 1 || rigList[0].Title != "rig bead" {
 		t.Fatalf("rig store should still contain only its own bead, got %#v", rigList)
+	}
+}
+
+func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityStore := beads.NewCachingStoreForTest(cityBacking, nil)
+	rigStore := beads.NewCachingStoreForTest(rigBacking, nil)
+	if err := cityStore.Prime(context.Background()); err != nil {
+		t.Fatalf("city Prime: %v", err)
+	}
+	if err := rigStore.Prime(context.Background()); err != nil {
+		t.Fatalf("rig Prime: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city", Prefix: "ct"},
+			Rigs:      []config.Rig{{Name: "rig1", Prefix: "rw"}},
+		},
+		cityName:      "test-city",
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"rig1": rigStore},
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Subject: "rw-1",
+		Payload: json.RawMessage(`{"id":"rw-1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
+	})
+
+	if _, err := cityStore.Get("rw-1"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("city cache Get(rw-1) error = %v, want ErrNotFound", err)
+	}
+	if got, err := rigStore.Get("rw-1"); err != nil {
+		t.Fatalf("rig cache Get(rw-1): %v", err)
+	} else if got.Title != "rig bead" {
+		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	}
+}
+
+func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testing.T) {
+	cityStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	rigStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	if err := cityStore.Prime(context.Background()); err != nil {
+		t.Fatalf("city Prime: %v", err)
+	}
+	if err := rigStore.Prime(context.Background()); err != nil {
+		t.Fatalf("rig Prime: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city", Prefix: "mlcm"},
+			Rigs:      []config.Rig{{Name: "rig1", Prefix: "mc-mogbzvrs"}},
+		},
+		cityName:      "test-city",
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"rig1": rigStore},
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Subject: "mc-mogbzvrs-hiv.1",
+		Payload: json.RawMessage(`{"id":"mc-mogbzvrs-hiv.1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
+	})
+
+	if _, err := cityStore.Get("mc-mogbzvrs-hiv.1"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("city cache Get(hyphenated rig bead) error = %v, want ErrNotFound", err)
+	}
+	if got, err := rigStore.Get("mc-mogbzvrs-hiv.1"); err != nil {
+		t.Fatalf("rig cache Get(hyphenated rig bead): %v", err)
+	} else if got.Title != "rig bead" {
+		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
 	}
 }
 

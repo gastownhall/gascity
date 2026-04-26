@@ -962,6 +962,55 @@ func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
 	}
 }
 
+func TestHandleOrderHistoryMarksAdHocOutputMetadata(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+
+	run, err := rigStore.Create(beads.Bead{
+		Title:  "ad hoc order output",
+		Status: "closed",
+		Labels: []string{"order-run:ad-hoc:rig:myrig", "wisp"},
+		Metadata: map[string]string{
+			"convergence.gate_stdout": "done",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create rig history bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=ad-hoc:rig:myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID    string `json:"bead_id"`
+			HasOutput bool   `json:"has_output"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(resp.Entries))
+	}
+	if resp.Entries[0].BeadID != run.ID {
+		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
+	}
+	if !resp.Entries[0].HasOutput {
+		t.Fatal("has_output = false, want true for captured output metadata")
+	}
+}
+
 func TestHandleOrderHistoryIncludesStoreRefForCollidingIDs(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()

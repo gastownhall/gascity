@@ -616,6 +616,50 @@ func TestCachingStoreUpdateReflectsWriteIntentWhenImmediateReadIsStale(t *testin
 	}
 }
 
+func TestCachingStoreUpdateReflectsWriteIntentWhenRefreshFails(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "root",
+		Status:   "open",
+		Labels:   []string{"root", "needs-update"},
+		Metadata: map[string]string{"real_world_app.contract.run_id": "r1"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &getFailsAfterUpdateStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := cs.Update(original.ID, beads.UpdateOpts{
+		Status:       &status,
+		Labels:       []string{"verified"},
+		RemoveLabels: []string{"needs-update"},
+		Metadata: map[string]string{
+			"real_world_app.contract.metadata_update": "true",
+		},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Metadata["real_world_app.contract.metadata_update"] != "true" || got.Metadata["real_world_app.contract.run_id"] != "r1" {
+		t.Fatalf("metadata = %#v, want original plus update", got.Metadata)
+	}
+	if !containsString(got.Labels, "verified") || containsString(got.Labels, "needs-update") {
+		t.Fatalf("labels = %#v, want verified without needs-update", got.Labels)
+	}
+}
+
 func TestCachingStoreUpdateDoesNotDuplicateAuthoritativeLabels(t *testing.T) {
 	mem := beads.NewMemStore()
 	original, err := mem.Create(beads.Bead{
@@ -657,6 +701,33 @@ type staleReadAfterUpdateStore struct {
 	mu        sync.Mutex
 	stale     beads.Bead
 	returnOld bool
+}
+
+type getFailsAfterUpdateStore struct {
+	beads.Store
+	mu      sync.Mutex
+	failGet bool
+}
+
+func (s *getFailsAfterUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.Store.Update(id, opts); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.failGet = true
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *getFailsAfterUpdateStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	if s.failGet {
+		s.failGet = false
+		s.mu.Unlock()
+		return beads.Bead{}, errors.New("refresh failed")
+	}
+	s.mu.Unlock()
+	return s.Store.Get(id)
 }
 
 type sparseCreateStore struct {

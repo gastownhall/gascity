@@ -59,6 +59,36 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
+func TestEventListFiltersUnregisteredEventTypes(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: "custom.untyped", Actor: "tester"})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("response = %+v, want only registered event", resp)
+	}
+	if resp.Items[0]["type"] != events.SessionWoke {
+		t.Fatalf("event type = %v, want %s", resp.Items[0]["type"], events.SessionWoke)
+	}
+}
+
 func TestEventListRejectsInvalidSince(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)

@@ -339,6 +339,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			Target:  a.QualifiedName(),
 			WorkDir: rigDir,
 			Env:     slingEnv,
+			Force:   opts.Force,
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -1020,6 +1021,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				Target:  a.QualifiedName(),
 				WorkDir: rigDir,
 				Env:     childEnv,
+				Force:   opts.Force,
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
 				childResult.Failed = true

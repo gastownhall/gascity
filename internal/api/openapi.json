@@ -730,9 +730,17 @@
           "request_id": {
             "description": "Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
             "type": "string"
+          },
+          "status": {
+            "description": "Async request status.",
+            "examples": [
+              "accepted"
+            ],
+            "type": "string"
           }
         },
         "required": [
+          "status",
           "request_id"
         ],
         "type": "object"

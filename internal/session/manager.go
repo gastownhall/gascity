@@ -727,12 +727,13 @@ func (m *Manager) Suspend(id string) error {
 			}
 		}
 
-		// Update state and record suspension timestamp.
-		if err := m.store.SetMetadata(id, "state", string(StateSuspended)); err != nil {
-			return fmt.Errorf("updating session state: %w", err)
-		}
-		if err := m.store.SetMetadata(id, "suspended_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return fmt.Errorf("storing suspension timestamp: %w", err)
+		// Update state and suspension timestamp together so stores with a
+		// write-through cache preserve one coherent lifecycle transition.
+		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+			"state":        string(StateSuspended),
+			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+		}}); err != nil {
+			return fmt.Errorf("updating suspension state: %w", err)
 		}
 
 		return nil

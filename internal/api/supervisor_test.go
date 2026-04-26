@@ -592,6 +592,37 @@ func TestSupervisorEventListsEmitTypedPayloadObjects(t *testing.T) {
 	}
 }
 
+func TestSupervisorEventListsFilterUnregisteredEventTypes(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	s.eventProv.(*events.Fake).Record(events.Event{Type: "custom.untyped", Actor: "tester"})
+	s.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionWoke, Actor: "tester"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s})
+
+	req := httptest.NewRequest("GET", "/v0/events", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("response = %+v, want only registered event", resp)
+	}
+	if resp.Items[0]["type"] != events.SessionWoke {
+		t.Fatalf("event type = %v, want %s", resp.Items[0]["type"], events.SessionWoke)
+	}
+}
+
 func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"

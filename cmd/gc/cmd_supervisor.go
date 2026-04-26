@@ -1340,6 +1340,7 @@ func reconcileCities(
 					cr.UpdateCallback(path, func(m *managedCity) {
 						m.started = true
 					})
+					emitPendingCityCreateResult(cr, path, cityName, stderr)
 				},
 				OnStatus: func(status string) {
 					cr.UpdateCallback(path, func(m *managedCity) {
@@ -1608,22 +1609,25 @@ func reconcileCities(
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-		reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
-		if consumeErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
-		}
-		if !hasReqID {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.create completion event (path=%s)\n", cityName, path) //nolint:errcheck
-		}
-		if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
-			api.EmitTypedEvent(supRec, events.RequestResultCityCreate, cityName, api.CityCreateSucceededPayload{
-				RequestID: reqID,
-				Name:      cityName,
-				Path:      path,
-			})
-		}
 		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+	}
+}
+
+func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {
+	reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+	if consumeErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+	}
+	if !hasReqID {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.create completion event (path=%s)\n", cityName, path) //nolint:errcheck
+	}
+	if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+		api.EmitTypedEvent(supRec, events.RequestResultCityCreate, cityName, api.CityCreateSucceededPayload{
+			RequestID: reqID,
+			Name:      cityName,
+			Path:      path,
+		})
 	}
 }
 

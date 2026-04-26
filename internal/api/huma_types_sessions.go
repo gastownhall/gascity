@@ -58,9 +58,9 @@ type SessionCreateInput struct {
 	Body sessionCreateBody
 }
 
-// asyncAcceptedBody is the response body for all async 202 responses.
-// Contains only request_id for correlation — no domain data.
+// asyncAcceptedBody is the response body for all async session 202 responses.
 type asyncAcceptedBody struct {
+	Status    string `json:"status" doc:"Async request status." example:"accepted"`
 	RequestID string `json:"request_id" doc:"Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
 }
 

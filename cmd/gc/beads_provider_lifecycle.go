@@ -47,6 +47,7 @@ var (
 	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
 	initDirIfReadyInitAndHookDir      = initAndHookDir
 	initDirIfReadyRetryDelay          = time.Second
+	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
 )
 
 const initDirIfReadyRetryLimit = 2
@@ -58,7 +59,9 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "dolt server exited during startup") ||
 		strings.Contains(msg, "did not become query-ready") ||
-		strings.Contains(msg, "signal: terminated")
+		strings.Contains(msg, "signal: terminated") ||
+		strings.Contains(msg, "table not found: issues") ||
+		strings.Contains(msg, "table not found: config")
 }
 
 // ── Consolidated lifecycle operations ────────────────────────────────────
@@ -366,6 +369,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if cityUsesBdStoreContract(cityPath) && currentManagedDoltPort(cityPath) != "" {
 		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
+		}
+		if err := initAndHookDirWaitForScopeReady(dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
+			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.

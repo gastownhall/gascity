@@ -330,6 +330,80 @@ func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
 	}
 }
 
+func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	created, err := rigStore.Create(beads.Bead{Title: "close me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := rigStore.Update(created.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	misrouted := &closeSucceedsWithoutBeadStore{Store: beads.NewMemStore()}
+	state := newFakeState(t)
+	state.cityBeadStore = misrouted
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+
+	s := New(state)
+	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: created.ID}); err != nil {
+		t.Fatalf("humaHandleBeadClose: %v", err)
+	}
+
+	if misrouted.closeCalls != 0 {
+		t.Fatalf("misrouted close calls = %d, want 0", misrouted.closeCalls)
+	}
+	got, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("rig status = %q, want closed", got.Status)
+	}
+}
+
+func TestBeadStoresForIDUsesConfiguredRigPrefixBeforeFallback(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cfg.Workspace.Prefix = "ct"
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: filepath.Join(state.cityPath, "rigs", "myrig"), Prefix: "rw"}}
+
+	s := New(state)
+	stores := s.beadStoresForID("rw-1")
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("beadStoresForID(rw-1) = %#v, want only configured rig store", stores)
+	}
+}
+
+func TestBeadStoresForIDUsesConfiguredHyphenatedRigPrefix(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cfg.Workspace.Prefix = "mlcm"
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: filepath.Join(state.cityPath, "rigs", "myrig"), Prefix: "mc-mogbzvrs"}}
+
+	s := New(state)
+	stores := s.beadStoresForID("mc-mogbzvrs-hiv.1")
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("beadStoresForID(hyphenated prefix) = %#v, want only configured rig store", stores)
+	}
+}
+
+type closeSucceedsWithoutBeadStore struct {
+	beads.Store
+	closeCalls int
+}
+
+func (s *closeSucceedsWithoutBeadStore) Close(string) error {
+	s.closeCalls++
+	return nil
+}
+
 func TestBeadCRUD(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)

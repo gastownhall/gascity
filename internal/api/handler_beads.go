@@ -182,6 +182,21 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 	stores := s.state.BeadStores()
 	cityPath := strings.TrimSpace(s.state.CityPath())
 
+	if prefix == config.EffectiveHQPrefix(cfg) {
+		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+			return cityStore
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if prefix != rig.EffectivePrefix() {
+			continue
+		}
+		if store, exists := stores[rig.Name]; exists {
+			return store
+		}
+		return nil
+	}
+
 	// Build rig path → name map for reverse lookup (used by both city
 	// and rig route resolution below).
 	rigPathToName := make(map[string]string, len(cfg.Rigs))

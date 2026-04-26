@@ -102,6 +102,16 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	assertLiveContractStreamOpens(t, baseURL, "/v0/events/stream")
 	assertLiveContractStreamOpens(t, baseURL, cityBase+"/events/stream")
 
+	cityScopedBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
+		"description": "City-scoped fixture created immediately after async city.create completion.",
+		"labels":      []string{"real-world-app-contract", "city-scope"},
+		"title":       "real-world app contract city-scoped bead",
+		"type":        "task",
+	}, http.StatusCreated)
+	if cityScopedBead.ID == "" || cityScopedBead.Status != "open" {
+		t.Fatalf("city-scoped bead = %+v, want id and open status", cityScopedBead)
+	}
+
 	rigName := "alpha"
 	rigDir := filepath.Join(cityDir, rigName)
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {

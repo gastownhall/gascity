@@ -258,13 +258,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		return
 	}
 	cs.mu.RLock()
-	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
-	for _, s := range cs.beadStores {
-		stores = append(stores, s)
-	}
-	if cs.cityBeadStore != nil {
-		stores = append(stores, cs.cityBeadStore)
-	}
+	stores := cs.beadEventStoresLocked(evt)
 	cs.mu.RUnlock()
 
 	for _, store := range stores {
@@ -275,6 +269,58 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
 	}
+}
+
+func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store {
+	if id := beadEventID(evt); id != "" && cs.cfg != nil {
+		if store, known := cs.beadEventConfiguredStoreLocked(id); known {
+			if store == nil {
+				return nil
+			}
+			return []beads.Store{store}
+		}
+	}
+
+	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
+	for _, s := range cs.beadStores {
+		stores = append(stores, s)
+	}
+	if cs.cityBeadStore != nil {
+		stores = append(stores, cs.cityBeadStore)
+	}
+	return stores
+}
+
+func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Store, bool) {
+	var matchedStore beads.Store
+	matchedLen := -1
+	match := func(prefix string, store beads.Store) {
+		if prefix == "" || !strings.HasPrefix(id, prefix+"-") {
+			return
+		}
+		if len(prefix) > matchedLen {
+			matchedLen = len(prefix)
+			matchedStore = store
+		}
+	}
+	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
+	for _, rig := range cs.cfg.Rigs {
+		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	return matchedStore, matchedLen >= 0
+}
+
+func beadEventID(evt events.Event) string {
+	id := strings.TrimSpace(evt.Subject)
+	if id == "" {
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(evt.Payload, &payload); err == nil {
+			id = strings.TrimSpace(payload.ID)
+		}
+	}
+	return id
 }
 
 // update replaces the config, session provider, and reopens stores.
