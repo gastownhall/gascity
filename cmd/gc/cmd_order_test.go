@@ -831,8 +831,8 @@ title = "Do work"
 			if bead.Assignee != config.ControlDispatcherAgentName {
 				t.Fatalf("finalizer assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
 			}
-			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-				t.Fatalf("finalizer gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			if bead.Metadata["gc.routed_to"] != "" {
+				t.Fatalf("finalizer gc.routed_to = %q, want empty for concrete control dispatcher assignee", bead.Metadata["gc.routed_to"])
 			}
 			if bead.Metadata[graphExecutionRouteMetaKey] != "quinn" {
 				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphExecutionRouteMetaKey])

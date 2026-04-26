@@ -367,6 +367,27 @@ func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	}
 }
 
+func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "control-dispatcher",
+		Dir:  "gascity",
+	}}}
+
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding: %v", err)
+	}
+	if binding.QualifiedName != "gascity/control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want gascity/control-dispatcher", binding.QualifiedName)
+	}
+	if binding.SessionName != "gascity--control-dispatcher" {
+		t.Fatalf("SessionName = %q, want gascity--control-dispatcher", binding.SessionName)
+	}
+	if binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = true, want false")
+	}
+}
+
 func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t *testing.T) {
 	step := &formula.RecipeStep{
 		Metadata: map[string]string{

@@ -163,11 +163,7 @@ func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteB
 		step.Assignee = binding.SessionName
 		return
 	}
-	if binding.QualifiedName != "" {
-		step.Metadata["gc.routed_to"] = binding.QualifiedName
-	} else {
-		delete(step.Metadata, "gc.routed_to")
-	}
+	delete(step.Metadata, "gc.routed_to")
 	step.Assignee = ""
 }
 
@@ -217,9 +213,6 @@ func ControlDispatcherBinding(store beads.Store, cityName string, cfg *config.Ci
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
 	binding := GraphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
-	if agentutil.IsMultiSessionAgent(&agentCfg) {
-		return binding, nil
-	}
 	sn := agentutil.LookupSessionName(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
 	if sn == "" {
 		return GraphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())

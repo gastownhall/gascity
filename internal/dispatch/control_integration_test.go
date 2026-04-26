@@ -913,7 +913,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	}
 }
 
-func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMetadataOnly(t *testing.T) {
+func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSessionName(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -934,11 +934,81 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
 	}
-	if binding.directSessionID != "" || binding.sessionName != "" {
-		t.Fatalf("binding = %+v, want no direct or legacy session-name target without a canonical bead", binding)
+	if binding.directSessionID != "" {
+		t.Fatalf("directSessionID = %q, want empty without canonical bead", binding.directSessionID)
 	}
-	if binding.qualifiedName != "worker" || !binding.metadataOnly {
-		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
+	if binding.sessionName != "worker" {
+		t.Fatalf("sessionName = %q, want worker", binding.sessionName)
+	}
+	if binding.qualifiedName != "" || binding.metadataOnly {
+		t.Fatalf("binding = %+v, want concrete session-name route", binding)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_ImplicitControlDispatcherUsesConcreteAssignee(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Rigs: []config.Rig{{
+			Name: "gascity",
+			Path: t.TempDir(),
+		}},
+		Agents: []config.Agent{{
+			Name: "claude",
+			Dir:  "gascity",
+		}},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-route",
+		},
+	}
+	applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore())
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for concrete control dispatcher assignee", got)
+	}
+	if got := step.Metadata["gc.execution_routed_to"]; got != "gascity/claude" {
+		t.Fatalf("gc.execution_routed_to = %q, want gascity/claude", got)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherNeverUsesMetadataRoute(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Agents: []config.Agent{
+			{
+				Name: "claude",
+				Dir:  "gascity",
+			},
+			{
+				Name: "control-dispatcher",
+				Dir:  "gascity",
+			},
+		},
+	}
+
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-route",
+		},
+	}
+	applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore())
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for concrete control dispatcher assignee", got)
 	}
 }
 
