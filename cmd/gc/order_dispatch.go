@@ -426,9 +426,9 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether any non-closed work bead exists for this
-// order. Tracking beads (title "order:<name>") are excluded, so only actual
-// work (wisps, exec results) counts.
+// hasOpenWorkStrict reports whether any non-closed work or tracking bead
+// exists for this order. Open tracking beads represent in-flight dispatch and
+// must block condition/event orders that do not consult LastRun.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
 		Label: "order-run:" + scopedName,
@@ -437,9 +437,8 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 	if err != nil {
 		return false, fmt.Errorf("listing order work beads: %w", err)
 	}
-	trackingTitle := "order:" + scopedName
 	for _, b := range results {
-		if b.Status != "closed" && b.Title != trackingTitle {
+		if b.Status != "closed" {
 			return true, nil
 		}
 	}

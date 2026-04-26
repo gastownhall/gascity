@@ -2641,6 +2641,39 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchSkipsOpenTrackingBeadForConditionOrder(t *testing.T) {
+	store := beads.NewMemStore()
+
+	_, err := store.Create(beads.Bead{
+		Title:  "order:my-auto",
+		Labels: []string{"order-run:my-auto", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:    "my-auto",
+		Trigger: "condition",
+		Check:   "true",
+		Exec:    "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	if ran {
+		t.Error("exec should not have run while an order-tracking bead is open")
+	}
+}
+
 func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 	store := beads.NewMemStore()
 
