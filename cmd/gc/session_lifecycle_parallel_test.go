@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -993,6 +994,97 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	}
 }
 
+func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *testing.T) {
+	resetSkillCatalogCache()
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"),
+		[]byte("[pack]\nname = \"named-refresh-test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(cityPath, "skills", "plan")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: plan\ndescription: test skill\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city", Provider: "claude"},
+		Session:       config.SessionConfig{Provider: "tmux"},
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Providers: map[string]config.ProviderSpec{
+			"claude": {Command: "true", PromptMode: "none", SupportsACP: boolPtr(true)},
+		},
+		Agents: []config.Agent{{
+			Name:     "mayor",
+			Scope:    "city",
+			Provider: "claude",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "mayor",
+			"session_name_explicit":      boolMetadata(true),
+			"template":                   "mayor",
+			"agent_name":                 "mayor",
+			"state":                      string(sessionpkg.StateCreating),
+			"pending_create_claim":       "true",
+			namedSessionMetadataKey:      boolMetadata(true),
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+			"continuation_epoch":         "1",
+			"generation":                 "1",
+			"instance_token":             sessionpkg.NewInstanceToken(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stale := TemplateParams{
+		TemplateName: "mayor",
+		SessionName:  "mayor",
+		InstanceName: "mayor",
+		Command:      "true",
+		WorkDir:      cityPath,
+	}
+	candidate := startCandidate{session: &bead, tp: stale}
+	refreshed := refreshConfiguredNamedStartCandidate(
+		candidate,
+		cityPath,
+		cfg.Workspace.Name,
+		cfg,
+		runtime.NewFake(),
+		store,
+		&clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)},
+		ioDiscard{},
+	)
+
+	if _, ok := stale.FPExtra["skills:plan"]; ok {
+		t.Fatal("test setup invalid: stale candidate already had skills fingerprint")
+	}
+	if got := refreshed.tp.FPExtra["skills:plan"]; got == "" {
+		t.Fatalf("refreshed FPExtra missing skills:plan: %#v", refreshed.tp.FPExtra)
+	}
+	if refreshed.tp.ConfiguredNamedIdentity != "mayor" {
+		t.Fatalf("ConfiguredNamedIdentity = %q, want mayor", refreshed.tp.ConfiguredNamedIdentity)
+	}
+	if runtime.CoreFingerprint(templateParamsToConfig(refreshed.tp)) == runtime.CoreFingerprint(templateParamsToConfig(stale)) {
+		t.Fatal("refreshed candidate core fingerprint did not change after skill FPExtra refresh")
+	}
+}
+
 func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
 	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
 	sp := runtime.NewFake()
@@ -1911,9 +2003,7 @@ func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 		}},
 		&panicStartProvider{Fake: runtime.NewFake()},
 		nil,
-		nil,
 		time.Second,
-		1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -2176,9 +2266,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		[]preparedStart{item},
 		sp,
 		nil,
-		nil,
 		10*time.Second,
-		1,
 	)
 
 	if len(results) != 1 {
@@ -2222,9 +2310,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 		[]preparedStart{item},
 		sp,
 		nil,
-		nil,
 		10*time.Second,
-		1,
 	)
 
 	if len(results) != 1 {
@@ -2266,9 +2352,7 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		[]preparedStart{item},
 		sp,
 		nil,
-		nil,
 		10*time.Second,
-		1,
 	)
 
 	if len(results) != 1 {

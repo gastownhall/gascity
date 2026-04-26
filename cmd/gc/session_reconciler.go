@@ -1043,6 +1043,7 @@ func reconcileSessionBeadsTraced(
 
 	plannedWakes := executePlannedStartsTraced(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
+		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
 	)
 

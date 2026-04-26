@@ -270,11 +270,59 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard)
+}
+
+func prepareStartCandidateForCity(
+	candidate startCandidate,
+	cityPath string,
+	cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	stderr io.Writer,
+) (*preparedStart, error) {
 	session := candidate.session
 	if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
+	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 	return buildPreparedStart(candidate, cfg, store)
+}
+
+func refreshConfiguredNamedStartCandidate(
+	candidate startCandidate,
+	cityPath string,
+	cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	stderr io.Writer,
+) startCandidate {
+	if candidate.session == nil || cfg == nil || store == nil || !isNamedSessionBead(*candidate.session) {
+		return candidate
+	}
+	if cityName == "" {
+		cityName = config.EffectiveCityName(cfg, "")
+	}
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: listing sessions: %v\n", candidate.name(), err) //nolint:errcheck
+		}
+		return candidate
+	}
+	refreshed, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.Open(), *candidate.session, clk, stderr)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
+		}
+		return candidate
+	}
+	candidate.tp = refreshed
+	return candidate
 }
 
 func buildPreparedStart(
@@ -445,6 +493,17 @@ func executePreparedStartWave(
 	prepared []preparedStart,
 	sp runtime.Provider,
 	store beads.Store,
+	startupTimeout time.Duration,
+) []startResult {
+	return executePreparedStartWaveForCity(ctx, prepared, "", sp, store, nil, startupTimeout, 1)
+}
+
+func executePreparedStartWaveForCity(
+	ctx context.Context,
+	prepared []preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
 	cfg *config.City,
 	startupTimeout time.Duration,
 	maxParallel int,
@@ -452,7 +511,6 @@ func executePreparedStartWave(
 	if len(prepared) == 0 {
 		return nil
 	}
-	cityPath := ""
 	if maxParallel <= 0 {
 		maxParallel = 1
 	}
@@ -875,7 +933,7 @@ func executePlannedStarts(
 	startupTimeout time.Duration,
 	stdout, stderr io.Writer,
 ) int {
-	return executePlannedStartsTraced(ctx, candidates, cfg, desiredState, sp, store, cityName, clk, rec, startupTimeout, stdout, stderr, nil)
+	return executePlannedStartsTraced(ctx, candidates, cfg, desiredState, sp, store, cityName, "", clk, rec, startupTimeout, stdout, stderr, nil)
 }
 
 func executePlannedStartsTraced(
@@ -886,6 +944,7 @@ func executePlannedStartsTraced(
 	sp runtime.Provider,
 	store beads.Store,
 	cityName string,
+	cityPath string,
 	clk clock.Clock,
 	rec events.Recorder,
 	startupTimeout time.Duration,
@@ -947,7 +1006,7 @@ func executePlannedStartsTraced(
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 					continue
 				}
-				item, err := prepareStartCandidate(candidate, cfg, store, clk)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 				if err != nil {
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
@@ -956,7 +1015,7 @@ func executePlannedStartsTraced(
 				prepared = append(prepared, *item)
 			}
 			offset = end
-			results := executePreparedStartWave(ctx, prepared, sp, store, cfg, startupTimeout, defaultMaxParallelStartsPerWave)
+			results := executePreparedStartWaveForCity(ctx, prepared, cityPath, sp, store, cfg, startupTimeout, defaultMaxParallelStartsPerWave)
 			for _, result := range results {
 				if trace != nil {
 					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{
