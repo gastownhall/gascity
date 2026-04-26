@@ -202,6 +202,11 @@ func decodeBeadEventPayloadBead(data []byte) (beads.Bead, error) {
 
 // WorkerOperationEventPayload is the typed payload projected for
 // worker.operation events on the supervisor event stream.
+//
+// Issue #1252 (1a) added the per-invocation cost/latency fields below
+// (Model through CostUSDEstimate). All are populated best-effort: missing
+// data leaves the field at its zero value rather than emitting a synthetic
+// signal. Cost is an estimate — see CostUSDEstimate's field doc.
 type WorkerOperationEventPayload struct {
 	OpID        string    `json:"op_id"`
 	Operation   string    `json:"operation"`
@@ -217,6 +222,48 @@ type WorkerOperationEventPayload struct {
 	Queued      *bool     `json:"queued,omitempty"`
 	Delivered   *bool     `json:"delivered,omitempty"`
 	Error       string    `json:"error,omitempty"`
+
+	// 1a additions: per-invocation cost/latency fields. Each is omitted
+	// when zero so events from operations that lack the data (legacy
+	// providers, internal lifecycle ops) stay compact.
+
+	// Model is the LLM model identifier observed in this operation
+	// (e.g. "claude-opus-4-7"). Sourced from session metadata.
+	Model string `json:"model,omitempty"`
+	// AgentName is the agent identity that ran this operation
+	// (e.g. "rig/polecat-1"). Distinct from SessionName which carries
+	// the canonical session identity.
+	AgentName string `json:"agent_name,omitempty"`
+	// PromptVersion is the human-readable template version label from
+	// frontmatter (`version:` field). Surfaced in dashboards for grouping.
+	// Populated from session metadata set during render. See #1256 (1e).
+	PromptVersion string `json:"prompt_version,omitempty"`
+	// PromptSHA is the SHA-256 hex digest of the rendered prompt.
+	// Distinguishes two runs that share PromptVersion but differ in
+	// rendered bytes (unbumped template edit). See #1256 (1e).
+	PromptSHA string `json:"prompt_sha,omitempty"`
+	// BeadID is the work bead this operation is acting on, when one
+	// exists. Empty for operations not tied to a bead (e.g. lifecycle
+	// transitions).
+	BeadID string `json:"bead_id,omitempty"`
+	// PromptTokens is the count of regular (non-cached) input tokens.
+	PromptTokens int `json:"prompt_tokens,omitempty"`
+	// CompletionTokens is the count of output tokens generated.
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	// CacheReadTokens is the count of cached input tokens read.
+	// Distinct from PromptTokens because cache-read pricing is roughly
+	// 10× cheaper than prompt pricing on Claude.
+	CacheReadTokens int `json:"cache_read_tokens,omitempty"`
+	// CacheCreationTokens is the count of input tokens written into
+	// the prompt cache during this invocation.
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// LatencyMs is the wall-clock latency of the LLM invocation
+	// itself, where measurable. Distinct from DurationMs which times
+	// the wrapping operation.
+	LatencyMs int64 `json:"latency_ms,omitempty"`
+	// CostUSDEstimate is a decision-support cost estimate computed
+	// against the pricing seam (#1255, 1d). Not invoice-grade.
+	CostUSDEstimate float64 `json:"cost_usd_estimate,omitempty"`
 }
 
 // IsEventPayload marks WorkerOperationEventPayload as an events.Payload variant.

@@ -11190,6 +11190,28 @@
       "WorkerOperationEventPayload": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "type": "string"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "cache_creation_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "cost_usd_estimate": {
+            "format": "double",
+            "type": "number"
+          },
           "delivered": {
             "type": "boolean"
           },
@@ -11204,10 +11226,27 @@
             "format": "date-time",
             "type": "string"
           },
+          "latency_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
           "op_id": {
             "type": "string"
           },
           "operation": {
+            "type": "string"
+          },
+          "prompt_sha": {
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "prompt_version": {
             "type": "string"
           },
           "provider": {
